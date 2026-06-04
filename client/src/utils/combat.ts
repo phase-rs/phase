@@ -49,3 +49,19 @@ export function getValidAttackTargets(
   if (wf.type !== "DeclareAttackers") return [];
   return wf.data.valid_attack_targets ?? [];
 }
+
+/** CR 702.22a: whether an object currently has the Banding keyword. */
+export function hasBanding(state: GameState | null, id: ObjectId): boolean {
+  return state?.objects?.[String(id)]?.keywords?.some((k) => k === "Banding") ?? false;
+}
+
+/**
+ * CR 702.22c: an attacking band is one or more creatures with banding plus at
+ * most one creature without banding. Returns whether `members` (2+) form a
+ * legal band. The engine re-validates on submit — this only gates the UI.
+ */
+export function isLegalBand(state: GameState | null, members: ObjectId[]): boolean {
+  if (members.length < 2) return false;
+  const banding = members.filter((id) => hasBanding(state, id)).length;
+  return banding >= 1 && members.length - banding <= 1;
+}

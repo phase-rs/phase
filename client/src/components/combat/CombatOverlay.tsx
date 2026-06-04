@@ -6,7 +6,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import type { AttackTarget, ObjectId } from "../../adapter/types.ts";
-import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
+import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets, isLegalBand } from "../../utils/combat.ts";
 import { AttackerControls } from "./AttackerControls.tsx";
 import { BlockerControls } from "./BlockerControls.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
@@ -24,6 +24,8 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
   const clearCombatSelection = useUiStore((s) => s.clearCombatSelection);
   const selectedAttackers = useUiStore((s) => s.selectedAttackers);
   const selectAllAttackers = useUiStore((s) => s.selectAllAttackers);
+  const attackerBands = useUiStore((s) => s.attackerBands);
+  const setAttackerBands = useUiStore((s) => s.setAttackerBands);
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const assignBlocker = useUiStore((s) => s.assignBlocker);
   const setCombatClickHandler = useUiStore((s) => s.setCombatClickHandler);
@@ -110,17 +112,33 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
     clearCombatSelection();
   }, [dispatch, clearCombatSelection]);
 
+  // CR 702.22c: banding is offered only in the single-target path (all band
+  // members must attack the same player/planeswalker, CR 702.22d) and only when
+  // the current selection forms a legal band. The toggle snapshots the current
+  // selection as one band; dispatch re-filters it to the still-selected members.
+  const canBand = !isMultiTarget && isLegalBand(gameState, selectedAttackers);
+  const isBanded = attackerBands.length > 0;
+
+  const handleToggleBand = useCallback(() => {
+    setAttackerBands(isBanded ? [] : [[...selectedAttackers]]);
+  }, [setAttackerBands, isBanded, selectedAttackers]);
+
   const handleConfirmAttackers = useCallback(() => {
     if (isMultiTarget) {
       setShowTargetPicker(true);
       return;
     }
+    // CR 702.22c/d: keep only bands whose members are still selected and still
+    // form a legal band; the engine re-validates on submit.
+    const bands = attackerBands
+      .map((band) => band.filter((id) => selectedAttackers.includes(id)))
+      .filter((band) => isLegalBand(gameState, band));
     dispatch({
       type: "DeclareAttackers",
-      data: { attacks: buildAttacks(selectedAttackers, gameState, playerId) },
+      data: { attacks: buildAttacks(selectedAttackers, gameState, playerId), bands },
     });
     clearCombatSelection();
-  }, [dispatch, selectedAttackers, clearCombatSelection, isMultiTarget, gameState, playerId]);
+  }, [dispatch, selectedAttackers, attackerBands, clearCombatSelection, isMultiTarget, gameState, playerId]);
 
   const handleTargetPickerConfirm = useCallback(
     (attacks: [ObjectId, AttackTarget][]) => {
@@ -150,6 +168,9 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
           onSkip={handleSkip}
           onConfirm={handleConfirmAttackers}
           attackerCount={selectedAttackers.length}
+          onToggleBand={handleToggleBand}
+          isBanded={isBanded}
+          canBand={canBand}
         />
         {showTargetPicker && (
           <AttackTargetPicker

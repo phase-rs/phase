@@ -1,6 +1,6 @@
 use crate::game::zones;
 use crate::types::ability::{
-    CastingPermission, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
+    CastingPermission, Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -178,11 +178,12 @@ pub fn resolve(
     }
 
     for &obj_id in &target_ids {
-        // CR 601.2a: If the card is not in exile, move it there first.
-        // The casting pipeline gates on Zone::Exile for permission-based casts,
-        // so the card must be in exile before we grant the permission.
+        // CR 601.2a: Impulse-draw and similar grants move non-exile cards to
+        // exile before attaching `ExileWithAltCost`. Targeted graveyard grants
+        // (Emry, Lurker in the Loch) keep the card in the graveyard and grant
+        // a durational permission the casting pipeline consumes in place.
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
-        if current_zone.is_some_and(|z| z != Zone::Exile) {
+        if current_zone.is_some_and(|z| z != Zone::Exile && z != Zone::Graveyard) {
             zones::move_to_zone(state, obj_id, Zone::Exile, events);
         }
 
@@ -230,7 +231,11 @@ pub fn resolve(
                     // recast offer) are pruned at the correct boundary.
                     // `None` (the common case) preserves the standing
                     // semantics used by Discover, Suspend, Nashi, etc.
-                    duration: duration.clone(),
+                    // Emry-class graveyard grants default to UntilEndOfTurn
+                    // when the parser did not carry an explicit duration.
+                    duration: duration.clone().or_else(|| {
+                        (current_zone == Some(Zone::Graveyard)).then_some(Duration::UntilEndOfTurn)
+                    }),
                 }
             };
             if !obj.casting_permissions.contains(&permission) {
@@ -274,6 +279,55 @@ mod tests {
         let obj_id = create_object(state, card_id, owner, "Hand Spell".to_string(), Zone::Hand);
         state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::generic(2);
         obj_id
+    }
+
+    fn add_card_to_graveyard(state: &mut GameState, owner: PlayerId, card_id: CardId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            card_id,
+            owner,
+            "Graveyard Artifact".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&obj_id).unwrap().mana_cost = ManaCost::zero();
+        obj_id
+    }
+
+    #[test]
+    fn graveyard_target_grant_stays_in_graveyard_with_timed_permission() {
+        let mut state = make_test_state();
+        let obj_id = add_card_to_graveyard(&mut state, PlayerId(0), CardId(400));
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: false,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: Some(Duration::UntilEndOfTurn),
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(obj.zone, Zone::Graveyard);
+        assert!(obj.casting_permissions.iter().any(|p| matches!(
+            p,
+            CastingPermission::ExileWithAltCost {
+                cost,
+                duration: Some(Duration::UntilEndOfTurn),
+                granted_to: Some(PlayerId(0)),
+                ..
+            } if *cost == ManaCost::zero()
+        )));
     }
 
     /// Issue #1520 — suspend last-time-counter free cast must actually CAST the

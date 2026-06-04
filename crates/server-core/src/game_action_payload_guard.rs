@@ -11,8 +11,10 @@
 //! including degenerate token-army boards — so it never rejects legitimate play;
 //! it only blocks payloads engineered to force large allocations/clones.
 use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
+use engine::types::counter::CounterType;
 use engine::types::game_state::ManaChoice;
 use engine::types::proposed_event::TokenCharacteristics;
+use serde::Serialize;
 
 /// Max number of entries accepted in any single client-supplied action list
 /// (targets, attackers, blockers, selections, reorder permutations, pile
@@ -24,6 +26,12 @@ pub const MAX_ACTION_LIST_LEN: usize = 10_000;
 /// option / named card / mode label). Comfortably above the longest real card
 /// name.
 pub const MAX_CHOICE_LEN: usize = 256;
+
+/// Max serialized size for nested debug-only AST payloads that can contain
+/// strings, vectors, or filters. Debug actions are still client-supplied game
+/// actions, so they must not forward arbitrarily large nested payloads into the
+/// engine reducers.
+pub const MAX_DEBUG_AST_JSON_LEN: usize = 16 * 1024;
 
 fn bound_list(field: &str, len: usize) -> Result<(), String> {
     if len > MAX_ACTION_LIST_LEN {
@@ -44,6 +52,69 @@ fn bound_string(field: &str, value: &str) -> Result<(), String> {
             "{field} is {} bytes; at most {MAX_CHOICE_LEN} allowed",
             value.len()
         ));
+    }
+    Ok(())
+}
+
+fn bound_serialized_json<T: Serialize>(field: &str, value: &T) -> Result<(), String> {
+    struct LimitingWriter {
+        written: usize,
+    }
+
+    impl std::io::Write for LimitingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let Some(written) = self.written.checked_add(buf.len()) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "serialized size overflow",
+                ));
+            };
+            self.written = written;
+            if self.written > MAX_DEBUG_AST_JSON_LEN {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "serialized size limit exceeded",
+                ));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = LimitingWriter { written: 0 };
+    serde_json::to_writer(&mut writer, value)
+        .map_err(|err| format!("{field} size validation failed or exceeded limit: {err}"))
+}
+
+fn guard_counter_type_payload(field: &str, counter_type: &CounterType) -> Result<(), String> {
+    match counter_type {
+        CounterType::Generic(name) => bound_string(&format!("{field}.Generic"), name)?,
+        CounterType::Plus1Plus1
+        | CounterType::Minus1Minus1
+        | CounterType::PowerToughness { .. }
+        | CounterType::Loyalty
+        | CounterType::Defense
+        | CounterType::Stun
+        | CounterType::Lore
+        | CounterType::Time
+        | CounterType::Fade
+        | CounterType::Age
+        | CounterType::Shield
+        | CounterType::Keyword(_) => {}
+    }
+    Ok(())
+}
+
+fn guard_enter_with_counters_payload(
+    field: &str,
+    enter_with_counters: &[(CounterType, u32)],
+) -> Result<(), String> {
+    bound_list(field, enter_with_counters.len())?;
+    for (index, (counter_type, _)) in enter_with_counters.iter().enumerate() {
+        guard_counter_type_payload(&format!("{field}[{index}].counter_type"), counter_type)?;
     }
     Ok(())
 }
@@ -80,6 +151,9 @@ fn guard_token_characteristics_payload(
     )?;
     bound_list(&format!("{field}.colors"), characteristics.colors.len())?;
     bound_list(&format!("{field}.keywords"), characteristics.keywords.len())?;
+    for (index, keyword) in characteristics.keywords.iter().enumerate() {
+        bound_serialized_json(&format!("{field}.keywords[{index}]"), keyword)?;
+    }
     Ok(())
 }
 
@@ -91,9 +165,9 @@ fn guard_debug_token_request_payload(request: &DebugTokenRequest) -> Result<(), 
             ..
         } => {
             bound_string("Debug.CreateToken.request.preset_id", preset_id)?;
-            bound_list(
+            guard_enter_with_counters_payload(
                 "Debug.CreateToken.request.enter_with_counters",
-                enter_with_counters.len(),
+                enter_with_counters,
             )?;
         }
         DebugTokenRequest::Custom {
@@ -105,9 +179,9 @@ fn guard_debug_token_request_payload(request: &DebugTokenRequest) -> Result<(), 
                 "Debug.CreateToken.request.characteristics",
                 characteristics,
             )?;
-            bound_list(
+            guard_enter_with_counters_payload(
                 "Debug.CreateToken.request.enter_with_counters",
-                enter_with_counters.len(),
+                enter_with_counters,
             )?;
         }
     }
@@ -125,6 +199,15 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         DebugAction::CreateToken { request, .. } => {
             guard_debug_token_request_payload(request)?;
         }
+        DebugAction::ModifyCounters { counter_type, .. } => {
+            guard_counter_type_payload("Debug.ModifyCounters.counter_type", counter_type)?;
+        }
+        DebugAction::GrantKeyword { keyword, .. } => {
+            bound_serialized_json("Debug.GrantKeyword.keyword", keyword)?;
+        }
+        DebugAction::RemoveKeyword { keyword, .. } => {
+            bound_serialized_json("Debug.RemoveKeyword.keyword", keyword)?;
+        }
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }
         | DebugAction::Sacrifice { .. }
@@ -134,7 +217,6 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::ShuffleLibrary { .. }
         | DebugAction::Proliferate { .. }
         | DebugAction::SetBasePowerToughness { .. }
-        | DebugAction::ModifyCounters { .. }
         | DebugAction::SetTapped { .. }
         | DebugAction::SetPrepared { .. }
         | DebugAction::SetController { .. }
@@ -142,8 +224,6 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::SetFaceState { .. }
         | DebugAction::Attach { .. }
         | DebugAction::Detach { .. }
-        | DebugAction::GrantKeyword { .. }
-        | DebugAction::RemoveKeyword { .. }
         | DebugAction::SetLife { .. }
         | DebugAction::ModifyPlayerCounters { .. }
         | DebugAction::ModifyEnergy { .. }
@@ -166,14 +246,24 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SelectTargets { targets } => {
             bound_list("SelectTargets.targets", targets.len())?;
         }
-        GameAction::DeclareAttackers { attacks } => {
+        GameAction::DeclareAttackers { attacks, bands } => {
             bound_list("DeclareAttackers.attacks", attacks.len())?;
+            // CR 702.22c: bound both the number of declared bands and the size
+            // of each individual band so a malicious client cannot send an
+            // unbounded nested payload.
+            bound_list("DeclareAttackers.bands", bands.len())?;
+            for (index, band) in bands.iter().enumerate() {
+                bound_list(&format!("DeclareAttackers.bands[{index}]"), band.len())?;
+            }
         }
         GameAction::DeclareBlockers { assignments } => {
             bound_list("DeclareBlockers.assignments", assignments.len())?;
         }
         GameAction::AssignCombatDamage { assignments, .. } => {
             bound_list("AssignCombatDamage.assignments", assignments.len())?;
+        }
+        GameAction::AssignBlockerDamage { assignments } => {
+            bound_list("AssignBlockerDamage.assignments", assignments.len())?;
         }
         GameAction::ReorderHand { order } => {
             bound_list("ReorderHand.order", order.len())?;
@@ -205,6 +295,22 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SubmitSideboard { main, sideboard } => {
             bound_list("SubmitSideboard.main", main.len())?;
             bound_list("SubmitSideboard.sideboard", sideboard.len())?;
+            for (index, card) in main.iter().enumerate() {
+                if card.name.len() > MAX_CHOICE_LEN {
+                    return Err(format!(
+                        "SubmitSideboard.main[{index}].name is {} bytes; at most {MAX_CHOICE_LEN} allowed",
+                        card.name.len()
+                    ));
+                }
+            }
+            for (index, card) in sideboard.iter().enumerate() {
+                if card.name.len() > MAX_CHOICE_LEN {
+                    return Err(format!(
+                        "SubmitSideboard.sideboard[{index}].name is {} bytes; at most {MAX_CHOICE_LEN} allowed",
+                        card.name.len()
+                    ));
+                }
+            }
         }
         GameAction::SubmitPilePartition { pile_a, .. } => {
             bound_list("SubmitPilePartition.pile_a", pile_a.len())?;

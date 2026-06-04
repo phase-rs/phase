@@ -94,6 +94,8 @@ use crate::types::ability::{
     StepSkipTarget, SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition,
     TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
+#[cfg(test)]
+use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -3175,7 +3177,9 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
     if scan_contains_phrase(&original_lower, "this turn")
         || scan_contains_phrase(&original_lower, "until ")
     {
-        if let Some(mut clause) = try_parse_play_from_exile(TextPair::new(text, &original_lower)) {
+        if let Some(mut clause) =
+            try_parse_play_from_exile(TextPair::new(text, &original_lower), ctx)
+        {
             if !matches!(clause.effect, Effect::GrantCastingPermission { .. }) {
                 peel_ctx.apply_optional(&mut clause.optional);
             }
@@ -4211,7 +4215,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     // CR 400.7i: "you may play/cast that card [this turn]" — impulse draw permission.
-    if let Some(clause) = try_parse_play_from_exile(tp) {
+    if let Some(clause) = try_parse_play_from_exile(tp, ctx) {
         return clause;
     }
 
@@ -5680,7 +5684,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
 }
 
 /// CR 400.7i: Parse "you may play/cast that card [this turn]" — impulse draw permission.
-fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // CR 611.2a + CR 108.3: Per-object grant clauses from compound-exile chains.
@@ -5765,6 +5769,25 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
         {
             return None;
         }
+    }
+
+    // CR 601.2a + CR 608.2c: Distinguish a targeted graveyard grant from an
+    // impulse-draw grant by the anaphor's referent, not by the clause's wording.
+    // When an earlier clause in this chain SELECTED a target (Emry's "Choose
+    // target artifact card in your graveyard" → `Effect::TargetOnly`), the
+    // "that card"/"that spell" anaphor binds to that chosen card — defer to
+    // `try_parse_cast_effect` → `CastFromZone { target: ParentTarget }`. When the
+    // referent is an exile/impulse publisher instead (`Exile the top card... you
+    // may play that card this turn`, or `ExileFromTopUntil` as in Territorial
+    // Bruntar), the anaphor is the tracked exile set — fall through to the
+    // `PlayFromExile { TrackedSet }` grant below. `parent_target_is_chosen` is a
+    // strict subset of `parent_target_available` set by the chain loop via
+    // `chain_prior_referent_is_chosen_target`, so the two classes split here
+    // without inspecting clause text (a lexical "that card this turn" guard would
+    // misroute the entire impulse class and silently drop its `PlayFromExile`
+    // shape).
+    if ctx.parent_target_is_chosen {
+        return None;
     }
 
     // Duration: extract from trailing text, defaulting to UntilEndOfTurn for impulse draw
@@ -9473,6 +9496,44 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr]) -> bool {
     false
 }
 
+/// CR 608.2c + CR 601.2a: Does the chain's prior referent come from an explicit
+/// target SELECTION (`Effect::TargetOnly`) rather than an exile/impulse publisher
+/// (`ExileTop`, `ExileFromTopUntil`, `ChangeZone`, token creation)? Emry, Lurker
+/// in the Loch — "Choose target artifact card in your graveyard. You may cast
+/// that card this turn." — selects its referent, so the anaphor binds to that
+/// chosen card (`CastFromZone { ParentTarget }`). An impulse publisher's anaphor
+/// is the tracked exile set and must stay a `PlayFromExile { TrackedSet }` grant
+/// (Territorial Bruntar's `ExileFromTopUntil` referent is whitelisted by
+/// `has_typed_target_widened`, so this stricter check is what excludes it). The
+/// walk mirrors `chain_has_prior_typed_referent`: it skips `ParentTarget`-carrier
+/// clauses (which continue the same chosen referent) and stops at the first
+/// conditional clause or non-carrier referent.
+fn chain_prior_referent_is_chosen_target(clauses: &[ClauseIr]) -> bool {
+    for prev in clauses.iter().rev() {
+        if prev.condition.is_some() {
+            return false;
+        }
+        if matches!(prev.parsed.effect, Effect::TargetOnly { .. }) {
+            return true;
+        }
+        if has_typed_target_widened(&prev.parsed.effect) {
+            // A typed referent that is not a bare target selection (an exile/
+            // zone publisher, or pump/destroy/etc. of a target) is not an
+            // Emry-style chosen graveyard pick — its "that card" anaphor keeps
+            // the impulse/tracked-set grant.
+            return false;
+        }
+        if matches!(
+            prev.parsed.effect.target_filter(),
+            Some(TargetFilter::ParentTarget)
+        ) {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
@@ -9962,6 +10023,7 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
         }
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
@@ -9982,43 +10044,63 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
     }
 }
 
-/// Recoerce an anaphoric "its power" reference (parsed as
-/// `Power { scope: Anaphoric }` per CR 608.2k) to a concrete `ObjectScope`
-/// when surrounding context establishes the binding — e.g. a damage clause
-/// whose subject is the source or first target object. An explicit
-/// participle-possessive ("the sacrificed creature's power",
-/// `CostPaidObject` per CR 608.2k) is deliberately NOT matched here — its
-/// referent is fixed by the Oracle text and must not be clobbered.
-fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: ObjectScope) {
+/// Rebind a deferred anaphoric **pronoun** referent ("its power", "its
+/// toughness", "its mana value", …) — parsed as `ObjectScope::Anaphoric` per
+/// CR 608.2k — to a concrete `ObjectScope` once the surrounding clause
+/// establishes the antecedent (a damage clause whose subject is the source,
+/// the first target object, or the triggering object).
+///
+/// CR 113.6 + CR 208/209/202: the pronoun names *one* object; this rewrite
+/// retargets *which* object (the `scope` field), never *which* characteristic
+/// (the `QuantityRef` variant), so it stays within each property's CR section
+/// and applies uniformly across power, toughness, mana value, color/word/
+/// mana-symbol counts, and counters. An explicit participle-possessive ("the
+/// sacrificed creature's power", `CostPaidObject`) and a demonstrative ("that
+/// creature's toughness", `Demonstrative`) are deliberately NOT matched — both
+/// have antecedents fixed by the Oracle text and must not be clobbered.
+fn rebind_anaphoric_object_scope(expr: &mut QuantityExpr, scope: ObjectScope) {
     match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Anaphoric,
-            },
-        } => {
-            *expr = QuantityExpr::Ref {
-                qty: QuantityRef::Power { scope },
-            };
-        }
+        QuantityExpr::Ref { qty } => rebind_anaphoric_ref(qty, scope),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
             exponent: inner, ..
         } => {
-            rewrite_event_source_power_to_object_power(inner, scope);
+            rebind_anaphoric_object_scope(inner, scope);
         }
         QuantityExpr::Sum { exprs } => {
             for inner in exprs {
-                rewrite_event_source_power_to_object_power(inner, scope);
+                rebind_anaphoric_object_scope(inner, scope);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rewrite_event_source_power_to_object_power(left, scope);
-            rewrite_event_source_power_to_object_power(right, scope);
+            rebind_anaphoric_object_scope(left, scope);
+            rebind_anaphoric_object_scope(right, scope);
         }
-        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+/// Retarget a single per-object `QuantityRef` whose scope is the deferred
+/// pronoun `ObjectScope::Anaphoric` to `target`. Leaves every other scope
+/// (including the fixed `Demonstrative` / `CostPaidObject` referents) and every
+/// non-per-object `QuantityRef` untouched.
+fn rebind_anaphoric_ref(qty: &mut QuantityRef, target: ObjectScope) {
+    let scope = match qty {
+        QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        | QuantityRef::CountersOn { scope, .. } => scope,
+        _ => return,
+    };
+    if *scope == ObjectScope::Anaphoric {
+        *scope = target;
     }
 }
 
@@ -10038,7 +10120,7 @@ fn bind_damage_clause_source(
             damage_source,
             ..
         } => {
-            rewrite_event_source_power_to_object_power(amount, power_scope);
+            rebind_anaphoric_object_scope(amount, power_scope);
             *damage_source = Some(damage_source_ref);
             true
         }
@@ -10423,16 +10505,19 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::LoseLife { ref mut target, .. } if target.is_none() => {
             *target = Some(subject_filter);
         }
-        // CR 608.2c + CR 120.3: When the stripped subject is the source object
-        // ("~ deals damage equal to its power..."), an anaphoric "its power" is
-        // the ability source's current power, not a triggering event's source
-        // power. Only `ObjectScope::Anaphoric` is rewritten — an explicit
-        // possessive ("the sacrificed creature's power", `CostPaidObject` per
-        // CR 608.2k) keeps its parser-fixed referent and is left untouched.
+        // CR 608.2c + CR 113.7a + CR 120.3: When the stripped subject is the
+        // source object ("~ deals damage equal to its toughness/power/mana
+        // value..."), an anaphoric "its <characteristic>" reads the ability
+        // source's current value — via LKI (CR 113.7a) if the source has since
+        // left the battlefield (Steadfast Armasaur destroyed in response to its
+        // own activated ability). Only the pronoun `ObjectScope::Anaphoric` is
+        // rebound; an explicit possessive ("the sacrificed creature's power",
+        // `CostPaidObject`) or a demonstrative ("that creature's toughness",
+        // `Demonstrative`) keeps its parser-fixed referent.
         Effect::DealDamage { amount, .. } | Effect::DamageEachPlayer { amount, .. }
             if subject_filter == TargetFilter::SelfRef =>
         {
-            rewrite_event_source_power_to_object_power(amount, ObjectScope::Source);
+            rebind_anaphoric_object_scope(amount, ObjectScope::Source);
         }
         // CR 701.23a: "Its controller may search their library..." — the subject
         // names the library owner (and, when the subject is a context-ref, the
@@ -10862,6 +10947,16 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
 fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
 
+    // CR 117.3a: Optional "you may " is peeled by `clause_shell` for generic
+    // imperatives but left attached for specialized cast/play grants (Emry,
+    // impulse-draw siblings). Strip here so "you may cast that card this
+    // turn" reaches the anaphoric `CastFromZone` arms.
+    let lower = opt(tag::<_, _, E>("you may "))
+        .parse(lower)
+        .ok()
+        .map(|(rest, _)| rest)
+        .unwrap_or(lower);
+
     // CR 305.1: "play" means cast if spell, play as land if land.
     let (rest, mode) = alt((
         value(CardPlayMode::Cast, tag::<_, _, E>("cast ")),
@@ -10904,6 +10999,10 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     .parse(rest)
     .is_ok()
     {
+        let (_, dur) = strip_trailing_duration(lower);
+        let duration = dur.or_else(|| {
+            scan_contains_phrase(lower, "this turn").then_some(Duration::UntilEndOfTurn)
+        });
         return Some(Effect::CastFromZone {
             target: TargetFilter::ParentTarget,
             without_paying_mana_cost: without_paying,
@@ -10911,7 +11010,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
-            duration: None,
+            duration,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
@@ -11397,7 +11496,7 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // Duration-scoped "play the exiled card" grants permission to the object
     // just exiled by the preceding clause. It is not an immediate cast/play
     // instruction, so it must win before the generic CastFromZone parser.
-    if let Some(clause) = try_parse_play_from_exile(tp) {
+    if let Some(clause) = try_parse_play_from_exile(tp, ctx) {
         return clause;
     }
 
@@ -12219,7 +12318,27 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
             || tag::<_, _, OracleError<'_>>("play ").parse(lower).is_ok()
             || tag::<_, _, OracleError<'_>>("cast ").parse(lower).is_ok());
 
-    battlefield_recall || hand_recall || copy_token_recall || play_from_exile_grant
+    // CR 603.7 + CR 400.7h + CR 118.9: cross-clause "you may play/cast that card
+    // without paying its mana cost [until end of turn / this turn]" — the "that
+    // card" anaphor refers to the card the preceding exile published into the
+    // tracked set (Urza, Lord High Artificer's {5}; the "shuffle ..., then exile
+    // the top card, you may play it for free until end of turn" class). Distinct
+    // from the `play_from_exile_grant` "remains exiled" impulse grant (which is
+    // PAID and permanent-duration); this is the FREE-cast, turn-scoped
+    // fingerprint. Only consulted after a prior clause publishes a tracked set,
+    // and triply scoped: anaphor (play/cast that card) + free-cast marker
+    // (without paying) + turn duration (until end of turn / this turn).
+    let free_cast_that_card_grant = (scan_contains_phrase(lower, "play that card")
+        || scan_contains_phrase(lower, "cast that card"))
+        && scan_contains_phrase(lower, "without paying")
+        && (scan_contains_phrase(lower, "until end of turn")
+            || scan_contains_phrase(lower, "this turn"));
+
+    battlefield_recall
+        || hand_recall
+        || copy_token_recall
+        || play_from_exile_grant
+        || free_cast_that_card_grant
 }
 
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
@@ -12603,6 +12722,7 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
         },
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. } => rewrite_condition_quantity_expr(inner),
         QuantityExpr::Sum { exprs } => {
             for inner in exprs {
@@ -12697,6 +12817,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             },
             QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
             QuantityExpr::Sum { exprs } => {
                 for inner in exprs {
@@ -12798,6 +12919,7 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
             },
             QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
             QuantityExpr::Sum { exprs } => {
                 for inner in exprs {
@@ -12854,6 +12976,7 @@ fn quantity_expr_references_controller_life_gained(expr: &QuantityExpr) -> bool 
                 },
         } => true,
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::UpTo { max: inner }
@@ -12894,6 +13017,7 @@ pub(crate) fn rewrite_gained_life_that_many_distribution_refs(def: &mut AbilityD
                 };
             }
             QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::UpTo { max: inner }
@@ -12947,9 +13071,9 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
                 *rounding = mode;
                 rewrite_quantity_expr(inner, mode);
             }
-            QuantityExpr::Multiply { inner, .. } | QuantityExpr::Offset { inner, .. } => {
-                rewrite_quantity_expr(inner, mode);
-            }
+            QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner, mode),
             QuantityExpr::Sum { exprs } => {
                 for inner in exprs {
                     rewrite_quantity_expr(inner, mode);
@@ -14333,6 +14457,19 @@ pub(crate) fn parse_effect_chain_ir(
             .or(turn_cond)
             .or(keyword_instead_cond)
             .or(suffix_cond);
+        // CR 608.2c + CR 608.2d: When NO typed condition matched any pass above,
+        // fall back to a structural-only strip that removes an unrepresentable
+        // `If <X>, ` head ONLY when the body begins with `"you may "`. This
+        // preserves the optional choice on patterns like Amareth ("If it shares
+        // a card type with that permanent, you may reveal …") and Tithe ("If
+        // target opponent controls more lands than you, you may search …"). The
+        // condition is intentionally dropped — the Condition_If swallow detector
+        // still flags it as unsupported. Issue #2277.
+        let text = if condition.is_none() {
+            strip_unrecognized_conditional_head_when_body_optional(&text)
+        } else {
+            text
+        };
         // CR 608.2c + CR 400.7: "unless ~ entered this turn" — strip suffix and
         // replace condition with SourceDidNotEnterThisTurn. The IfYouDo condition
         // is redundant when the parent is optional (optional already gates the sub).
@@ -14636,6 +14773,12 @@ pub(crate) fn parse_effect_chain_ir(
         };
         let parent_target_available =
             if_you_do_anchor.is_some() || chain_has_prior_typed_referent(&clauses);
+        // CR 608.2c + CR 601.2a: a strict subset of `parent_target_available`
+        // restricted to chosen-target referents (Emry), excluding impulse
+        // publishers (Territorial Bruntar's `ExileFromTopUntil`). An "if you
+        // do" object anchor is a created/tracked referent, not a target
+        // selection, so it does not count here.
+        let parent_target_is_chosen = chain_prior_referent_is_chosen_target(&clauses);
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -14673,6 +14816,7 @@ pub(crate) fn parse_effect_chain_ir(
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
             parent_target_available,
+            parent_target_is_chosen,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -24249,6 +24393,92 @@ mod tests {
         );
     }
 
+    /// CR 603.7 + CR 400.7h + CR 118.9: The free-cast cross-clause grant —
+    /// "exile the top card. Until end of turn, you may play that card without
+    /// paying its mana cost." (Urza, Lord High Artificer's {5}) — must rebind
+    /// the cast clause's `ParentTarget` to the tracked set the exile published.
+    /// This proves `contains_implicit_tracked_set_pronoun`'s free-cast
+    /// recognizer fired: without it the `CastFromZone` target stays
+    /// `ParentTarget` (binds to nothing) and the parse is a no-op at runtime.
+    #[test]
+    fn exile_top_then_free_play_that_card_binds_cast_to_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile the top card. Until end of turn, you may play that card without paying its mana cost.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected a controller ExileTop head, got {:?}",
+            def.effect
+        );
+        let cast = def
+            .sub_ability
+            .as_ref()
+            .expect("the free-cast grant must chain after the exile");
+        assert!(
+            matches!(
+                &*cast.effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Play,
+                    ..
+                }
+            ),
+            "expected CastFromZone bound to the tracked exiled card (free, Play), got {:?}",
+            cast.effect
+        );
+    }
+
+    /// Regression: Abbot of Keral Keep's "exile the top card of your library"
+    /// with a paid impulse grant ("Until end of turn, you may play that card")
+    /// must be untouched by the free-cast detector. It is a PAID play (no
+    /// "without paying"), so it stays a `GrantCastingPermission(PlayFromExile)`
+    /// — the free-cast `CastFromZone` rebinding must not fire here.
+    #[test]
+    fn abbot_of_keral_keep_paid_impulse_grant_unchanged() {
+        let def = parse_effect_chain(
+            "Exile the top card of your library. Until end of turn, you may play that card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected a controller ExileTop head, got {:?}",
+            def.effect
+        );
+        let grant = def
+            .sub_ability
+            .as_ref()
+            .expect("the paid impulse grant must chain after the exile");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile { .. },
+                    ..
+                }
+            ),
+            "expected a paid PlayFromExile grant (not a free CastFromZone), got {:?}",
+            grant.effect
+        );
+    }
+
     #[test]
     fn put_counter_where_x_is_lowers_to_speed_quantity() {
         let def = parse_effect_chain_with_context(
@@ -25193,18 +25423,19 @@ mod tests {
             "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
         );
 
-        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{Anaphoric})).
+        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{Demonstrative})).
         //
         // CR 608.2c — "that spell" in the delayed-trigger clause is a bare
-        // anaphoric pronoun: it points at the spell introduced by the
+        // demonstrative possessive: it points at the spell introduced by the
         // earlier-instruction `Counter target spell`. `classify_possessive_referent`
-        // emits `ObjectScope::Anaphoric` whose runtime resolver (in
-        // `game/quantity.rs`) consults `effect_context_object` (the
-        // captured-on-counter spell snapshot stamped by the parent chain)
-        // before falling back to the trigger-event source / cost_paid_object.
+        // emits `ObjectScope::Demonstrative` (the noun-phrase referent, distinct
+        // from the pronoun "its") whose runtime resolver (in `game/quantity.rs`)
+        // consults `effect_context_object` (the captured-on-counter spell
+        // snapshot stamped by the parent chain) before falling back to the
+        // trigger-event source / cost_paid_object. The dedicated variant keeps
+        // the subject-injection rewrite from rebinding this fixed antecedent.
         // The integration test `mana_drain_refund.rs` exercises the runtime
-        // end-to-end; this parser assertion just freezes the parse-time
-        // scope.
+        // end-to-end; this parser assertion just freezes the parse-time scope.
         let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
             panic!(
                 "expected Mana effect on delayed trigger, got {:?}",
@@ -25217,11 +25448,11 @@ mod tests {
                     *count,
                     QuantityExpr::Ref {
                         qty: QuantityRef::ObjectManaValue {
-                            scope: crate::types::ability::ObjectScope::Anaphoric,
+                            scope: crate::types::ability::ObjectScope::Demonstrative,
                         }
                     },
                     "Colorless count must reference the counter-target spell's \
-                     mana value via ObjectManaValue{{Anaphoric}} (CR 608.2c \
+                     mana value via ObjectManaValue{{Demonstrative}} (CR 608.2c \
                      instruction-order referent)"
                 );
             }
@@ -27205,17 +27436,130 @@ mod tests {
 
     #[test]
     fn parse_play_from_exile_this_turn() {
+        // CR 400.7i + CR 608.2c: A standalone "you may play that card this turn"
+        // clause has no prior typed referent, so the anaphor binds to the impulse
+        // tracked exile set — `GrantCastingPermission { PlayFromExile }`, NOT a
+        // `CastFromZone` parent-target grant. This is the impulse-draw default
+        // shared by Dark-Dweller Oracle, Bell Borca, Count on Luck, et al.
         let def = parse_effect_chain("You may play that card this turn.", AbilityKind::Spell);
-        assert!(matches!(
-            &*def.effect,
-            Effect::GrantCastingPermission {
-                permission: CastingPermission::PlayFromExile {
-                    duration: Duration::UntilEndOfTurn,
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::UntilEndOfTurn,
+                        ..
+                    },
                     ..
-                },
+                }
+            ),
+            "expected PlayFromExile(UntilEndOfTurn), got {:?}",
+            def.effect
+        );
+    }
+
+    /// Issue #2027 — Emry, Lurker in the Loch. Within a chain whose prior clause
+    /// chose a typed graveyard target ("Choose target artifact card in your
+    /// graveyard"), "you may cast that card this turn" binds to that target:
+    /// `CastFromZone { target: ParentTarget }`, NOT the impulse `PlayFromExile`
+    /// tracked-set grant. The discriminator is the prior typed referent
+    /// (`ParseContext::parent_target_available`), not the clause wording — so the
+    /// grant must be parsed in the full chain, not in isolation.
+    #[test]
+    fn parse_emry_cast_that_card_this_turn_is_cast_from_zone() {
+        let def = parse_effect_chain(
+            "Choose target artifact card in your graveyard. You may cast that card this turn.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Emry chain must produce a cast sub-ability");
+        match &*sub.effect {
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: false,
+                mode: CardPlayMode::Cast,
                 ..
+            } => {}
+            other => panic!("expected CastFromZone ParentTarget, got {other:?}"),
+        }
+    }
+
+    /// Regression for PR #2185: an impulse-draw chain ("Exile the top card... you
+    /// may play that card this turn") has NO chosen target — the "that card"
+    /// anaphor refers to the prior exile's tracked set. It must keep its
+    /// `GrantCastingPermission { PlayFromExile, TrackedSet }` shape and must NOT be
+    /// rerouted into `CastFromZone` by the Emry graveyard-grant handling. Fails if
+    /// the parent-vs-impulse split keys on clause wording instead of
+    /// `parent_target_available`.
+    #[test]
+    fn parse_impulse_play_that_card_this_turn_stays_play_from_exile() {
+        let def = parse_effect_chain(
+            "Exile the top card of your library. You may play that card this turn.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("impulse chain must produce a permission sub-ability");
+        match &*sub.effect {
+            Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        duration: Duration::UntilEndOfTurn,
+                        ..
+                    },
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    "impulse grant must bind to the tracked exile set"
+                );
             }
-        ));
+            other => panic!("expected GrantCastingPermission/PlayFromExile, got {other:?}"),
+        }
+    }
+
+    /// Regression for PR #2185 (tightening): Territorial Bruntar — "exile cards
+    /// from the top of your library until you exile a nonland card. You may cast
+    /// that card this turn." The prior clause is `ExileFromTopUntil`, an impulse
+    /// publisher whose anaphor is the just-exiled tracked card — NOT a chosen
+    /// target like Emry's `TargetOnly`. It must keep `PlayFromExile { TrackedSet }`.
+    /// `ExileFromTopUntil` is whitelisted by `has_typed_target_widened`, so this
+    /// fails if the parent-vs-impulse split keys on `parent_target_available`
+    /// rather than the stricter `parent_target_is_chosen`.
+    #[test]
+    fn parse_exile_until_nonland_play_that_card_stays_play_from_exile() {
+        let def = parse_effect_chain(
+            "Exile cards from the top of your library until you exile a nonland card. \
+             You may cast that card this turn.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("exile-until chain must produce a permission sub-ability");
+        match &*sub.effect {
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile { .. },
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    "exile-until grant must bind to the tracked exile set, not a chosen target"
+                );
+            }
+            other => panic!("expected GrantCastingPermission/PlayFromExile, got {other:?}"),
+        }
     }
 
     #[test]
@@ -30192,7 +30536,7 @@ mod tests {
     }
 
     /// CR 508.6 + CR 104.3e: An "[source] attacked this turn" relative clause
-    /// narrows the player set to `OpponentAttackedBySourceThisTurn` (Angel of Destiny,
+    /// narrows the player set to `OpponentAttacked { Source, ThisTurn }` (Angel of Destiny,
     /// issue #1599). General over the predicate verb and over the self-ref
     /// spelling ("this creature" / "~" / "it"). The controller is excluded by
     /// the scope, so an attack trigger never eliminates its own controller.
@@ -30204,8 +30548,11 @@ mod tests {
                 let (scope, result) = strip_each_player_subject(&text);
                 assert_eq!(
                     scope,
-                    Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
-                    "scope must narrow to OpponentAttackedBySourceThisTurn for {text:?}",
+                    Some(PlayerFilter::OpponentAttacked {
+                        subject: AttackSubject::Source,
+                        scope: AttackScope::ThisTurn,
+                    }),
+                    "scope must narrow to OpponentAttacked{{Source, ThisTurn}} for {text:?}",
                 );
                 assert_eq!(result, "lose the game", "predicate for {text:?}");
             }
@@ -30214,7 +30561,13 @@ mod tests {
         // General over the predicate verb (not just "loses the game").
         let (scope, result) =
             strip_each_player_subject("each player this creature attacked this turn loses 2 life");
-        assert_eq!(scope, Some(PlayerFilter::OpponentAttackedBySourceThisTurn));
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::Source,
+                scope: AttackScope::ThisTurn,
+            })
+        );
         assert_eq!(result, "lose 2 life");
     }
 
@@ -32228,6 +32581,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_an_article_subtype_addendum_condition() {
+        let def = parse_effect_chain(
+            "Return target creature card from your graveyard to the battlefield. If it's an Elf, create three 1/1 green Elf Warrior creature tokens.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional token addendum");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = &sub.condition else {
+            panic!(
+                "expected TargetMatchesFilter condition, got {:?}",
+                sub.condition
+            );
+        };
+        assert!(
+            !use_lki,
+            "present-tense 'it's an' subtype condition must not use LKI"
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed subtype filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.iter().any(
+                |type_filter| matches!(type_filter, TypeFilter::Subtype(name) if name == "Elf")
+            ),
+            "expected Elf subtype filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    #[test]
     fn parse_controlled_parent_target_addendum_condition() {
         let def = parse_effect_chain(
             "Return target nonland permanent to its owner's hand. If you controlled that permanent, draw a card.",
@@ -32443,6 +32828,53 @@ mod tests {
         );
         assert!(cond.is_none());
         assert_eq!(text, "draw a card if the moon is full");
+    }
+
+    #[test]
+    fn strip_suffix_conditional_parses_lki_combat_status() {
+        for (input, expected_prop, expected_negated) in [
+            (
+                "draw a card if it was attacking",
+                FilterProp::Attacking,
+                false,
+            ),
+            (
+                "draw a card if it was blocking",
+                FilterProp::Blocking,
+                false,
+            ),
+            (
+                "draw a card if it wasn't attacking",
+                FilterProp::Attacking,
+                true,
+            ),
+            (
+                "draw a card if it was not blocking",
+                FilterProp::Blocking,
+                true,
+            ),
+        ] {
+            let (cond, text) = strip_suffix_conditional(input, &mut ParseContext::default());
+            assert_eq!(text, "draw a card");
+            let cond =
+                cond.unwrap_or_else(|| panic!("should parse {input:?} as LKI combat status"));
+            let (cond, negated) = match cond {
+                AbilityCondition::Not { condition } => (*condition, true),
+                condition => (condition, false),
+            };
+            assert_eq!(negated, expected_negated);
+            match cond {
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(ref tf),
+                    use_lki: true,
+                } => {
+                    assert_eq!(tf.properties, vec![expected_prop]);
+                }
+                other => panic!(
+                    "expected TargetMatchesFilter({expected_prop:?}, lki=true), got {other:?}"
+                ),
+            }
+        }
     }
 
     // --- StaticCondition → AbilityCondition bridge tests ---
@@ -33388,7 +33820,7 @@ mod tests {
     }
 
     #[test]
-    fn for_each_pump_beyond_first_offsets_quantity_before_scaling() {
+    fn for_each_pump_beyond_first_clamps_offset_quantity_before_scaling() {
         let def = parse_effect_chain(
             "~ gets -2/-1 until end of turn for each creature blocking it beyond the first",
             AbilityKind::Spell,
@@ -33403,14 +33835,26 @@ mod tests {
                     PtValue::Quantity(QuantityExpr::Multiply {
                         factor: -2,
                         inner,
-                    }) if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                    }) if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::ClampMin {
+                            inner,
+                            minimum: 0,
+                        } if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                    )
                 ));
                 assert!(matches!(
                     toughness,
                     PtValue::Quantity(QuantityExpr::Multiply {
                         factor: -1,
                         inner,
-                    }) if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                    }) if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::ClampMin {
+                            inner,
+                            minimum: 0,
+                        } if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                    )
                 ));
             }
             other => panic!("expected Pump, got {:?}", other),

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use crate::game::combat::AttackTarget;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{battlefield_active_statics, game_functioning_statics};
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
@@ -31,6 +32,9 @@ pub struct StaticCheckContext {
     pub target_id: Option<ObjectId>,
     pub player_id: Option<PlayerId>,
     pub card_name: Option<String>,
+    /// CR 508.1d: When checking scoped `CantAttack` statics (`attack_defended`),
+    /// the declared attack target for the creature in `target_id`.
+    pub attack_target: Option<AttackTarget>,
 }
 
 /// Process-wide cached static-ability registry.
@@ -625,6 +629,26 @@ pub fn check_static_ability(
 
         if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
             continue;
+        }
+
+        // CR 508.1d: Scoped attack prohibitions (Eriette, Propaganda-family flat
+        // restrictions) only apply when the declared target matches `attack_defended`.
+        // When no target is in context (eligibility queries), skip scoped statics so
+        // the creature remains able to attack other players.
+        if matches!(
+            def.mode,
+            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
+        ) {
+            if let Some(defended) = def.attack_defended.as_ref() {
+                if !super::restrictions::attack_target_matches_defended_scope(
+                    state,
+                    context.attack_target.as_ref(),
+                    defended,
+                    obj.controller,
+                ) {
+                    continue;
+                }
+            }
         }
 
         // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated

@@ -187,6 +187,7 @@ fn ureni_attacks_in_second_combat_fires_again() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(ureni, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("second DeclareAttackers should succeed");
     runner.advance_until_stack_empty();

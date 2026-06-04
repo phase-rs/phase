@@ -651,6 +651,10 @@ pub enum Keyword {
     Melee,
     Mentor,
     Myriad,
+    /// CR 702.39a: Provoke — "Whenever this creature attacks, you may have
+    /// target creature defending player controls untap and block it this turn
+    /// if able." Synthesized into an optional Attacks trigger (untap + the
+    /// source-referential `Effect::ForceBlock`) in `database::synthesis`.
     Provoke,
     Rebound,
     Retrace,
@@ -748,8 +752,10 @@ pub enum Keyword {
     /// count is the distinct-colors-spent metric. Per CR 702.44d each instance
     /// works separately.
     Sunburst,
-    /// CR 702.72a: Champion a [type] — exile a creature of the specified type you control
-    /// when this enters; return it when this leaves.
+    /// CR 702.72a: Champion a [type] — exile another object of the specified
+    /// type you control or sacrifice this permanent when it enters; return the
+    /// exiled card when this leaves. Wired at build time by
+    /// `synthesize_champion`; CR 702.72b makes the two abilities linked.
     Champion(String),
     /// CR 702.149a: Training — whenever this creature attacks with another creature
     /// with greater power, put a +1/+1 counter on this creature.
@@ -1125,8 +1131,8 @@ impl Keyword {
     ///   loops in `game/triggers.rs`.
     /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
     ///   triggers separately) / Increment (CR 702.191a: a triggered ability;
-    ///   CR 702.191b: each instance triggers separately) / Exalted (CR 702.83a:
-    ///   a triggered ability;
+    ///   CR 702.191b: each instance triggers separately) / Provoke (CR 702.39b:
+    ///   each instance triggers separately) / Exalted (CR 702.83a: a triggered ability;
     ///   per-instance multiplicity grounded in the general CR 113.2c rule, since
     ///   CR 702.83 has no card-specific multiplicity clause) — one trigger is
     ///   installed per face `Keyword` instance by
@@ -1147,6 +1153,7 @@ impl Keyword {
                 | Keyword::Storm
                 | Keyword::Myriad
                 | Keyword::Increment
+                | Keyword::Provoke
                 | Keyword::Exalted
                 | Keyword::DoubleTeam
         )

@@ -202,6 +202,7 @@ mod tests {
                 active_zones: Vec::new(),
                 characteristic_defining: false,
                 description: None,
+                attack_defended: None,
             }],
             target: None,
             duration: None,

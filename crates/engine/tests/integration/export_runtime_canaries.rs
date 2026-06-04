@@ -88,6 +88,7 @@ fn export_backed_grizzly_bears_combat_canary() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(bears_id, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declare attackers should succeed");
 

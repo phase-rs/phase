@@ -241,6 +241,8 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game_action_payload_guard::MAX_ACTION_LIST_LEN;
+    use engine::types::{GameAction, ObjectId};
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
 
     #[test]
@@ -259,6 +261,18 @@ mod tests {
         };
         let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
         assert!(err.contains("emote"));
+    }
+
+    #[test]
+    fn dispatch_guard_rejects_oversized_game_action_before_handler_work() {
+        let msg = ClientMessage::Action {
+            action: GameAction::ReorderHand {
+                order: vec![ObjectId(1); MAX_ACTION_LIST_LEN + 1],
+            },
+        };
+
+        let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
+        assert!(err.contains("ReorderHand.order"));
     }
 
     #[test]

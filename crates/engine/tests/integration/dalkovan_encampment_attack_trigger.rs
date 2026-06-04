@@ -85,6 +85,7 @@ fn dalkovan_encampment_delayed_trigger_creates_warrior_tokens() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
     runner.advance_until_stack_empty();
