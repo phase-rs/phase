@@ -262,6 +262,7 @@ fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityE
         }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => 0,
         QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::UpTo { max: inner }
