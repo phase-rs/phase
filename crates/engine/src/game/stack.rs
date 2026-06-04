@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    CastingPermission, ContinuousModification, Duration, Effect, EffectKind, KeywordAction,
-    ResolvedAbility, TargetFilter, TargetRef,
+    ContinuousModification, Duration, Effect, EffectKind, KeywordAction, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -100,7 +100,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         Some(e) => e,
         None => return,
     };
-    state.stack_paid_facts.remove(&entry.id);
+    let paid_snapshot = state.stack_paid_facts.remove(&entry.id);
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -256,6 +256,75 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 702.140b-c: A mutating creature spell begins resolving. Mirror the
+    // Bestow illegal-target detection (above) — both run BEFORE the generic
+    // CR 608.2b fizzle check, because a mutating spell with an illegal target
+    // does NOT fizzle to the graveyard: it reverts to a plain creature spell and
+    // resolves (CR 702.140b). The LEGAL case diverts entirely:
+    //   * CR 702.140b — target illegal: revert to a plain creature spell and
+    //     continue resolving (falls through to the normal permanent-spell
+    //     battlefield entry below); the fizzle check is suppressed via
+    //     `mutate_reverted_at_resolution`.
+    //   * CR 702.140c — target legal: the spell does NOT enter the battlefield.
+    //     Instead it pauses for the controller's top/bottom choice;
+    //     `merge::handle_mutate_merge_choice` performs the merge.
+    let mut mutate_reverted_at_resolution = false;
+    if casting_variant == CastingVariant::Mutate {
+        let mutate_target = spell_targets.iter().find_map(|t| match t {
+            crate::types::ability::TargetRef::Object(id) => Some(*id),
+            _ => None,
+        });
+        // CR 608.2b + CR 702.140b: re-check the captured target is STILL legal at
+        // resolution — not merely present. A target that stopped being a creature,
+        // became Human, or changed owner is now illegal and the spell reverts to a
+        // plain creature spell. Re-evaluate against the SAME predicate the
+        // cast-offer / target-attachment path used (`casting::mutate_target_filter`)
+        // via the shared targeting/filter machinery so the two cannot drift.
+        let legal_target = mutate_target.filter(|&id| {
+            if !state.battlefield.contains(&id) {
+                return false;
+            }
+            let filter = super::casting::mutate_target_filter();
+            let ctx = super::filter::FilterContext::from_source_with_controller(
+                entry.id,
+                entry.controller,
+            );
+            super::filter::matches_target_filter(state, id, &filter, &ctx)
+        });
+        match legal_target {
+            Some(target_id) => {
+                // CR 702.140c: pause for the top/bottom choice. The merging spell
+                // (`entry.id`) has already been popped from the stack.
+                state.pending_mutate_merge = Some(crate::types::game_state::PendingMutateMerge {
+                    merging_id: entry.id,
+                    target_id,
+                    controller: entry.controller,
+                });
+                state.waiting_for = crate::types::game_state::WaitingFor::MutateMergeChoice {
+                    player: entry.controller,
+                    merging_id: entry.id,
+                    target_id,
+                };
+                events.push(GameEvent::StackResolved {
+                    object_id: entry.id,
+                });
+                state.current_trigger_event = None;
+                state.current_trigger_events.clear();
+                state.current_trigger_match_count = None;
+                state.die_result_this_resolution = None;
+                return;
+            }
+            None => {
+                // CR 702.140b: illegal target — revert to a plain creature spell
+                // and continue resolving via the normal battlefield-entry path.
+                // Suppress the fizzle check below so it does not route the spell to
+                // the graveyard (it is no longer a targeted mutating spell).
+                super::casting::revert_mutate_form(state, entry.id);
+                mutate_reverted_at_resolution = true;
+            }
+        }
+    }
+
     // CR 707.10: Expose the resolving stack entry so a `CopySpell` carried as
     // the spell's own effect (the Chain cycle's "you may copy this spell")
     // can copy itself even though `resolve_top` has already popped it off the
@@ -273,7 +342,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // CR 702.103e: when a bestowed Aura reverted at the start of resolution,
         // suppress the fizzle check — the spell is no longer an Aura and proceeds
         // to resolve as a creature spell with no remaining target.
-        if !original_targets.is_empty() && !bestow_reverted_at_resolution {
+        if !original_targets.is_empty()
+            && !bestow_reverted_at_resolution
+            && !mutate_reverted_at_resolution
+        {
             let validated = validate_targets_in_chain(state, ability);
             let legal_targets = flatten_targets_in_chain(&validated);
             if targeting::check_fizzle(&original_targets, &legal_targets) {
@@ -458,21 +530,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     *enter_tapped = crate::types::proposed_event::EtbTapState::Tapped;
                 }
             }
-            // CR 712.14a + CR 310.11b: If this spell was cast via an
-            // ExileWithAltCost permission with `cast_transformed`, the
-            // permanent enters the battlefield transformed (resolving to its
-            // back face). Used by the Siege victory trigger.
+            // CR 712.14a + CR 310.11b: If this spell was finalized from an
+            // ExileWithAltCost permission with `cast_transformed`, the permanent
+            // enters the battlefield transformed (resolving to its back face).
+            // The finalized stack-paid snapshot is authoritative here; the
+            // mutable permission list is casting-time authorization, not
+            // resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
-                let cast_transformed = obj.casting_permissions.iter().any(|p| {
-                    matches!(
-                        p,
-                        CastingPermission::ExileWithAltCost {
-                            cast_transformed: true,
-                            ..
-                        }
-                    )
-                });
-                if cast_transformed {
+                if paid_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.cast_transformed)
+                {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         enter_transformed,
                         ..
@@ -4311,6 +4379,56 @@ mod tests {
             );
             // 5 resolutions × 2 (Doubling Season) = 10 Insect tokens.
             assert_eq!(token_ids(&state).len(), 10);
+        }
+
+        // §3.4 + CR 614.1a + CR 707.2 (issue #1511): a mandatory token-count
+        // doubler applies to a `CopyTokenOf` swap collapsed into the copy-prefix
+        // batch — each of the 5 self-copy resolutions creates one copy doubled
+        // to two, for 10 copy tokens. Locks in that routing copy-token creation
+        // through the `CreateToken` replacement pipeline doubles uniformly on
+        // the batched copy path without double-counting.
+        #[test]
+        fn mandatory_token_doubling_batches_and_doubles_copy_prefix() {
+            let mut state = setup();
+            add_lands(&mut state, 6); // 6 lands ⇒ the copy-instead branch fires.
+            let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
+            let sub = copy_instead_sub(src, 6);
+
+            // Doubling Season: mandatory, controller-scoped token-count doubler.
+            let ds_id = create_object(
+                &mut state,
+                CardId(905),
+                PlayerId(0),
+                "Doubling Season".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&ds_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let repl = doubling_season_replacement();
+                Arc::make_mut(&mut obj.base_replacement_definitions).push(repl.clone());
+                obj.replacement_definitions.push(repl);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_token_triggers(
+                &mut state,
+                src,
+                insect_token_effect(),
+                Some(Box::new(sub)),
+                5,
+            );
+            resolve_to_empty_batched(&mut state);
+            // 5 copy resolutions × 2 (Doubling Season) = 10 "Scout" copy tokens.
+            let copies = state
+                .objects
+                .values()
+                .filter(|o| o.is_token && o.name == "Scout")
+                .count();
+            assert_eq!(
+                copies, 10,
+                "doubler must apply to each batched copy-token resolution (issue #1511)"
+            );
         }
 
         /// Push `n` identical untargeted Token triggers from `source_id`, each

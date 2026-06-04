@@ -3182,8 +3182,8 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::CastFromZone { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
-        | Effect::LoseTheGame
-        | Effect::WinTheGame
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
         | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }

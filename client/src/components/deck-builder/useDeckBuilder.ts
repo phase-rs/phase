@@ -74,7 +74,7 @@ export function useDeckBuilder({
   // Which surface is foregrounded on phone (tablet/desktop show columns and
   // ignore this). Deck-first: the main canvas (deck or, while searching, the
   // results grid) is the default; "info" is the commander + stats rail.
-  const [activeSurface, setActiveSurface] = useState<"deck" | "info" | "playtest">("deck");
+  const [activeSurface, setActiveSurface] = useState<"deck" | "info">("deck");
   // Visual representation of the deck within the main canvas.
   const [deckView, setDeckView] = useState<"list" | "stack">("list");
   // Unsaved-changes flag: set on any deck mutation, cleared on save/clone/load.

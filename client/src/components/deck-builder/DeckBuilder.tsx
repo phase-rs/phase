@@ -16,7 +16,6 @@ import type { GameFormat } from "../../adapter/types";
 import { CommanderPanel } from "./CommanderPanel";
 import { DeckBuilderToolbar } from "./DeckBuilderToolbar";
 import { DeckBuilderTabBar } from "./DeckBuilderTabBar";
-import { PlaytestPanel } from "./PlaytestPanel";
 import { panelId, tabId } from "./deckBuilderTabs";
 import { useDeckBuilder } from "./useDeckBuilder";
 
@@ -100,15 +99,15 @@ export function DeckBuilder({
   const searchActive = hasSearchCriteria(searchFilters);
   const deckCount = deck.main.reduce((sum, e) => sum + e.count, 0) + commanders.length;
 
-  // Filters are a collapsible rail (lg+) / overlay sheet (below lg), shown on
-  // demand so the deck canvas owns the space by default. useIsMobile flips at the
-  // same 1024px boundary as the rail's `lg:static`, so it cleanly distinguishes
-  // "modal sheet" (mobile/tablet) from "inline rail" (desktop) — only the former
-  // gets dialog semantics + a focus trap.
-  const isMobile = useIsMobile();
+  // Filters are an inline sidebar (≥820px) / overlay sheet (below 820px), shown on
+  // demand so the deck canvas owns the space by default. The 820px breakpoint
+  // matches the shell rail's appearance and the sheet's `min-[820px]:static`, so it
+  // cleanly distinguishes "modal sheet" (narrow, rail hidden) from "inline sidebar"
+  // (rail visible) — only the former gets dialog semantics + a focus trap.
+  const isNarrow = useIsMobile(820);
   const filterPanelRef = useRef<HTMLDivElement>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const filtersAsDialog = filtersOpen && isMobile;
+  const filtersAsDialog = filtersOpen && isNarrow;
   useEffect(() => {
     if (!filtersOpen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -220,7 +219,6 @@ export function DeckBuilder({
   // Phone: tab bar picks one surface. md+: both columns show.
   const mainVisible = activeSurface === "deck" ? "flex" : "hidden md:flex";
   const infoVisible = activeSurface === "info" ? "flex" : "hidden md:flex";
-  const playtestVisible = activeSurface === "playtest" ? "flex" : "hidden md:flex";
 
   return (
     <div className="flex h-screen flex-col bg-transparent">
@@ -252,7 +250,7 @@ export function DeckBuilder({
             type="button"
             aria-label={t("filters.close")}
             onClick={() => setFiltersOpen(false)}
-            className="fixed inset-0 z-30 bg-black/60 lg:hidden"
+            className="fixed inset-0 z-30 bg-black/60 min-[820px]:hidden"
           />
         )}
 
@@ -266,7 +264,13 @@ export function DeckBuilder({
           aria-label={filtersAsDialog ? t("filters.title") : undefined}
           className={
             filtersOpen
-              ? "fixed inset-y-0 left-0 z-40 flex w-[min(20rem,85vw)] flex-col border-r border-white/10 bg-[#0b1020]/96 backdrop-blur-md lg:static lg:z-auto lg:w-64 lg:bg-black/12"
+              ? // Overlay sheet below 820px (where the shell rail is hidden, so a
+                // fixed left-0 sheet is unobstructed). At ≥820px — exactly where the
+                // rail appears — the sheet becomes an inline `static` sidebar that
+                // flows inside the rail-offset content column, so it can never be
+                // painted over by the rail. Breakpoint matches the rail's so there
+                // is no in-between band.
+                "fixed inset-y-0 left-0 z-40 flex w-[min(20rem,85vw)] flex-col border-r border-white/10 bg-[#0b1020]/96 backdrop-blur-md min-[820px]:static min-[820px]:left-auto min-[820px]:z-auto min-[820px]:w-64 min-[820px]:bg-black/12"
               : "hidden"
           }
         >
@@ -452,15 +456,6 @@ export function DeckBuilder({
               onCardClick={handleScrollToCard}
             />
           </div>
-        </section>
-
-        <section
-          id={panelId("playtest")}
-          role="tabpanel"
-          aria-labelledby={tabId("playtest")}
-          className={`${playtestVisible} min-h-0 min-w-0 flex-1 flex-col overflow-hidden`}
-        >
-          <PlaytestPanel deck={deck} format={format} mainCount={deckCount} />
         </section>
       </div>
 

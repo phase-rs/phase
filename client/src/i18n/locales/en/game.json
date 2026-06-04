@@ -1167,6 +1167,10 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Choose Casting Cost",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Cast Normally",
@@ -1388,6 +1392,15 @@
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
     "bottom": "Bottom of library"
+  },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
   },
   "permanentTypeSlot": {
     "eyebrow": "Permanent Type",

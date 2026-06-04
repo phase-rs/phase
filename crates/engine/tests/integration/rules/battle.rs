@@ -63,6 +63,91 @@ fn battle_has_defense_equal_to_counters() {
     assert_eq!(obj.counters.get(&CounterType::Defense).copied(), Some(4));
 }
 
+/// CR 310.11b + CR 712.14a: Accepting a Siege victory cast during trigger
+/// resolution must preserve `cast_transformed`, so the permanent resolves onto
+/// the battlefield back face up.
+#[test]
+fn siege_victory_cast_during_resolution_enters_transformed() {
+    use engine::game::game_object::BackFaceData;
+    use engine::types::ability::{
+        CardPlayMode, CastFromZoneDriver, Effect, ResolvedAbility, TargetFilter, TargetRef,
+    };
+    use engine::types::card_type::CardType;
+    use engine::types::mana::ManaCost;
+
+    let (mut runner, battle) = prime_siege(P0, P1, "Invasion of Test", 3);
+    {
+        let obj = runner.state_mut().objects.get_mut(&battle).unwrap();
+        obj.back_face = Some(BackFaceData {
+            name: "Test Back Face".to_string(),
+            power: Some(4),
+            toughness: Some(4),
+            loyalty: None,
+            defense: None,
+            card_types: CardType {
+                supertypes: Vec::new(),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Spirit".to_string()],
+            },
+            mana_cost: ManaCost::default(),
+            keywords: Vec::new(),
+            abilities: Vec::new(),
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: Vec::new(),
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: None,
+        });
+    }
+
+    let cast_victory_back_face = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::SelfRef,
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: true,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::DuringResolution,
+        },
+        vec![TargetRef::Object(battle)],
+        battle,
+        P0,
+    );
+    let mut events = Vec::new();
+    engine::game::effects::resolve_ability_chain(
+        runner.state_mut(),
+        &cast_victory_back_face,
+        &mut events,
+        0,
+    )
+    .expect("Siege victory CastFromZone should cast during resolution");
+
+    assert_eq!(
+        runner.state().objects[&battle].zone,
+        Zone::Stack,
+        "victory cast should put the Siege on the stack during resolution"
+    );
+
+    runner.resolve_top();
+
+    let obj = &runner.state().objects[&battle];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        obj.transformed,
+        "victory cast must preserve cast_transformed through the during-resolution permission"
+    );
+    assert_eq!(obj.name, "Test Back Face");
+    assert!(obj.card_types.core_types.contains(&CoreType::Creature));
+}
+
 /// CR 704.5v + CR 310.7: A battle with 0 defense is put into its owner's
 /// graveyard by state-based actions.
 #[test]

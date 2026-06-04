@@ -4507,7 +4507,7 @@ fn token_description_to_spec(
     token: &crate::parser::oracle_ir::ast::TokenDescription,
 ) -> Option<crate::types::proposed_event::TokenSpec> {
     use crate::types::ability::PtValue;
-    use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::card_type::CoreType;
     use crate::types::proposed_event::TokenSpec;
 
     // Split parsed `types` into core_types vs subtypes by checking CoreType::from_str.
@@ -4549,7 +4549,9 @@ fn token_description_to_spec(
             toughness,
             core_types,
             subtypes,
-            supertypes: Vec::<Supertype>::new(),
+            // CR 205.4a: Carry parsed supertypes (legendary/snow) onto the
+            // appended-token spec rather than dropping them.
+            supertypes: token.supertypes.clone(),
             colors: token.colors.clone(),
             keywords: token.keywords.clone(),
         },
@@ -10660,7 +10662,7 @@ mod snapshot_tests {
         assert!(
             matches!(
                 def.execute.as_deref().map(|a| &*a.effect),
-                Some(crate::types::ability::Effect::WinTheGame)
+                Some(crate::types::ability::Effect::WinTheGame { .. })
             ),
             "execute must be WinTheGame, got {:?}",
             def.execute

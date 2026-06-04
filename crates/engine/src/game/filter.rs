@@ -2582,10 +2582,15 @@ fn matches_filter_prop(
             let controller_pid = controller.as_ref().and_then(|c| {
                 controller_ref_player(state, source.id, source.controller, source.ability, c)
             });
-            state.objects.values().any(|perm| {
-                if perm.zone != crate::types::zones::Zone::Battlefield {
+            // CR 730.2: iterate `state.battlefield` — the authoritative list of
+            // INDEPENDENT permanents — so an absorbed merge component (zone is
+            // Battlefield but it is not a member of this list) is never counted
+            // as a separate permanent. This also avoids an O(n) per-object
+            // absorbed-component scan over `state.objects`.
+            state.battlefield.iter().any(|perm_id| {
+                let Some(perm) = state.objects.get(perm_id) else {
                     return false;
-                }
+                };
                 let controller_ok = match (controller, controller_pid) {
                     (Some(ControllerRef::You), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::Opponent), _) => {

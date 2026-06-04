@@ -295,6 +295,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::DiscoverChoice { .. }
         | GameAction::CascadeChoice { .. }
         | GameAction::ChooseTopOrBottom { .. }
+        // CR 702.140c: mutate merge side carries a single typed enum — nothing
+        // client-controlled to bound.
+        | GameAction::ChooseMutateMergeSide { .. }
         | GameAction::ChooseLegend { .. }
         | GameAction::ChooseBattleProtector { .. }
         | GameAction::SetAutoPass { .. }

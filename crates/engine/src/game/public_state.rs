@@ -205,6 +205,14 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_public_state_player_dirty(state, *player_id);
                 mark_mana_display_dirty(state);
             }
+            // CR 702.140c + CR 730.2: a merge changes the surviving permanent's
+            // displayed characteristics. `merge_object_onto` already marks
+            // `layers_dirty` (Gate 1 caught it), but mark the merged object here
+            // too so this arm is sound even if a future caller skips the full mark.
+            GameEvent::Mutated { merged_id, .. } => {
+                mark_object_dirty_with_mana(state, *merged_id);
+                mark_battlefield_display_dirty(state);
+            }
             GameEvent::CounterAdded { object_id, .. }
             | GameEvent::CounterRemoved { object_id, .. }
             | GameEvent::Evolved { object_id } => {

@@ -566,7 +566,13 @@ fn check_lethal_damage(
 /// Mirror Box's "permanents you control", Cadric / Sliver Gravemother's
 /// type-scoped variants). The candidate is passed as the target object so
 /// type-scoped exemptions are evaluated per-permanent, not per-player.
-fn legend_rule_exempt(
+///
+/// This is the single authority the legend-rule SBA consults; it is public so
+/// rules-aware consumers (e.g. the AI's anti-self-harm policy) can ask the same
+/// per-permanent question without duplicating the exemption logic. Callers that
+/// reason about a prospective duplicate should evaluate the already-controlled
+/// same-name permanents the same way the SBA filters them before grouping.
+pub fn legend_rule_exempt(
     state: &GameState,
     permanent_id: crate::types::identifiers::ObjectId,
 ) -> bool {
@@ -2665,6 +2671,50 @@ mod tests {
             .static_definitions
             .push(def);
         id
+    }
+
+    fn add_creature_token(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        legendary: bool,
+    ) -> ObjectId {
+        let id = create_creature(state, CardId(300), owner, name, 1, 1);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_token = true;
+        if legendary {
+            obj.card_types.supertypes.push(Supertype::Legendary);
+        }
+        id
+    }
+
+    #[test]
+    fn sba_legend_rule_suppressed_for_creature_tokens_scope() {
+        // CR 704.5j: The Master, Multiplied — duplicate legendary creature tokens
+        // controlled by the exemption source's controller are not grouped.
+        use crate::types::ability::FilterProp;
+        let mut state = setup();
+        let id1 = add_creature_token(&mut state, PlayerId(0), "The Doctor", true);
+        let id2 = add_creature_token(&mut state, PlayerId(0), "The Doctor", true);
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::Token])
+                    .controller(ControllerRef::You),
+            )),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "creature-token legend-rule exemption must suppress the choice"
+        );
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
     }
 
     #[test]
