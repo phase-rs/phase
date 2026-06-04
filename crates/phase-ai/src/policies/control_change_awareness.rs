@@ -191,4 +191,3 @@ fn would_target_own_permanent(
         _ => false,
     }
 }
-

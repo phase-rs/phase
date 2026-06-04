@@ -120,4 +120,3 @@ fn has_mill_with_conditional_payoff(ctx: &PolicyContext<'_>) -> bool {
         })
         .unwrap_or(false)
 }
-

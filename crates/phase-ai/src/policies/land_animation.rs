@@ -266,4 +266,3 @@ fn has_sufficient_mana_sources(ctx: &PolicyContext<'_>, exclude_land: ObjectId) 
 
     land_count >= 3 // Heuristic: need at least 3 other lands
 }
-
