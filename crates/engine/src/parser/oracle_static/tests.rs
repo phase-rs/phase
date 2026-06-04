@@ -115,6 +115,122 @@ fn extra_blockers_static_self_reference_stays_selfref() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
+/// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
+/// blocked by more than one creature." must decompose into BOTH the P/T grant
+/// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
+/// creature. Previously the evasion clause was dropped entirely.
+#[test]
+fn cant_be_blocked_static_splits_from_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+0 and can't be blocked by more than one creature.",
+    );
+    assert!(
+        defs.len() >= 2,
+        "expected P/T + evasion defs, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }
+                && matches!(
+                    d.affected,
+                    Some(TargetFilter::Typed(TypedFilter { ref properties, .. }))
+                        if properties.contains(&FilterProp::EnchantedBy)
+                )),
+        "expected enchanted-creature CantBeBlockedByMoreThan {{ max: 1 }}, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    // The P/T grant is preserved (and remains a continuous modification).
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "P/T grant must be preserved"
+    );
+}
+
+/// CR 509.1b: The compound split must also match the typographic U+2019
+/// apostrophe ("can'​t"), matching the standalone evasion branches — MTGJSON
+/// Oracle text uses U+2019, and the static path doesn't normalize apostrophes.
+#[test]
+fn cant_be_blocked_static_splits_with_typographic_apostrophe() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+0 and can\u{2019}t be blocked by more than one creature.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }),
+        "U+2019 form must still split off the evasion grant, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 509.1b: The bare compound form "… and can't be blocked" yields a plain
+/// `CantBeBlocked` static alongside the keyword grant.
+#[test]
+fn cant_be_blocked_static_splits_bare_form() {
+    let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and can't be blocked.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantBeBlocked),
+        "expected CantBeBlocked, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 105.4 + CR 509.1b + CR 608.2c: The split path must use the chosen-color
+/// qualifier parser before the generic type parser, matching the standalone
+/// "can't be blocked by <filter>" path.
+#[test]
+fn cant_be_blocked_static_split_keeps_chosen_color_filter() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked by creatures of that color.",
+    );
+    let filter = defs
+        .iter()
+        .find_map(|d| match &d.mode {
+            StaticMode::CantBeBlockedBy { filter } => Some(filter),
+            _ => None,
+        })
+        .expect("expected split CantBeBlockedBy static");
+
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::IsChosenColor))
+        ),
+        "expected IsChosenColor blocker filter, got {filter:?}"
+    );
+}
+
+/// CR 509.1b: A trailing evasion condition belongs on the split
+/// `CantBeBlocked` companion, not only on standalone attached-subject forms.
+#[test]
+fn cant_be_blocked_static_split_keeps_trailing_condition() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked as long as you control a Gate.",
+    );
+    let condition = defs
+        .iter()
+        .find_map(|d| {
+            (d.mode == StaticMode::CantBeBlocked)
+                .then_some(d.condition.as_ref())
+                .flatten()
+        })
+        .expect("expected split CantBeBlocked static with condition");
+
+    assert!(
+        matches!(
+            condition,
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf))
+            } if tf.get_subtype() == Some("Gate")
+        ),
+        "expected Gate condition, got {condition:?}"
+    );
+}
+
 /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
 /// creature spells the controller casts.
 #[test]
@@ -2989,6 +3105,34 @@ fn static_tarmogoyf_cda() {
 }
 
 #[test]
+fn attacks_each_combat_unless_you_control_is_conditional_must_attack() {
+    // CR 508.1d + CR 604.1: Reckless Cohort — "attacks each combat if able
+    // unless you control another Ally" is a MustAttack rule-static gated by a
+    // negated control-presence condition (the requirement applies only while you
+    // do NOT control another Ally).
+    let def = parse_static_line(
+        "This creature attacks each combat if able unless you control another Ally.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::MustAttack);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(def.condition, Some(StaticCondition::Not { .. })),
+        "expected a negated control-presence condition, got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn attacks_each_combat_if_able_unconditional_has_no_condition() {
+    // Regression: the plain rule-static (no "unless") still parses to an
+    // unconditional MustAttack.
+    let def = parse_static_line("This creature attacks each combat if able.").unwrap();
+    assert_eq!(def.mode, StaticMode::MustAttack);
+    assert!(def.condition.is_none());
+}
+
+#[test]
 fn static_unlicensed_hearse_counts_cards_exiled_with_it() {
     let def = parse_static_line(
             "Unlicensed Hearse's power and toughness are each equal to the number of cards exiled with it.",
@@ -3887,6 +4031,46 @@ fn static_legend_rule_routes_through_classifier() {
     ));
     assert!(crate::parser::oracle_classifier::is_static_pattern(
         "the \"legend rule\" doesn't apply."
+    ));
+}
+
+#[test]
+fn static_legend_rule_creature_tokens_scope() {
+    // CR 704.5j: The Master, Multiplied — "doesn't apply to creature tokens you control."
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to creature tokens you control.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
+    ));
+}
+
+#[test]
+fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
+    // CR 603.2 + CR 609.3: The Master, Multiplied.
+    let def = parse_static_line(
+        "Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCauseSacrificeOrExile {
+            cause: ProhibitionScope::Controller,
+        }
+    );
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
     ));
 }
 

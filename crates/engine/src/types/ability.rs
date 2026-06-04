@@ -3846,6 +3846,31 @@ impl Comparator {
     }
 }
 
+/// CR 508.1 / CR 508.1b: Subject axis for counting members of a triggering
+/// `AttackersDeclared` event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AttackersDeclaredCountSubject {
+    /// Count attackers whose controller matches `scope` relative to the trigger
+    /// controller. `filter` is the optional condition-level type axis (CR
+    /// 508.1): when `Some(f)`, only attackers whose object matches `f` are
+    /// counted, so "you attack with two or more Dinosaurs" fires only on ≥2
+    /// Dinosaurs — not on one Dinosaur plus an unrelated attacker. When `None`,
+    /// every attacker in the scoped batch is counted (the untyped "attack with
+    /// two or more creatures" behavior).
+    Controller {
+        scope: ControllerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
+    /// Count attackers whose announced attack target matches a scoped player,
+    /// planeswalker, battle, or combined attack-target class.
+    AttackTarget {
+        controller: ControllerRef,
+        attacked: crate::types::triggers::AttackTargetFilter,
+    },
+}
+
 /// CR 208: Selects which creature P/T metric a `FilterProp::PtComparison`
 /// reads. Power, toughness, and their total are all derived from the same CR
 /// 208 characteristic pair, so they are a leaf-level parameterization axis, not
@@ -10404,35 +10429,23 @@ pub enum TriggerCondition {
     /// resolution-time per CR 603.4.
     ChosenLabelIs { label: String },
 
-    /// CR 508.1 + CR 603.2c + CR 603.4: Intervening-if for "attacks with N or more creatures"
-    /// triggers. Reads the triggering `AttackersDeclared` event and counts attackers whose
-    /// controller matches `scope` relative to the trigger's controller:
-    ///   - `ControllerRef::You` → attackers controlled by the trigger controller.
-    ///   - `ControllerRef::Opponent` → attackers controlled by a player other than the
-    ///     trigger controller. "Another player attacks with 2+" uses this scope; all
-    ///     attackers in the batch share one attacking player (the active player per
-    ///     CR 506.2), so counting "≠ trigger controller" is equivalent to counting the
-    ///     triggering player's creatures.
+    /// CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Intervening-if comparison
+    /// over the current attack declaration. Handles "attacks with N or more
+    /// creatures", "none of those creatures attacked you", and attack-target
+    /// count gates such as "two or more of those creatures are attacking you
+    /// and/or planeswalkers you control."
     ///
-    /// `filter` is the condition-level type axis (CR 508.1): when `Some(f)`,
-    /// only attackers whose object matches `f` are counted, so "you attack with
-    /// two or more Dinosaurs" fires only on ≥2 Dinosaurs — not on one Dinosaur
-    /// plus an unrelated attacker. When `None`, every attacker in the scoped
-    /// batch is counted (the untyped "attack with two or more creatures"
-    /// behavior, preserved byte-for-byte).
-    ///
-    /// True when the count meets or exceeds `minimum`.
-    AttackersDeclaredMin {
-        scope: ControllerRef,
-        minimum: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TargetFilter>,
+    /// The `subject` axis selects what is counted (attackers by controller, or
+    /// attacks by their announced target); the `Controller` subject also carries
+    /// the optional condition-level type filter (CR 508.1) so "you attack with
+    /// two or more Dinosaurs" counts only Dinosaur attackers. `comparator` and
+    /// `count` express the threshold (`GE 2` for "two or more", `EQ 0` for
+    /// "none of those creatures").
+    AttackersDeclaredCount {
+        subject: AttackersDeclaredCountSubject,
+        comparator: Comparator,
+        count: u32,
     },
-    /// CR 506.2 + CR 603.4: Intervening-if "if none of those creatures attacked you".
-    /// Reads the triggering `AttackersDeclared` event's per-attacker `AttackTarget` tuples
-    /// (CR 508.1b) and returns true iff no attacker in the batch targeted the trigger's
-    /// controller directly (`AttackTarget::Player(trigger_controller)`).
-    NoneOfAttackersTargetedYou,
 
     /// CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they] draw in
     /// each of [your|their] draw steps" — the trigger fires for every card-draw

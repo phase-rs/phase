@@ -617,6 +617,16 @@ pub enum StaticMode {
     CantSearchLibrary {
         cause: ProhibitionScope,
     },
+    /// CR 603.2 + CR 609.3: "Triggered abilities <scope> can't cause you to
+    /// sacrifice or exile <affected>." E.g., The Master, Multiplied — triggered
+    /// abilities you control can't cause you to sacrifice or exile creature
+    /// tokens you control. When a muzzled trigger would move an affected object
+    /// to exile or its controller's graveyard via sacrifice, that object is
+    /// skipped (CR 609.3: do as much as possible). Scope of muzzled abilities
+    /// rides on `cause`; scope of protected objects rides on `affected`.
+    CantCauseSacrificeOrExile {
+        cause: ProhibitionScope,
+    },
     CastWithFlash,
     /// CR 701.38d: While voting, the controller of this permanent may vote an
     /// additional time. Each active source grants +1 to the controller's
@@ -1313,6 +1323,7 @@ impl Hash for StaticMode {
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
@@ -1340,6 +1351,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
             StaticMode::CantBeActivated { who, .. } => write!(f, "CantBeActivated({who})"),
             StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
+            StaticMode::CantCauseSacrificeOrExile { cause } => {
+                write!(f, "CantCauseSacrificeOrExile({cause})")
+            }
             StaticMode::SuppressTriggers { events, .. } => {
                 let parts: Vec<String> = events.iter().map(|e| e.to_string()).collect();
                 write!(f, "SuppressTriggers({})", parts.join("+"))
@@ -1929,6 +1943,15 @@ impl FromStr for StaticMode {
                     // CR 701.23: Round-trip of the scope identifier.
                     if let Ok(cause) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantSearchLibrary { cause });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CantCauseSacrificeOrExile(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 603.2 + CR 609.3: Round-trip of the scope identifier.
+                    if let Ok(cause) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantCauseSacrificeOrExile { cause });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if other.starts_with("SuppressTriggers(") {

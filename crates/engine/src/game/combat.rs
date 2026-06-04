@@ -535,6 +535,55 @@ fn block_restriction_statics_against<'a>(
         })
 }
 
+/// CR 509.1c: Static abilities that force blockers onto `attacker_id` — e.g.
+/// "must be blocked if able" on the attacker itself, or on an Aura/Equipment
+/// whose `affected` filter matches the enchanted/equipped creature (Predatory
+/// Impetus, Lure). Mirrors [`block_restriction_statics_against`].
+fn must_be_blocked_statics_for_attacker<'a>(
+    state: &'a GameState,
+    attacker_id: ObjectId,
+) -> impl Iterator<Item = (&'a GameObject, &'a StaticDefinition)> + 'a {
+    super::functioning_abilities::battlefield_functioning_statics(state)
+        .filter(|(_, def)| {
+            matches!(
+                def.mode,
+                StaticMode::MustBeBlocked | StaticMode::MustBeBlockedByAll
+            )
+        })
+        .filter(move |(src, def)| match def.affected.as_ref() {
+            None => src.id == attacker_id,
+            Some(filter) => matches_target_filter(
+                state,
+                attacker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ),
+        })
+        .filter(move |(src, def)| {
+            def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    attacker_id,
+                )
+            })
+        })
+}
+
+fn attacker_has_must_be_blocked(state: &GameState, attacker_id: ObjectId) -> bool {
+    // CR 509.1c: Check if any active static forces blockers on this attacker.
+    must_be_blocked_statics_for_attacker(state, attacker_id)
+        .any(|(_, def)| def.mode == StaticMode::MustBeBlocked)
+}
+
+fn attacker_has_must_be_blocked_by_all(state: &GameState, attacker_id: ObjectId) -> bool {
+    // CR 509.1c: Check if any active static forces all able creatures to block this attacker.
+    must_be_blocked_statics_for_attacker(state, attacker_id)
+        .any(|(_, def)| def.mode == StaticMode::MustBeBlockedByAll)
+}
+
 /// Validate blocker declarations per CR 509.1.
 /// Each assignment is (blocker_id, attacker_id).
 pub fn validate_blockers(
@@ -902,17 +951,8 @@ pub fn validate_blockers_for_player(
                 continue;
             }
             let attacker_id = attacker_info.object_id;
-            let attacker = match state.objects.get(&attacker_id) {
-                Some(obj) => obj,
-                None => continue,
-            };
 
-            // Check if this attacker has MustBeBlocked.
-            // CR 604.1: `active_static_definitions` owns the static-ability gating.
-            let has_must_be_blocked =
-                super::functioning_abilities::active_static_definitions(state, attacker)
-                    .any(|sd| sd.mode == StaticMode::MustBeBlocked);
-            if !has_must_be_blocked {
+            if !attacker_has_must_be_blocked(state, attacker_id) {
                 continue;
             }
 
@@ -958,15 +998,7 @@ pub fn validate_blockers_for_player(
                 continue;
             }
             let attacker_id = attacker_info.object_id;
-            let attacker = match state.objects.get(&attacker_id) {
-                Some(obj) => obj,
-                None => continue,
-            };
-            // CR 604.1: `active_static_definitions` owns the static-ability gating.
-            let has_must_be_blocked_by_all =
-                super::functioning_abilities::active_static_definitions(state, attacker)
-                    .any(|sd| sd.mode == StaticMode::MustBeBlockedByAll);
-            if !has_must_be_blocked_by_all {
+            if !attacker_has_must_be_blocked_by_all(state, attacker_id) {
                 continue;
             }
             // Any untapped defender with spare block capacity that could legally
@@ -4309,6 +4341,39 @@ mod tests {
         assert!(!can_block_pair(&state, ground_blocker, attacker));
         assert!(validate_blockers(&state, &[(flying_blocker, attacker)]).is_err());
         assert!(!can_block_pair(&state, flying_blocker, attacker));
+    }
+
+    /// Issue #2015: Predatory Impetus — `MustBeBlocked` on the Aura with
+    /// `EnchantedBy` affected must reach declare-blockers enforcement.
+    #[test]
+    fn aura_must_be_blocked_on_enchanted_creature_reaches_enforcement() {
+        use crate::types::ability::{FilterProp, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Enchanted Beast", 3, 3);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        let aura = create_creature(&mut state, PlayerId(0), "Predatory Impetus", 0, 0);
+        let aura_obj = state.objects.get_mut(&aura).unwrap();
+        aura_obj.card_types.core_types.push(CoreType::Enchantment);
+        aura_obj.attached_to = Some(attacker.into());
+        aura_obj.static_definitions.push(
+            StaticDefinition::new(StaticMode::MustBeBlocked).affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            )),
+        );
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "enchanted attacker with a legal blocker must be blocked (CR 509.1c)"
+        );
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
     }
 
     #[test]

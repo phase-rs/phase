@@ -124,7 +124,7 @@ fn players_for_filter(
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
-                crate::game::players::matches_relation(player.id, controller, *relation)
+                crate::game::players::matches_relation(state, player.id, controller, *relation)
                     && crate::game::players::performed_action_this_way(state, player.id, *action)
             })
             .map(|player| player.id)
@@ -154,7 +154,10 @@ fn players_for_filter(
             state
                 .players
                 .iter()
-                .filter(|player| !player.is_eliminated && player.id != controller)
+                .filter(|player| {
+                    !player.is_eliminated
+                        && crate::game::players::is_opponent(state, controller, player.id)
+                })
                 .filter(|player| triggering.is_none_or(|pid| pid != player.id))
                 .map(|player| player.id)
                 .collect()
@@ -204,7 +207,7 @@ fn players_for_filter(
                 .iter()
                 .filter(|player| !player.is_eliminated)
                 .filter(|player| {
-                    crate::game::players::matches_relation(player.id, controller, *relation)
+                    crate::game::players::matches_relation(state, player.id, controller, *relation)
                         && crate::game::effects::player_control_count_compares(
                             state,
                             player.id,
@@ -235,7 +238,7 @@ fn players_for_filter(
                 .iter()
                 .filter(|player| !player.is_eliminated)
                 .filter(|player| {
-                    crate::game::players::matches_relation(player.id, controller, *relation)
+                    crate::game::players::matches_relation(state, player.id, controller, *relation)
                         && crate::game::effects::candidate_player_scalar(player, attr)
                             .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                 })

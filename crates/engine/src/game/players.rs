@@ -82,22 +82,39 @@ pub fn neighbor(state: &GameState, controller: PlayerId, direction: SeatDirectio
 
 /// CR 102.2 / CR 102.3: Opponents in two-player and multiplayer games.
 ///
-/// Returns all living players except the given player, in seat order.
+/// Returns all living players not on the given player's team, in seat order.
 pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     state
         .seat_order
         .iter()
         .copied()
-        .filter(|&id| id != player && is_alive(state, id))
+        .filter(|&id| is_opponent(state, player, id) && is_alive(state, id))
         .collect()
 }
 
-/// CR 102.1 / CR 102.2 / CR 109.5: Match a player against a relation to the
-/// resolving effect's controller.
-pub fn matches_relation(player: PlayerId, controller: PlayerId, relation: PlayerRelation) -> bool {
+/// CR 102.2 / CR 102.3: Whether `other` is an opponent of `player`.
+pub fn is_opponent(state: &GameState, player: PlayerId, other: PlayerId) -> bool {
+    if player == other {
+        return false;
+    }
+    if state.format_config.team_based {
+        team_index(player) != team_index(other)
+    } else {
+        true
+    }
+}
+
+/// CR 102.1 / CR 102.2 / CR 102.3 / CR 109.5: Match a player against a
+/// relation to the resolving effect's controller.
+pub fn matches_relation(
+    state: &GameState,
+    player: PlayerId,
+    controller: PlayerId,
+    relation: PlayerRelation,
+) -> bool {
     match relation {
         PlayerRelation::Controller => player == controller,
-        PlayerRelation::Opponent => player != controller,
+        PlayerRelation::Opponent => is_opponent(state, controller, player),
         PlayerRelation::All => true,
     }
 }
@@ -246,7 +263,7 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 
     // 2HG team pairing: even-indexed players are paired with the next odd-indexed player
     let player_idx = player.0;
-    let team_base = (player_idx / 2) * 2;
+    let team_base = team_index(player) * 2;
     let partner_idx = if player_idx == team_base {
         team_base + 1
     } else {
@@ -259,6 +276,10 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     } else {
         Vec::new()
     }
+}
+
+fn team_index(player: PlayerId) -> u8 {
+    player.0 / 2
 }
 
 #[cfg(test)]
@@ -416,6 +437,34 @@ mod tests {
         let state = make_state(2, FormatConfig::standard());
         assert_eq!(opponents(&state, PlayerId(0)), vec![PlayerId(1)]);
         assert_eq!(opponents(&state, PlayerId(1)), vec![PlayerId(0)]);
+    }
+
+    #[test]
+    fn opponents_two_headed_giant_excludes_teammate() {
+        let state = make_state(4, FormatConfig::two_headed_giant());
+        assert_eq!(
+            opponents(&state, PlayerId(0)),
+            vec![PlayerId(2), PlayerId(3)]
+        );
+        assert!(!is_opponent(&state, PlayerId(0), PlayerId(1)));
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(2)));
+    }
+
+    #[test]
+    fn matches_relation_opponent_excludes_two_headed_giant_teammate() {
+        let state = make_state(4, FormatConfig::two_headed_giant());
+        assert!(!matches_relation(
+            &state,
+            PlayerId(1),
+            PlayerId(0),
+            PlayerRelation::Opponent
+        ));
+        assert!(matches_relation(
+            &state,
+            PlayerId(2),
+            PlayerId(0),
+            PlayerRelation::Opponent
+        ));
     }
 
     // --- apnap_order ---

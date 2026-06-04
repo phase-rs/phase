@@ -140,10 +140,11 @@ fn find_legal_targets_with_context(
                 ) {
                     continue;
                 }
-                let is_opponent = player.id != source_controller;
                 let include = match controller {
-                    Some(ControllerRef::Opponent) => is_opponent,
-                    Some(ControllerRef::You) => !is_opponent,
+                    Some(ControllerRef::Opponent) => {
+                        super::players::is_opponent(state, source_controller, player.id)
+                    }
+                    Some(ControllerRef::You) => player.id == source_controller,
                     // CR 109.4: TargetPlayer is nonsensical when enumerating target
                     // candidates (the "target player" is what's being chosen here).
                     // Fail closed.
@@ -1126,7 +1127,8 @@ fn stack_spell_entry_matches_filter(
                 TargetRef::Object(id) => {
                     super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
                 }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+                    state,
                     constraint,
                     *pid,
                     source_controller_opt,
@@ -1144,7 +1146,8 @@ fn stack_spell_entry_matches_filter(
                 TargetRef::Object(id) => {
                     super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
                 }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+                    state,
                     constraint,
                     *pid,
                     source_controller_opt,
@@ -3181,6 +3184,34 @@ mod tests {
             "protected opponent must not be a legal target, got {:?}",
             targets
         );
+    }
+
+    /// CR 102.3 + CR 115.9c: In team multiplayer, "target opponent" excludes
+    /// teammates and includes opposing-team players.
+    #[test]
+    fn find_legal_targets_typed_opponent_excludes_two_headed_giant_teammate() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source);
+        assert!(
+            !targets.contains(&TargetRef::Player(PlayerId(1))),
+            "teammate must not be a legal target opponent, got {:?}",
+            targets
+        );
+        assert!(targets.contains(&TargetRef::Player(PlayerId(2))));
+        assert!(targets.contains(&TargetRef::Player(PlayerId(3))));
     }
 
     fn make_resolved_with_targets(

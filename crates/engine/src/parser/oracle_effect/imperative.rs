@@ -6560,9 +6560,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,
         },
-        ImperativeFamilyAst::ForceAttack { duration } => Effect::ForceAttack {
+        ImperativeFamilyAst::ForceAttack {
+            duration,
+            required_player,
+        } => Effect::ForceAttack {
             target: TargetFilter::Any,
-            required_player: TargetFilter::Controller,
+            required_player,
             duration,
         },
         // CR 701.15a: Goad target creature. Subject injection fills target from parsed text.
@@ -7150,9 +7153,29 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
         }));
     }
 
-    let targeted: Result<(&str, Duration), nom::Err<OracleError<'_>>> = (
+    let targeted: Result<(&str, (TargetFilter, Duration)), nom::Err<OracleError<'_>>> = (
         alt((tag("attacks"), tag("attack"))),
-        preceded(tag(" "), tag("you")),
+        preceded(
+            tag(" "),
+            // CR 508.1d: the required player. "you" binds the resolving ability
+            // controller; "that player" references the opponent chosen earlier
+            // in the same resolution — Ruhan of the Fomori, Raving Dead, Knight
+            // Rampager ("choose an opponent at random. This creature attacks
+            // that player this combat if able."). CR 608.2c: the choose+attack
+            // resolve together, so the resolution-scoped ChosenPlayer { index }
+            // (read from chosen_players) is the correct reference, not the
+            // durable SourceChosenPlayer. The opponent choice is the single
+            // preceding choice in every card of this class, so index 0.
+            alt((
+                value(TargetFilter::Controller, tag("you")),
+                value(
+                    TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                    ),
+                    tag("that player"),
+                ),
+            )),
+        ),
         preceded(
             tag(" "),
             alt((
@@ -7168,12 +7191,15 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
             )),
         ),
     )
-        .map(|(_, _, duration)| duration)
+        .map(|(_, required_player, duration)| (required_player, duration))
         .parse(trimmed);
 
-    if let Ok((rest, duration)) = targeted {
+    if let Ok((rest, (required_player, duration))) = targeted {
         if rest.is_empty() {
-            return Some(ImperativeFamilyAst::ForceAttack { duration });
+            return Some(ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            });
         }
     }
 
@@ -10022,11 +10048,94 @@ mod tests {
             "Should parse 'attacks you this combat if able'"
         );
         match result.unwrap() {
-            ImperativeFamilyAst::ForceAttack { duration } => {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            } => {
                 assert_eq!(duration, Duration::UntilEndOfCombat);
+                assert_eq!(required_player, TargetFilter::Controller);
             }
             other => panic!("Expected ForceAttack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_attack_that_player_this_combat_if_able() {
+        // CR 508.1d: Ruhan of the Fomori / Raving Dead / Knight Rampager —
+        // "attacks that player" references the opponent chosen earlier in the
+        // same resolution, lowered to ControllerRef::ChosenPlayer { index: 0 }.
+        let result = try_parse_attack_if_able("attacks that player this combat if able")
+            .expect("should parse 'attacks that player this combat if able'");
+        match result {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            } => {
+                assert_eq!(duration, Duration::UntilEndOfCombat);
+                assert_eq!(
+                    required_player.chosen_player_index(),
+                    Some(0),
+                    "that player must reference the chosen player at index 0, got {required_player:?}"
+                );
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ruhan_choose_opponent_then_force_attack_composes() {
+        use crate::types::ability::{ChoiceType, Effect};
+
+        // CR 608.2c: The full Ruhan-class trigger composes the opponent choice
+        // with a forced attack at that opponent. Both resolve together, so the
+        // sub-ability references the resolution-scoped ChosenPlayer { index }.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of combat on your turn, choose an opponent at random. ~ attacks that player this combat if able.",
+            "Ruhan of the Fomori",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("should produce one triggered ability");
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("trigger has an execute chain");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent,
+                    ..
+                }
+            ),
+            "parent must be an opponent choice, got {:?}",
+            execute.effect
+        );
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("the force-attack must chain as the sub-ability");
+        // The forced attacker is the source (~ → SelfRef), forced to attack the
+        // resolution-scoped chosen opponent (chosen_players[0]).
+        let Effect::ForceAttack {
+            target,
+            required_player,
+            duration,
+        } = &*sub.effect
+        else {
+            panic!("sub-ability must be a ForceAttack, got {:?}", sub.effect);
+        };
+        assert_eq!(*target, TargetFilter::SelfRef);
+        assert_eq!(*duration, Duration::UntilEndOfCombat);
+        assert_eq!(
+            required_player.chosen_player_index(),
+            Some(0),
+            "must force attacking the chosen player, got {required_player:?}"
+        );
     }
 
     /// CR 508.1d / CR 509.1c: the standalone-combat-requirement recognizer

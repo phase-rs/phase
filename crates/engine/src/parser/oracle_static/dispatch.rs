@@ -1222,6 +1222,14 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "Triggered abilities <scope> can't cause you to sacrifice or exile <affected>" ---
+    // CR 603.2 + CR 609.3: The Master, Multiplied class. Subject-scoped prohibition
+    // where `cause` identifies whose triggered abilities are muzzled and `affected`
+    // identifies the protected objects.
+    if let Some(def) = parse_cant_cause_sacrifice_or_exile(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Creatures entering [the battlefield] [and dying] don't cause abilities to trigger" ---
     // CR 603.2g + CR 603.6a + CR 700.4: Torpor Orb (ETB only), Hushbringer (ETB + Dies).
     if let Some(def) = parse_suppress_triggers(&tp, &text) {

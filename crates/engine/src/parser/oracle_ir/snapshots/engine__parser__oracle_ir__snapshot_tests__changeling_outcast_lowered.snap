@@ -26,6 +26,19 @@ expression: "&lowered"
   "triggers": [],
   "statics": [
     {
+      "mode": "CantBlock",
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [],
+      "condition": null,
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "~ can't block and can't be blocked."
+    },
+    {
       "mode": "CantBeBlocked",
       "affected": {
         "type": "SelfRef"

@@ -100,9 +100,10 @@ pub(crate) fn parse_legend_rule_exemption(
 /// CR 704.5j: Resolve the `<scope>` noun phrase of a legend-rule exemption
 /// ("permanents you control", "Slivers you control", ...) into a
 /// controller-scoped `affected` filter. Returns `None` for scopes this parser
-/// cannot resolve precisely ("tokens", "commanders", "creature tokens", "them"),
+/// cannot resolve precisely ("tokens", "commanders", "them"),
 /// so those cards are deferred rather than given a filter that silently matches
-/// nothing.
+/// nothing. "creature tokens you control" is handled explicitly (The Master,
+/// Multiplied).
 /// CR 109.5: "you control" resolves to the source's controller.
 pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
     // Drop the trailing sentence terminator so the combinator suffix split sees
@@ -123,6 +124,14 @@ pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilt
     // "<Subtype>s you control" — permanents of a single subtype (Sliver
     // Gravemother, Spider-Verse). Require the subtype to consume the whole base
     // so multi-word scopes ("creature tokens") are deferred, not truncated.
+    if base.lower == "creature tokens" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You),
+        ));
+    }
+
     if let Some((canonical, consumed)) = parse_subtype(base.original) {
         if consumed == base.original.len() {
             return Some(TargetFilter::Typed(
@@ -402,6 +411,51 @@ pub(crate) fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option
 
     Some(
         StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
+            .description(text.to_string()),
+    )
+}
+
+/// CR 603.2 + CR 609.3: Parse "Triggered abilities <scope> can't cause you to
+/// sacrifice or exile <affected>." statics (The Master, Multiplied class).
+///
+/// Supported Oracle class:
+/// - "Triggered abilities you control can't cause you to sacrifice or exile
+///   creature tokens you control."
+pub(crate) fn parse_cant_cause_sacrifice_or_exile(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    fn parse_sacrifice_or_exile_negation(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = alt((
+            value((), tag::<_, _, OracleError<'_>>("can't ")),
+            value((), tag("cannot ")),
+            value((), tag("may not ")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("cause you to ").parse(input)?;
+        let (input, _) =
+            alt((tag("sacrifice or exile "), tag("exile or sacrifice "))).parse(input)?;
+        Ok((input, ()))
+    }
+
+    let rest = nom_tag_tp(tp, "triggered abilities ")?;
+    let (cause, predicate) = strip_controller_possessive_scope(rest.original)?;
+    let predicate_lower = predicate.to_lowercase();
+    nom_on_lower(predicate, &predicate_lower, |i| {
+        let (i, _) = parse_sacrifice_or_exile_negation(i)?;
+        let (i, _) = tag("creature tokens you control").parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof(i)?;
+        Ok((i, ()))
+    })?;
+    let affected = TargetFilter::Typed(
+        TypedFilter::creature()
+            .properties(vec![FilterProp::Token])
+            .controller(ControllerRef::You),
+    );
+    Some(
+        StaticDefinition::new(StaticMode::CantCauseSacrificeOrExile { cause })
+            .affected(affected)
             .description(text.to_string()),
     )
 }
