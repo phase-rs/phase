@@ -1743,9 +1743,8 @@ pub(super) fn match_life_changed(
     }
 }
 
-/// CR 107.14: Match energy-counter (or other player-counter) gain events.
-/// Fires on `GameEvent::EnergyChanged { delta > 0 }` or
-/// `GameEvent::PlayerCounterChanged { delta > 0 }` when the triggering player
+/// CR 107.14: Match energy gain events.
+/// Fires on `GameEvent::EnergyChanged { delta > 0 }` when the triggering player
 /// matches `valid_target` (typically `Controller`).
 pub(super) fn match_counter_player_added_all(
     event: &GameEvent,
@@ -3671,7 +3670,7 @@ mod tests {
         CastingVariant, GameState, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::player::PlayerId;
+    use crate::types::player::{PlayerCounterKind, PlayerId};
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -6976,6 +6975,18 @@ mod tests {
             &GameEvent::EnergyChanged {
                 player: PlayerId(0),
                 delta: -1,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire on non-energy player counters.
+        assert!(!match_counter_player_added_all(
+            &GameEvent::PlayerCounterChanged {
+                player: PlayerId(0),
+                counter_kind: PlayerCounterKind::Poison,
+                delta: 1,
             },
             &trigger,
             source,
