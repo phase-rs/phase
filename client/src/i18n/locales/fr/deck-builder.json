@@ -33,8 +33,7 @@
   "tabs": {
     "ariaLabel": "Surface du constructeur de deck",
     "deck": "Deck",
-    "info": "Infos",
-    "playtest": "Playtest"
+    "info": "Infos"
   },
   "toolbar": {
     "menu": "Menu",
@@ -230,19 +229,5 @@
     "minimumCount": "Le deck contient {{count}} cartes (minimum 60)",
     "maxCopies": "{{name}} : {{count}} copies (max 4)",
     "companionInMain": "{{name}} est votre compagnon mais figure aussi dans le deck principal — cela enfreint sa condition de construction. Retirez-le du deck principal pour l'utiliser comme compagnon."
-  },
-  "playtest": {
-    "title": "Goldfish playtest",
-    "subtitle": "Sample opening hands or launch a solo game against the AI with this list — no deck save required.",
-    "sampleHand": "Sample opening hand",
-    "sampleHandHint": "Random seven from your main deck (display preview only).",
-    "reshuffle": "Reshuffle",
-    "goldfish": "Launch goldfish game",
-    "goldfishHint": "Starts a local {{count}}-card game vs AI using your current list and format.",
-    "difficulty": "AI difficulty",
-    "difficultyEasy": "Easy",
-    "difficultyMedium": "Medium",
-    "difficultyHard": "Hard",
-    "launch": "Launch game"
   }
 }

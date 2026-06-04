@@ -3692,6 +3692,18 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
         }
     }
 
+    // CR 702.140: Mutate is a parameterized keyword (`Mutate(ManaCost)`), so the
+    // `Keyword::from_str` fallback below would yield `Concrete(Keyword::Mutate(cost))`
+    // and force an exact-cost match. Text like "creature card with mutate" refers to the
+    // keyword class regardless of cost, so map it to the discriminant-level `Kind`.
+    if let Ok((rest, kind)) =
+        value(KeywordKind::Mutate, tag::<_, _, OracleError<'_>>("mutate")).parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
     if matches!(
         text,
         "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
@@ -6536,6 +6548,52 @@ mod tests {
                 },])
             )
         );
+    }
+
+    #[test]
+    fn card_with_mutate_uses_keyword_kind_filter() {
+        // CR 702.140: "creature card with mutate" refers to the keyword class regardless
+        // of its mana-cost parameter, so it must lower to a discriminant-level keyword-kind
+        // filter rather than a concrete `Keyword::Mutate(cost)` exact match.
+        let (f, _) = parse_type_phrase("creature card with mutate");
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) = f
+        else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert!(properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Mutate,
+        }));
+    }
+
+    #[test]
+    fn otrimi_trigger_returns_mutate_creature_card_to_hand() {
+        // CR 702.140: Otrimi's reflexive trigger returns "target creature card with mutate
+        // from your graveyard to your hand" — a graveyard->hand bounce (destination None),
+        // NOT a battlefield bounce. The target must be a creature card you own in your
+        // graveyard that has the Mutate keyword kind.
+        let (f, _) = parse_target("target creature card with mutate from your graveyard");
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+            ..
+        }) = f
+        else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Mutate,
+        }));
+        assert!(properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
     }
 
     #[test]

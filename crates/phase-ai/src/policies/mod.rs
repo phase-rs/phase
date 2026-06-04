@@ -35,6 +35,7 @@ mod recursion_awareness;
 mod redundancy_avoidance;
 pub mod registry;
 mod sacrifice_value;
+mod spellskite_priority;
 mod spellslinger_casting;
 pub(crate) mod stack_awareness;
 pub(crate) mod strategy_helpers;

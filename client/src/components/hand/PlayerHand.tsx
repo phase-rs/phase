@@ -218,14 +218,21 @@ export function PlayerHand() {
 
   const handleContainerClick = useCallback(
     (e: React.MouseEvent) => {
-      // Only handle clicks directly on the container (not bubbled from cards)
+      // On mobile the fanned cards are `pointer-events-none` (the drawer is the
+      // interaction surface), so every tap in the hand area falls through to this
+      // container — or to the inner lift wrapper, which bubbles here. Any such tap
+      // opens the full-hand drawer. This MUST run before the target===currentTarget
+      // guard below: the lift wrapper makes `e.target` the wrapper rather than the
+      // container, so the guard alone would swallow taps that land over a card.
+      if (isMobile) {
+        setMobileHandOpen(true);
+        return;
+      }
+      // Desktop: only a click on the empty container area (card clicks stop
+      // propagation) toggles the hand lift.
       if (e.target === e.currentTarget) {
-        if (isMobile) {
-          setMobileHandOpen(true);
-        } else {
-          setSelectedCardId(null);
-          setExpanded((prev) => !prev);
-        }
+        setSelectedCardId(null);
+        setExpanded((prev) => !prev);
       }
     },
     [isMobile, setMobileHandOpen],

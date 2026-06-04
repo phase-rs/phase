@@ -117,6 +117,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseDungeonRoom { .. }
             | WaitingFor::SpecializeColor { .. }
             | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::MutateMergeChoice { .. }
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
@@ -412,6 +413,7 @@ pub(super) fn handle_resolution_choice(
                             value: discover_value as i32,
                         },
                     }),
+                    false,
                     cleanup,
                     events,
                 )?;
@@ -544,6 +546,7 @@ pub(super) fn handle_resolution_choice(
                             value: source_mv as i32,
                         },
                     }),
+                    false,
                     cleanup,
                     events,
                 )?;
@@ -2481,6 +2484,18 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
                 player: state.active_player,
             })
+        }
+        // CR 702.140c + CR 730.2a: The mutate spell's controller chose whether the
+        // spell merges on top of or under the target creature. `merge::handle_mutate_
+        // merge_choice` validates the actor, performs the merge (CR 730.2), and
+        // returns to priority so the `Mutated` event's triggers/SBAs are processed.
+        (
+            WaitingFor::MutateMergeChoice { player, .. },
+            GameAction::ChooseMutateMergeSide { side },
+        ) => {
+            let waiting =
+                crate::game::merge::handle_mutate_merge_choice(state, player, side, events)?;
+            ResolutionChoiceOutcome::WaitingFor(waiting)
         }
         // CR 903.9a: Owner decides whether to return their commander to the command zone.
         // Accept = move to command zone; Decline = leave in current zone (marked as

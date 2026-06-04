@@ -1729,6 +1729,12 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         // for the dispatcher — ordering invariant, not a defensive escape.
         tag("who doesn't"),
         tag("who does not"),
+        // CR 119.3 + CR 701.55a: "each opponent who lost N or more life this
+        // turn faces a villainous choice" is a restricted chooser phrase, not
+        // a normal per-player imperative. Preserve the full subject so the
+        // `ChooseOneOf` parser can emit a PlayerAttribute chooser instead of
+        // broadening the choice to every opponent.
+        tag("who lost"),
     ))
     .parse(rest_lower.as_str())
     .is_ok()
@@ -3124,7 +3130,30 @@ pub(super) fn strip_return_destination_ext_with_remainder(
     for (phrase, zone, transformed, enters_under_you, enter_tapped, enters_attacking) in patterns {
         if let Some(pos) = lower.rfind(phrase) {
             let after_destination = &lower[pos + phrase.len()..];
-            let original_after_destination = &text[pos + phrase.len()..];
+            let (enter_with_counters, counters_offset) =
+                parse_with_counters_suffix_spanned(after_destination);
+            // CR 614.1c: when the "with N <type> counter(s)" clause is lifted
+            // onto `enter_with_counters`, excise it (and any leading " and"
+            // connector) from the returned remainder so the caller does not
+            // re-parse "and with two stun counters …" into a dangling
+            // Unimplemented follow-up clause (Unstoppable Slasher).
+            let original_after_destination = match counters_offset {
+                Some(off) => {
+                    // CR 614.1c: strip a trailing " and" connector left after
+                    // excising the consumed counter clause. Space-anchored
+                    // `strip_suffix(" and")` (not `trim_end_matches("and")`,
+                    // which is not word-anchored and would corrupt a remainder
+                    // ending in "brand"/"island"); mirrors the leading
+                    // `strip_leading_sequence_connector` analogue.
+                    let trimmed = text[pos + phrase.len()..pos + phrase.len() + off].trim_end();
+                    trimmed
+                        // allow-noncombinator: structural cleanup of a trailing " and" connector on an already-sliced remainder, not parsing dispatch
+                        .strip_suffix(" and")
+                        .map(|s| s.trim_end())
+                        .unwrap_or(trimmed)
+                }
+                None => &text[pos + phrase.len()..],
+            };
             return (
                 text[..pos].trim(),
                 Some(ReturnDestination {
@@ -3133,7 +3162,7 @@ pub(super) fn strip_return_destination_ext_with_remainder(
                     enters_under: enters_under_you.then_some(ControllerRef::You),
                     enter_tapped: *enter_tapped,
                     enters_attacking: *enters_attacking,
-                    enter_with_counters: parse_with_counters_suffix(after_destination),
+                    enter_with_counters,
                 }),
                 original_after_destination,
             );
@@ -4690,12 +4719,28 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
 /// pre-trim. The body combinator gates on `tag("with ")` then dispatches to
 /// `parse_counter_suffix_body`.
 pub(crate) fn parse_with_counters_suffix(lower: &str) -> Vec<(CounterType, QuantityExpr)> {
+    parse_with_counters_suffix_spanned(lower).0
+}
+
+/// Like [`parse_with_counters_suffix`], but also reports the byte offset in
+/// `lower` at which the matched `"with N <type> counter(s) [on it]"` clause
+/// begins (the start of the `"with "` token). Callers that need to excise the
+/// consumed counter clause from a larger remainder — e.g.
+/// `strip_return_destination_ext_with_remainder`, so "return it to the
+/// battlefield tapped and with two stun counters under its owner's control"
+/// does not leave a dangling "and with two stun counters …" clause once the
+/// counters are lifted onto `enter_with_counters` (Unstoppable Slasher) — use
+/// this offset to truncate. Returns `None` for the offset when no counter
+/// clause matched.
+pub(crate) fn parse_with_counters_suffix_spanned(
+    lower: &str,
+) -> (Vec<(CounterType, QuantityExpr)>, Option<usize>) {
     nom_primitives::scan_preceded(lower, |i| {
         let (i, _) = tag::<_, _, OracleError<'_>>("with ").parse(i)?;
         parse_counter_suffix_body_combinator(i)
     })
-    .map(|(_, val, _)| vec![val])
-    .unwrap_or_default()
+    .map(|(prefix, val, _)| (vec![val], Some(prefix.len())))
+    .unwrap_or((Vec::new(), None))
 }
 
 /// CR 122.1 + CR 614.1c: Combinator body for "[N|a|an] [additional ]<type>
@@ -4734,7 +4779,12 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     let (rest, _) = tag(" counter").parse(rest)?;
     // Optional plural "s".
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")).parse(rest)?;
-    let (rest, _) = tag(" on it").parse(rest)?;
+    // CR 614.1c: "on it" is grammatical filler — present in "return it to the
+    // battlefield with two +1/+1 counters on it" but absent when a controller
+    // clause follows ("return it to the battlefield tapped and with two stun
+    // counters under its owner's control", Unstoppable Slasher). Optional so
+    // both shapes lift the counters onto `enter_with_counters`.
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>(" on it")).parse(rest)?;
 
     Ok((
         rest,
@@ -4776,8 +4826,37 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_where_x_quantity_expression;
+    use super::{parse_where_x_quantity_expression, strip_return_destination_ext_with_remainder};
     use crate::types::ability::{QuantityExpr, QuantityRef};
+    use crate::types::counter::CounterType;
+    use crate::types::zones::Zone;
+
+    /// CR 614.1c + issue #1498: "return it to the battlefield tapped and with
+    /// two stun counters under its owner's control" (Unstoppable Slasher) must
+    /// lift the stun counters onto `enter_with_counters` and excise the counter
+    /// clause from the returned remainder so no dangling follow-up clause is
+    /// re-parsed. The `" on it"` filler is absent here (a controller clause
+    /// follows the counters), which the optional terminator now tolerates.
+    #[test]
+    fn return_to_battlefield_lifts_stun_counters_without_on_it_filler() {
+        let (target, dest, remainder) = strip_return_destination_ext_with_remainder(
+            "it to the battlefield tapped and with two stun counters under its owner's control",
+        );
+        assert_eq!(target, "it");
+        let dest = dest.expect("expected a battlefield return destination");
+        assert_eq!(dest.zone, Zone::Battlefield);
+        assert!(dest.enter_tapped);
+        assert_eq!(
+            dest.enter_with_counters,
+            vec![(CounterType::Stun, QuantityExpr::Fixed { value: 2 })]
+        );
+        // The counter clause (and its leading " and" connector) is excised, so
+        // nothing dangling remains to be re-parsed as a follow-up clause.
+        assert_eq!(
+            remainder, "",
+            "the counter clause must be excised from the remainder, got {remainder:?}"
+        );
+    }
 
     fn variable_x() -> QuantityExpr {
         QuantityExpr::Ref {

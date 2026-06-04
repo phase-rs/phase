@@ -1748,6 +1748,80 @@ pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     }
 }
 
+/// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
+/// affects, for an effect whose targets live on `ability`.
+///
+/// Explicit `TargetRef::Player` targets win. Otherwise a player-typed mass
+/// filter (`Controller`, `Player`, or a `Typed` filter with no `type_filters`
+/// and an optional `controller` ref) expands to the matching player ids.
+/// Returns an empty vec if the filter doesn't refer to players (the caller's
+/// object branch handles those). Every `ControllerRef` variant is matched
+/// exhaustively so this is the single authority for the
+/// "player-typed filter → `Vec<PlayerId>`" shape (shared by phasing's
+/// player path and the transient-effect player-scope binding).
+pub(crate) fn collect_player_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<PlayerId> {
+    let from_targets: Vec<PlayerId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Player(pid) => Some(*pid),
+            TargetRef::Object(_) => None,
+        })
+        .collect();
+    if !from_targets.is_empty() {
+        return from_targets;
+    }
+
+    match target {
+        TargetFilter::Controller => vec![ability.scoped_player.unwrap_or(ability.controller)],
+        TargetFilter::Player => state.players.iter().map(|p| p.id).collect(),
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            ..
+        }) if type_filters.is_empty() => state
+            .players
+            .iter()
+            .filter(|p| match controller {
+                Some(ControllerRef::You) => p.id == ability.controller,
+                Some(ControllerRef::Opponent) => p.id != ability.controller,
+                Some(ControllerRef::ScopedPlayer) => {
+                    p.id == ability.scoped_player.unwrap_or(ability.controller)
+                }
+                // CR 109.4: TargetPlayer is ambiguous here (player targets are
+                // resolved from ability.targets directly); fail closed.
+                Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::ParentTargetController) => false,
+                Some(ControllerRef::DefendingPlayer) => false,
+                // CR 613.1: no card scopes this shape to a persisted chosen
+                // player; fail closed (mirrors DefendingPlayer).
+                Some(ControllerRef::SourceChosenPlayer) => false,
+                // CR 608.2c + CR 109.4: Player chosen by an earlier
+                // `Choose(Player)` in this resolution.
+                Some(ControllerRef::ChosenPlayer { index }) => {
+                    ability.chosen_players.get(*index as usize).copied() == Some(p.id)
+                }
+                // CR 603.2 + CR 109.4: The triggering player. Resolved against
+                // the current trigger event; fail closed when there is none.
+                Some(ControllerRef::TriggeringPlayer) => {
+                    state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| targeting::extract_player_from_event(e, state))
+                        == Some(p.id)
+                }
+                None => true,
+            })
+            .map(|p| p.id)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn target_creature_quantity_slot_filter() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::creature())
 }
@@ -5728,6 +5802,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             Vec::new(),
             ObjectId(1),
@@ -5765,6 +5840,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             Vec::new(),
             ObjectId(1),
@@ -5796,6 +5872,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             Vec::new(),
             ObjectId(1),

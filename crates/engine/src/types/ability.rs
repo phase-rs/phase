@@ -545,6 +545,47 @@ impl std::str::FromStr for CardPlayMode {
     }
 }
 
+/// CR 608.2g vs CR 118.9: Which casting *mechanism* an `Effect::CastFromZone`
+/// drives — i.e. *when* relative to the granting ability's resolution the card
+/// is cast. This is orthogonal to `duration` (CR 611.2a permission-expiry),
+/// `mode` (CR 601.2 cast vs CR 305.1 play), and `alt_ability_cost` (CR 118.9
+/// cost-substitution); none of those describe the casting mechanism, so the
+/// router must read this field rather than inferring the mechanism from them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CastFromZoneDriver {
+    /// CR 118.9: Grant a lingering `CastingPermission` on the target card(s)
+    /// and return — the controller casts the card later, during the granting
+    /// effect's own (or a future) priority window. The default for every
+    /// permission-granting cast-from-zone effect: Discover/Nashi/Jeleva-style
+    /// "you may cast those exiled cards" and Rebound's next-upkeep recast offer
+    /// (CR 702.88a), whose `duration: Some(UntilEndOfTurn)` then prunes the
+    /// unused permission.
+    #[default]
+    LingeringPermission,
+    /// CR 608.2g: Cast the card *as the granting ability resolves* — the card
+    /// goes onto the stack immediately via `initiate_cast_during_resolution`,
+    /// and the CR 608.2g timing bypass (sorcery-speed / empty-stack /
+    /// active-player gates do not apply) is armed. Set by Suspend's
+    /// last-time-counter trigger (CR 702.62a) so a suspended sorcery recast at
+    /// upkeep is not blocked by the sorcery-speed gate (issue #1520).
+    DuringResolution,
+}
+
+impl CastFromZoneDriver {
+    /// Serde skip predicate — the `LingeringPermission` default is the common
+    /// case and is elided from serialized `Effect::CastFromZone` bodies.
+    pub fn is_default(&self) -> bool {
+        matches!(self, CastFromZoneDriver::LingeringPermission)
+    }
+
+    /// CR 608.2g: true iff this effect casts the card as the granting ability
+    /// resolves (Suspend's last-counter cast), rather than granting a lingering
+    /// permission.
+    pub fn is_during_resolution(&self) -> bool {
+        matches!(self, CastFromZoneDriver::DuringResolution)
+    }
+}
+
 /// CR 702.104a + CR 702.104b: The outcome of the Tribute choice the chosen opponent
 /// made as the creature entered the battlefield. Persisted as a `ChosenAttribute` on
 /// the Tribute creature so the companion "if tribute wasn't paid" trigger (CR
@@ -1489,7 +1530,7 @@ pub enum CastingPermission {
         /// Cascade/Discover hit *during resolution* of the source spell. It
         /// carries the rejection-cleanup state (exiled misses + where the hit
         /// goes if the cast-time MV check fails). `None` for all standing
-        /// permissions (Airbending, Suspend, Maralen, Beseech, etc.) which are
+        /// permissions (Airbending, Maralen, Beseech, etc.) which are
         /// cast later via a normal `CastSpell` and never need resolution-time
         /// cleanup. `resolution_cleanup.is_some()` is the discriminator that
         /// distinguishes a cast-during-resolution permission from a plain
@@ -1650,22 +1691,27 @@ pub enum CastPermissionConstraint {
 }
 
 /// CR 608.2g: Rejection-cleanup state carried by a cast-during-resolution
-/// `ExileWithAltCost` permission (Cascade / Discover). When the cast-time
-/// resulting-mana-value check fails at finalization, the source spell's
-/// `WaitingFor::CastOffer` has already been consumed, so the misses ride
-/// inside the permission and the engine still knows where the rejected hit
-/// goes (`reject_action`).
+/// `ExileWithAltCost` permission. Its presence is the engine's marker that the
+/// cast happens *during the resolution* of its source ability (CR 608.2g —
+/// normal timing/empty-stack/active-player gates do not apply). For Cascade /
+/// Discover, when the cast-time resulting-mana-value check fails at
+/// finalization the source spell's `WaitingFor::CastOffer` has already been
+/// consumed, so the misses ride inside the permission and the engine still
+/// knows where the rejected hit goes (`reject_action`). Suspend's last-counter
+/// free cast (CR 702.62a/d) has no dig, so it carries an empty `exiled_misses`
+/// and `RemainExiled` — the marker still arms the CR 608.2g timing bypass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCastCleanup {
     /// Cards exiled during the dig that were not the hit; they go to the
     /// bottom of the library in a random order on resolution completion.
+    /// Empty for Suspend's self-free-cast (no dig).
     pub exiled_misses: Vec<super::identifiers::ObjectId>,
     /// Where the hit goes if the player declines or the cast-time MV check
     /// rejects the cast.
     pub reject_action: ResolutionMvRejectAction,
 }
 
-/// CR 608.2g: Disposition of a Cascade/Discover hit that is not cast.
+/// CR 608.2g: Disposition of a during-resolution card that is not cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ResolutionMvRejectAction {
@@ -1673,6 +1719,11 @@ pub enum ResolutionMvRejectAction {
     BottomWithMisses,
     /// CR 701.57a: discover — hit goes to its owner's hand; misses to bottom.
     ToHand,
+    /// CR 702.62a: Suspend's last-counter free cast — the card has no dig
+    /// misses and no resulting-MV gate, so this reject disposition is only
+    /// reached if a future during-resolution free cast adds a constraint. "If
+    /// you don't [cast it], it remains exiled" — the card stays in exile.
+    RemainExiled,
 }
 
 /// When a delayed triggered ability fires (CR 603.7).
@@ -6608,6 +6659,16 @@ pub enum Effect {
         /// grants (Discover, Suspend, Nashi, etc.).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
+        /// CR 608.2g vs CR 118.9: Which casting mechanism this effect drives —
+        /// cast the card as the granting ability resolves (`DuringResolution`,
+        /// Suspend's last-counter cast per CR 702.62a) versus grant a lingering
+        /// permission the controller acts on at a later priority window
+        /// (`LingeringPermission`, the default for Discover/Nashi/Rebound). The
+        /// router in `cast_from_zone::resolve` reads THIS field, not `duration`
+        /// (which is CR 611.2a permission-expiry and means nothing about the
+        /// casting mechanism). See issue #1520.
+        #[serde(default, skip_serializing_if = "CastFromZoneDriver::is_default")]
+        driver: CastFromZoneDriver,
     },
     /// CR 615: Prevent damage to a target.
     PreventDamage {
@@ -6682,12 +6743,27 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient_object_filter: Option<TargetFilter>,
     },
-    /// CR 104.3a: A player who meets this effect's condition loses the game.
-    /// The affected player is determined by resolution context (controller's opponent
-    /// if untargeted, or explicit target if targeted).
-    LoseTheGame,
-    /// CR 104.3a: The controller wins the game — all opponents lose.
-    WinTheGame,
+    /// CR 104.3e: An effect may state that a player loses the game.
+    ///
+    /// `target` names the player who loses the game when the effect resolves:
+    /// `Some(filter)` for directed loss (e.g. "that player loses the game" on
+    /// Ezio Auditore da Firenze's reflexive sub-ability, where the filter
+    /// resolves to the damaged player via `TargetFilter::TriggeringPlayer`);
+    /// `None` for the untargeted controller-scoped form (the resolver falls
+    /// back to `ability.controller`).
+    LoseTheGame {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetFilter>,
+    },
+    /// CR 104.2b: An effect may state that a player wins the game.
+    ///
+    /// `target` mirrors `LoseTheGame::target`: `Some(filter)` for directed
+    /// wins; `None` defaults to the ability's controller (the standard "you
+    /// win the game" reading).
+    WinTheGame {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetFilter>,
+    },
     /// CR 706: Roll a die with the given number of sides.
     /// If `results` is non-empty, execute the matching branch.
     /// CR 706.1: `count` is how many dice of this kind to roll ("roll two
@@ -8002,9 +8078,19 @@ impl Effect {
             },
 
             // GenericEffect and LoseLife have Option<TargetFilter>
-            Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
-                target.as_ref()
-            }
+            //
+            // CR 104.3e + CR 115.1 + CR 603.7c: `LoseTheGame.target` and
+            // `WinTheGame.target` are Some(filter) when the Oracle text names
+            // a specific subject ("that player loses the game" — Ezio
+            // Auditore da Firenze; the filter resolves to
+            // `TargetFilter::TriggeringPlayer` so the trigger machinery binds
+            // the damaged player into `ability.targets`). When None the
+            // resolver falls back to `ability.controller` (the "you lose the
+            // game" / "you win the game" default).
+            Effect::GenericEffect { target, .. }
+            | Effect::LoseLife { target, .. }
+            | Effect::LoseTheGame { target, .. }
+            | Effect::WinTheGame { target, .. } => target.as_ref(),
 
             // CR 115.1 + CR 115.7: Mana abilities normally don't target, but a
             // few spell-only mana effects (Jeska's Will mode 1: "Add {R} for
@@ -8076,8 +8162,6 @@ impl Effect {
             | Effect::ExchangeControl { .. }
             | Effect::Manifest { .. }
             | Effect::ManifestDread
-            | Effect::LoseTheGame
-            | Effect::WinTheGame
             | Effect::RollDie { .. }
             | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
@@ -8246,8 +8330,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CastFromZone { .. } => "CastFromZone",
         Effect::PreventDamage { .. } => "PreventDamage",
         Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
-        Effect::LoseTheGame => "LoseTheGame",
-        Effect::WinTheGame => "WinTheGame",
+        Effect::LoseTheGame { .. } => "LoseTheGame",
+        Effect::WinTheGame { .. } => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
         Effect::FlipCoin { .. } => "FlipCoin",
         Effect::FlipCoins { .. } => "FlipCoins",
@@ -8623,8 +8707,8 @@ impl From<&Effect> for EffectKind {
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
             Effect::CreateDamageReplacement { .. } => EffectKind::CreateDamageReplacement,
-            Effect::LoseTheGame => EffectKind::LoseTheGame,
-            Effect::WinTheGame => EffectKind::WinTheGame,
+            Effect::LoseTheGame { .. } => EffectKind::LoseTheGame,
+            Effect::WinTheGame { .. } => EffectKind::WinTheGame,
             Effect::RollDie { .. } => EffectKind::RollDie,
             Effect::FlipCoin { .. } => EffectKind::FlipCoin,
             Effect::FlipCoins { .. } => EffectKind::FlipCoins,
@@ -10097,7 +10181,7 @@ pub enum TriggerCondition {
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
-    /// CR 508.1a + CR 603.2c: "Whenever ~ and at least N other creatures attack".
+    /// CR 508.1a: "Whenever ~ and at least N other creatures attack".
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
     MinCoAttackers { minimum: u32 },

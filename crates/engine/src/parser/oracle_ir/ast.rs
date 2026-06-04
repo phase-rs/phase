@@ -8,6 +8,7 @@ use crate::types::ability::{
     PaymentCost, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
     SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
 use crate::types::keywords::Keyword;
@@ -61,6 +62,11 @@ pub(crate) struct TokenDescription {
     pub(crate) power: Option<crate::types::ability::PtValue>,
     pub(crate) toughness: Option<crate::types::ability::PtValue>,
     pub(crate) types: Vec<String>,
+    /// CR 205.4a: Supertypes parsed from the inline token grammar (e.g. the
+    /// "legendary" in "a legendary 20/20 black Avatar creature token"). Captured
+    /// rather than discarded so legendary/snow tokens (Marit Lage, etc.) carry
+    /// their supertype — load-bearing for the legend rule (CR 704.5j).
+    pub(crate) supertypes: Vec<Supertype>,
     pub(crate) colors: Vec<ManaColor>,
     pub(crate) keywords: Vec<Keyword>,
     pub(crate) tapped: bool,
