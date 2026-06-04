@@ -317,7 +317,12 @@ pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) 
         let Some(filter) = extract_target_filter(effect) else {
             continue;
         };
-        if engine::game::filter::player_matches_target_filter(filter, player, source_controller) {
+        if engine::game::filter::player_matches_target_filter_in_state(
+            ctx.state,
+            filter,
+            player,
+            source_controller,
+        ) {
             found_targeted_effect = true;
             impact += player_impact(effect);
         }
