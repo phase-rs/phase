@@ -1730,14 +1730,15 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 // Vehicle card" to `Or[Typed{Artifact}, Typed{Vehicle}]` —
                 // which would match any artifact, not only artifact creatures
                 // (#1537, Szarekh, the Silent King).
-                let mut left_extras = Vec::with_capacity(
-                    adjective_type_filters.len()
-                        + extra_core_type_filters.len()
-                        + neg_type_filters.len(),
-                );
-                left_extras.extend(adjective_type_filters.iter().cloned());
-                left_extras.extend(extra_core_type_filters.iter().cloned());
-                left_extras.extend(neg_type_filters.iter().cloned());
+                // This branch `return`s immediately below, so the three
+                // accumulators are never read again — drain them into
+                // `left_extras` instead of cloning. `std::mem::take` (rather
+                // than a plain move) keeps the borrow checker happy inside the
+                // `for separator` loop, and `append` reuses each backing
+                // allocation rather than heap-cloning every `TypeFilter`.
+                let mut left_extras = std::mem::take(&mut adjective_type_filters);
+                left_extras.append(&mut extra_core_type_filters);
+                left_extras.append(&mut neg_type_filters);
                 let left = typed(
                     card_type.unwrap_or(TypeFilter::Any),
                     subtype,
