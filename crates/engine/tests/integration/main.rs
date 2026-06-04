@@ -128,6 +128,7 @@ mod specialize_runtime;
 mod spellstutter_sprite_counter_with_x;
 mod spikeshell_harrier_speed_superlative;
 mod springheart_nantuko_bestow_landfall;
+mod steadfast_armasaur_lki_toughness;
 mod swans_prevention_followup;
 mod talon_gates_from_hand_activation;
 mod tempt_with_discovery;

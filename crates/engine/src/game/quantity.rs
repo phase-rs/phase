@@ -2504,7 +2504,7 @@ fn object_for_scope<'a>(
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to a live `GameObject` here — both are snapshot
         // referents read through `ability` slots, not `state.objects`.
-        ObjectScope::CostPaidObject | ObjectScope::Anaphoric => None,
+        ObjectScope::CostPaidObject | ObjectScope::Anaphoric | ObjectScope::Demonstrative => None,
     }
 }
 
@@ -2543,7 +2543,7 @@ fn object_id_for_scope(
         // `CostPaidObject` (cost referent) nor `Anaphoric` (instruction-order
         // referent) resolves to an `ObjectId` here — both are snapshot
         // referents read through `ability` slots, not `state.objects`.
-        ObjectScope::CostPaidObject | ObjectScope::Anaphoric => None,
+        ObjectScope::CostPaidObject | ObjectScope::Anaphoric | ObjectScope::Demonstrative => None,
     }
 }
 
@@ -2801,8 +2801,10 @@ where
         // trigger-condition referent (slot 2: trigger-event source) then the
         // cost referent (slot 3: `cost_paid_object`). The arm differs from
         // `CostPaidObject` only in slot priority — instruction-order (608.2c)
-        // first, vs. cost referent (608.2k) first.
-        ObjectScope::Anaphoric => ability
+        // first, vs. cost referent (608.2k) first. `Demonstrative` ("that
+        // creature's toughness") shares this resolution — same earlier-
+        // instruction referent, named by a full noun phrase rather than "its".
+        ObjectScope::Anaphoric | ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
@@ -2929,7 +2931,9 @@ fn resolve_object_mana_value(
         //   3. `cost_paid_object` — the CR 608.2k cost referent, last resort.
         // The arm differs from `CostPaidObject` only in slot priority:
         // instruction-order (608.2c) first, vs. cost referent (608.2k) first.
-        ObjectScope::Anaphoric => ability
+        // `Demonstrative` ("that spell's mana value", Mana Drain) shares this
+        // resolution — same earlier-instruction referent named by a noun phrase.
+        ObjectScope::Anaphoric | ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
             .map(|s| u32_to_i32_saturating(s.lki.mana_value))
             .or_else(|| {

@@ -1262,13 +1262,13 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     //   - participle adjective + type ("the sacrificed creature's power",
     //     "the destroyed creature's power", "the revealed card's mana value")
     //     → `CostPaidObject` (CR 608.2k cost / trigger-condition referent).
-    //   - bare anaphoric ("that card's mana value", "that creature's power",
-    //     "that spell's mana value", "the creature's toughness") → `Anaphoric`
-    //     (CR 608.2c earlier-instruction referent — Yuriko / Dark Confidant
-    //     issue #511 class).
-    // The participle form is NEVER rewritten by the subject-injection /
-    // "itself" remaps — unlike the bare anaphoric "its" arms above, which emit
-    // `Anaphoric` precisely so they can be remapped.
+    //   - bare demonstrative ("that card's mana value", "that creature's
+    //     power", "that spell's mana value", "the creature's toughness") →
+    //     `Demonstrative` (CR 608.2c earlier-instruction referent — Yuriko /
+    //     Dark Confidant issue #511 class).
+    // Neither the participle nor the demonstrative form is ever rewritten by
+    // the subject-injection / "itself" remaps — unlike the bare pronoun "its"
+    // arms above, which emit `Anaphoric` precisely so they can be remapped.
     if let Some((prefix, suffix)) = lower.split_once("'s ") {
         let suffix = suffix.trim();
         if let Some(scope) = classify_possessive_referent(prefix.trim()) {
@@ -1400,17 +1400,19 @@ fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
 ///   source and `effect_context_object` as later fallbacks. Greater Good
 ///   (issue #338) and the cost-referent class depend on this priority.
 ///
-/// - **Bare anaphoric** ("that creature", "that card", "that spell", "the
-///   creature") → [`ObjectScope::Anaphoric`]. CR 608.2c (the "follow
+/// - **Bare demonstrative** ("that creature", "that card", "that spell", "the
+///   creature") → [`ObjectScope::Demonstrative`]. CR 608.2c (the "follow
 ///   instructions in the order written / apply the rules of English to the
 ///   text" anaphora rule) makes the antecedent the *most recent earlier
-///   effect instruction* in the same ability. The runtime `Anaphoric` arm
-///   inverts the slot order accordingly: slot 1 is `effect_context_object`
-///   (the revealed / moved / effect-sacrificed object), then the trigger
-///   source (CR 608.2k trigger-condition referent), then `cost_paid_object`.
-///   This is the Yuriko, the Tiger's Shadow / Dark Confidant class
-///   (issue #511): a reveal earlier in the same ability binds "that card's"
-///   to the revealed card, not to the trigger source.
+///   effect instruction* in the same ability. The runtime `Demonstrative` arm
+///   (shared with `Anaphoric`) inverts the slot order accordingly: slot 1 is
+///   `effect_context_object` (the revealed / moved / effect-sacrificed
+///   object), then the trigger source (CR 608.2k trigger-condition referent),
+///   then `cost_paid_object`. This is the Yuriko, the Tiger's Shadow / Dark
+///   Confidant class (issue #511): a reveal earlier in the same ability binds
+///   "that card's" to the revealed card, not to the trigger source. The
+///   dedicated variant (vs. the pronoun `Anaphoric`) is what keeps the
+///   subject-injection rewrite from clobbering this fixed antecedent.
 ///
 /// Picking the scope at parse time (rather than always emitting one or the
 /// other) lets the runtime consult the right slot priority for each
@@ -1445,14 +1447,18 @@ fn classify_possessive_referent(prefix: &str) -> Option<ObjectScope> {
         return Some(ObjectScope::CostPaidObject);
     }
 
-    // CR 608.2c: bare anaphoric — "that <type>" / "the <type>" with no
-    // participle adjective in between. The type word must be the entire
-    // remainder (no trailing modifiers), which `all_consuming` enforces.
+    // CR 608.2c: bare demonstrative / definite possessive — "that <type>" /
+    // "the <type>" with no participle adjective in between. The type word must
+    // be the entire remainder (no trailing modifiers), which `all_consuming`
+    // enforces. Emits `Demonstrative` (NOT the pronoun `Anaphoric`): the
+    // antecedent is a full noun phrase fixed by the Oracle text, so the
+    // subject-injection rewrite must never rebind it (Creature Bond, Erratic
+    // Explosion). At runtime it resolves identically to `Anaphoric`.
     if nom::combinator::all_consuming(parse_possessive_object_type)
         .parse(rest)
         .is_ok()
     {
-        return Some(ObjectScope::Anaphoric);
+        return Some(ObjectScope::Demonstrative);
     }
 
     None
@@ -3681,14 +3687,16 @@ mod tests {
         );
     }
 
-    /// CR 608.2c: bare anaphoric "that spell" inside a triggered ability or
+    /// CR 608.2c: bare demonstrative "that spell" inside a triggered ability or
     /// delayed-trigger continuation is an instruction-order referent — it
     /// points at the spell introduced by an earlier instruction in the same
     /// ability (typically a counter / copy / reveal), not at the cost-paid
-    /// object. Slot priority differs from `CostPaidObject`
+    /// object. It selects `ObjectScope::Demonstrative` (the noun-phrase referent,
+    /// distinct from the pronoun "its") so the subject-injection rewrite never
+    /// rebinds it; slot priority differs from `CostPaidObject`
     /// (effect_context_object first vs. cost_paid_object first); see
     /// `classify_possessive_referent` and `resolve_object_mana_value`'s
-    /// `Anaphoric` arm. Mana Drain is the canonical delayed-trigger member of
+    /// `Demonstrative` arm. Mana Drain is the canonical delayed-trigger member of
     /// this class — `snapshot_quantity_ref`
     /// (`game/effects/delayed_trigger.rs`) bakes the resolved value into
     /// `Fixed` at delayed-trigger creation time using the parent's target
@@ -3699,7 +3707,7 @@ mod tests {
             parse_event_context_quantity("that spell's mana value"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::Anaphoric
+                    scope: ObjectScope::Demonstrative
                 }
             })
         );
@@ -3707,45 +3715,45 @@ mod tests {
 
     /// CR 608.2c — Yuriko, the Tiger's Shadow / Dark Confidant class
     /// (issue #511). A reveal in an earlier instruction binds "that card's
-    /// mana value" to the revealed card. The bare anaphoric prefix "that
-    /// card" must select `ObjectScope::Anaphoric` so the runtime resolver
+    /// mana value" to the revealed card. The bare demonstrative prefix "that
+    /// card" selects `ObjectScope::Demonstrative` so the runtime resolver
     /// reads `effect_context_object` (the revealed card) before the trigger
     /// source (the Ninja that dealt combat damage).
     #[test]
-    fn parse_event_context_possessive_that_card_mana_value_anaphoric() {
+    fn parse_event_context_possessive_that_card_mana_value_demonstrative() {
         assert_eq!(
             parse_event_context_quantity("that card's mana value"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::Anaphoric
+                    scope: ObjectScope::Demonstrative
                 }
             })
         );
     }
 
-    /// CR 608.2c — bare anaphoric "that permanent" inside a triggered ability
+    /// CR 608.2c — bare demonstrative "that permanent" inside a triggered ability
     /// is an instruction-order referent like "that card" / "that creature".
     #[test]
-    fn parse_event_context_possessive_that_permanent_power_anaphoric() {
+    fn parse_event_context_possessive_that_permanent_power_demonstrative() {
         assert_eq!(
             parse_event_context_quantity("that permanent's power"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Power {
-                    scope: ObjectScope::Anaphoric
+                    scope: ObjectScope::Demonstrative
                 }
             })
         );
     }
 
     /// CR 608.2c — battles are objects and can be referenced by bare
-    /// anaphoric possessives the same way cards, permanents, and spells are.
+    /// demonstrative possessives the same way cards, permanents, and spells are.
     #[test]
-    fn parse_event_context_possessive_that_battle_mana_value_anaphoric() {
+    fn parse_event_context_possessive_that_battle_mana_value_demonstrative() {
         assert_eq!(
             parse_event_context_quantity("that battle's mana value"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::Anaphoric
+                    scope: ObjectScope::Demonstrative
                 }
             })
         );
@@ -3850,22 +3858,24 @@ mod tests {
         );
     }
 
-    /// CR 608.2c — "that creature" is a bare anaphoric pronoun: it points at
-    /// the most recent earlier-instruction object (a revealed / sacrificed-by-
+    /// CR 608.2c — "that creature" is a bare demonstrative possessive: it points
+    /// at the most recent earlier-instruction object (a revealed / sacrificed-by-
     /// effect / moved permanent), so the parser emits
-    /// `ObjectScope::Anaphoric`. The runtime resolver consults
-    /// `effect_context_object` first, then the trigger source, then
-    /// `cost_paid_object` — the inverse of `CostPaidObject`'s slot order.
-    /// Participle-possessive forms (`the sacrificed creature's toughness`,
-    /// `the destroyed creature's power`) continue to map to `CostPaidObject`
-    /// — see the sibling regression tests below.
+    /// `ObjectScope::Demonstrative` (distinct from the pronoun "its" so the
+    /// subject-injection rewrite never rebinds it — this is what protects
+    /// Creature Bond's "that creature's toughness" from the LKI-toughness fix's
+    /// generalized rebind). The runtime resolver consults `effect_context_object`
+    /// first, then the trigger source, then `cost_paid_object` — the inverse of
+    /// `CostPaidObject`'s slot order. Participle-possessive forms (`the sacrificed
+    /// creature's toughness`, `the destroyed creature's power`) continue to map to
+    /// `CostPaidObject` — see the sibling regression tests below.
     #[test]
-    fn parse_event_context_possessive_that_creature_toughness_anaphoric() {
+    fn parse_event_context_possessive_that_creature_toughness_demonstrative() {
         assert_eq!(
             parse_event_context_quantity("that creature's toughness"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Toughness {
-                    scope: ObjectScope::Anaphoric
+                    scope: ObjectScope::Demonstrative
                 }
             })
         );

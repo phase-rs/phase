@@ -8823,9 +8823,12 @@ mod tests {
     /// value"` is an instruction-order referent: it points at the object
     /// introduced by an earlier `RevealTop` / `Mill` / `ChangeZone`
     /// instruction in the same ability. `classify_possessive_referent`
-    /// therefore emits `ObjectScope::Anaphoric`, whose runtime resolver reads
-    /// `effect_context_object` first (the revealed card) and only then falls
-    /// back to the trigger source and the cost-paid object.
+    /// therefore emits `ObjectScope::Demonstrative` (the noun-phrase
+    /// back-reference, distinct from the pronoun "its"), whose runtime resolver
+    /// reads `effect_context_object` first (the revealed card) and only then
+    /// falls back to the trigger source and the cost-paid object. The dedicated
+    /// variant keeps the subject-injection rewrite from rebinding this fixed
+    /// antecedent.
     #[test]
     fn parse_lose_life_equal_to_mana_value() {
         let text = "loses life equal to that card's mana value";
@@ -8839,11 +8842,11 @@ mod tests {
                         amount,
                         QuantityExpr::Ref {
                             qty: QuantityRef::ObjectManaValue {
-                                scope: crate::types::ability::ObjectScope::Anaphoric
+                                scope: crate::types::ability::ObjectScope::Demonstrative
                             }
                         }
                     ),
-                    "Expected ObjectManaValue {{ Anaphoric }}, got {amount:?}"
+                    "Expected ObjectManaValue {{ Demonstrative }}, got {amount:?}"
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),

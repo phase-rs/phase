@@ -3607,23 +3607,18 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             if let Some(qty) = qty {
                 // Route based on target phrase
                 if target_phrase == "itself" {
-                    // CR 608.2k: When target is "itself", an anaphoric "its power"
-                    // means the target's power. Only `Anaphoric` is remapped — an
-                    // explicit possessive ("the sacrificed creature's power",
-                    // `CostPaidObject` per CR 608.2k) keeps its fixed referent.
-                    let qty = match &qty {
-                        QuantityExpr::Ref {
-                            qty:
-                                QuantityRef::Power {
-                                    scope: crate::types::ability::ObjectScope::Anaphoric,
-                                },
-                        } => QuantityExpr::Ref {
-                            qty: QuantityRef::Power {
-                                scope: crate::types::ability::ObjectScope::Target,
-                            },
-                        },
-                        other => other.clone(),
-                    };
+                    // CR 608.2k: When the recipient is "itself", an anaphoric
+                    // "its <characteristic>" means that target's value. Only the
+                    // pronoun `Anaphoric` is rebound (across every per-object
+                    // characteristic) — an explicit possessive ("the sacrificed
+                    // creature's power", `CostPaidObject`) or a demonstrative
+                    // ("that creature's toughness", `Demonstrative`) keeps its
+                    // fixed referent.
+                    let mut qty = qty;
+                    super::rebind_anaphoric_object_scope(
+                        &mut qty,
+                        crate::types::ability::ObjectScope::Target,
+                    );
                     return Some((
                         Effect::DealDamage {
                             amount: qty,

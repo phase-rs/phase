@@ -2861,20 +2861,39 @@ pub enum ObjectScope {
     /// trio (CR 117.1 + CR 400.7j cost referent and CR 603.2 trigger
     /// referent are the two enumerated members of CR 608.2k's single clause).
     CostPaidObject,
-    /// CR 608.2k: A deferred anaphoric pronoun ("it" / "its") whose object
-    /// referent is bound at parse time. The parser remaps this to a concrete
-    /// scope wherever it can — `Source` when the clause subject is the ability
-    /// source, `Target` when the recipient is "itself". For triggered abilities
-    /// no remap applies and `Anaphoric` survives to runtime, where it resolves
-    /// identically to `CostPaidObject` (behavior-preserving — these cards
-    /// parsed to `CostPaidObject` before this variant existed). General
-    /// rules-correct runtime resolution of triggered-ability anaphora (e.g.
-    /// "its mana value" after a reveal — see issue #511) is separate per-card
-    /// parser work. Distinguishing this from an explicit cost-paid possessive
-    /// ("the sacrificed creature's power", CR 608.2k -> `CostPaidObject`) is
-    /// what prevents the subject-injection rewrite from clobbering
-    /// correctly-scoped possessives.
+    /// CR 608.2k: A deferred anaphoric **pronoun** ("it" / "its") whose object
+    /// referent is bound at parse time. The parser rebinds this to a concrete
+    /// scope wherever the enclosing clause establishes the antecedent —
+    /// `Source` when the clause subject is the ability source, `Target` when
+    /// the recipient is "itself", `EventSource` when the subject is the
+    /// triggering object. The rebind ([`rebind_anaphoric_object_scope`] in
+    /// `parser/oracle_effect/mod.rs`) covers every per-object characteristic
+    /// (power, toughness, mana value, …) — not just power — because the
+    /// pronoun refers to one object and the rebind only retargets *which*
+    /// object, never *which* characteristic. When no clause subject applies
+    /// (triggered-ability anaphora) `Anaphoric` survives to runtime, where it
+    /// resolves identically to a demonstrative (effect-context referent first;
+    /// see [`ObjectScope::Demonstrative`]). General rules-correct runtime
+    /// resolution of triggered-ability anaphora (e.g. "its mana value" after a
+    /// reveal — see issue #511) is separate per-card parser work.
     Anaphoric,
+    /// CR 608.2c: A **demonstrative / definite** possessive back-reference
+    /// ("that creature's", "that card's", "that spell's", "the creature's")
+    /// whose antecedent is a full noun phrase naming an object introduced by an
+    /// earlier instruction in the same ability — *not* the grammatical subject
+    /// of the clause it appears in. Unlike [`ObjectScope::Anaphoric`] (the
+    /// pronoun "its"), the subject-injection rewrite MUST NOT rebind this — its
+    /// antecedent is fixed by the Oracle text. Steadfast Armasaur ("its
+    /// toughness", `Anaphoric` → rebound to `Source`) and Creature Bond ("that
+    /// creature's toughness", `Demonstrative` → never rebound) parse to the
+    /// same `QuantityRef` property and differ only by this scope: collapsing
+    /// them caused the LKI-toughness bug. At runtime `Demonstrative` resolves
+    /// identically to `Anaphoric` — `effect_context_object` (CR 608.2c
+    /// instruction-order referent) first, then the trigger source (CR 608.2k),
+    /// then the cost-paid object. This is the Yuriko / Dark Confidant / Mana
+    /// Drain class (issue #511): a reveal/counter/reanimate earlier in the same
+    /// ability binds "that <type>'s" to the referenced object.
+    Demonstrative,
 }
 
 /// Source set for counting distinct card types.

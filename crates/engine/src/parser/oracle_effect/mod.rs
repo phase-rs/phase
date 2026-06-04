@@ -10044,24 +10044,23 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
     }
 }
 
-/// Recoerce an anaphoric "its power" reference (parsed as
-/// `Power { scope: Anaphoric }` per CR 608.2k) to a concrete `ObjectScope`
-/// when surrounding context establishes the binding — e.g. a damage clause
-/// whose subject is the source or first target object. An explicit
-/// participle-possessive ("the sacrificed creature's power",
-/// `CostPaidObject` per CR 608.2k) is deliberately NOT matched here — its
-/// referent is fixed by the Oracle text and must not be clobbered.
-fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: ObjectScope) {
+/// Rebind a deferred anaphoric **pronoun** referent ("its power", "its
+/// toughness", "its mana value", …) — parsed as `ObjectScope::Anaphoric` per
+/// CR 608.2k — to a concrete `ObjectScope` once the surrounding clause
+/// establishes the antecedent (a damage clause whose subject is the source,
+/// the first target object, or the triggering object).
+///
+/// CR 113.6 + CR 208/209/202: the pronoun names *one* object; this rewrite
+/// retargets *which* object (the `scope` field), never *which* characteristic
+/// (the `QuantityRef` variant), so it stays within each property's CR section
+/// and applies uniformly across power, toughness, mana value, color/word/
+/// mana-symbol counts, and counters. An explicit participle-possessive ("the
+/// sacrificed creature's power", `CostPaidObject`) and a demonstrative ("that
+/// creature's toughness", `Demonstrative`) are deliberately NOT matched — both
+/// have antecedents fixed by the Oracle text and must not be clobbered.
+fn rebind_anaphoric_object_scope(expr: &mut QuantityExpr, scope: ObjectScope) {
     match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Anaphoric,
-            },
-        } => {
-            *expr = QuantityExpr::Ref {
-                qty: QuantityRef::Power { scope },
-            };
-        }
+        QuantityExpr::Ref { qty } => rebind_anaphoric_ref(qty, scope),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -10070,18 +10069,38 @@ fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: Ob
         | QuantityExpr::Power {
             exponent: inner, ..
         } => {
-            rewrite_event_source_power_to_object_power(inner, scope);
+            rebind_anaphoric_object_scope(inner, scope);
         }
         QuantityExpr::Sum { exprs } => {
             for inner in exprs {
-                rewrite_event_source_power_to_object_power(inner, scope);
+                rebind_anaphoric_object_scope(inner, scope);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rewrite_event_source_power_to_object_power(left, scope);
-            rewrite_event_source_power_to_object_power(right, scope);
+            rebind_anaphoric_object_scope(left, scope);
+            rebind_anaphoric_object_scope(right, scope);
         }
-        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+/// Retarget a single per-object `QuantityRef` whose scope is the deferred
+/// pronoun `ObjectScope::Anaphoric` to `target`. Leaves every other scope
+/// (including the fixed `Demonstrative` / `CostPaidObject` referents) and every
+/// non-per-object `QuantityRef` untouched.
+fn rebind_anaphoric_ref(qty: &mut QuantityRef, target: ObjectScope) {
+    let scope = match qty {
+        QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
+        | QuantityRef::CountersOn { scope, .. } => scope,
+        _ => return,
+    };
+    if *scope == ObjectScope::Anaphoric {
+        *scope = target;
     }
 }
 
@@ -10101,7 +10120,7 @@ fn bind_damage_clause_source(
             damage_source,
             ..
         } => {
-            rewrite_event_source_power_to_object_power(amount, power_scope);
+            rebind_anaphoric_object_scope(amount, power_scope);
             *damage_source = Some(damage_source_ref);
             true
         }
@@ -10486,16 +10505,19 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::LoseLife { ref mut target, .. } if target.is_none() => {
             *target = Some(subject_filter);
         }
-        // CR 608.2c + CR 120.3: When the stripped subject is the source object
-        // ("~ deals damage equal to its power..."), an anaphoric "its power" is
-        // the ability source's current power, not a triggering event's source
-        // power. Only `ObjectScope::Anaphoric` is rewritten — an explicit
-        // possessive ("the sacrificed creature's power", `CostPaidObject` per
-        // CR 608.2k) keeps its parser-fixed referent and is left untouched.
+        // CR 608.2c + CR 113.7a + CR 120.3: When the stripped subject is the
+        // source object ("~ deals damage equal to its toughness/power/mana
+        // value..."), an anaphoric "its <characteristic>" reads the ability
+        // source's current value — via LKI (CR 113.7a) if the source has since
+        // left the battlefield (Steadfast Armasaur destroyed in response to its
+        // own activated ability). Only the pronoun `ObjectScope::Anaphoric` is
+        // rebound; an explicit possessive ("the sacrificed creature's power",
+        // `CostPaidObject`) or a demonstrative ("that creature's toughness",
+        // `Demonstrative`) keeps its parser-fixed referent.
         Effect::DealDamage { amount, .. } | Effect::DamageEachPlayer { amount, .. }
             if subject_filter == TargetFilter::SelfRef =>
         {
-            rewrite_event_source_power_to_object_power(amount, ObjectScope::Source);
+            rebind_anaphoric_object_scope(amount, ObjectScope::Source);
         }
         // CR 701.23a: "Its controller may search their library..." — the subject
         // names the library owner (and, when the subject is a context-ref, the
@@ -25401,18 +25423,19 @@ mod tests {
             "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
         );
 
-        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{Anaphoric})).
+        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{Demonstrative})).
         //
         // CR 608.2c — "that spell" in the delayed-trigger clause is a bare
-        // anaphoric pronoun: it points at the spell introduced by the
+        // demonstrative possessive: it points at the spell introduced by the
         // earlier-instruction `Counter target spell`. `classify_possessive_referent`
-        // emits `ObjectScope::Anaphoric` whose runtime resolver (in
-        // `game/quantity.rs`) consults `effect_context_object` (the
-        // captured-on-counter spell snapshot stamped by the parent chain)
-        // before falling back to the trigger-event source / cost_paid_object.
+        // emits `ObjectScope::Demonstrative` (the noun-phrase referent, distinct
+        // from the pronoun "its") whose runtime resolver (in `game/quantity.rs`)
+        // consults `effect_context_object` (the captured-on-counter spell
+        // snapshot stamped by the parent chain) before falling back to the
+        // trigger-event source / cost_paid_object. The dedicated variant keeps
+        // the subject-injection rewrite from rebinding this fixed antecedent.
         // The integration test `mana_drain_refund.rs` exercises the runtime
-        // end-to-end; this parser assertion just freezes the parse-time
-        // scope.
+        // end-to-end; this parser assertion just freezes the parse-time scope.
         let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
             panic!(
                 "expected Mana effect on delayed trigger, got {:?}",
@@ -25425,11 +25448,11 @@ mod tests {
                     *count,
                     QuantityExpr::Ref {
                         qty: QuantityRef::ObjectManaValue {
-                            scope: crate::types::ability::ObjectScope::Anaphoric,
+                            scope: crate::types::ability::ObjectScope::Demonstrative,
                         }
                     },
                     "Colorless count must reference the counter-target spell's \
-                     mana value via ObjectManaValue{{Anaphoric}} (CR 608.2c \
+                     mana value via ObjectManaValue{{Demonstrative}} (CR 608.2c \
                      instruction-order referent)"
                 );
             }

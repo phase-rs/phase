@@ -939,7 +939,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             counter_type,
         } => {
             let scope_str = match scope {
-                ObjectScope::Source | ObjectScope::Anaphoric => "self",
+                ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => "self",
                 ObjectScope::Target => "target",
                 ObjectScope::Recipient => "recipient",
                 ObjectScope::EventSource => "event source",
@@ -959,35 +959,45 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         },
         QuantityRef::Variable { name } => name.clone(),
         QuantityRef::Power { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "self power".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self power".into()
+            }
             ObjectScope::Target => "target's power".into(),
             ObjectScope::Recipient => "recipient's power".into(),
             ObjectScope::EventSource => "event source's power".into(),
             ObjectScope::CostPaidObject => "referenced object's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "self toughness".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self toughness".into()
+            }
             ObjectScope::Target => "target's toughness".into(),
             ObjectScope::Recipient => "recipient's toughness".into(),
             ObjectScope::EventSource => "event source's toughness".into(),
             ObjectScope::CostPaidObject => "referenced object's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "self mana value".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self mana value".into()
+            }
             ObjectScope::Target => "target's mana value".into(),
             ObjectScope::Recipient => "recipient's mana value".into(),
             ObjectScope::EventSource => "event source's mana value".into(),
             ObjectScope::CostPaidObject => "referenced object's mana value".into(),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "self colors".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self colors".into()
+            }
             ObjectScope::Target => "target's colors".into(),
             ObjectScope::Recipient => "recipient's colors".into(),
             ObjectScope::EventSource => "event source's colors".into(),
             ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "words in self name".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "words in self name".into()
+            }
             ObjectScope::Target => "words in target's name".into(),
             ObjectScope::Recipient => "words in recipient's name".into(),
             ObjectScope::EventSource => "words in event source's name".into(),
@@ -995,7 +1005,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
-                ObjectScope::Source | ObjectScope::Anaphoric => "self",
+                ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => "self",
                 ObjectScope::Target => "target",
                 ObjectScope::Recipient => "recipient",
                 ObjectScope::EventSource => "event source",
@@ -5278,42 +5288,52 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
         QuantityRef::Variable { .. } => ("Variable", Handled),
         QuantityRef::Power { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SelfPower", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SelfPower", Handled)
+            }
             ObjectScope::Target => ("TargetPower", Handled),
             ObjectScope::Recipient => ("RecipientPower", Handled),
             ObjectScope::EventSource => ("EventSourcePower", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SelfToughness", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SelfToughness", Handled)
+            }
             ObjectScope::Target => ("TargetToughness", Handled),
             ObjectScope::Recipient => ("RecipientToughness", Handled),
             ObjectScope::EventSource => ("EventSourceToughness", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SelfManaValue", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SelfManaValue", Handled)
+            }
             ObjectScope::Target => ("TargetManaValue", Handled),
             ObjectScope::Recipient => ("RecipientManaValue", Handled),
             ObjectScope::EventSource => ("EventSourceManaValue", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SourceObjectColorCount", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SourceObjectColorCount", Handled)
+            }
             ObjectScope::Target => ("TargetObjectColorCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SourceObjectNameWordCount", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SourceObjectNameWordCount", Handled)
+            }
             ObjectScope::Target => ("TargetObjectNameWordCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectNameWordCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectNameWordCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => {
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
                 ("SourceManaSymbolsInManaCost", Handled)
             }
             ObjectScope::Target => ("TargetManaSymbolsInManaCost", Handled),

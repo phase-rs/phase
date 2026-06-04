@@ -10,13 +10,28 @@
 //! correctly-scoped possessive, which is the root cause of Rite of Consumption
 //! dealing no damage.
 //!
-//! After the #495 fix and the bare-anaphoric-possessive classifier fix (Yuriko,
-//! the Tiger's Shadow / Dark Confidant class — `classify_possessive_referent`
-//! in `parser/oracle_quantity.rs`), exactly **251** cards in the exported card
-//! data retain a runtime `ObjectScope::Anaphoric` in a `DealDamage` /
-//! `GainLife` / `LoseLife` (or similar) amount. This test holds that set as a
-//! sorted constant and fails if a card leaks in or out of it — a tripwire,
-//! not a snapshot.
+//! After the #495 fix and the bare-possessive classifier fix (Yuriko, the
+//! Tiger's Shadow / Dark Confidant class — `classify_possessive_referent` in
+//! `parser/oracle_quantity.rs`), the retained anaphora referents split across
+//! two `ObjectScope` variants:
+//!
+//! - **155** cards retain `ObjectScope::Anaphoric` — the *pronoun* "its"
+//!   (categories 1-3 below), which the subject-injection rewrite may rebind.
+//! - **111** cards retain `ObjectScope::Demonstrative` — the bare *demonstrative
+//!   / definite* possessive ("that creature's toughness", "that card's mana
+//!   value"; category 4 below), whose antecedent is fixed by the Oracle text and
+//!   must never be rebound.
+//!
+//! The split is what fixed the Steadfast Armasaur LKI-toughness bug: "its
+//! toughness" (pronoun → `Anaphoric` → rebound to `Source`, so it LKI-falls-back
+//! to 3 when the source is destroyed in response) and "that creature's toughness"
+//! (demonstrative → `Demonstrative`, never rebound) parse to the same
+//! `QuantityRef::Toughness` property and previously collapsed to one scope, so
+//! generalizing the Power-only rebind to toughness regressed Creature Bond.
+//! Splitting the variant let the rebind cover every per-object characteristic
+//! while touching only the genuine pronoun. This test holds each set as a sorted
+//! constant and fails if a card leaks in or out of either — a tripwire, not a
+//! snapshot.
 //!
 //! ## The four categories of retained `Anaphoric`
 //!
@@ -41,7 +56,7 @@
 //!    This is also a *genuine pre-existing misparse*: the referent should be
 //!    the target slot, not an anaphoric source marker.
 //!
-//! 4. **Bare anaphoric possessive (CR 608.2c reveal/move/effect-sacrifice
+//! 4. **Bare demonstrative possessive (CR 608.2c reveal/move/effect-sacrifice
 //!    class — Yuriko, the Tiger's Shadow / Dark Confidant / Mana Drain /
 //!    Calibrated Blast / Reanimate / Vendetta / etc.)** — e.g. "...reveal
 //!    the top card of your library... loses life equal to that card's mana
@@ -49,9 +64,12 @@
 //!    that spell's mana value". The bare "that <type>" / "the <type>"
 //!    possessive prefix anchors to the object introduced by an earlier
 //!    instruction in the same ability. `classify_possessive_referent`
-//!    selects `ObjectScope::Anaphoric` so the runtime consults
-//!    `effect_context_object` first (CR 608.2c instruction-order referent)
-//!    rather than the cost-paid object or the trigger source. The 88
+//!    selects `ObjectScope::Demonstrative` (tracked by
+//!    `DEMONSTRATIVE_SCOPE_CARDS`, NOT this `Anaphoric` set) so the runtime
+//!    consults `effect_context_object` first (CR 608.2c instruction-order
+//!    referent) rather than the cost-paid object or the trigger source — while
+//!    the dedicated variant keeps the subject-injection rewrite from rebinding
+//!    the fixed antecedent. The 88
 //!    additions break down by anaphor source:
 //!    - **reveal-then-act** (`RevealTop` → instruction reads "that card") —
 //!      Yuriko, Dark Confidant (already category 4 by its pronoun form),
@@ -114,12 +132,13 @@
 //! of the pronoun ("its mana value"). Yuriko, the Tiger's Shadow surfaced the
 //! same bug as Dark Confidant once #511 fixed the pronoun branch.
 //!
-//! This test **freezes** the `Anaphoric` set so it cannot grow silently while
-//! #512 does the remaining category-2/3 fixes. A new leak (a new card name,
-//! or a count change) fails this test; a human then decides whether it is a
-//! legitimate new category-1/2/3/4 case (add it here) or a real regression
-//! (fix the parser). The curation lives at the *category* level — the
-//! correct granularity — not as 251 per-card annotations.
+//! This test **freezes** both the `Anaphoric` (pronoun) and `Demonstrative`
+//! (noun-phrase) sets so neither can grow silently while #512 does the
+//! remaining category-2/3 fixes. A new leak (a new card name, or a count
+//! change) fails this test; a human then decides whether it is a legitimate
+//! new case (add it to the matching list) or a real regression (fix the
+//! parser). The curation lives at the *category* level — the correct
+//! granularity — not as per-card annotations.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -134,21 +153,15 @@ use serde_json::Value;
 /// a legitimate category-1/2/3/4 case may be added; a real regression must be
 /// fixed in the parser instead.
 const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
-    "abattoir ghoul",
     "ad nauseam",
-    "alchemist's talent",
     "alpha brawl",
     "ambuscade",
     "angelic chorus",
     "archdruid's charm",
-    "archon of redemption",
-    "artifact mutation",
     "assert perfection",
     "augury adept",
-    "aura mutation",
     "avatar destiny",
     "backlash",
-    "baneful omen",
     "banewasp affliction",
     "bartz and boko",
     "beastie beatdown",
@@ -156,58 +169,37 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "blood poet",
     "bottle golems",
     "boulderbranch golem",
-    "bounteous kirin",
     "brainstealer dragon",
-    "breeches, the blastmaker",
-    "brightmare",
     "brokers charm",
-    "calibrated blast",
     "champion of the path",
     "champion of wits",
     "chastise",
     "circus of the sun",
     "clear shot",
-    "cleric class",
     "common black removal",
     "conclave mentor",
     "consume",
     "consuming ferocity",
-    "consuming vapors",
-    "creature bond",
     "crumble",
     "crush underfoot",
     "dark confidant",
     "dark tutelage",
     "darkstar augur",
-    "daxos of meletis",
     "deadshot",
     "death",
     "death watch",
     "death's caress",
     "delif's cone",
     "delirium",
-    "devour flesh",
-    "devour in shadow",
     "diplomatic relations",
-    "dire tactics",
     "divine offering",
     "domri's ambush",
-    "doomgape",
-    "dovescape",
     "durkwood tracker",
-    "duskmantle seer",
     "electrosiphon",
     "electryte",
-    "energy tap",
-    "engulfing slagwurm",
-    "erratic explosion",
     "exile",
-    "explosive revelation",
-    "feed the swarm",
     "felling blow",
     "feral encounter",
-    "fiery encore",
-    "flamethrower sonata",
     "foot chopper",
     "gargantuan gorilla",
     "garruk relentless",
@@ -217,121 +209,69 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "goblin crash pilot",
     "goblin sleigh ride",
     "goblin tinkerer",
-    "golbez, crystal collector",
     "gregor, shrewd magistrate",
-    "greven, predator captain",
     "grim contest",
     "grim feast",
-    "grisly spectacle",
-    "heal the scars",
-    "healing technique",
-    "hellhole rats",
     "hidetsugu and kairi",
-    "hit",
-    "hoard-smelter dragon",
     "horrid shadowspinner",
     "hotel of fears",
     "huatli's final strike",
     "hunter's edge",
     "hunter's mark",
-    "ignite memories",
-    "ikra shidiqi, the usurper",
     "immersturm",
-    "imp's mischief",
-    "induce paranoia",
     "infernal reckoning",
-    "interpret the signs",
     "jenova, ancient calamity",
-    "judge unworthy",
     "judgment of alexander",
-    "kaervek the merciless",
     "kamahl's will",
     "karplusan yeti",
-    "keeper of secrets",
     "kefka, dancing mad",
-    "kindle the carnage",
     "knockout maneuver",
     "lagonna-band storyteller",
     "lammastide weave",
     "lifeblood hydra",
     "living inferno",
     "lorcan, warlock collector",
-    "lozhan, dragons' legacy",
     "lukka, coppercoat outcast",
     "luminate primordial",
     "madame null, power broker",
     "make yourself useful",
-    "mana drain",
-    "marshland bloodcaster",
     "master of the wild hunt",
-    "mirkwood elk",
     "momentous fall",
     "moonlight hunt",
     "mortis dogs",
-    "narset of the ancient way",
     "nature's way",
     "neerdiv, devious diver",
-    "niambi, esteemed speaker",
     "nibelheim aflame",
     "nissa's judgment",
     "nissa's revelation",
     "noxious gearhulk",
-    "orchard warden",
-    "orim's thunder",
     "orzhov charm",
     "osseous sticktwister",
-    "overwhelming intellect",
     "packsong pup",
     "pain for all",
-    "pain seer",
     "paladin of atonement",
     "pandemonium",
-    "parallectric feedback",
-    "passionate archaeologist",
     "phthisis",
-    "phyrexian delver",
-    "planeswalker's fury",
-    "planeswalker's mirth",
     "polukranos, world eater",
     "predatory urge",
     "prime speaker zegana",
-    "proper burial",
-    "protection racket",
-    "pyretic rebirth",
     "pyrotechnic performer",
     "queen's bay paladin",
     "rabid gnaw",
-    "rage extractor",
     "rapacious guest",
     "rashida scalebane",
     "ravenous gigantotherium",
-    "razor hippogriff",
-    "reanimate",
-    "reanimate [6cb8b8c4-0674-4f14-9d89-010969fbb80e]",
-    "refuse",
-    "reviving vapors",
-    "riddle of lightning",
-    "righteous valkyrie",
-    "rotfeaster maggot",
-    "ruin raider",
-    "rupture",
     "sapling of colfenor",
     "sarkhan the mad",
-    "scattering stroke",
     "season's beatings",
     "seeds of innocence",
     "seek",
     "selfless exorcist",
     "serene offering",
     "sever soul",
-    "sheltering word",
-    "sheoldred's restoration",
     "showstopping surprise",
     "shriveling rot",
-    "sifter wurm",
     "signature slam",
-    "sin prodder",
-    "singe-mind ogre",
     "sister hospitaller",
     "solitude",
     "sorin the mirthless",
@@ -340,9 +280,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "spinal embrace",
     "spirit flare",
     "spoils of the hunt",
-    "steadfast armasaur",
     "stronghold arena",
-    "summon: kujata",
     "sunscourge champion",
     "sylvan smite",
     "syr ginger, the meal ender",
@@ -356,9 +294,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "the bears of littjara",
     "the creation of avacyn",
     "the great aerie",
-    "the lord of pain",
     "the mystery raceway",
-    "the provider",
     "the ruinous powers",
     "thorin, mountain-king",
     "thought sponge",
@@ -366,41 +302,164 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "too greedily, too deep",
     "tracker",
     "traitor's roar",
+    "vein drinker",
+    "venom blast",
+    "vivien's invocation",
+    "vraska's stoneglare",
+    "willow geist",
+    "wolverine riders",
+];
+
+/// Cards whose exported card data retains a runtime `ObjectScope::Demonstrative`
+/// (the CR 608.2c bare demonstrative / definite possessive back-reference —
+/// "that creature's toughness", "that card's mana value"). Split out of the
+/// former `Anaphoric` set so the subject-injection rewrite can rebind the
+/// pronoun "its" without clobbering these fixed antecedents. Frozen for the
+/// same anti-silent-drift reason as [`ANAPHORIC_SCOPE_CARDS`]; sorted by the
+/// export's normalized (lowercase) card key.
+const DEMONSTRATIVE_SCOPE_CARDS: &[&str] = &[
+    "abattoir ghoul",
+    "agonizing demise",
+    "alchemist's talent",
+    "archon of redemption",
+    "artifact mutation",
+    "aura mutation",
+    "baneful omen",
+    "boros fury-shield",
+    "bounteous kirin",
+    "breeches, the blastmaker",
+    "brightmare",
+    "calibrated blast",
+    "cinder cloud",
+    "cleric class",
+    "consuming vapors",
+    "cragganwick cremator",
+    "creature bond",
+    "daxos of meletis",
+    "dead reckoning",
+    "devour flesh",
+    "devour in shadow",
+    "dire tactics",
+    "doomgape",
+    "dovescape",
+    "duskmantle seer",
+    "energy tap",
+    "engulfing slagwurm",
+    "erratic explosion",
+    "essence backlash",
+    "explosive revelation",
+    "feed the swarm",
+    "fiery encore",
+    "flamethrower sonata",
+    "golbez, crystal collector",
+    "grab the reins",
+    "greven, predator captain",
+    "grisly spectacle",
+    "heal the scars",
+    "healing technique",
+    "heart-piercer manticore",
+    "hellhole rats",
+    "hit",
+    "hoard-smelter dragon",
+    "ignite memories",
+    "ikra shidiqi, the usurper",
+    "imp's mischief",
+    "induce paranoia",
+    "interpret the signs",
+    "judge unworthy",
+    "kaervek the merciless",
+    "kaervek's purge",
+    "keeper of secrets",
+    "kindle the carnage",
+    "lie in wait",
+    "lozhan, dragons' legacy",
+    "mana drain",
+    "marshland bloodcaster",
+    "mirkwood elk",
+    "narset of the ancient way",
+    "niambi, esteemed speaker",
+    "orchard warden",
+    "orim's thunder",
+    "overwhelming intellect",
+    "pain seer",
+    "parallectric feedback",
+    "passionate archaeologist",
+    "phyrexian delver",
+    "planeswalker's fury",
+    "planeswalker's mirth",
+    "proper burial",
+    "protection racket",
+    "pyretic rebirth",
+    "rage extractor",
+    "rakdos joins up",
+    "razor hippogriff",
+    "reanimate",
+    "reanimate [6cb8b8c4-0674-4f14-9d89-010969fbb80e]",
+    "refuse",
+    "reviving vapors",
+    "riddle of lightning",
+    "righteous valkyrie",
+    "rotfeaster maggot",
+    "ruin raider",
+    "rupture",
+    "sapling of colfenor",
+    "sarkhan the mad",
+    "scattering stroke",
+    "sheltering word",
+    "sheoldred's restoration",
+    "sifter wurm",
+    "sin prodder",
+    "singe-mind ogre",
+    "summon: kujata",
+    "terror of the peaks",
+    "the lord of pain",
+    "the provider",
     "tribute to hunger",
     "trostani, selesnya's voice",
     "twisted justice",
     "undying flames",
+    "unnatural hunger",
     "vanish into memory",
-    "vein drinker",
     "vendetta",
     "vengeful rebirth",
-    "venom blast",
     "verdant sun's avatar",
     "vial smasher the fierce",
     "viashino heretic",
-    "vivien's invocation",
     "volcanic vision",
-    "vraska's stoneglare",
     "weed strangle",
-    "willow geist",
-    "wolverine riders",
     "yuriko, the tiger's shadow",
+    "ziatora, the incinerator",
 ];
 
 /// Recursively reports whether a JSON subtree contains an `ObjectScope`
-/// `{"type":"Anaphoric"}` node. `Anaphoric` is only ever serialized as an
-/// `ObjectScope` variant tag, so a tag match is an exact detector.
-fn contains_anaphoric(value: &Value) -> bool {
+/// `{"type":<tag>}` node. `Anaphoric` / `Demonstrative` are only ever
+/// serialized as `ObjectScope` variant tags, so a tag match is an exact
+/// detector.
+fn contains_scope_tag(value: &Value, tag: &str) -> bool {
     match value {
         Value::Object(map) => {
-            if map.get("type") == Some(&Value::String("Anaphoric".to_string())) {
+            if map.get("type") == Some(&Value::String(tag.to_string())) {
                 return true;
             }
-            map.values().any(contains_anaphoric)
+            map.values().any(|v| contains_scope_tag(v, tag))
         }
-        Value::Array(items) => items.iter().any(contains_anaphoric),
+        Value::Array(items) => items.iter().any(|v| contains_scope_tag(v, tag)),
         _ => false,
     }
+}
+
+/// Collect the set of card keys whose exported data retains the given
+/// `ObjectScope` tag. Returns `None` when the export has not been generated
+/// (CI without card data), so callers can self-skip.
+fn observed_scope_set<'a>(
+    cards: &'a serde_json::Map<String, Value>,
+    tag: &str,
+) -> BTreeSet<&'a str> {
+    cards
+        .iter()
+        .filter(|(_, card)| contains_scope_tag(card, tag))
+        .map(|(name, _)| name.as_str())
+        .collect()
 }
 
 #[test]
@@ -414,12 +473,7 @@ fn anaphoric_scope_set_is_frozen() {
     let cards: Value = serde_json::from_str(&raw).expect("export should be valid JSON");
     let cards = cards.as_object().expect("export root should be an object");
 
-    let observed: BTreeSet<&str> = cards
-        .iter()
-        .filter(|(_, card)| contains_anaphoric(card))
-        .map(|(name, _)| name.as_str())
-        .collect();
-
+    let observed = observed_scope_set(cards, "Anaphoric");
     let allowed: BTreeSet<&str> = ANAPHORIC_SCOPE_CARDS.iter().copied().collect();
 
     let leaked: Vec<&str> = observed.difference(&allowed).copied().collect();
@@ -429,54 +483,107 @@ fn anaphoric_scope_set_is_frozen() {
         leaked.is_empty(),
         "New card(s) leaked a runtime ObjectScope::Anaphoric and are not in the \
          frozen allowlist: {leaked:?}. Classify each: a legitimate new \
-         category-1/2/3/4 case (see module doc) should be added to \
-         ANAPHORIC_SCOPE_CARDS; a real regression must be fixed in the parser. \
-         Categories 2 & 3 are tracked in #512, Dark Confidant's reveal-referent \
-         in #511."
+         category-1/2/3 pronoun case (see module doc) should be added to \
+         ANAPHORIC_SCOPE_CARDS; a bare demonstrative ('that creature's …') \
+         belongs in DEMONSTRATIVE_SCOPE_CARDS; a real regression must be fixed \
+         in the parser. Categories 2 & 3 are tracked in #512, Dark Confidant's \
+         reveal-referent in #511."
     );
     assert!(
         removed.is_empty(),
         "Card(s) in the frozen allowlist no longer retain ObjectScope::Anaphoric: \
-         {removed:?}. If #512/#511 fixed the misparse, remove the card(s) from \
-         ANAPHORIC_SCOPE_CARDS and update the count assertion."
+         {removed:?}. If #512/#511 fixed the misparse — or the card was a \
+         demonstrative that moved to DEMONSTRATIVE_SCOPE_CARDS — remove the \
+         card(s) from ANAPHORIC_SCOPE_CARDS and update the count assertion."
     );
 
-    // Secondary tripwire: the count itself is pinned. If #512/#511 land,
-    // both this and ANAPHORIC_SCOPE_CARDS shrink together.
+    // Secondary tripwire: the count itself is pinned. Splitting the bare
+    // demonstrative possessives onto `ObjectScope::Demonstrative` (so the
+    // subject-injection rewrite can rebind the pronoun "its" without clobbering
+    // them) moved 95 cards from this set into DEMONSTRATIVE_SCOPE_CARDS, and
+    // Steadfast Armasaur's "its toughness" rebound to `Source` (the LKI-toughness
+    // fix), taking the count 252 -> 156; the Optional_YouMay capture fix
+    // (#2277) then dropped "ian the reckless" to 155. If #512/#511 land, this
+    // shrinks further.
     assert_eq!(
         observed.len(),
-        251,
-        "Expected exactly 251 cards retaining ObjectScope::Anaphoric. PR #1451 \
-         re-scoped 8 dynamic-quantity 'its power' anaphora off the Anaphoric \
-         arm onto typed quantity refs; PR #1522 re-scoped Dead Before Sunrise \
-         through the recipient/subject rewrite. The category-2 'it deals damage \
-         equal to its power' trigger-subject class (#512) then moved 10 more \
-         cards (Warstorm Surge, Stalking Vengeance, Mage Slayer, et al.) onto \
-         `Power {{ scope: EventSource }}`. The parser later began extracting the \
-         'where X is that <type>'s mana value' tail for five more cards in the \
-         existing category-3 (target-destroy anaphora: Artifact Mutation, Aura \
-         Mutation, Hoard-Smelter Dragon) and category-4 (counter-then-act: \
-         Dovescape, Induce Paranoia) classes, moving the count 247 -> 252. Count \
-         moved to {}.",
+        155,
+        "Expected exactly 155 cards retaining ObjectScope::Anaphoric (pronoun \
+         'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        251,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 251 cards."
+        155,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 155 cards."
     );
 }
 
-/// The allowlist constant must stay sorted so diffs are reviewable and the
+/// Companion tripwire for the bare demonstrative possessive class
+/// (`ObjectScope::Demonstrative`, CR 608.2c). Split out of the former
+/// `Anaphoric` set so the subject-injection rewrite never rebinds these fixed
+/// antecedents (Creature Bond, Erratic Explosion, Mana Drain, Yuriko, …).
+/// Freezes the set for the same anti-silent-drift reason as the `Anaphoric`
+/// guard: a new leak or count change forces a human classification.
+#[test]
+fn demonstrative_scope_set_is_frozen() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+    if !path.exists() {
+        eprintln!("skipping: client/public/card-data.json not generated");
+        return;
+    }
+    let raw = std::fs::read_to_string(&path).expect("export should be readable");
+    let cards: Value = serde_json::from_str(&raw).expect("export should be valid JSON");
+    let cards = cards.as_object().expect("export root should be an object");
+
+    let observed = observed_scope_set(cards, "Demonstrative");
+    let allowed: BTreeSet<&str> = DEMONSTRATIVE_SCOPE_CARDS.iter().copied().collect();
+
+    let leaked: Vec<&str> = observed.difference(&allowed).copied().collect();
+    let removed: Vec<&str> = allowed.difference(&observed).copied().collect();
+
+    assert!(
+        leaked.is_empty(),
+        "New card(s) leaked a runtime ObjectScope::Demonstrative and are not in \
+         DEMONSTRATIVE_SCOPE_CARDS: {leaked:?}. A bare 'that <type>'s …' / \
+         'the <type>'s …' possessive is the expected source; add it, or fix a \
+         real parser regression."
+    );
+    assert!(
+        removed.is_empty(),
+        "Card(s) in DEMONSTRATIVE_SCOPE_CARDS no longer retain \
+         ObjectScope::Demonstrative: {removed:?}. Remove the card(s) and update \
+         the count assertion."
+    );
+    assert_eq!(
+        observed.len(),
+        111,
+        "Expected exactly 111 cards retaining ObjectScope::Demonstrative. Count \
+         moved to {}.",
+        observed.len()
+    );
+    assert_eq!(
+        DEMONSTRATIVE_SCOPE_CARDS.len(),
+        111,
+        "DEMONSTRATIVE_SCOPE_CARDS must list exactly 111 cards."
+    );
+}
+
+/// The allowlist constants must stay sorted so diffs are reviewable and the
 /// `BTreeSet` semantics are obvious to a human auditor.
 #[test]
 fn anaphoric_scope_allowlist_is_sorted_and_unique() {
-    let mut sorted = ANAPHORIC_SCOPE_CARDS.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-    assert_eq!(
-        sorted.as_slice(),
-        ANAPHORIC_SCOPE_CARDS,
-        "ANAPHORIC_SCOPE_CARDS must be sorted and free of duplicates."
-    );
+    for (label, list) in [
+        ("ANAPHORIC_SCOPE_CARDS", ANAPHORIC_SCOPE_CARDS),
+        ("DEMONSTRATIVE_SCOPE_CARDS", DEMONSTRATIVE_SCOPE_CARDS),
+    ] {
+        let mut sorted = list.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.as_slice(),
+            list,
+            "{label} must be sorted and free of duplicates."
+        );
+    }
 }
