@@ -2476,6 +2476,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
         }
     }
 
+    // CR 608.2c + CR 205.3a: Article choice must not affect anaphoric subtype gates.
     let (negated, rest_after_prefix) = if let Ok((rest, _)) = alt((
         tag::<_, _, OracleError<'_>>("it's not a "),
         tag("it's not an "),
