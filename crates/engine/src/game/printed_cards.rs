@@ -505,6 +505,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
@@ -1876,6 +1877,7 @@ mod tests {
         walk_effect(&until_lose, &mut names);
 
         let roll = Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
             sides: 6,
             results: vec![DieResultBranch {
                 min: 1,

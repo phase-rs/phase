@@ -159,6 +159,8 @@ pub enum TriggerEventKey {
     Fight,
     /// CR 702.26c: A permanent phased in.
     PhaseIn,
+    /// CR 702.26b: A permanent phased out.
+    PhaseOut,
 }
 
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.

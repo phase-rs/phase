@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Scegli un nuovo bersaglio per la copia",
     "chooseTargetForCopy": "Scegli il bersaglio per la copia",
     "chooseCreatureToExplore": "Scegli quale creatura esplora dopo",
+    "chooseCreatureTokenToPopulate": "Scegli una pedina creatura da popolare",
     "chooseReturnAsAuraTarget": "Scegli un permanente da incantare",
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",

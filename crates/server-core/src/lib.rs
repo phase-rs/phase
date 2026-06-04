@@ -13,7 +13,7 @@ mod harness;
 pub mod legacy_deck_guard;
 pub mod legacy_join_guard;
 pub mod lobby;
-pub mod lookup_join_guard;
+pub mod lobby_subscriber_wire_guard;
 pub mod p2p_backup_guard;
 pub mod persist;
 pub mod protocol;
@@ -38,7 +38,7 @@ pub use game_reconnect_guard::guard_game_reconnect;
 pub use legacy_deck_guard::guard_legacy_deck;
 pub use legacy_join_guard::guard_legacy_join_game;
 pub use lobby::LobbyManager;
-pub use lookup_join_guard::guard_lookup_join_target;
+pub use lobby_subscriber_wire_guard::{guard_lobby_subscriber_capacity, MAX_LOBBY_SUBSCRIBERS};
 pub use p2p_backup_guard::{guard_p2p_backup, MAX_P2P_SNAPSHOT_LEN};
 pub use persist::{PersistedLobbyMeta, PersistedSession};
 pub use protocol::{

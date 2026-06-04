@@ -60,8 +60,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // unified special-cast offer (Adventure / Miracle / Madness / Cascade /
     // Discover / Paradigm); dispatches on `data.kind.type`.
     "CastOffer",
-    // Note: `PopulateChoice` is intentionally NOT registered — it has no
-    // renderer anywhere in client/src/, so the safety-net modal must fire for it.
+    // CR 701.36a: choose a creature token to copy (board click via TargetingOverlay).
+    "PopulateChoice",
     // Mana abilities (cost-selection prompts now route through PayCost above).
     "PayManaAbilityMana",
     "ChooseManaColor",

@@ -10,6 +10,7 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::engine::EngineError;
 use super::{casting, casting_costs, mana_abilities};
+use casting_costs::{CostSelection, SpellCostPayment};
 
 pub(super) fn cancel_pending_cast(
     state: &mut GameState,
@@ -105,20 +106,11 @@ pub(super) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
     pending_cast: PendingCast,
-    selection_bounds: (usize, usize),
-    permanents: &[ObjectId],
-    chosen: &[ObjectId],
+    paid_cost: Option<SpellCostPayment<'_>>,
+    selection: CostSelection<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    casting::handle_sacrifice_for_cost(
-        state,
-        player,
-        pending_cast,
-        selection_bounds,
-        permanents,
-        chosen,
-        events,
-    )
+    casting::handle_sacrifice_for_cost(state, player, pending_cast, paid_cost, selection, events)
 }
 
 pub(super) fn handle_return_to_hand_for_cost(

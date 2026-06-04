@@ -250,6 +250,7 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
             FilterProp::HasAttachment {
                 kind: engine::types::ability::AttachmentKind::Aura,
                 controller: None,
+                exclude_source: false,
             },
         ])),
         // CR 301.5: equipped creature — has at least one Equipment attached.
@@ -257,6 +258,7 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
             FilterProp::HasAttachment {
                 kind: engine::types::ability::AttachmentKind::Equipment,
                 controller: None,
+                exclude_source: false,
             },
         ])),
 

@@ -266,9 +266,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         },
         // CR 702.26c: Phasing triggers fire when a permanent phases in.
         TriggerMode::PhaseIn => push(TriggerEventKey::PhaseIn),
-        TriggerMode::PhaseOut | TriggerMode::PhaseOutAll => {
-            return (keys, true);
-        }
+        // CR 702.26b: Phasing triggers fire when a permanent phases out.
+        TriggerMode::PhaseOut | TriggerMode::PhaseOutAll => push(TriggerEventKey::PhaseOut),
         TriggerMode::TurnBegin => push(TriggerEventKey::TurnStarted),
         TriggerMode::NewGame => return (keys, true),
 
@@ -522,9 +521,9 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::PermanentUntapped { .. } => push(TriggerEventKey::Untaps),
         // CR 702.26c: Phasing triggers fire when a permanent phases in.
         GameEvent::PermanentPhasedIn { .. } => push(TriggerEventKey::PhaseIn),
-        GameEvent::PermanentPhasedOut { .. }
-        | GameEvent::PlayerPhasedOut { .. }
-        | GameEvent::PlayerPhasedIn { .. } => {}
+        // CR 702.26b: Phasing triggers fire when a permanent phases out.
+        GameEvent::PermanentPhasedOut { .. } => push(TriggerEventKey::PhaseOut),
+        GameEvent::PlayerPhasedOut { .. } | GameEvent::PlayerPhasedIn { .. } => {}
         GameEvent::LandPlayed { .. } => {}
         GameEvent::StackPushed { .. } | GameEvent::StackResolved { .. } => {}
         GameEvent::Discarded { .. } => push(TriggerEventKey::Discarded),
@@ -922,12 +921,22 @@ pub fn candidates_for_event(state: &GameState, event: &GameEvent) -> SmallVec<[O
         }
     }
     // CR 702.26b: a phased-out permanent is treated as though it doesn't exist,
-    // so it never triggers. The legacy battlefield scan dropped these via
-    // `battlefield_phased_in_ids`; the index does not track phase status
-    // (phasing is not a zone change and does not touch the trigger index), so
-    // the filter must be reapplied here. Unknown ids are kept defensively and
-    // handled by the caller's per-candidate lookup.
-    out.retain(|id| state.objects.get(id).is_none_or(|obj| !obj.is_phased_out()));
+    // so it normally cannot trigger. The event source is the one exception for
+    // its own "phases out" trigger: the event is emitted after the status flip,
+    // and collection applies the matching definition-level carve-out.
+    let phase_out_source = match event {
+        GameEvent::PermanentPhasedOut { object_id, .. } => Some(*object_id),
+        _ => None,
+    };
+    if let Some(object_id) = phase_out_source {
+        out.push(object_id);
+    }
+    out.retain(|id| {
+        state
+            .objects
+            .get(id)
+            .is_none_or(|obj| !obj.is_phased_out() || phase_out_source == Some(*id))
+    });
     out.sort_unstable_by_key(|id| id.0);
     out.dedup();
     out
@@ -1006,5 +1015,23 @@ mod tests {
             &state,
         );
         assert!(event_keys.contains(&TriggerEventKey::PhaseIn));
+    }
+
+    #[test]
+    fn phase_out_uses_narrow_trigger_key_for_def_and_event() {
+        let def = TriggerDefinition::new(TriggerMode::PhaseOut);
+        let (keys, route) = keys_from_trigger_def(&def);
+        assert!(keys.contains(&TriggerEventKey::PhaseOut));
+        assert!(!route);
+
+        let state = GameState::new_two_player(42);
+        let event_keys = keys_from_event(
+            &GameEvent::PermanentPhasedOut {
+                object_id: crate::types::identifiers::ObjectId(1),
+                indirect: false,
+            },
+            &state,
+        );
+        assert!(event_keys.contains(&TriggerEventKey::PhaseOut));
     }
 }

@@ -38981,6 +38981,56 @@ mod tests {
             .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })));
     }
 
+    /// CR 400.1 + CR 108.3 — Aether Vial class: "put a creature card ... from
+    /// your hand onto the battlefield" must scope the candidate set to the
+    /// controller's hand (`controller == Some(ControllerRef::You)`), not to
+    /// every player's hand. Without the controller scope the resolver collects
+    /// hand cards from both players, letting you put an opponent's creatures
+    /// onto the battlefield and revealing their hand (issue #1980).
+    ///
+    /// This is a building-block assertion on the produced `ChangeZone` target
+    /// filter, not a single-card check: every "<filter> from your hand onto the
+    /// battlefield" effect shares this code path. The dynamic interior clause
+    /// ("with mana value equal to the number of charge counters on this
+    /// artifact") is what previously displaced the "from your hand" zone suffix
+    /// past the contiguous type-phrase parse, dropping the controller scope.
+    #[test]
+    fn put_zone_change_from_your_hand_scopes_to_controller() {
+        // Self-references ("this artifact") are normalized to `~` before the
+        // effect parser runs, so the dynamic mana-value clause reaches this
+        // path as "the number of charge counters on ~ from your hand".
+        let text = "put a creature card with mana value equal to the number of charge counters on ~ from your hand onto the battlefield";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Aether Vial put-from-hand");
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = effect
+        else {
+            panic!("expected ChangeZone, got {effect:?}");
+        };
+        assert_eq!(destination, Zone::Battlefield);
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected typed hand filter, got {target:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })),
+            "filter must restrict to the hand zone, got {:?}",
+            typed.properties
+        );
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::You),
+            "\"from your hand\" must scope candidates to the controller's hand, got {:?}",
+            typed.controller
+        );
+    }
+
     /// CR 508.4 + CR 614.1 — Kaalia of the Vast: "put X from your hand onto
     /// the battlefield tapped and attacking that opponent." The inline-tail
     /// patcher in `try_parse_put_zone_change` must set both `enter_tapped`

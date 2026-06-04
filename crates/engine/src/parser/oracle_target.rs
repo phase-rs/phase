@@ -2999,15 +2999,46 @@ pub(crate) fn parse_mana_value_suffix(
     // ("that damage"), and game-state counts ("the number of lands you
     // control") share the same quantity grammar as CDA/static parsing.
     if let Ok((after_equal_to, _)) = tag::<_, _, OracleError<'_>>("equal to ").parse(rest) {
-        let (after, phrase) = take_till::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.')
-            .parse(after_equal_to)
-            .ok()?;
-        let phrase = phrase.trim();
-        let value = crate::parser::oracle_quantity::parse_cda_quantity(phrase).or_else(|| {
-            parse_mana_value_reference_expr(phrase)
-                .and_then(|(value, after)| after.trim().is_empty().then_some(value))
-        });
-        if let Some(value) = value {
+        let (after_punct, raw_phrase) =
+            take_till::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.')
+                .parse(after_equal_to)
+                .ok()?;
+        let parse_value = |phrase: &str| -> Option<QuantityExpr> {
+            let phrase = phrase.trim();
+            crate::parser::oracle_quantity::parse_cda_quantity(phrase).or_else(|| {
+                parse_mana_value_reference_expr(phrase)
+                    .and_then(|(value, after)| after.trim().is_empty().then_some(value))
+            })
+        };
+        // CR 119.3 + CR 400.1 + CR 108.3: Resolve the dynamic quantity, preferring
+        // the FULL phrase first. A quantity whose own grammar already includes a
+        // zone clause ("the number of cards in your graveyard" → GraveyardSize;
+        // "the total power of creatures in your graveyard") must parse whole so it
+        // keeps the zone scope that belongs to the *quantity* — pre-cutting at the
+        // first zone clause would strip that scope and silently drop the bound.
+        //
+        // Only when the full phrase is NOT a recognized quantity is a trailing
+        // zone clause a separable, owner/controller-scoped clause on the *target*
+        // (per-player zones are CR 400.1, keyed by owner CR 108.3). Aether Vial's
+        // "the number of charge counters on ~ from your hand" parses only after
+        // the "from your hand" tail is cut, leaving it for the caller's
+        // `parse_zone_suffix` pass (see `parse_type_phrase_with_ctx`) to attach as
+        // `InZone { Hand }` + controller; without the cut the whole tail parsed as
+        // one quantity, failed, and dropped the zone scope entirely — letting the
+        // resolver collect cards from every player's hand (issue #1980). Cutting
+        // only on full-parse failure mirrors the `try_dynamic` branch above, which
+        // lets the quantity grammar decide consumption before treating the
+        // remainder as a zone suffix. The cut point is the first word-boundary
+        // zone clause recognized by the `parse_zone_suffix` building block.
+        let resolved = parse_value(raw_phrase)
+            .map(|value| (value, after_punct))
+            .or_else(|| {
+                let (phrase, zone_tail) =
+                    nom_primitives::scan_split_at_phrase(raw_phrase, parse_zone_suffix_nom)?;
+                let offset = raw_phrase.len() - zone_tail.len();
+                parse_value(phrase).map(|value| (value, &after_equal_to[offset..]))
+            });
+        if let Some((value, after)) = resolved {
             return Some((
                 FilterProp::Cmc {
                     comparator: Comparator::EQ,
@@ -3902,6 +3933,7 @@ pub(crate) fn attachment_kinds_filter_prop(
         [kind] => FilterProp::HasAttachment {
             kind: kind.clone(),
             controller,
+            exclude_source: false,
         },
         _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
     }
@@ -5977,6 +6009,79 @@ mod tests {
                     },
                 },
             }]))
+        );
+    }
+
+    /// CR 400.1 + CR 108.3 — Aether Vial class: a dynamic
+    /// "with mana value equal to <quantity>" suffix must NOT swallow a trailing
+    /// "from your hand" zone clause into the quantity phrase. The zone clause
+    /// carries the controller scope; dropping it lets the resolver collect
+    /// hand cards from every player (issue #1980). `parse_mana_value_suffix`
+    /// must cut the quantity at the zone-clause boundary so the caller's
+    /// `parse_zone_suffix` pass attaches `InZone { Hand }` + `controller: You`.
+    #[test]
+    fn dynamic_mana_value_suffix_leaves_trailing_zone_clause() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the number of charge counters on ~ from your hand",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected typed filter, got {f:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::You),
+            "\"from your hand\" must scope to the controller's hand, got {:?}",
+            typed.controller
+        );
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+            "filter must carry an InZone{{Hand}} property, got {:?}",
+            typed.properties
+        );
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    ..
+                }
+            )),
+            "the dynamic mana-value bound must still be parsed, got {:?}",
+            typed.properties
+        );
+    }
+
+    /// CR 119.3 + CR 400.1 — Regression guard (companion to
+    /// `dynamic_mana_value_suffix_leaves_trailing_zone_clause`): when the
+    /// quantity's OWN grammar already includes the zone clause — "the number of
+    /// cards in your graveyard" canonicalizes to `GraveyardSize { Controller }`
+    /// — the "in your graveyard" tail must stay attached to the *quantity*, not
+    /// be cut off as a target-zone suffix. `parse_mana_value_suffix` must try the
+    /// full phrase first and only cut on full-parse failure; pre-cutting left
+    /// `parse_cda_quantity("the number of cards")` (which is `None`) and silently
+    /// dropped the mana-value bound entirely for this whole class.
+    #[test]
+    fn dynamic_mana_value_suffix_keeps_zone_bearing_quantity_whole() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the number of cards in your graveyard",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::GraveyardSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            }])),
+            "the graveyard count must parse whole and stay on the quantity, not \
+             leak its zone onto the target",
         );
     }
 
@@ -8808,6 +8913,7 @@ mod tests {
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: None,
+                ..
             }
         ));
     }
@@ -8822,6 +8928,7 @@ mod tests {
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Equipment,
                 controller: None,
+                ..
             }
         ));
     }

@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Choisissez une nouvelle cible pour la copie",
     "chooseTargetForCopy": "Choisissez la cible de la copie",
     "chooseCreatureToExplore": "Choisissez quelle créature explore ensuite",
+    "chooseCreatureTokenToPopulate": "Choisissez un jeton de créature à peupler",
     "chooseReturnAsAuraTarget": "Choisissez un permanent à enchanter",
     "tapUntappedCreatures_one": "Engagez {{count}} créature dégagée",
     "tapUntappedCreatures_other": "Engagez {{count}} créatures dégagées",

@@ -5,8 +5,9 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, ObjectProperty,
-    PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect,
+    ObjectProperty, PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation,
+    TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -579,6 +580,59 @@ fn static_cant_be_blocked_by_more_than_two_creatures() {
     let def = parse_static_line("~ can't be blocked by more than two creatures.").unwrap();
     assert_eq!(def.mode, StaticMode::CantBeBlockedByMoreThan { max: 2 });
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_attach_only_restriction_power_ge_lowers_to_filter() {
+    // CR 301.5 + CR 303.4 + CR 701.3a: Strata Scythe class — a positive
+    // attachment restriction lowers to `AttachmentRestriction` whose `filter` is
+    // the reused `TargetFilter` for "a creature with power 3 or greater".
+    let def =
+        parse_static_line("~ can be attached only to a creature with power 3 or greater.").unwrap();
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::AttachmentRestriction { filter }
+            if matches!(
+                filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.properties.contains(&FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::GE,
+                            value: QuantityExpr::Fixed { value: 3 },
+                        })
+            )
+        ),
+        "Expected AttachmentRestriction with PtComparison(Power, GE, 3), got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn static_attach_only_restriction_legendary_lowers_to_filter() {
+    // CR 301.5 + CR 303.4 + CR 701.3a: Konda's Banner class — "a legendary
+    // creature" host whitelist via the reused `TargetFilter` legendary property.
+    let def = parse_static_line("~ can be attached only to a legendary creature.").unwrap();
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::AttachmentRestriction { filter }
+            if matches!(
+                filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.properties.contains(&FilterProp::HasSupertype {
+                            value: crate::types::card_type::Supertype::Legendary,
+                        })
+            )
+        ),
+        "Expected AttachmentRestriction with Legendary creature filter, got {:?}",
+        def.mode
+    );
 }
 
 #[test]
@@ -2770,6 +2824,42 @@ fn this_land_is_the_chosen_type() {
 }
 
 #[test]
+fn enchanted_land_is_the_chosen_type() {
+    // CR 305.7 + CR 305.6: Phantasmal Terrain / Convincing Mirage. The Aura's
+    // continuous static must set the enchanted land's subtype to the chosen
+    // basic land type with replacement semantics (SetChosenBasicLandType), not
+    // additive (AddChosenSubtype) — that variant clears the land's old types and
+    // rules-text abilities, which AddChosenSubtype does not.
+    let def = parse_static_line("Enchanted land is the chosen type.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::EnchantedBy])
+        ))
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetChosenBasicLandType]
+    );
+
+    // Tail variants ("and loses its other land types"/"types") parse identically
+    // — CR 305.7 already removes the old land types, so the tail is cosmetic.
+    for line in [
+        "Enchanted land is the chosen type",
+        "Enchanted land is the chosen type and loses its other land types.",
+        "Enchanted land is the chosen type and loses its other types.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetChosenBasicLandType],
+            "line did not parse to SetChosenBasicLandType: {line}"
+        );
+    }
+}
+
+#[test]
 fn this_creature_is_the_chosen_type() {
     let def = parse_static_line("This creature is the chosen type in addition to its other types.")
         .unwrap();
@@ -3458,6 +3548,77 @@ fn quoted_ability_sacrifice_cost_separator() {
 }
 
 #[test]
+fn quoted_ability_preserves_activation_restrictions() {
+    // CR 602.5c: A granted activated ability carrying a trailing use
+    // restriction inside its quoted text must surface that restriction on the
+    // acquired ability — not drop it as an unparsed sentence. CR 602.5d:
+    // "Activate only as a sorcery" → AsSorcery timing gate. This is the path
+    // for Skygames ("Enchanted land has \"{T}: ... Activate only as a
+    // sorcery.\""), Mindwhip Sliver, and Squirrel anthem cards.
+    let def =
+        parse_static_line("Enchanted land has \"{T}: Draw a card. Activate only as a sorcery.\"")
+            .unwrap();
+    let grant = def
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("should grant the quoted activated ability");
+    let ContinuousModification::GrantAbility { definition } = grant else {
+        unreachable!();
+    };
+    assert_eq!(definition.kind, AbilityKind::Activated);
+    assert!(definition.cost.is_some(), "should retain the tap cost");
+    assert!(
+        definition.sorcery_speed,
+        "AsSorcery must set sorcery_speed on the granted ability"
+    );
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "granted ability must carry AsSorcery, got {:?}",
+        definition.activation_restrictions
+    );
+    assert!(
+        !matches!(
+            *definition.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        ),
+        "the draw effect must still parse, got {:?}",
+        definition.effect
+    );
+
+    // CR 602.5b: Non-sorcery restrictions use the same single-authority
+    // extractor and must surface on the granted copy too.
+    let once = parse_static_line(
+        "Creatures you control have \"{T}: Draw a card. Activate only during your turn and only once each turn.\"",
+    )
+    .unwrap();
+    let grant = once
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("should grant the quoted activated ability");
+    let ContinuousModification::GrantAbility { definition } = grant else {
+        unreachable!();
+    };
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::DuringYourTurn),
+        "granted ability must carry DuringYourTurn, got {:?}",
+        definition.activation_restrictions
+    );
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::OnlyOnceEachTurn),
+        "granted ability must carry OnlyOnceEachTurn, got {:?}",
+        definition.activation_restrictions
+    );
+}
+
+#[test]
 fn quoted_self_rule_static_grants_static_mode() {
     let modifications = parse_quoted_ability_modifications(
         "It gains \"This creature attacks each combat if able.\"",
@@ -3601,6 +3762,7 @@ fn static_during_your_turn_equipped_creatures_you_control_have_double_strike() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Equipment,
                     controller: None,
+                    exclude_source: false,
                 }]),
         ))
     );
@@ -7990,7 +8152,8 @@ fn creatures_you_control_that_are_enchanted() {
                 tf.properties.as_slice(),
                 [FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
-                    controller: None
+                    controller: None,
+                    exclude_source: false
                 }]
             ));
         }
@@ -10802,6 +10965,7 @@ fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 }])
         ))
     );
