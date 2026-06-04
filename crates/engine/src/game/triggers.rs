@@ -4558,11 +4558,14 @@ fn record_trigger_fired(
             state.triggers_fired_this_game.insert(key);
         }
         TriggerConstraint::OncePerOpponentPerTurn => {
-            // Extract the opponent player_id from the event
+            // CR 603.2i: "for the first time during each of their turns" constraint.
             let opponent_id = match event {
                 GameEvent::LifeChanged { player_id, .. } => *player_id,
                 _ => return,
             };
+            if state.active_player != opponent_id {
+                return;
+            }
             let per_opponent_key = (obj_id, trig_idx, opponent_id);
             state
                 .triggers_fired_this_turn_per_opponent
