@@ -52,6 +52,47 @@ fn blocked_creature_and_blocker_exchange_damage() {
     );
 }
 
+/// CR 702.45a: Bushido pumps the Bushido creature when it becomes blocked.
+#[test]
+fn bushido_becomes_blocked_pumps_attacker_not_blocker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_id = scenario
+        .add_creature(P0, "Ronin", 2, 2)
+        .from_oracle_text_with_keywords(&["bushido"], "Bushido 2")
+        .id();
+    let blocker_id = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker_id, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("Bushido creature should be able to attack");
+    // CR 508.2: Active player gets priority after attackers before blockers.
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker_id, attacker_id)],
+        })
+        .expect("blocker should be able to block the Bushido creature");
+
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "becomes-blocked Bushido trigger should be on the stack"
+    );
+    runner.resolve_top();
+
+    let state = runner.state();
+    assert_eq!(state.objects[&attacker_id].power, Some(4));
+    assert_eq!(state.objects[&attacker_id].toughness, Some(4));
+    assert_eq!(state.objects[&blocker_id].power, Some(2));
+    assert_eq!(state.objects[&blocker_id].toughness, Some(2));
+}
+
 #[test]
 fn decayed_attacker_sacrifices_at_end_of_combat() {
     let mut scenario = GameScenario::new();
@@ -66,6 +107,7 @@ fn decayed_attacker_sacrifices_at_end_of_combat() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker_id, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("decayed creature should be able to attack");
 
@@ -179,6 +221,7 @@ fn defender_cannot_attack() {
     // Trying to declare a defender as attacker should fail
     let result = runner.act(GameAction::DeclareAttackers {
         attacks: vec![(wall_id, AttackTarget::Player(P1))],
+        bands: vec![],
     });
     assert!(
         result.is_err(),
@@ -242,6 +285,7 @@ fn attacker_taps_when_attacking() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker_id, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -426,7 +470,10 @@ fn ghostly_prison_accept_pays_tax_and_attacks_proceed() {
         (a2, AttackTarget::Player(P1)),
     ];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should pause with CombatTaxPayment");
 
     // Verify we're paused with the right total ({4}) and two per-creature entries.
@@ -499,7 +546,10 @@ fn ghostly_prison_decline_removes_taxed_attackers() {
         (a2, AttackTarget::Player(P1)),
     ];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should pause with CombatTaxPayment");
 
     // Decline the tax.
@@ -536,7 +586,10 @@ fn two_prisons_stack_tax() {
 
     let attacks = vec![(a1, AttackTarget::Player(P1))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should pause with CombatTaxPayment");
 
     match &runner.state().waiting_for {
@@ -588,7 +641,10 @@ fn norns_annex_accept_pays_phyrexian_with_mana() {
 
     let attacks = vec![(attacker, AttackTarget::Player(P1))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should pause with CombatTaxPayment");
 
     // Verify the engine paused with the right Phyrexian-cost tax (mana_value 1).
@@ -669,7 +725,10 @@ fn norns_annex_accept_pays_phyrexian_with_life_when_no_mana() {
 
     let attacks = vec![(attacker, AttackTarget::Player(P1))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should pause with CombatTaxPayment");
 
     runner
@@ -706,7 +765,10 @@ fn norns_annex_decline_drops_taxed_attackers() {
 
     let attacks = vec![(attacker, AttackTarget::Player(P1))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should pause with CombatTaxPayment");
 
     runner
@@ -776,7 +838,10 @@ fn archangel_of_tithes_untapped_taxes_opponent_attacks() {
 
     let attacks = vec![(attacker, AttackTarget::Player(P1))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should pause with CombatTaxPayment (#309)");
 
     match &runner.state().waiting_for {
@@ -821,7 +886,10 @@ fn archangel_of_tithes_tapped_does_not_tax() {
 
     let attacks = vec![(attacker, AttackTarget::Player(P1))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should succeed without tax pause");
 
     // Attack proceeds directly — no CombatTaxPayment pause.
@@ -854,7 +922,10 @@ fn archangel_of_tithes_controller_can_attack_own_creatures_without_tax() {
     // Bear is controlled by the Archangel's controller, so no tax.
     let attacks = vec![(bear, AttackTarget::Player(P1))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("Owner of Archangel should attack without paying their own tax");
 
     let state = runner.state();
@@ -920,7 +991,10 @@ fn propaganda_does_not_tax_attacks_against_other_opponents_3p() {
 
     let attacks = vec![(attacker, AttackTarget::Player(P2))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers against P2 must not pause for P0's Propaganda (#302)");
 
     let state = runner.state();
@@ -942,7 +1016,10 @@ fn propaganda_taxes_attacks_against_its_controller_3p() {
 
     let attacks = vec![(attacker, AttackTarget::Player(P0))];
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers against P0 must pause with CombatTaxPayment");
 
     match &runner.state().waiting_for {

@@ -40,6 +40,7 @@ fn issue_890_attack_trigger_deals_damage() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(skitterspike, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declaring Giggling Skitterspike as attacker should succeed");
     runner.advance_until_stack_empty();
@@ -73,6 +74,7 @@ fn issue_890_block_trigger_deals_damage() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P0))],
+            bands: vec![],
         })
         .expect("declaring P1 attacker should succeed");
     runner.pass_both_players();

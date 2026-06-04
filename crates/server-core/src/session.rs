@@ -1088,7 +1088,16 @@ impl SessionManager {
                 && session
                     .state
                     .waiting_for
-                    .accepts_freeform_combat_damage_assignment());
+                    .accepts_freeform_combat_damage_assignment())
+            // CR 510.1d + CR 702.22k: a banded blocker's free damage division
+            // has too many legal splits to enumerate as candidates, so the
+            // server bypasses its legality gate and the engine handler
+            // (handle_assign_blocker_damage) validates the submission.
+            || (matches!(action, GameAction::AssignBlockerDamage { .. })
+                && session
+                    .state
+                    .waiting_for
+                    .accepts_freeform_blocker_damage_assignment());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
             if !legal_actions.contains(&action) {

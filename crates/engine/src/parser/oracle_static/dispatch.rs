@@ -182,6 +182,18 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: Persistent, name-anchored
+    // exile-play permission — "[During your turn, ]you may play lands and cast
+    // spells from among cards exiled with ~." (The Matrix of Time) and the
+    // "you may look at cards exiled with ~, and you may play lands and cast
+    // spells from among those cards." variant (Prosper/Tibalt impulse-commander
+    // class). Lowers to `ExileCastPermission { pool: Persistent, play_mode:
+    // Play, frequency: Unlimited }` reading the lifetime `exile_links` set,
+    // distinct from the Maralen "this turn" rolling-pool handler above.
+    if let Some(result) = try_parse_persistent_exile_play_permission(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 601.2b + CR 118.9a + CR 601.2: Omniscience-class restricted free-cast
     // static. Optional " from your hand" zone qualifier — Dracogenesis's
     // "you may cast Dragon spells without paying their mana costs" relies on
@@ -357,6 +369,12 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 305.7 + CR 305.6: "Enchanted land is the chosen type" — Aura sets the
+    // enchanted land's subtype to the basic land type chosen as the Aura entered.
+    if let Some(def) = parse_enchanted_land_chosen_type_static(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 305.7: "Enchanted land is a [type]" — must be before general "enchanted land" handler.
     if let Some(rest) = nom_tag_tp(&tp, "enchanted land is a ") {
         let rest = rest.trim_end_matches('.');
@@ -527,6 +545,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 614.1c + CR 122.1: "[scope] creatures you control enter with an
+    // additional +1/+1 counter on them." Continuous "enters with" replacement
+    // static (Kalain, Bard Class, Gorma the Gullet, Master Chef). The verb here
+    // is "enter", not "get"/"has", so it must dispatch BEFORE the anthem
+    // "creatures you control ..." branches below (which route to
+    // parse_continuous_gets_has and only recognize get/has verbs).
+    if let Some(def) = parse_enters_with_additional_counters(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Creatures you control [with counter condition] get/have ..." ---
     // Must come BEFORE parse_typed_you_control to prevent core type words like
     // "Creatures" from falling through to the subtype path (A1 fix: 162+ cards).
@@ -691,6 +719,15 @@ pub(crate) fn parse_static_line_inner(
         if let Some(result) = parse_typed_you_control(tp.original, tp.lower, false) {
             return Some(result);
         }
+    }
+
+    // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
+    // lands" — continuous land animation (Living Plane, Nature's Revolt). Must
+    // come before parse_land_type_change: both split on "are", but the land
+    // animation form carries a creature descriptor the type-change parser can't
+    // claim. The "creature" guard lets land *type* lines fall through.
+    if let Some(def) = parse_land_animation(&tp, &text) {
+        return Some(def);
     }
 
     // CR 305.7: "[Subject] lands are [type]" — land type-changing statics.
@@ -1169,10 +1206,27 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "~ can be attached only to {filter}" ---
+    // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction on an
+    // Aura/Equipment — the source can only attach to a host matching the parsed
+    // `TargetFilter` (Strata Scythe, Brass Knuckles, Konda's Banner). Enforced in
+    // game/effects/attach.rs::attachment_illegality.
+    if let Some(def) = parse_attach_only_restriction(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Spells and abilities <scope> can't cause their controller to search their library" ---
     // CR 701.23 + CR 609.3: Ashiok, Dream Render's first static. Subject-scoped
     // prohibition where `cause` identifies whose spells/abilities are muzzled.
     if let Some(def) = parse_cant_search_library(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "Triggered abilities <scope> can't cause you to sacrifice or exile <affected>" ---
+    // CR 603.2 + CR 609.3: The Master, Multiplied class. Subject-scoped prohibition
+    // where `cause` identifies whose triggered abilities are muzzled and `affected`
+    // identifies the protected objects.
+    if let Some(def) = parse_cant_cause_sacrifice_or_exile(&tp, &text) {
         return Some(def);
     }
 
@@ -1234,14 +1288,27 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "~ can't be the target" or "~ can't be targeted" ---
-    if nom_primitives::scan_contains(tp.lower, "can't be the target")
-        || nom_primitives::scan_contains(tp.lower, "can't be targeted")
-    {
-        return Some(
-            StaticDefinition::new(StaticMode::CantBeTargeted)
-                .affected(TargetFilter::SelfRef)
-                .description(text.to_string()),
-        );
+    // CR 702.18a / 702.11a: these descriptive phrasings ARE Shroud / Hexproof.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
+        return Some(match scope {
+            // CR 702.11a: "... your opponents control" — grant Hexproof so the
+            // permanent's own controller can still target it.
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Hexproof,
+                    }])
+                    .description(text.to_string())
+            }
+            // CR 702.18a: blanket — can't be targeted by any player. Enforced in
+            // `targeting.rs::can_target` via the object's active static definitions.
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                StaticDefinition::new(StaticMode::CantBeTargeted)
+                    .affected(TargetFilter::SelfRef)
+                    .description(text.to_string())
+            }
+        });
     }
 
     // --- "~ can't be sacrificed" (CR 701.21) ---
@@ -1815,4 +1882,93 @@ pub(crate) fn parse_static_line_inner(
     }
 
     None
+}
+
+/// CR 614.1c + CR 122.1: Parse a continuous "enters with an additional counter"
+/// replacement static.
+///
+/// Grammar (combinator-composed, one `alt()` per axis of variation):
+/// ```text
+/// <subject> " enter[s] with an additional " <counter> " counter on " <pronoun>
+/// ```
+/// where `<subject>` is a controller-scoped creature phrase
+/// ("[Other|Legendary|Nontoken|Token ]creatures you control"), `<counter>` is a
+/// recognized counter type (currently +1/+1 in shipping printings, but the
+/// strict counter-type combinator admits any recognized type so the class is not
+/// special-cased to one counter), and `<pronoun>` is "them"/"it".
+///
+/// The affected-permanent scope rides on `StaticDefinition::affected` exactly
+/// like the anthem statics — reuse `parse_continuous_subject_filter` so every
+/// Other/Legendary/Nontoken/Token qualifier is handled by the shared subject
+/// parser rather than re-enumerated here. The filter MUST anchor to
+/// `ControllerRef::You` (CR 109.5: "you control"); subjects without that anchor
+/// fall through to leave the line Unimplemented.
+///
+/// FIXED-count form only: a dynamic count (Gev, "for each opponent who lost
+/// life") produces no fixed `<counter>` token and so fails the combinator,
+/// leaving the line Unimplemented until a dynamic-count axis exists.
+fn parse_enters_with_additional_counters(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // Split the subject from the predicate at the " enter[s] with an additional "
+    // verb phrase, scanned at word boundaries so any controlled-creature subject
+    // length is handled.
+    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("enter with an additional "),
+            tag("enters with an additional "),
+        ))
+        .parse(i)
+    })?;
+
+    // Parse the predicate: verb phrase, counter type, " counter on ", pronoun.
+    fn parse_predicate(i: &str) -> OracleResult<'_, crate::types::counter::CounterType> {
+        let (i, _) = alt((
+            tag::<_, _, OracleError<'_>>("enter with an additional "),
+            tag("enters with an additional "),
+        ))
+        .parse(i)?;
+        let (i, counter_type) = nom_primitives::parse_strict_counter_type(i)?;
+        let (i, _) = tag(" counter on ").parse(i)?;
+        let (i, _) = alt((tag("them"), tag("it"))).parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        Ok((i, counter_type))
+    }
+    let (_rest, counter_type) = all_consuming(parse_predicate)
+        .parse(predicate_lower.trim_end())
+        .ok()?;
+
+    // CR 109.5: the subject must be a controller-scoped ("you control") creature
+    // phrase. Recover the original-case slice so the shared subject parser sees
+    // the printed capitalization (subtypes/supertypes are capitalized in Oracle).
+    let subject_original = tp.original[..subject_lower.len()].trim();
+    let affected = parse_continuous_subject_filter(subject_original)?;
+    if !filter_is_controller_you(&affected) {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+            counter_type,
+            count: 1,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 109.5: True when `filter` is anchored to the source's controller via a
+/// `ControllerRef::You` constraint (directly or within an Or/And composition).
+/// Stricter than `filter_has_source_or_controller_anchor`, which also accepts
+/// `Opponent` — "enters with an additional counter" statics are always
+/// "you control" scoped, so an opponent anchor must NOT match.
+fn filter_is_controller_you(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.controller == Some(ControllerRef::You),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().all(filter_is_controller_you)
+        }
+        _ => false,
+    }
 }

@@ -11,6 +11,8 @@ pub(crate) enum RuleStaticPredicate {
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
+    CantCrew,
+    CantBeActivated,
     CantBeSacrificed,
     MustAttack,
     MustBlock,
@@ -630,6 +632,21 @@ pub(crate) fn push_grant_clause_modifications(
 
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
+        return;
+    }
+
+    // CR 702.18a / 702.11a: a descriptive "can't be the target [of ...]" grant is
+    // Shroud (blanket) or Hexproof (opponents only). Emit the keyword so the
+    // existing targeting checks apply the correct controller scope, rather than a
+    // scope-less rule static.
+    if let Some(scope) =
+        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str())
+    {
+        let keyword = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
+        };
+        modifications.push(ContinuousModification::AddKeyword { keyword });
         return;
     }
 

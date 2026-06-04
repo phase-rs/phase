@@ -1806,14 +1806,21 @@ pub(super) fn try_parse_dig_instead_alternative(
     let body_rest_lower = body_rest.to_lowercase();
     let alt_continuation = parse_dig_from_among(&body_rest_lower, body_rest)?;
     let ContinuationAst::DigFromAmong {
-        count: alt_keep_count,
-        up_to: alt_up_to,
+        quantity: alt_quantity,
         filter: alt_filter,
         destination: alt_destination,
         rest_destination: alt_rest,
+        ..
     } = alt_continuation
     else {
         return None;
+    };
+    // CR 701.20e: Map the typed `PutCount` onto the Dig's keep_count/up_to.
+    // `All` has no fixed cap (route every kept card → `keep_count = None`).
+    let (alt_keep_count, alt_up_to) = match alt_quantity {
+        crate::parser::oracle_ir::ast::PutCount::All => (None, false),
+        crate::parser::oracle_ir::ast::PutCount::Up(n) => (Some(n), true),
+        crate::parser::oracle_ir::ast::PutCount::Exactly(n) => (Some(n), false),
     };
 
     let condition = parse_additional_cost_instead_condition_fragment(cond_text)
@@ -1830,7 +1837,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         player: prev_player.clone(),
         count: prev_count.clone(),
         destination: alt_destination,
-        keep_count: Some(alt_keep_count),
+        keep_count: alt_keep_count,
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
@@ -2476,17 +2483,65 @@ pub(super) fn try_nom_condition_as_ability_condition(
         }
     }
 
-    let (negated, rest_after_prefix) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("it's not a ").parse(lower.as_str())
+    // CR 508.1 + CR 509.1 + CR 400.7: "it was/wasn't attacking/blocking" — past-tense
+    // combat-status check on the trigger subject via LKI. Used by dies-triggers
+    // that condition on the creature's combat state before it left the battlefield
+    // (e.g., Garna, Bloodfist of Keld: "draw a card if it was attacking").
+    {
+        let mut parse_status = (
+            alt((
+                value(
+                    true,
+                    alt((
+                        tag::<_, _, OracleError<'_>>("it wasn't "),
+                        tag("it was not "),
+                    )),
+                ),
+                value(false, tag("it was ")),
+            )),
+            alt((
+                value(FilterProp::Attacking, tag("attacking")),
+                value(FilterProp::Blocking, tag("blocking")),
+            )),
+        );
+        if let Ok((rest, (negated, prop))) = parse_status.parse(lower.as_str()) {
+            if rest.trim().is_empty() {
+                let cond = AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![prop],
+                        ..Default::default()
+                    }),
+                    use_lki: true,
+                };
+                return Some(maybe_negate(cond, negated));
+            }
+        }
+    }
+
+    // CR 608.2c + CR 205.3a: Article choice must not affect anaphoric subtype gates.
+    let (negated, rest_after_prefix) = if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it's not a "),
+        tag("it's not an "),
+    ))
+    .parse(lower.as_str())
     {
         (true, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it's a ").parse(lower.as_str()) {
-        (false, Some(rest))
     } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("that card is a ").parse(lower.as_str())
+        alt((tag::<_, _, OracleError<'_>>("it's a "), tag("it's an "))).parse(lower.as_str())
     {
         (false, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it isn't a ").parse(lower.as_str())
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that card is a "),
+        tag("that card is an "),
+    ))
+    .parse(lower.as_str())
+    {
+        (false, Some(rest))
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it isn't a "),
+        tag("it isn't an "),
+    ))
+    .parse(lower.as_str())
     {
         (true, Some(rest))
     } else {
@@ -3877,6 +3932,30 @@ mod tests {
             tf.type_filters
                 .contains(&TypeFilter::Subtype("Goblin".to_string())),
             "expected Goblin subtype filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 608.2c + CR 205.3a: Article choice must not affect anaphoric subtype
+    /// gates. "If it's an Elf" is the same condition family as "If it's a Goblin".
+    #[test]
+    fn if_its_an_subtype_parses_condition() {
+        let (cond, body) = strip_leading_general_conditional(
+            "If it's an Elf, create three 1/1 green Elf Warrior creature tokens.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "create three 1/1 green Elf Warrior creature tokens.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = cond else {
+            panic!("expected TargetMatchesFilter for 'Elf' subtype, got {cond:?}");
+        };
+        assert!(!use_lki, "present-tense 'it's an' check must not use LKI");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for subtype");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Elf".to_string())),
+            "expected Elf subtype filter, got {:?}",
             tf.type_filters
         );
     }

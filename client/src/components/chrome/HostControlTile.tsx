@@ -308,6 +308,10 @@ export function HostControlTile() {
   const waitingSeats = playerSlots.filter((slot) => slot.kind.type === "WaitingHuman");
   const occupiedSeats = playerSlots.length - waitingSeats.length;
   const canEditSeats = hostingStatus === "waiting";
+  // Live room with open seats → glow the panel to advertise it's waiting for the
+  // table to fill. Drops the moment the room is full (or while still connecting).
+  const awaitingPlayers = hostingStatus === "waiting" && waitingSeats.length > 0;
+  const glow = awaitingPlayers ? " host-awaiting-glow" : "";
 
   useEffect(() => {
     if (!canEditSeats || !haveAnyDeck) return;
@@ -383,7 +387,7 @@ export function HostControlTile() {
           type="button"
           onClick={() => setCollapsed(false)}
           aria-label={t("hostControl.expand")}
-          className="inline-flex items-center gap-2 rounded-full surface-card border border-hairline px-3 py-2 shadow-panel backdrop-blur-md transition-colors hover:border-hairline-hover"
+          className={`inline-flex items-center gap-2 rounded-full surface-card border border-hairline px-3 py-2 shadow-panel backdrop-blur-md transition-colors hover:border-hairline-hover${glow}`}
         >
           <StatusDot connecting={isConnecting} />
           {isConnecting ? (
@@ -408,7 +412,7 @@ export function HostControlTile() {
 
   return (
     <div className={wrapper}>
-      <div className="w-[calc(100vw-1.5rem)] max-w-[20rem] surface-card rounded-panel border border-hairline shadow-panel backdrop-blur-md sm:w-72">
+      <div className={`w-[calc(100vw-1.5rem)] max-w-[20rem] surface-card rounded-panel border border-hairline shadow-panel backdrop-blur-md sm:w-72${glow}`}>
         {/* Header */}
         <div className="flex items-center justify-between gap-2 border-b border-hairline px-3 py-2">
           <button

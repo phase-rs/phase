@@ -1223,6 +1223,7 @@ impl GameRunner {
             &mut self.state,
             GameAction::DeclareAttackers {
                 attacks: attacks.to_vec(),
+                bands: vec![],
             },
         )
     }
@@ -1482,7 +1483,14 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Impending => {
                     "AlternativeCastChoice(Impending)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Prototype => {
+                    "AlternativeCastChoice(Prototype)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Mutate => {
+                    "AlternativeCastChoice(Mutate)"
+                }
             },
+            WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
             WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
@@ -1517,6 +1525,7 @@ impl GameRunner {
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
+            WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",
             WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
             WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",

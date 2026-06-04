@@ -606,6 +606,21 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 509.1b: "<predicate> and can't be blocked[ by/except by … | by more
+    // than N creatures]" pairs a keyword/continuous grant with an evasion grant
+    // under one subject (Madcap Skills). Split so the evasion clause is not
+    // dropped.
+    if let Some(defs) = try_split_and_cant_be_blocked(&stripped) {
+        return defs;
+    }
+
+    // CR 509.1b: "<grant> and can't block" pairs a P/T (or keyword) grant with a
+    // blocking restriction under one subject (Copper Carapace, Maniacal Rage,
+    // Threshold downside creatures). Split so the CantBlock clause is not dropped.
+    if let Some(defs) = try_split_and_cant_block(&stripped) {
+        return defs;
+    }
+
     // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
     // ("enchanted creature ...", "equipped creature ...") may decompose into more
     // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).
@@ -629,7 +644,63 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     }
 
     // Fall back to the single-return parser.
-    parse_static_line(text).into_iter().collect()
+    let mut defs: Vec<StaticDefinition> = parse_static_line(text).into_iter().collect();
+    append_cant_have_keyword_denials(text, &mut defs);
+    defs
+}
+
+/// CR 613.1f / CR 702: "... can't have or gain [keyword]" (Theros Archetype cycle,
+/// Arcane Lighthouse) both strips the keyword now — a `RemoveKeyword` continuous
+/// modification on the base `Continuous` static — AND denies it going forward, so a
+/// concurrent anthem can't grant it back. The forward denial is a Layer 6
+/// `StaticMode::CantHaveKeyword` static (enforced by `apply_cant_have_keyword_denials`
+/// in `layers.rs`). Emit it as a sibling of the continuous static, reusing that
+/// static's `affected`/`condition` so it covers exactly the same objects.
+fn append_cant_have_keyword_denials(text: &str, defs: &mut Vec<StaticDefinition>) {
+    // Identify the SPECIFIC keyword the line denies, parsed from the clause
+    // "... can't have or gain [keyword]" / "... can't have [keyword]". Keying the
+    // emission off any `RemoveKeyword` alone would mis-target a line that removes
+    // one keyword but denies a different one ("lose flying ... can't have or gain
+    // trample"); the denied keyword must come from the can't-have clause itself.
+    let Some(denied) = parse_cant_have_or_gain_keyword(&text.to_lowercase()) else {
+        return;
+    };
+    let mut siblings: Vec<StaticDefinition> = Vec::new();
+    for def in defs.iter() {
+        if !matches!(def.mode, StaticMode::Continuous) {
+            continue;
+        }
+        // Reuse the affected/condition scope of the continuous static that strips
+        // the denied keyword now, so the forward denial covers identical objects.
+        let strips_denied = def.modifications.iter().any(|m| {
+            matches!(m, ContinuousModification::RemoveKeyword { keyword } if *keyword == denied)
+        });
+        if strips_denied {
+            siblings.push(StaticDefinition {
+                mode: StaticMode::CantHaveKeyword {
+                    keyword: denied.clone(),
+                },
+                modifications: Vec::new(),
+                ..def.clone()
+            });
+        }
+    }
+    defs.extend(siblings);
+}
+
+/// Extract the keyword denied by a "... can't have or gain [keyword]" /
+/// "... can't have [keyword]" clause from the already-lowercased line, using the
+/// canonical keyword combinator rather than coincidentally matching a removal.
+fn parse_cant_have_or_gain_keyword(lower: &str) -> Option<Keyword> {
+    let tail =
+        if let Ok((_, (_, after))) = nom_primitives::split_once_on(lower, "can't have or gain ") {
+            after
+        } else if let Ok((_, (_, after))) = nom_primitives::split_once_on(lower, "can't have ") {
+            after
+        } else {
+            return None;
+        };
+    crate::parser::oracle_keyword::parse_keyword_from_oracle(tail.trim().trim_end_matches('.'))
 }
 
 pub(crate) fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {
@@ -1529,6 +1600,7 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
             .properties(vec![FilterProp::HasAttachment {
                 kind,
                 controller: None,
+                exclude_source: false,
             }]),
     )
 }
@@ -1545,9 +1617,24 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
 /// you control"), and analogous "[other] commander(s) [you control | your
 /// opponents control]" subject phrases.
 pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let (filter, rest) = parse_commander_subject_filter_prefix(subject.trim())?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(filter)
+}
+
+/// CR 903.3 + CR 903.3d: Parse a commander subject prefix, returning the
+/// unconsumed text for trigger/event parsers that need to continue at the verb.
+pub(crate) fn parse_commander_subject_filter_prefix(subject: &str) -> Option<(TargetFilter, &str)> {
     type VE<'a> = OracleError<'a>;
-    let lower = subject.trim().to_lowercase();
+    let lower = subject.to_lowercase();
     let i = lower.as_str();
+
+    // Possessive "your commander(s)" is owner-scoped: it refers to the
+    // commander's designation for the evaluating player, not just any
+    // commander currently controlled by that player.
+    let (i, possessive_your) = opt(tag::<_, _, VE>("your ")).parse(i).ok()?;
 
     // Optional leading "other " — emits FilterProp::Another.
     let (i, other) = opt(tag::<_, _, VE>("other ")).parse(i).ok()?;
@@ -1597,12 +1684,13 @@ pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilt
     .parse(i)
     .ok()?;
 
-    if !i.trim().is_empty() {
-        return None;
+    let mut props = Vec::new();
+    if possessive_your.is_some() {
+        props.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        });
     }
-
-    // CR 903.3d: a commander, when controlled, is a permanent on the battlefield.
-    let mut props = vec![FilterProp::IsCommander];
+    props.push(FilterProp::IsCommander);
     if has_other {
         props.push(FilterProp::Another);
     }
@@ -1611,13 +1699,17 @@ pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilt
     }
     let mut typed = if is_creature_subject {
         TypedFilter::creature().properties(props)
+    } else if possessive_your.is_some() {
+        TypedFilter::default().properties(props)
     } else {
         TypedFilter::permanent().properties(props)
     };
     if let Some(c) = controller {
         typed = typed.controller(c);
     }
-    Some(TargetFilter::Typed(typed))
+
+    let consumed = lower.len() - i.len();
+    Some((TargetFilter::Typed(typed), &subject[consumed..]))
 }
 
 /// CR 205.1a / CR 205.3 / CR 111.1: Returns true when `descriptor` is a
@@ -2063,6 +2155,10 @@ pub(crate) fn parse_combat_rule_static_predicate_nom(
         parse_cant_attack_rule_static_predicate_nom,
         value(RuleStaticPredicate::CantBlock, tag("can't block")),
         value(
+            RuleStaticPredicate::CantCrew,
+            (tag("can't crew"), opt(preceded(space1, tag("vehicles")))),
+        ),
+        value(
             RuleStaticPredicate::MustAttack,
             alt((
                 tag("attacks each combat if able"),
@@ -2099,6 +2195,27 @@ pub(crate) fn parse_combat_rule_static_predicate_nom(
     .parse(input)
 }
 
+pub(crate) fn parse_rule_static_tail_predicate_nom(
+    input: &str,
+) -> OracleResult<'_, RuleStaticPredicate> {
+    alt((
+        parse_rule_static_predicate_nom,
+        value(RuleStaticPredicate::CantBlock, tag("block")),
+        value(
+            RuleStaticPredicate::CantCrew,
+            (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+        ),
+        value(
+            RuleStaticPredicate::CantBeActivated,
+            alt((
+                tag("have its activated abilities activated"),
+                tag("have their activated abilities activated"),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
 pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
     let mut remaining = rest;
     let mut predicates = Vec::new();
@@ -2109,7 +2226,8 @@ pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleSt
             return Some(predicates);
         }
         let (after_separator, _) = parse_rule_static_separator_nom(trimmed).ok()?;
-        let (after_predicate, predicate) = parse_rule_static_predicate_nom(after_separator).ok()?;
+        let (after_predicate, predicate) =
+            parse_rule_static_tail_predicate_nom(after_separator).ok()?;
         predicates.push(predicate);
         remaining = after_predicate;
     }

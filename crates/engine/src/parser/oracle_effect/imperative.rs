@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::space1;
-use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
+use nom::character::complete::{one_of, space1};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -1512,6 +1512,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking,
             up_to: false,
             enter_with_counters,
+            face_down_profile: None,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -1529,6 +1530,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         TargetedImperativeAst::ReturnAllToZone {
             target,
@@ -1548,6 +1550,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 target,
                 enters_under,
                 enter_tapped,
+                face_down_profile: None,
             }
         }
         TargetedImperativeAst::Fight { target } => Effect::Fight {
@@ -1796,6 +1799,7 @@ pub(super) fn parse_search_and_creation_ast(
                 power,
                 toughness,
                 types,
+                supertypes,
                 colors,
                 keywords,
                 tapped,
@@ -1810,6 +1814,7 @@ pub(super) fn parse_search_and_creation_ast(
                     power: Some(power),
                     toughness: Some(toughness),
                     types,
+                    supertypes,
                     colors,
                     keywords,
                     tapped,
@@ -1997,7 +2002,8 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner: TargetFilter::Controller,
             attach_to: token.attach_to,
             enters_attacking: token.enters_attacking,
-            supertypes: vec![],
+            // CR 205.4a: Preserve parsed token supertypes (legendary/snow).
+            supertypes: token.supertypes,
             static_abilities: token.static_abilities,
             enter_with_counters: vec![],
         },
@@ -2032,6 +2038,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             ])),
             enters_under: None,
             enter_tapped: false,
+            face_down_profile: None,
         },
     }
 }
@@ -3486,6 +3493,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped,
+                    face_down_profile: None,
                 }
             } else {
                 Effect::ChangeZone {
@@ -3501,6 +3509,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enters_attacking,
                     up_to,
                     enter_with_counters,
+                    face_down_profile: None,
                 }
             }
         }
@@ -3906,6 +3915,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -3932,6 +3942,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -4042,6 +4053,7 @@ pub(super) fn lower_multi_filter_search_library(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        face_down_profile: None,
     };
 
     // CR 107.1c + CR 701.23d: Wrap the count in `UpTo` once at the helper's
@@ -4204,6 +4216,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         target: TargetFilter::Controller,
         enters_under: None,
         enter_tapped: false,
+        face_down_profile: None,
     }
 }
 
@@ -4358,6 +4371,54 @@ pub(super) fn parse_exile_ast(
                 let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
                 return Some(ZoneCounterImperativeAst::ExileTop {
                     player,
+                    count,
+                    face_down,
+                });
+            }
+        }
+
+        // CR 701.13: Exile — "exile the top card[s]" with NO "of <player>'s
+        // library" qualifier is an implicit-controller top-of-library exile
+        // (Urza, Lord High Artificer's {5}; Bloodsoaked Insight; the
+        // "shuffle ..., then exile the top card" class). The twelve qualified
+        // suffix patterns above run FIRST so a real "of <player>'s library"
+        // continuation is never shadowed by this fallback.
+        // CR 701.24: Shuffle — after a shuffle the library order is RANDOM, so
+        // the exiled top card is determined by post-shuffle order; the player
+        // makes NO selection. This deterministic top-of-library ExileTop is the
+        // rules-correct shape — NOT a library-wide ChangeZone (which would offer
+        // a tutor prompt). The ABSENCE of a selection prompt is correct.
+        let head = remainder.trim_start();
+        if let Ok((after_noun, _)) = alt((
+            tag::<_, _, OracleError<'_>>("cards"),
+            tag::<_, _, OracleError<'_>>("card"),
+        ))
+        .parse(head)
+        {
+            // Require this is a clause boundary, NOT a qualified continuation
+            // (" of <player>'s library", already handled above). `not(tag(" of "))`
+            // rejects the qualified form on the raw tail; the boundary check
+            // accepts EOF or a sentence/clause terminator (after an optional
+            // single separator space).
+            let not_qualified = not(tag::<_, _, OracleError<'_>>(" of "))
+                .parse(after_noun)
+                .is_ok();
+            let boundary = after_noun.strip_prefix(' ').unwrap_or(after_noun); // allow-noncombinator: trim one optional separator before nom boundary peek
+            let at_boundary = alt((
+                value((), eof::<_, OracleError<'_>>),
+                value((), peek(one_of(".,"))),
+            ))
+            .parse(boundary)
+            .is_ok();
+            if not_qualified && at_boundary {
+                // CR 406.3: honor a trailing "face down" suffix exactly as the
+                // twelve qualified patterns do.
+                let (after_lib, face_down) = strip_exile_top_face_down(after_noun);
+                // CR 107.3c: honor a trailing ", where x is <expr>" binding —
+                // the text defines X, so the controller doesn't choose it.
+                let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
+                return Some(ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Controller,
                     count,
                     face_down,
                 });
@@ -4681,8 +4742,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 /// accidental alpha-suffix matches (e.g., `"x lifelink"`).
 fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
     use crate::parser::oracle_nom::error::OracleResult;
-    use nom::character::complete::one_of;
-    use nom::combinator::{eof, peek, recognize};
+    use nom::combinator::recognize;
     use nom::sequence::terminated;
 
     // Shared word-boundary guard: the token just consumed must be followed by
@@ -5473,9 +5533,19 @@ pub(super) fn parse_imperative_family_ast(
             .is_some()
             {
                 Some(ImperativeFamilyAst::RollToVisitAttractions)
+            } else if let Some(ast) = try_parse_roll_n_dice(lower) {
+                // CR 706.1: "roll two six-sided dice" / "roll X d12" — the
+                // multi-dice form. Tried before the single-die path; returns
+                // None for count == 1 so "roll a d6" / "roll one d6" falls through.
+                Some(ast)
             } else {
-                try_parse_roll_die_with_modifier(lower)
-                    .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier })
+                try_parse_roll_die_with_modifier(lower).map(|(sides, modifier)| {
+                    ImperativeFamilyAst::RollDie {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        sides,
+                        modifier,
+                    }
+                })
             }
         }
         // CR 701.51b: "open an Attraction" / "open two Attractions"
@@ -6086,14 +6156,71 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
     Some(ImperativeFamilyAst::FlipCoins { count: expr })
 }
 
+/// CR 706.1: Parse "roll N six-sided dice" / "roll X d12" / "roll two d6" —
+/// the multi-dice form. Mirrors `try_parse_flip_n_coins`: strip the
+/// "roll "/"rolls " prefix, take the count via `parse_count_expr` (digit,
+/// word-number, and `X` forms), then parse the die size from the remainder.
+/// Returns None for count == 1 so "roll a d6" / "roll one d6" falls through
+/// to the existing single-die path.
+fn try_parse_roll_n_dice(lower: &str) -> Option<ImperativeFamilyAst> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll "), tag("rolls ")))
+        .parse(lower)
+        .ok()?;
+
+    // `parse_count_expr` returns the remainder with leading whitespace trimmed
+    // ("two six-sided dice" → after = "six-sided dice").
+    let (expr, after) = parse_count_expr(rest)?;
+
+    // CR 706.1: Reject count == 1 so "roll a d6" / "roll one d6" prefers the
+    // single-die `RollDie { count: Fixed(1), .. }` path.
+    if matches!(expr, QuantityExpr::Fixed { value: 1 }) {
+        return None;
+    }
+
+    let (sides, rest_after_sides) = parse_die_sides_with_rest(after)?;
+    // CR 706.1: The remainder must be only the plural/singular die noun
+    // (possibly with trailing punctuation) — a wider clause means this isn't a
+    // bare multi-dice roll, so fall through to higher-level chain parsing.
+    let rest_after_sides = rest_after_sides
+        .trim_start()
+        .trim_end_matches(['.', ',', ';'])
+        .trim();
+    if !rest_after_sides.is_empty() {
+        return None;
+    }
+
+    Some(ImperativeFamilyAst::RollDie {
+        count: expr,
+        sides,
+        // CR 706.2: multi-dice forms with a result-shifting modifier are
+        // vanishingly rare and parsed via the table path; the bare form has
+        // no modifier.
+        modifier: None,
+    })
+}
+
 /// CR 706.1a: Returns `(sides, remainder)`. The remainder is the slice immediately after
 /// the consumed die phrase, with whitespace untrimmed. Callers needing to
 /// attach trailing modifiers / clauses can branch on the remainder shape.
 fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
-    // Strip the "roll a " / "rolls a " prefix.
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll a "), tag("rolls a ")))
-        .parse(lower)
-        .ok()?;
+    // Strip the single-die article/count prefix.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("roll a "),
+        tag("rolls a "),
+        tag("roll one "),
+        tag("rolls one "),
+    ))
+    .parse(lower)
+    .ok()?;
+    parse_die_sides_with_rest(rest)
+}
+
+/// CR 706.1a: Parse a die size (`dN` numeric form or `N-sided`/word form) from
+/// the text immediately following the count/article, returning `(sides,
+/// remainder)`. Shared by the single-die (`roll a dN`) and multi-dice (`roll N
+/// dN`) parsers so both pick up every die-size spelling uniformly. The
+/// trailing " die"/" dice" noun is consumed when present.
+fn parse_die_sides_with_rest(rest: &str) -> Option<(u8, &str)> {
     // CR 706.1a: Numeric form — consume "d" followed by the longest run of
     // ASCII digits. This permits trailing text like " and add the number of
     // cards in your hand" or terminating punctuation.
@@ -6122,10 +6249,13 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     ))
     .parse(rest)
     .ok()?;
-    // Consume the optional " die" suffix so it doesn't leak into the
-    // modifier-detection path. Tolerant of absence ("roll a six-sided").
+    // Consume the optional " dice"/" die" noun so it doesn't leak into the
+    // modifier-detection path. " dice" (plural, multi-dice form) is tried
+    // before " die" so it isn't mis-consumed as " die" + "ce". Tolerant of
+    // absence ("roll a six-sided").
     let after_word = alt((
-        value((), tag::<_, _, OracleError<'_>>(" die")),
+        value((), tag::<_, _, OracleError<'_>>(" dice")),
+        value((), tag(" die")),
         value((), tag("")),
     ))
     .parse(after_word)
@@ -6477,6 +6607,14 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,
         },
+        ImperativeFamilyAst::ForceAttack {
+            duration,
+            required_player,
+        } => Effect::ForceAttack {
+            target: TargetFilter::Any,
+            required_player,
+            duration,
+        },
         // CR 701.15a: Goad target creature. Subject injection fills target from parsed text.
         ImperativeFamilyAst::Goad => Effect::Goad {
             target: TargetFilter::Any,
@@ -6528,9 +6666,14 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Clash => Effect::Clash,
         ImperativeFamilyAst::GainKeyword(effect) => effect,
         ImperativeFamilyAst::LoseKeyword(effect) => effect,
-        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame,
-        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame,
-        ImperativeFamilyAst::RollDie { sides, modifier } => Effect::RollDie {
+        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame { target: None },
+        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame { target: None },
+        ImperativeFamilyAst::RollDie {
+            count,
+            sides,
+            modifier,
+        } => Effect::RollDie {
+            count,
             sides,
             results: vec![],
             modifier,
@@ -6829,6 +6972,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 }
             } else {
                 Effect::ChangeZone {
@@ -6842,6 +6986,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters,
+                    face_down_profile: None,
                 }
             }
         }
@@ -7020,15 +7165,11 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
     Some(Effect::Adapt { count })
 }
 
-/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" as a temporary MustAttack.
+/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" requirements.
 ///
-/// Handles bare forms ("attacks this turn if able") and player-targeted forms
-/// ("attacks you this turn if able", "attacks that opponent this combat if able",
-/// "attacks target opponent this turn if able"). The player target is currently
-/// not enforced at runtime — MustAttack forces the creature to attack if able,
-/// but the specific-player constraint requires additional engine support.
-///
-/// Emits a `GenericEffect` with `StaticMode::MustAttack` and the appropriate duration.
+/// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
+/// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
+/// "you" to the resolving ability controller and grants `MustAttackPlayer`.
 fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
@@ -7059,51 +7200,57 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
         }));
     }
 
-    // Second try: player-targeted forms — "attacks [player] this turn/combat if able".
-    // Strip verb prefix, skip over the player phrase, then match the duration suffix.
-    let rest = if let Ok((r, _)) =
-        alt((tag::<_, _, OracleError<'_>>("attacks "), tag("attack "))).parse(trimmed)
-    {
-        r
-    } else {
-        return None;
-    };
+    let targeted: Result<(&str, (TargetFilter, Duration)), nom::Err<OracleError<'_>>> = (
+        alt((tag("attacks"), tag("attack"))),
+        preceded(
+            tag(" "),
+            // CR 508.1d: the required player. "you" binds the resolving ability
+            // controller; "that player" references the opponent chosen earlier
+            // in the same resolution — Ruhan of the Fomori, Raving Dead, Knight
+            // Rampager ("choose an opponent at random. This creature attacks
+            // that player this combat if able."). CR 608.2c: the choose+attack
+            // resolve together, so the resolution-scoped ChosenPlayer { index }
+            // (read from chosen_players) is the correct reference, not the
+            // durable SourceChosenPlayer. The opponent choice is the single
+            // preceding choice in every card of this class, so index 0.
+            alt((
+                value(TargetFilter::Controller, tag("you")),
+                value(
+                    TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                    ),
+                    tag("that player"),
+                ),
+            )),
+        ),
+        preceded(
+            tag(" "),
+            alt((
+                value(Duration::UntilEndOfTurn, tag("this turn if able")),
+                value(
+                    Duration::UntilEndOfCombat,
+                    alt((
+                        tag("this combat if able"),
+                        tag("that combat if able"),
+                        tag("each combat if able"),
+                    )),
+                ),
+            )),
+        ),
+    )
+        .map(|(_, required_player, duration)| (required_player, duration))
+        .parse(trimmed);
 
-    // Match duration suffix: "this turn if able" or "this combat if able"
-    let duration_suffix: Result<(&str, Duration), nom::Err<OracleError<'_>>> = alt((
-        value(Duration::UntilEndOfTurn, tag(" this turn if able")),
-        value(Duration::UntilEndOfCombat, tag(" this combat if able")),
-        value(Duration::UntilEndOfCombat, tag(" each combat if able")),
-    ))
-    .parse(rest);
-
-    // If a duration suffix is found somewhere in the remaining text,
-    // the player phrase is whatever sits between the verb and the suffix.
-    if duration_suffix.is_err() {
-        // Try scanning for the suffix by finding it anywhere after the verb
-        for (suffix_tag, dur) in [
-            (" this turn if able", Duration::UntilEndOfTurn),
-            (" this combat if able", Duration::UntilEndOfCombat),
-            (" each combat if able", Duration::UntilEndOfCombat),
-        ] {
-            if rest.ends_with(suffix_tag) {
-                return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-                    static_abilities: vec![must_attack_static_definition()],
-                    duration: Some(dur),
-                    target: None,
-                }));
-            }
+    if let Ok((rest, (required_player, duration))) = targeted {
+        if rest.is_empty() {
+            return Some(ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            });
         }
-        return None;
     }
 
-    let (_, duration) = duration_suffix.ok()?;
-
-    Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-        static_abilities: vec![must_attack_static_definition()],
-        duration: Some(duration),
-        target: None,
-    }))
+    None
 }
 
 /// CR 508.1d: Build the `StaticDefinition` for a transient "attacks if able"
@@ -7165,6 +7312,28 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
     } else {
         (trimmed, Duration::UntilEndOfTurn)
     };
+
+    // CR 702.18a / 702.11a: "can't be the target [of ...]" granted to the target
+    // for a duration is a Shroud / Hexproof keyword grant (Vines of Vastwood). Map
+    // it to the keyword so the targeting check applies the correct controller scope
+    // (Hexproof leaves the controller able to target), reusing the enforced keyword
+    // path rather than a scope-less rule static.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(clean) {
+        let keyword = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                crate::types::keywords::Keyword::Shroud
+            }
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                crate::types::keywords::Keyword::Hexproof
+            }
+        };
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
+            duration: Some(duration),
+            target: None,
+        }));
+    }
 
     let modes = parse_restriction_modes(clean)?;
     let statics: Vec<StaticDefinition> = modes
@@ -8363,6 +8532,7 @@ mod tests {
                 target: TargetFilter::Or { filters },
                 enters_under: None,
                 enter_tapped,
+                face_down_profile: None,
             } => {
                 assert_eq!(origin, None);
                 assert_eq!(destination, Zone::Battlefield);
@@ -9939,6 +10109,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_attack_you_this_combat_if_able() {
+        let result = try_parse_attack_if_able("attacks you this combat if able");
+        assert!(
+            result.is_some(),
+            "Should parse 'attacks you this combat if able'"
+        );
+        match result.unwrap() {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            } => {
+                assert_eq!(duration, Duration::UntilEndOfCombat);
+                assert_eq!(required_player, TargetFilter::Controller);
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_attack_that_player_this_combat_if_able() {
+        // CR 508.1d: Ruhan of the Fomori / Raving Dead / Knight Rampager —
+        // "attacks that player" references the opponent chosen earlier in the
+        // same resolution, lowered to ControllerRef::ChosenPlayer { index: 0 }.
+        let result = try_parse_attack_if_able("attacks that player this combat if able")
+            .expect("should parse 'attacks that player this combat if able'");
+        match result {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            } => {
+                assert_eq!(duration, Duration::UntilEndOfCombat);
+                assert_eq!(
+                    required_player.chosen_player_index(),
+                    Some(0),
+                    "that player must reference the chosen player at index 0, got {required_player:?}"
+                );
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ruhan_choose_opponent_then_force_attack_composes() {
+        use crate::types::ability::{ChoiceType, Effect};
+
+        // CR 608.2c: The full Ruhan-class trigger composes the opponent choice
+        // with a forced attack at that opponent. Both resolve together, so the
+        // sub-ability references the resolution-scoped ChosenPlayer { index }.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of combat on your turn, choose an opponent at random. ~ attacks that player this combat if able.",
+            "Ruhan of the Fomori",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("should produce one triggered ability");
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("trigger has an execute chain");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent,
+                    ..
+                }
+            ),
+            "parent must be an opponent choice, got {:?}",
+            execute.effect
+        );
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("the force-attack must chain as the sub-ability");
+        // The forced attacker is the source (~ → SelfRef), forced to attack the
+        // resolution-scoped chosen opponent (chosen_players[0]).
+        let Effect::ForceAttack {
+            target,
+            required_player,
+            duration,
+        } = &*sub.effect
+        else {
+            panic!("sub-ability must be a ForceAttack, got {:?}", sub.effect);
+        };
+        assert_eq!(*target, TargetFilter::SelfRef);
+        assert_eq!(*duration, Duration::UntilEndOfCombat);
+        assert_eq!(
+            required_player.chosen_player_index(),
+            Some(0),
+            "must force attacking the chosen player, got {required_player:?}"
+        );
+    }
+
     /// CR 508.1d / CR 509.1c: the standalone-combat-requirement recognizer
     /// used to gate the conjunction split. Recognizes both attack and
     /// must-be-blocked forms, and rejects non-requirements.
@@ -10728,11 +10996,16 @@ mod tests {
         let def = super::super::parse_effect_chain("Roll a d20.", AbilityKind::Spell);
         match &*def.effect {
             Effect::RollDie {
+                count,
                 sides,
                 modifier,
                 results,
             } => {
                 assert_eq!(*sides, 20);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
                 assert!(modifier.is_none());
                 assert!(results.is_empty());
             }
@@ -10768,6 +11041,35 @@ mod tests {
                     },
                     other => panic!("expected Add modifier, got {other:?}"),
                 }
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1a + CR 706.2: The single-die parser accepts word-count "one"
+    /// as the same semantic count as article "a", including modifier clauses.
+    #[test]
+    fn roll_one_d20_with_add_modifier_parses_to_roll_die_with_modifier() {
+        let def = super::super::parse_effect_chain(
+            "Roll one d20 and add the number of cards in your hand.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::RollDie {
+                count,
+                sides,
+                modifier,
+                ..
+            } => {
+                assert_eq!(*sides, 20);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+                assert!(matches!(
+                    modifier,
+                    Some(crate::types::ability::DieRollModifier::Add { .. })
+                ));
             }
             other => panic!("expected RollDie, got {other:?}"),
         }
@@ -10814,6 +11116,84 @@ mod tests {
         }
     }
 
+    /// CR 706.1: "Roll two six-sided dice" is the multi-dice word form —
+    /// parses to `RollDie { count: Fixed(2), sides: 6 }`. Mirrors the
+    /// `FlipCoins { count }` precedent for the dice axis.
+    #[test]
+    fn roll_two_six_sided_dice_parses_to_roll_die_count_two() {
+        let def = super::super::parse_effect_chain("Roll two six-sided dice.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie {
+                count,
+                sides,
+                modifier,
+                ..
+            } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 2 }
+                );
+                assert!(modifier.is_none());
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1: The single-die path is unchanged — "Roll a six-sided die"
+    /// still lowers to `count: Fixed(1)` so back-compat with existing
+    /// single-die cards holds.
+    #[test]
+    fn roll_a_six_sided_die_lowers_to_count_one() {
+        let def = super::super::parse_effect_chain("Roll a six-sided die.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1: The `dN` shorthand also supports a leading count: "Roll two
+    /// d6" → `count: Fixed(2), sides: 6`.
+    #[test]
+    fn roll_two_d6_parses_to_roll_die_count_two() {
+        let def = super::super::parse_effect_chain("Roll two d6.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 2 }
+                );
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1 + CR 107.3a: "Roll X twelve-sided dice" binds the count to the
+    /// announced `X`, lowering to `count: Variable("X"), sides: 12`.
+    #[test]
+    fn roll_x_twelve_sided_dice_parses_to_variable_count() {
+        let def = super::super::parse_effect_chain("Roll X twelve-sided dice.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 12);
+                assert!(matches!(
+                    count,
+                    crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable { .. }
+                    }
+                ));
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
     /// CR 706.2: open-ended upper bound "N+" parses to (min=N, max=u8::MAX) so
     /// modifier-boosted rolls beyond the printed face count still resolve to
     /// the intended branch.
@@ -10830,6 +11210,106 @@ mod tests {
         assert_eq!(
             super::try_parse_die_result_line("20 | Win the game."),
             Some((20, 20, "Win the game."))
+        );
+    }
+
+    /// CR 701.13 + CR 701.24: A suffix-less "exile the top card[s]" (no "of
+    /// <player>'s library" qualifier) is an implicit-controller, deterministic
+    /// top-of-library exile — the "shuffle ..., then exile the top card" class
+    /// (Urza, Lord High Artificer's {5}). It must NOT fall through to the
+    /// generic `tag("exile ")` path (which produces a library-wide tutor).
+    /// Covers period-terminated, plural-count, and EOF-terminated forms.
+    #[test]
+    fn exile_the_top_card_no_qualifier_parses_controller_exile_top() {
+        let mut ctx = ParseContext::default();
+
+        let singular = parse_exile_ast("exile the top card.", "exile the top card.", &mut ctx)
+            .expect("'exile the top card.' should parse as ExileTop");
+        assert!(
+            matches!(
+                singular,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected ExileTop(Controller, 1), got {singular:?}"
+        );
+
+        let plural = parse_exile_ast(
+            "exile the top two cards.",
+            "exile the top two cards.",
+            &mut ctx,
+        )
+        .expect("'exile the top two cards.' should parse as ExileTop");
+        assert!(
+            matches!(
+                plural,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    face_down: false,
+                }
+            ),
+            "expected ExileTop(Controller, 2), got {plural:?}"
+        );
+
+        let eof = parse_exile_ast("exile the top card", "exile the top card", &mut ctx)
+            .expect("'exile the top card' (no period) should parse as ExileTop");
+        assert!(
+            matches!(
+                eof,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected ExileTop(Controller, 1) at EOF, got {eof:?}"
+        );
+    }
+
+    /// Regression: the suffix-less branch must NOT shadow the qualified "of
+    /// <player>'s library" patterns, which run first and take precedence.
+    /// "of target opponent's library" → opponent filter; "of each player's
+    /// library" → ScopedPlayer. Both must survive the new fallback.
+    #[test]
+    fn exile_the_top_qualified_library_patterns_take_precedence() {
+        let mut ctx = ParseContext::default();
+
+        let opponent = parse_exile_ast(
+            "exile the top card of target opponent's library.",
+            "exile the top card of target opponent's library.",
+            &mut ctx,
+        )
+        .expect("qualified opponent-library phrase should parse");
+        assert!(
+            matches!(
+                opponent,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "expected opponent-typed ExileTop, got {opponent:?}"
+        );
+
+        let each = parse_exile_ast(
+            "exile the top card of each player's library.",
+            "exile the top card of each player's library.",
+            &mut ctx,
+        )
+        .expect("qualified each-player-library phrase should parse");
+        assert!(
+            matches!(
+                each,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::ScopedPlayer,
+                    ..
+                }
+            ),
+            "expected ScopedPlayer ExileTop, got {each:?}"
         );
     }
 }

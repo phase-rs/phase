@@ -10,15 +10,15 @@ use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient,
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
-    CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, FilterProp,
-    ManaContribution, ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition,
-    TargetFilter, TypedFilter,
+    ChosenSubtypeKind, CommanderOwnership, ContinuousModification, CopiableValues, Duration,
+    Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope, QuantityExpr,
+    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::{has_positive_counters, CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -38,7 +38,11 @@ struct ActiveCombatAssignmentRuleEffect {
 }
 
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
-fn subtype_matches_core_types(
+/// CR 205.1a: Whether a subtype correlates to at least one of the given core
+/// types — i.e. whether it survives a card-type replacement. Shared with the
+/// token-copy "stamp at creation" path so both the layered and baked
+/// applications of `SetCardTypes` drop the same uncorrelated subtypes.
+pub(crate) fn subtype_matches_core_types(
     subtype: &str,
     core_types: &[CoreType],
     all_creature_types: &[String],
@@ -1271,6 +1275,16 @@ pub fn evaluate_layers(state: &mut GameState) {
             }
         }
 
+        // CR 613.1f: "Effects that say an object can't have an ability" are
+        // applied in Layer 6 (Ability), together with the keyword grants/removals.
+        // Strip denied keywords at the END of Layer 6 — after all grants in this
+        // bucket but BEFORE Layer 7 — so a keyword-conditional P/T effect
+        // ("creatures with flying get +1/+1") evaluated later observes the denied
+        // state (Archetype cycle, Arcane Lighthouse).
+        if *layer == Layer::Ability {
+            apply_cant_have_keyword_denials(state, None);
+        }
+
         // CR 613.4c: P/T counters modify power/toughness in layer 7c. Counters
         // are object state, not continuous effects, so the `CounterPT` bucket is
         // empty and the fold runs here — after the 7c `+N/+N` effects above and
@@ -1280,6 +1294,7 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
 
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, bf_ids.iter().copied());
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
         }
         if matches!(*layer, Layer::Control | Layer::Type) {
@@ -1722,7 +1737,7 @@ fn entered_object_blocks_incremental(
     //     genuine new entry are sourced by statics already covered by (1)/(2).
     //     A controller differing from the base controller indicates a Layer-2
     //     override the incremental path does not reset for the rest of the board.
-    if !obj.counters.is_empty() {
+    if has_positive_counters(&obj.counters) {
         return true;
     }
     if obj.attached_to.is_some() || !obj.attachments.is_empty() {
@@ -1815,6 +1830,12 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
                 apply_continuous_effect_to(state, effect, entered_ids);
             }
         }
+        // CR 613.1f: mirror the full-pass end-of-Layer-6 denial hook for the
+        // incremental path, restricted to the freshly-entered objects that were
+        // reset and re-derived in this pass.
+        if *layer == Layer::Ability {
+            apply_cant_have_keyword_denials(state, Some(entered_ids));
+        }
         // CR 613.4c: P/T counters modify power/toughness in layer 7c, before the
         // 7d switch (CR 613.4d). The CounterPT bucket carries no continuous
         // effects, so fold the on-object counters in here.
@@ -1822,6 +1843,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             apply_pt_counter_modifications(state, entered_ids.iter().copied());
         }
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, entered_ids.iter().copied());
             let entered_vec: Vec<ObjectId> = entered_ids.iter().copied().collect();
             apply_intrinsic_basic_land_mana_abilities(state, &entered_vec);
         }
@@ -1894,6 +1916,25 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .collect()
 }
 
+/// CR 718.3b: A prototyped spell and the permanent it becomes have only their
+/// alternative mana cost and P/T characteristics. If that mana cost contains
+/// colored mana symbols, the spell/permanent is those colors. Reapply this after
+/// layer reset so the prototype marker survives normal layer recomputation.
+fn apply_prototype_characteristics(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
+    for id in ids {
+        let Some(obj) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        let Some(form) = obj.prototype_form.clone() else {
+            continue;
+        };
+        obj.mana_cost = form.mana_cost;
+        obj.power = Some(form.power);
+        obj.toughness = Some(form.toughness);
+        obj.color = form.colors;
+    }
+}
+
 /// CR 613.4c: Fold each permanent's power/toughness counters into its P/T in
 /// layer 7c. Counters are object state rather than continuous effects, so this
 /// runs at the `Layer::CounterPT` step of the layer loop — after the 7c `+N/+N`
@@ -1903,7 +1944,7 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
 fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
     for id in ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            if obj.counters.is_empty() {
+            if !has_positive_counters(&obj.counters) {
                 continue;
             }
 
@@ -2447,6 +2488,54 @@ fn apply_combat_assignment_rule_effects_filtered(
     }
 }
 
+/// CR 613.1f: Layer 6 applies "effects that say an object can't have an ability."
+/// `StaticMode::CantHaveKeyword { keyword }` (Theros Archetype cycle, Arcane
+/// Lighthouse: "... can't have or gain [keyword]") denies the keyword to its
+/// affected objects. This is run AFTER all keyword grants/removals are applied,
+/// so the denial wins regardless of grant timestamp — the rules-correct "can't
+/// have" outcome (a concurrent anthem can't restore a denied keyword).
+fn apply_cant_have_keyword_denials(state: &mut GameState, restrict_to: Option<&HashSet<ObjectId>>) {
+    // Collect (affected object, denied keyword) pairs under an immutable borrow,
+    // then strip — avoids a borrow conflict with the per-object mutation.
+    let mut denials: Vec<(ObjectId, Keyword)> = Vec::new();
+    for (source, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
+        let StaticMode::CantHaveKeyword { keyword } = &def.mode else {
+            continue;
+        };
+        let ctx = FilterContext::from_source(state, source.id);
+        for id in super::targeting::zone_object_ids(state, crate::types::zones::Zone::Battlefield) {
+            if restrict_to.is_some_and(|ids| !ids.contains(&id)) {
+                continue;
+            }
+            // CR 604.1: a static with no `affected` filter is intrinsically SelfRef.
+            let affected = match def.affected.as_ref() {
+                None => id == source.id,
+                Some(filter) => matches_target_filter(state, id, filter, &ctx),
+            };
+            if !affected {
+                continue;
+            }
+            if let Some(condition) = def.condition.as_ref() {
+                if !evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    source.controller,
+                    source.id,
+                    id,
+                ) {
+                    continue;
+                }
+            }
+            denials.push((id, keyword.clone()));
+        }
+    }
+    for (id, keyword) in denials {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.keywords.retain(|k| k != &keyword);
+        }
+    }
+}
+
 fn collect_active_combat_assignment_rule_effects(
     state: &GameState,
 ) -> Vec<ActiveCombatAssignmentRuleEffect> {
@@ -2677,6 +2766,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddAllLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType
     );
 
     if b_changes_types && filter_references_type(&a.affected_filter) {
@@ -2990,6 +3080,7 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. } => None,
@@ -3050,16 +3141,22 @@ fn apply_continuous_effect_filtered(
 
     record_attribution(state, effect, &affected_ids);
 
-    // Pre-read chosen subtype from source (avoids borrow conflict in the loop)
-    let chosen_subtype =
-        if let ContinuousModification::AddChosenSubtype { ref kind } = effect.modification {
-            state
-                .objects
-                .get(&effect.source_id)
-                .and_then(|src| src.chosen_subtype_str(kind))
-        } else {
-            None
-        };
+    // Pre-read chosen subtype from source (avoids borrow conflict in the loop).
+    // Populated for `AddChosenSubtype { kind }` (additive — creature type or
+    // basic land type) AND for `SetChosenBasicLandType` (CR 305.7 replacement
+    // of a land's subtype with the source's chosen basic land type). The latter
+    // is implicitly `ChosenSubtypeKind::BasicLandType`.
+    let chosen_subtype_kind = match effect.modification {
+        ContinuousModification::AddChosenSubtype { ref kind } => Some(kind),
+        ContinuousModification::SetChosenBasicLandType => Some(&ChosenSubtypeKind::BasicLandType),
+        _ => None,
+    };
+    let chosen_subtype = chosen_subtype_kind.and_then(|kind| {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.chosen_subtype_str(kind))
+    });
 
     // Pre-read chosen color from source (avoids borrow conflict in the loop).
     // Used by `AddChosenColor` (CR 105.3) AND by `AddKeyword` when the keyword
@@ -3618,15 +3715,21 @@ fn apply_continuous_effect_filtered(
             // Abilities granted by other effects are re-added in Layer 6.
             // Intrinsic mana abilities are derived from subtypes in mana_sources.rs.
             ContinuousModification::SetBasicLandType { land_type } => {
-                obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
-                obj.card_types
-                    .subtypes
-                    .push(land_type.as_subtype_str().to_string());
-                Arc::make_mut(&mut obj.abilities).clear();
-                obj.trigger_definitions.clear();
-                obj.replacement_definitions.clear();
-                obj.static_definitions.clear();
-                obj.keywords.clear();
+                set_land_subtype_replacing(obj, land_type.as_subtype_str().to_string());
+            }
+            // CR 305.7 + CR 305.6: Set the land's subtype to the basic land type
+            // chosen by the granting source (Phantasmal Terrain, Convincing
+            // Mirage). Identical replacement semantics to `SetBasicLandType` —
+            // remove old land subtypes (CR 205.3i), clear abilities/triggers/
+            // replacements/statics/keywords generated from rules text — except
+            // the concrete subtype is the source's pre-read `chosen_subtype`
+            // (read above for `BasicLandType`). The intrinsic mana ability is
+            // derived from the subtype in `mana_sources.rs` (CR 305.6). If no
+            // choice was recorded, this is a no-op.
+            ContinuousModification::SetChosenBasicLandType => {
+                if let Some(ref subtype) = chosen_subtype {
+                    set_land_subtype_replacing(obj, subtype.clone());
+                }
             }
             // CR 707.9a: Retain the source's printed trigger on the copy.
             // After `CopyValues` overwrote `obj.trigger_definitions` with the
@@ -3642,6 +3745,18 @@ fn apply_continuous_effect_filtered(
             }
         }
     }
+}
+
+// CR 305.7: Setting a land subtype replaces old land subtypes and removes the
+// land's rules-text abilities; layer 6 reapplies abilities from other effects.
+fn set_land_subtype_replacing(obj: &mut crate::game::game_object::GameObject, subtype: String) {
+    obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
+    obj.card_types.subtypes.push(subtype);
+    Arc::make_mut(&mut obj.abilities).clear();
+    obj.trigger_definitions.clear();
+    obj.replacement_definitions.clear();
+    obj.static_definitions.clear();
+    obj.keywords.clear();
 }
 
 /// CR 305.6: After layer 4 establishes final land types, derive each land's
@@ -3891,6 +4006,71 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    #[test]
+    fn prototyped_permanent_keeps_secondary_characteristics_after_type_change() {
+        let mut state = setup();
+        let prototype = make_creature(&mut state, "Combat Thresher", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&prototype).unwrap();
+            obj.card_types.core_types.insert(0, CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.base_color.clear();
+            obj.color.clear();
+            obj.prototype_form = Some(crate::game::game_object::PrototypeFormState {
+                mana_cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 2,
+                },
+                power: 1,
+                toughness: 1,
+                colors: vec![ManaColor::White],
+            });
+        }
+
+        evaluate_layers(&mut state);
+        let as_creature = state.objects.get(&prototype).unwrap();
+        assert_eq!(as_creature.mana_cost.mana_value(), 3);
+        assert_eq!(as_creature.power, Some(1));
+        assert_eq!(as_creature.toughness, Some(1));
+        assert_eq!(as_creature.color, vec![ManaColor::White]);
+
+        let type_changer = create_object(
+            &mut state,
+            CardId(161),
+            PlayerId(0),
+            "Prototype Shell".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&type_changer).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: prototype })
+                    .modifications(vec![ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Artifact],
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+        let noncreature = state.objects.get(&prototype).unwrap();
+        assert_eq!(noncreature.mana_cost.mana_value(), 3);
+        assert_eq!(noncreature.power, Some(1));
+        assert_eq!(noncreature.toughness, Some(1));
+        assert_eq!(noncreature.color, vec![ManaColor::White]);
+        assert!(!noncreature
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
     }
 
     /// Places a battlefield commander object with the given owner/controller.
@@ -4770,6 +4950,239 @@ mod tests {
         assert!(
             equipped.has_keyword(&Keyword::Shroud),
             "equipped creature must gain Shroud from the keyword companion"
+        );
+    }
+
+    /// CR 613.1f + CR 702: End-to-end confirmation that the Theros Archetype cycle /
+    /// Arcane Lighthouse "can't have or gain [keyword]" denial wins in Layer 6 over a
+    /// concurrent keyword grant. A creature given Flying by an anthem must NOT keep
+    /// Flying once an Archetype-style `CantHaveKeyword { Flying }` static is in play —
+    /// the denial is applied after all grants, so it is order-independent.
+    #[test]
+    fn cant_have_keyword_denial_overrides_concurrent_grant() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Anthem: grants Flying to all creatures (Layer 6 ability-adding effect).
+        let anthem_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flight Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(anthem_static);
+        }
+
+        // Baseline: with only the anthem, the bear gains Flying.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "anthem must grant Flying before the denial is added"
+        );
+
+        // Archetype: creatures can't have or gain Flying (Layer 6 denial).
+        let denial_static = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::Flying,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Imagination".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial_static);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
+        );
+    }
+
+    /// CR 613.1f → CR 613.1g: The denial is applied at the END of Layer 6, so a
+    /// Layer 7 power/toughness effect conditional on the denied keyword
+    /// ("creatures with flying get +1/+1") observes the keyword as already removed
+    /// and does NOT apply. Regression guard for the layer-evaluation-order fix:
+    /// running the strip after the full layer loop (post-Layer-7) would let the
+    /// buff land incorrectly.
+    #[test]
+    fn cant_have_keyword_denial_is_observed_by_layer7_pt() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Layer 6: grant Flying to all creatures.
+        let flying_anthem = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        // Layer 7: creatures WITH flying get +1/+1 — keyword-conditional P/T.
+        let flying_pt_anthem = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flight & Buff".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(flying_anthem);
+            obj.static_definitions.push(flying_pt_anthem);
+        }
+
+        // Layer 6 denial: creatures can't have or gain Flying.
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::Flying,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Imagination".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let b = state.objects.get(&bear).unwrap();
+        assert!(
+            !b.has_keyword(&Keyword::Flying),
+            "denial must strip Flying at the end of Layer 6"
+        );
+        assert_eq!(
+            b.power,
+            Some(2),
+            "Layer 7 'flying creatures get +1/+1' must NOT apply — the denial removed \
+             Flying before Layer 7, so the keyword-conditional buff sees no Flying"
+        );
+        assert_eq!(b.toughness, Some(2), "toughness likewise unbuffed");
+    }
+
+    /// CR 613.1f: The incremental layer path must mirror the full pass's
+    /// end-of-Layer-6 keyword denial for newly-entered objects. Regression guard:
+    /// if the incremental path omits the denial hook, this plain entered creature
+    /// keeps Flying from the existing anthem even though the existing Archetype
+    /// static says creatures can't have or gain Flying.
+    #[test]
+    fn cant_have_keyword_denial_applies_to_incremental_entry() {
+        let mut state = setup();
+
+        let flying_anthem = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flight Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(flying_anthem);
+        }
+
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::Flying,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Imagination".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        evaluate_layers(&mut state);
+
+        let entered = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Fresh Bear".to_string(),
+            Zone::Hand,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&entered).unwrap();
+            obj.zone = Zone::Battlefield;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.timestamp = ts;
+        }
+        state.battlefield.push_back(entered);
+        mark_layers_entered(&mut state, entered);
+        flush_layers(&mut state);
+
+        assert!(
+            !state
+                .objects
+                .get(&entered)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "entered creature must have Flying stripped by the incremental Layer 6 denial hook"
         );
     }
 
@@ -7539,6 +7952,99 @@ mod tests {
         assert!(
             !land.card_types.subtypes.contains(&"Desert".to_string()),
             "CR 305.7: Old land subtypes should be removed"
+        );
+    }
+
+    #[test]
+    fn set_chosen_basic_land_type_reads_source_choice() {
+        // CR 305.7 + CR 305.6: Phantasmal Terrain / Convincing Mirage. The Aura
+        // (source) recorded a chosen basic land type as it entered; its
+        // SetChosenBasicLandType static must set the ENCHANTED land's subtype to
+        // that chosen type with full replacement semantics — old land subtype and
+        // rules-text abilities cleared, intrinsic mana ability for the new type
+        // derived (CR 305.6).
+        use crate::types::ability::{BasicLandType, ChosenAttribute};
+
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        // Enchanted land: starts as a Swamp with a rules-text ability.
+        let land_id = make_land(&mut state, "Test Swamp", p0);
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.subtypes.push("Swamp".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            Arc::make_mut(&mut obj.base_abilities).push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+            obj.abilities = Arc::new((*obj.base_abilities).clone());
+        }
+
+        // Source Aura: chose Island as it entered, carries the chosen-type static
+        // anchored to its enchanted land.
+        let aura_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Convincing Mirage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.attached_to = Some(land_id.into());
+            obj.chosen_attributes
+                .push(ChosenAttribute::BasicLandType(BasicLandType::Island));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![ContinuousModification::SetChosenBasicLandType]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .attachments
+            .push(aura_id);
+
+        evaluate_layers(&mut state);
+
+        let land = state.objects.get(&land_id).unwrap();
+        assert!(
+            land.card_types.subtypes.contains(&"Island".to_string()),
+            "CR 305.7: enchanted land should gain the source's chosen Island subtype"
+        );
+        assert!(
+            !land.card_types.subtypes.contains(&"Swamp".to_string()),
+            "CR 305.7: old land subtype should be removed"
+        );
+        assert!(
+            !land
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::GainLife { .. })),
+            "CR 305.7: rules-text abilities should be removed"
+        );
+        assert_eq!(
+            count_mana_abilities(land, ManaColor::Blue),
+            1,
+            "CR 305.6: chosen Island should grant the intrinsic blue mana ability"
+        );
+        assert_eq!(
+            count_mana_abilities(land, ManaColor::Black),
+            0,
+            "CR 305.7: old Swamp mana ability should be gone"
         );
     }
 

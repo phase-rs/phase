@@ -9,7 +9,7 @@
 //! CR 614.1a: doubling replacements modify counter quantities.
 
 use engine::types::actions::GameAction;
-use engine::types::counter::CounterType;
+use engine::types::counter::{has_positive_counters, CounterType};
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -190,7 +190,7 @@ fn count_permanents_with_counters(state: &GameState, player: PlayerId) -> usize 
                         .players
                         .iter()
                         .any(|p| p.id != player && p.poison_counters > 0))
-                && !obj.counters.is_empty()
+                && has_positive_counters(&obj.counters)
         })
         .count()
 }
@@ -551,6 +551,55 @@ mod tests {
     }
 
     // ─── verdict() — non-counter spell ───────────────────────────────────────
+
+    #[test]
+    fn proliferate_ignores_stale_zero_count_permanents() {
+        let mut state = GameState::new_two_player(42);
+        let gen_id = create_object(
+            &mut state,
+            CardId(1),
+            AI,
+            "Proliferator".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&gen_id).unwrap().abilities)
+            .push(make_proliferate_ability());
+        let stale = create_object(
+            &mut state,
+            CardId(2),
+            AI,
+            "Stale Map".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&stale)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 0);
+
+        let candidate = activate_candidate(gen_id, 0);
+        let decision = decision();
+        let (context, config) = context_with_commitment(0.9, vec![]);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+
+        let verdict = PlusOneCountersPolicy.verdict(&ctx);
+        match verdict {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "proliferate_no_targets");
+                assert!(delta < 0.0, "expected negative delta, got {delta}");
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
+        }
+    }
 
     #[test]
     fn any_doubler_on_battlefield_finds_passive_replacement() {

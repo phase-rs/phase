@@ -11,6 +11,7 @@ use super::identifiers::ObjectId;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, StepEndManaAction};
 use super::phase::Phase;
+use super::player::PlayerId;
 use super::zones::Zone;
 
 /// CR 109.5 + CR 102.1: The "who" axis of a continuous prohibition static.
@@ -305,6 +306,46 @@ impl FromStr for CastFrequency {
     }
 }
 
+/// CR 601.2a + CR 903.8: Which origin zones a continuous free-cast permission
+/// may replace the mana cost from.
+///
+/// The axis is separate from `CastFrequency`: Omniscience/Zaffai explicitly say
+/// "from your hand", while Dracogenesis omits a zone qualifier and therefore
+/// also reaches command-zone roles that are already authorized by CR 903.8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CastFreeOrigin {
+    /// Explicit "from your hand" permissions.
+    #[default]
+    Hand,
+    /// No explicit origin qualifier. This does not create a new zone permission;
+    /// runtime casting still has to prove the object is in a built-in cast zone
+    /// (hand, or an already-authorized command-zone role).
+    DefaultCastPermission,
+}
+
+impl fmt::Display for CastFreeOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CastFreeOrigin::Hand => write!(f, "hand"),
+            CastFreeOrigin::DefaultCastPermission => write!(f, "default_cast_permission"),
+        }
+    }
+}
+
+impl FromStr for CastFreeOrigin {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "hand" => Ok(CastFreeOrigin::Hand),
+            "default_cast_permission" | "implicit_cast_zone" | "otherwise_castable" => {
+                Ok(CastFreeOrigin::DefaultCastPermission)
+            }
+            other => Err(format!("unknown CastFreeOrigin: {other}")),
+        }
+    }
+}
+
 /// CR 118.9 + CR 601.2a: The cost axis for `StaticMode::ExileCastPermission`.
 ///
 /// Sibling to `CastFrequency` and `CardPlayMode` — each axis of the exile-cast
@@ -346,6 +387,89 @@ impl FromStr for ExileCastCost {
             "pay_normal_cost" => Ok(ExileCastCost::PayNormalCost),
             "without_paying_mana_cost" => Ok(ExileCastCost::WithoutPayingManaCost),
             other => Err(format!("unknown ExileCastCost: {other}")),
+        }
+    }
+}
+
+/// CR 113.6b + CR 406.6: Which exile-link pool a `StaticMode::ExileCastPermission`
+/// draws from. A typed axis (not a `bool`) so the open-ended design space — e.g.
+/// a future "this game" or windowed pool — slots in without a refactor.
+///
+/// - `ThisTurn` — the per-turn rolling list
+///   (`GameState::cards_exiled_with_source_this_turn`). The card's reference is
+///   scoped by the "this turn" suffix (Maralen, Fae Ascendant: "...exiled with ~
+///   *this turn*..."). Cards exiled on a prior turn are no longer eligible.
+/// - `Persistent` — the lifetime `GameState::exile_links` pool, queried through
+///   `linked_exile_cards_for_source` (the same source-keyed set that backs
+///   `TargetFilter::ExiledBySource`). The card's reference has no turn bound
+///   ("...from among cards exiled with ~." — The Matrix of Time, the
+///   Prosper/Tibalt impulse-commander class). Every card still linked to the
+///   source remains eligible across turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExileCardPool {
+    /// Per-turn rolling pool (`cards_exiled_with_source_this_turn`).
+    #[default]
+    ThisTurn,
+    /// Lifetime per-source `exile_links` pool (`linked_exile_cards_for_source`).
+    Persistent,
+}
+
+impl fmt::Display for ExileCardPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExileCardPool::ThisTurn => write!(f, "this_turn"),
+            ExileCardPool::Persistent => write!(f, "persistent"),
+        }
+    }
+}
+
+impl FromStr for ExileCardPool {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "this_turn" => Ok(ExileCardPool::ThisTurn),
+            "persistent" => Ok(ExileCardPool::Persistent),
+            other => Err(format!("unknown ExileCardPool: {other}")),
+        }
+    }
+}
+
+/// CR 117.1c + CR 305.1: When a `StaticMode::ExileCastPermission` is active. A
+/// typed axis (not a `bool`) so other timing windows (e.g. "during combat")
+/// extend without a refactor.
+///
+/// - `AnyTime` — the permission functions whenever its other gates pass
+///   (Maralen, Fae Ascendant: the per-turn cast slot is not turn-restricted).
+/// - `YourTurnOnly` — CR 117.1c: the permission functions only while it is the
+///   source controller's turn ("*During your turn*, you may play lands and cast
+///   spells from among cards exiled with ~." — The Matrix of Time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExileCastTiming {
+    /// No turn restriction.
+    #[default]
+    AnyTime,
+    /// CR 117.1c: Active only during the source controller's turn.
+    YourTurnOnly,
+}
+
+impl fmt::Display for ExileCastTiming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExileCastTiming::AnyTime => write!(f, "any_time"),
+            ExileCastTiming::YourTurnOnly => write!(f, "your_turn_only"),
+        }
+    }
+}
+
+impl FromStr for ExileCastTiming {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "any_time" => Ok(ExileCastTiming::AnyTime),
+            "your_turn_only" => Ok(ExileCastTiming::YourTurnOnly),
+            other => Err(format!("unknown ExileCastTiming: {other}")),
         }
     }
 }
@@ -493,6 +617,16 @@ pub enum StaticMode {
     CantSearchLibrary {
         cause: ProhibitionScope,
     },
+    /// CR 603.2 + CR 609.3: "Triggered abilities <scope> can't cause you to
+    /// sacrifice or exile <affected>." E.g., The Master, Multiplied — triggered
+    /// abilities you control can't cause you to sacrifice or exile creature
+    /// tokens you control. When a muzzled trigger would move an affected object
+    /// to exile or its controller's graveyard via sacrifice, that object is
+    /// skipped (CR 609.3: do as much as possible). Scope of muzzled abilities
+    /// rides on `cause`; scope of protected objects rides on `affected`.
+    CantCauseSacrificeOrExile {
+        cause: ProhibitionScope,
+    },
     CastWithFlash,
     /// CR 701.38d: While voting, the controller of this permanent may vote an
     /// additional time. Each active source grants +1 to the controller's
@@ -592,6 +726,16 @@ pub enum StaticMode {
     /// runtime-implemented; other arms are inert.
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
+    /// CR 508.1d: This creature must attack a *specific* player if able ("target
+    /// creature attacks you this combat if able"; Alluring Siren, Dulcet Sirens).
+    /// Unlike the generic
+    /// [`MustAttack`] (attack any defender), this carries the `PlayerId` that must
+    /// be attacked. Data-carrying variant — not registry-registered (see
+    /// `coverage::is_data_carrying_static`); enforced by direct pattern-match in
+    /// `combat.rs` declare-attackers validation. Mirrors [`MustBlockAttacker`].
+    MustAttackPlayer {
+        player: PlayerId,
+    },
     MustBlock,
     /// CR 702.39a / CR 509.1c: This creature must block a *specific* attacker if
     /// able (Provoke; "target creature blocks ~ this turn if able"). Unlike the
@@ -671,11 +815,15 @@ pub enum StaticMode {
         alt_cost: Option<AbilityCost>,
     },
     /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
-    /// spells from hand without paying their mana costs. `Unlimited` = Omniscience,
-    /// Tamiyo emblem. `OncePerTurn` = Zaffai and the Tempests.
+    /// spells without paying their mana costs. `Unlimited` = Omniscience,
+    /// Tamiyo emblem, Dracogenesis. `OncePerTurn` = Zaffai and the Tempests.
     CastFromHandFree {
         /// CR 601.2b: Per-turn cast frequency.
         frequency: CastFrequency,
+        /// CR 601.2a + CR 903.8: Whether the permission is explicitly hand-only
+        /// or applies to built-in cast zones that already authorize the spell.
+        #[serde(default)]
+        origin: CastFreeOrigin,
     },
     /// CR 601.2a + CR 113.6b + CR 118.9: Static ability granting permission to
     /// cast cards exiled with this source — restricted to cards exiled *this
@@ -717,6 +865,19 @@ pub enum StaticMode {
         /// with future patterns).
         #[serde(default)]
         cost: ExileCastCost,
+        /// CR 113.6b + CR 406.6: Which exile-link pool the permission draws
+        /// from. `ThisTurn` (default) preserves the Maralen shape (per-turn
+        /// rolling list); `Persistent` reads the lifetime `exile_links` set for
+        /// the open-ended "cards exiled with ~" class (The Matrix of Time,
+        /// Prosper/Tibalt impulse commanders).
+        #[serde(default)]
+        pool: ExileCardPool,
+        /// CR 117.1c: When the permission functions. `AnyTime` (default)
+        /// preserves the Maralen shape; `YourTurnOnly` gates the grant to the
+        /// source controller's turn ("During your turn, you may play lands and
+        /// cast spells from among cards exiled with ~.").
+        #[serde(default)]
+        timing: ExileCastTiming,
     },
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
@@ -827,6 +988,26 @@ pub enum StaticMode {
     CantBeBlockedByMoreThan {
         max: u32,
     },
+    /// CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction — this
+    /// Aura/Equipment "can be attached only to" a permanent matching `filter`.
+    /// The complement of the negative `Other("CantBeEquipped" | "CantBeEnchanted"
+    /// | "CantBeAttached")` host-prohibition family: those live on the *host* and
+    /// refuse any attachment, whereas this lives on the *attachment* and whitelists
+    /// the legal hosts it may attach to. CR 701.3a folds equip/enchant legality
+    /// into one attach gate, so a single typed variant covers both Equipment
+    /// (CR 301.5) and Aura (CR 303.4) — the `filter` (a reused `TargetFilter`)
+    /// expresses "a creature with power N or greater", "a legendary creature",
+    /// "an {type}", etc. Corpus: Strata Scythe, Brass Knuckles ("a creature with
+    /// power/toughness N or greater"), Konda's Banner ("a legendary creature").
+    ///
+    /// Data-carrying variant (holds `TargetFilter`) — not registry-registered
+    /// (see `coverage::is_data_carrying_static`); enforced via the attachment's
+    /// active static definitions in `game/effects/attach.rs::attachment_illegality`.
+    /// A candidate host that does not match `filter` is an illegal attach/equip
+    /// target (CR 301.5b / CR 303.4j: the attachment doesn't move).
+    AttachmentRestriction {
+        filter: TargetFilter,
+    },
     /// CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
     Protection,
     /// CR 702.12: Indestructible — prevents destruction by lethal damage and destroy effects.
@@ -887,6 +1068,8 @@ pub enum StaticMode {
     Goaded,
     CantAttackAlone,
     CantBlockAlone,
+    /// CR 702.122c: This creature can't crew Vehicles.
+    CantCrew,
     MayLookAtTopOfLibrary,
 
     // -- Tier 3: Parser-produced statics --
@@ -1018,6 +1201,29 @@ pub enum StaticMode {
     /// player's normal untap, scanning the battlefield for this variant on
     /// permanents whose controller != active_player.
     UntapsDuringEachOtherPlayersUntapStep,
+    /// CR 614.1c + CR 122.1: Continuous "enters with an additional counter"
+    /// replacement static. A permanent matching `StaticDefinition::affected`
+    /// (e.g. "Other creatures you control", "Legendary creatures you control",
+    /// "Nontoken creatures you control") that would enter the battlefield does
+    /// so with `count` additional counters of `counter_type` on it.
+    ///
+    /// Per CR 614.1c these "enters with …" effects are replacement effects, not
+    /// triggered abilities; the affected-permanent scope rides on
+    /// `StaticDefinition::affected` (the controller-scoped "you control" plus any
+    /// Other/Legendary/Nontoken qualifier), exactly like the anthem statics.
+    /// Runtime integration lives in the battlefield-entry counter hook in
+    /// `effects/change_zone.rs`, which scans active statics whose `affected`
+    /// filter matches the entering object and folds `count` `counter_type`
+    /// counters into the entry's counter list.
+    ///
+    /// Class members (fixed-count form): Kalain, Reclusive Painter; Bard Class;
+    /// Gorma the Gullet; Master Chef. The dynamic-count form (Gev, "for each
+    /// opponent who lost life") is intentionally NOT matched by the parser and
+    /// remains Unimplemented until a dynamic-count axis is added.
+    EntersWithAdditionalCounters {
+        counter_type: super::counter::CounterType,
+        count: u32,
+    },
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -1049,6 +1255,7 @@ impl Hash for StaticMode {
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
+            StaticMode::MustAttackPlayer { player } => player.hash(state),
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
@@ -1058,6 +1265,7 @@ impl Hash for StaticMode {
                 BlockExceptionKind::MinBlockers { min } => min.hash(state),
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
+            StaticMode::AttachmentRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
             StaticMode::StepEndUnspentMana { filter, action } => {
@@ -1079,16 +1287,21 @@ impl Hash for StaticMode {
                 // alt_cost contains AbilityCost which lacks Hash; discriminant + play_mode only.
                 play_mode.hash(state);
             }
-            StaticMode::CastFromHandFree { frequency } => {
+            StaticMode::CastFromHandFree { frequency, origin } => {
                 frequency.hash(state);
+                origin.hash(state);
             }
             StaticMode::ExileCastPermission {
                 frequency,
                 play_mode,
                 cost,
+                pool,
+                timing,
             } => {
                 frequency.hash(state);
                 play_mode.hash(state);
+                pool.hash(state);
+                timing.hash(state);
                 cost.hash(state);
             }
             StaticMode::SkipStep { step } => step.hash(state),
@@ -1110,6 +1323,10 @@ impl Hash for StaticMode {
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::CantCauseSacrificeOrExile { .. }
+            // CR 614.1c: data-carrying (CounterType + count); consumed by direct
+            // match in change_zone.rs, never used as a HashMap key.
+            | StaticMode::EntersWithAdditionalCounters { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
@@ -1134,6 +1351,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
             StaticMode::CantBeActivated { who, .. } => write!(f, "CantBeActivated({who})"),
             StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
+            StaticMode::CantCauseSacrificeOrExile { cause } => {
+                write!(f, "CantCauseSacrificeOrExile({cause})")
+            }
             StaticMode::SuppressTriggers { events, .. } => {
                 let parts: Vec<String> = events.iter().map(|e| e.to_string()).collect();
                 write!(f, "SuppressTriggers({})", parts.join("+"))
@@ -1176,6 +1396,9 @@ impl fmt::Display for StaticMode {
                 write!(f, "PlayerProtection({target:?})")
             }
             StaticMode::MustAttack => write!(f, "MustAttack"),
+            StaticMode::MustAttackPlayer { player } => {
+                write!(f, "MustAttackPlayer({player:?})")
+            }
             StaticMode::MustBlock => write!(f, "MustBlock"),
             StaticMode::MustBlockAttacker { attacker } => {
                 write!(f, "MustBlockAttacker({attacker:?})")
@@ -1207,21 +1430,37 @@ impl fmt::Display for StaticMode {
                     write!(f, "TopOfLibraryCastPermission({play_mode})")
                 }
             }
-            StaticMode::CastFromHandFree { frequency } => {
-                write!(f, "CastFromHandFree({frequency})")
+            StaticMode::CastFromHandFree { frequency, origin } => {
+                if matches!(origin, CastFreeOrigin::Hand) {
+                    write!(f, "CastFromHandFree({frequency})")
+                } else {
+                    write!(f, "CastFromHandFree({frequency},{origin})")
+                }
             }
             StaticMode::ExileCastPermission {
                 frequency,
                 play_mode,
                 cost,
-            } => match cost {
-                ExileCastCost::WithoutPayingManaCost => {
-                    write!(f, "ExileCastPermission({play_mode},{frequency},free)")
+                pool,
+                timing,
+            } => {
+                // Positional, lossless round-trip. Segments 1-2 (play_mode,
+                // frequency) are always present; the optional "free" cost
+                // marker, the pool scope, and the timing scope are appended as
+                // tagged segments only when non-default so the historical
+                // 2-/3-segment Maralen forms keep parsing unchanged.
+                write!(f, "ExileCastPermission({play_mode},{frequency}")?;
+                if matches!(cost, ExileCastCost::WithoutPayingManaCost) {
+                    write!(f, ",free")?;
                 }
-                ExileCastCost::PayNormalCost => {
-                    write!(f, "ExileCastPermission({play_mode},{frequency})")
+                if matches!(pool, ExileCardPool::Persistent) {
+                    write!(f, ",pool={pool}")?;
                 }
-            },
+                if matches!(timing, ExileCastTiming::YourTurnOnly) {
+                    write!(f, ",timing={timing}")?;
+                }
+                write!(f, ")")
+            }
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
             StaticMode::CantEnterBattlefieldFrom => write!(f, "CantEnterBattlefieldFrom"),
@@ -1267,6 +1506,12 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeBlockedBy { filter } => {
                 write!(f, "CantBeBlockedBy({filter:?})")
             }
+            // CR 301.5 + CR 303.4: TargetFilter has no parseable string form —
+            // Debug format, one-way (mirrors CantBeBlockedBy). No from_str
+            // reconstruction; the variant is data-carrying.
+            StaticMode::AttachmentRestriction { filter } => {
+                write!(f, "AttachmentRestriction({filter:?})")
+            }
             StaticMode::CantBeBlockedByMoreThan { max } => {
                 write!(f, "CantBeBlockedByMoreThan({max})")
             }
@@ -1292,6 +1537,7 @@ impl fmt::Display for StaticMode {
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
+            StaticMode::CantCrew => write!(f, "CantCrew"),
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),
@@ -1337,6 +1583,14 @@ impl fmt::Display for StaticMode {
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
+            }
+            // CR 614.1c + CR 122.1: "enters with an additional [counter] counter"
+            // — Display carries both the counter type and the fixed count.
+            StaticMode::EntersWithAdditionalCounters {
+                counter_type,
+                count,
+            } => {
+                write!(f, "EntersWithAdditionalCounters({counter_type:?},{count})")
             }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
@@ -1522,26 +1776,37 @@ impl FromStr for StaticMode {
             }
             "CastFromHandFree" => StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
             },
             s if s.starts_with("CastFromHandFree(") => {
-                let freq = s
+                let inner = s
                     .strip_prefix("CastFromHandFree(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("unlimited");
+                let mut parts = inner.split(',');
+                let freq = parts.next().unwrap_or("unlimited");
+                let origin = parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(CastFreeOrigin::Hand);
                 StaticMode::CastFromHandFree {
                     frequency: freq.parse().unwrap_or(CastFrequency::Unlimited),
+                    origin,
                 }
             }
             "ExileCastPermission" => StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
                 cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
             },
             s if s.starts_with("ExileCastPermission(") => {
-                // Display form: "ExileCastPermission(<play_mode>,<frequency>)" or
-                // "ExileCastPermission(<play_mode>,<frequency>,free)" for the
-                // `WithoutPayingManaCost` shape. Parse positionally so a later
-                // 3-segment form survives lossless round-trip.
+                // Display form: "ExileCastPermission(<play_mode>,<frequency>[,free]
+                // [,pool=<scope>][,timing=<scope>])". The first two segments are
+                // positional; the optional "free" cost marker and the tagged
+                // pool=/timing= segments are present only when non-default, so
+                // the historical 2-/3-segment Maralen forms round-trip unchanged.
                 let inner = s
                     .strip_prefix("ExileCastPermission(")
                     .and_then(|s| s.strip_suffix(')'))
@@ -1555,15 +1820,28 @@ impl FromStr for StaticMode {
                     .next()
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(CastFrequency::Unlimited);
-                let cost = if matches!(parts.next(), Some("free")) {
-                    ExileCastCost::WithoutPayingManaCost
-                } else {
-                    ExileCastCost::PayNormalCost
-                };
+                let mut cost = ExileCastCost::PayNormalCost;
+                let mut pool = ExileCardPool::ThisTurn;
+                let mut timing = ExileCastTiming::AnyTime;
+                for seg in parts {
+                    if seg == "free" {
+                        cost = ExileCastCost::WithoutPayingManaCost;
+                    } else if let Some(scope) = seg.strip_prefix("pool=") {
+                        if let Ok(p) = scope.parse() {
+                            pool = p;
+                        }
+                    } else if let Some(scope) = seg.strip_prefix("timing=") {
+                        if let Ok(t) = scope.parse() {
+                            timing = t;
+                        }
+                    }
+                }
                 StaticMode::ExileCastPermission {
                     frequency,
                     play_mode,
                     cost,
+                    pool,
+                    timing,
                 }
             }
             "CantBeCountered" => StaticMode::CantBeCountered,
@@ -1595,6 +1873,7 @@ impl FromStr for StaticMode {
             "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,
+            "CantCrew" => StaticMode::CantCrew,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
             // Tier 3
             "MayChooseNotToUntap" => StaticMode::MayChooseNotToUntap,
@@ -1666,9 +1945,24 @@ impl FromStr for StaticMode {
                         return Ok(StaticMode::CantSearchLibrary { cause });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CantCauseSacrificeOrExile(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 603.2 + CR 609.3: Round-trip of the scope identifier.
+                    if let Ok(cause) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantCauseSacrificeOrExile { cause });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
                 } else if other.starts_with("SuppressTriggers(") {
                     // CR 603.2g: Data-carrying — round-trip preserves discriminant only.
                     // Callers that need the full filter/events read from the typed field.
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if other.starts_with("EntersWithAdditionalCounters(") {
+                    // CR 614.1c: Data-carrying (CounterType + count). The Display
+                    // form uses the Debug rendering of `CounterType`, which has no
+                    // FromStr inverse; round-trip is diagnostic-only and callers
+                    // read the typed field. Mirrors MaximumHandSize / SuppressTriggers.
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
                     .strip_prefix("CantCastDuring(")
@@ -1998,6 +2292,7 @@ mod tests {
             StaticMode::MustBeBlocked,
             StaticMode::CantAttackAlone,
             StaticMode::CantBlockAlone,
+            StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
             // Tier 3: parser-produced statics
             StaticMode::MayChooseNotToUntap,
@@ -2021,20 +2316,39 @@ mod tests {
             // Cast-from-hand-free permissions (Omniscience; Zaffai).
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
             },
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
+            },
+            StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::DefaultCastPermission,
             },
             // Exile-cast permission (Maralen, Fae Ascendant).
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
                 cost: ExileCastCost::WithoutPayingManaCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
                 cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
+            },
+            // Persistent, your-turn-only exile-play permission
+            // (The Matrix of Time; Prosper/Tibalt impulse-commander class).
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Play,
+                cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::Persistent,
+                timing: ExileCastTiming::YourTurnOnly,
             },
             // Casting prohibitions
             StaticMode::CantBeCast {

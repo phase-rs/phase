@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
@@ -22,7 +22,7 @@ interface GameBoardProps {
   playerHud?: React.ReactNode;
 }
 
-export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
+export const GameBoard = memo(function GameBoard({ oppHud, playerHud }: GameBoardProps) {
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
@@ -271,4 +271,4 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
       </div>
     </BoardInteractionContext.Provider>
   );
-}
+});

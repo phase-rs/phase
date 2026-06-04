@@ -141,7 +141,8 @@ fn unique_recipient_from_filter(
         .iter()
         .filter(|p| {
             !p.is_eliminated
-                && crate::game::filter::player_matches_target_filter(
+                && crate::game::filter::player_matches_target_filter_in_state(
+                    state,
                     filter,
                     p.id,
                     Some(source_controller),
@@ -534,6 +535,7 @@ mod tests {
         .sub_ability(give_control);
         let ability = ResolvedAbility::new(
             Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
                 sides: 4,
                 results: vec![],
                 modifier: None,

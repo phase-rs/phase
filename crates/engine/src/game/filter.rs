@@ -652,6 +652,11 @@ fn controller_ref_player(
         ControllerRef::ChosenPlayer { index } => {
             ability.and_then(|a| a.chosen_players.get(*index as usize).copied())
         }
+        // CR 613.1: The player persisted on the source via an "as ~ enters,
+        // choose a player" replacement — read durably from the source object.
+        ControllerRef::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, source_id)
+        }
         // CR 603.2 + CR 109.4: The player identified by the triggering event.
         ControllerRef::TriggeringPlayer => crate::game::quantity::triggering_event_player(state),
     }
@@ -1106,6 +1111,14 @@ fn filter_inner_for_object(
                     }
                     ControllerRef::DefendingPlayer => {
                         match crate::game::combat::defending_player_for_attacker(state, source_id) {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 613.1: "the chosen player controls" — match against the
+                    // player persisted on the source.
+                    ControllerRef::SourceChosenPlayer => {
+                        match crate::game::game_object::source_chosen_player(state, source_id) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -1674,6 +1687,9 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TargetPlayer => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
+                    // CR 613.1: "the chosen player" has no meaning for a
+                    // spell-history record. Fail closed.
+                    ControllerRef::SourceChosenPlayer => return false,
                     // CR 109.4: A chosen-player scope has no meaning for a
                     // spell-history record (no resolution context). Fail closed.
                     ControllerRef::ChosenPlayer { .. } => return false,
@@ -2357,9 +2373,12 @@ fn aura_can_enchant_referenced_target(
             source.ability,
             source.recipient_id,
         ),
-        TargetRef::Player(player_id) => {
-            player_matches_target_filter(enchant_filter, *player_id, Some(aura.controller))
-        }
+        TargetRef::Player(player_id) => player_matches_target_filter_in_state(
+            state,
+            enchant_filter,
+            *player_id,
+            Some(aura.controller),
+        ),
     }
 }
 
@@ -2566,10 +2585,15 @@ fn matches_filter_prop(
             let controller_pid = controller.as_ref().and_then(|c| {
                 controller_ref_player(state, source.id, source.controller, source.ability, c)
             });
-            state.objects.values().any(|perm| {
-                if perm.zone != crate::types::zones::Zone::Battlefield {
+            // CR 730.2: iterate `state.battlefield` — the authoritative list of
+            // INDEPENDENT permanents — so an absorbed merge component (zone is
+            // Battlefield but it is not a member of this list) is never counted
+            // as a separate permanent. This also avoids an O(n) per-object
+            // absorbed-component scan over `state.objects`.
+            state.battlefield.iter().any(|perm_id| {
+                let Some(perm) = state.objects.get(perm_id) else {
                     return false;
-                }
+                };
                 let controller_ok = match (controller, controller_pid) {
                     (Some(ControllerRef::You), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::Opponent), _) => {
@@ -2581,6 +2605,7 @@ fn matches_filter_prop(
                         perm.controller == pid
                     }
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::SourceChosenPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::ChosenPlayer { .. }), Some(pid)) => perm.controller == pid,
                     // CR 603.2 + CR 109.4: triggering-player-scoped name match.
                     (Some(ControllerRef::TriggeringPlayer), Some(pid)) => perm.controller == pid,
@@ -2617,6 +2642,11 @@ fn matches_filter_prop(
             }
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
+            // CR 613.1: Ownership relative to the source's persisted chosen player.
+            ControllerRef::SourceChosenPlayer => {
+                crate::game::game_object::source_chosen_player(state, source.id)
                     .is_some_and(|pid| pid == obj.owner)
             }
             // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
@@ -2704,10 +2734,18 @@ fn matches_filter_prop(
             let referent = source.recipient_id.unwrap_or(source.id);
             obj.attached_to.and_then(|t| t.as_object()) == Some(referent)
         }
-        // CR 303.4 + CR 301.5: Non-source-relative attachment predicate.
-        // Matches objects that have at least one attachment of the given kind whose
-        // controller satisfies the optional `ControllerRef`.
-        FilterProp::HasAttachment { kind, controller } => obj.attachments.iter().any(|att_id| {
+        // CR 303.4 + CR 301.5: Attachment predicate. Matches objects that have
+        // at least one attachment of the given kind whose controller satisfies
+        // the optional `ControllerRef`. `exclude_source` preserves "another
+        // Aura/Equipment" legality after the source becomes attached.
+        FilterProp::HasAttachment {
+            kind,
+            controller,
+            exclude_source,
+        } => obj.attachments.iter().any(|att_id| {
+            if *exclude_source && *att_id == source.id {
+                return false;
+            }
             let Some(att) = state.objects.get(att_id) else {
                 return false;
             };
@@ -3124,6 +3162,11 @@ fn zone_change_record_matches_property(
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
             }
+            // CR 613.1: Ownership relative to the source's persisted chosen player.
+            ControllerRef::SourceChosenPlayer => {
+                crate::game::game_object::source_chosen_player(state, source.id)
+                    .is_some_and(|pid| pid == record.owner)
+            }
             // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
             ControllerRef::ChosenPlayer { index } => source
                 .ability
@@ -3180,8 +3223,13 @@ fn zone_change_record_matches_property(
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
-        FilterProp::HasAttachment { kind, controller } => record.attachments.iter().any(|att| {
-            att.kind == *kind
+        FilterProp::HasAttachment {
+            kind,
+            controller,
+            exclude_source,
+        } => record.attachments.iter().any(|att| {
+            (!*exclude_source || att.object_id != source.id)
+                && att.kind == *kind
                 && attachment_controller_matches(
                     controller.as_ref(),
                     att.controller,
@@ -3314,6 +3362,11 @@ fn attachment_controller_matches(
         }
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
+        // CR 613.1: Attachment controller relative to the source's chosen player.
+        Some(ControllerRef::SourceChosenPlayer) => {
+            crate::game::game_object::source_chosen_player(state, source.id)
                 .is_some_and(|pid| pid == attachment_controller)
         }
         // CR 608.2c + CR 109.4: Attachment controller relative to a chosen player.
@@ -3770,6 +3823,38 @@ pub fn player_matches_target_filter(
     player_id: PlayerId,
     source_controller: Option<PlayerId>,
 ) -> bool {
+    player_matches_target_filter_with(
+        filter,
+        player_id,
+        source_controller,
+        &|controller, player| controller != player,
+    )
+}
+
+/// Check if a player target matches a TargetFilter constraint using team-aware
+/// opponent semantics from the game state.
+/// CR 102.2 / CR 102.3 / CR 115.9c: Opponent-scoped player targets exclude
+/// teammates in team multiplayer.
+pub fn player_matches_target_filter_in_state(
+    state: &GameState,
+    filter: &TargetFilter,
+    player_id: PlayerId,
+    source_controller: Option<PlayerId>,
+) -> bool {
+    player_matches_target_filter_with(
+        filter,
+        player_id,
+        source_controller,
+        &|controller, player| crate::game::players::is_opponent(state, controller, player),
+    )
+}
+
+fn player_matches_target_filter_with(
+    filter: &TargetFilter,
+    player_id: PlayerId,
+    source_controller: Option<PlayerId>,
+    is_opponent: &impl Fn(PlayerId, PlayerId) -> bool,
+) -> bool {
     match filter {
         TargetFilter::Any | TargetFilter::Player => true,
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
@@ -3780,7 +3865,9 @@ pub fn player_matches_target_filter(
         TargetFilter::ScopedPlayer => false,
         TargetFilter::Typed(ref tf) if tf.type_filters.is_empty() => match &tf.controller {
             Some(ControllerRef::You) => source_controller == Some(player_id),
-            Some(ControllerRef::Opponent) => source_controller.is_some_and(|c| c != player_id),
+            Some(ControllerRef::Opponent) => {
+                source_controller.is_some_and(|controller| is_opponent(controller, player_id))
+            }
             Some(ControllerRef::ScopedPlayer) => false,
             // CR 109.4: TargetPlayer has no meaning when matching a player against
             // a filter without ability context. Fail closed (mirrors the pattern
@@ -3788,6 +3875,9 @@ pub fn player_matches_target_filter(
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
+            // CR 613.1: "the chosen player" has no meaning in this name-filter
+            // context. Fail closed (mirrors `TargetPlayer`).
+            Some(ControllerRef::SourceChosenPlayer) => false,
             // CR 109.4: Chosen-player scope has no meaning without resolution
             // context. Fail closed (mirrors `TargetPlayer`).
             Some(ControllerRef::ChosenPlayer { .. }) => false,
@@ -3798,12 +3888,12 @@ pub fn player_matches_target_filter(
         },
         // Typed filters with type_filters don't match players
         TargetFilter::Typed(_) => false,
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|f| player_matches_target_filter(f, player_id, source_controller)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|f| player_matches_target_filter(f, player_id, source_controller)),
+        TargetFilter::Or { filters } => filters.iter().any(|f| {
+            player_matches_target_filter_with(f, player_id, source_controller, is_opponent)
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|f| {
+            player_matches_target_filter_with(f, player_id, source_controller, is_opponent)
+        }),
         // CR 102.1 + CR 103.1: seating-neighbor resolution requires
         // `state.seat_order`, which is not available in this stateless matcher.
         // The recipient is resolved upstream at the GainControl recipient path
@@ -3826,6 +3916,7 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
@@ -3901,6 +3992,26 @@ mod tests {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         assert!(!matches_target_filter(&state, id, &TargetFilter::None, id));
+    }
+
+    #[test]
+    fn player_filter_in_state_excludes_two_headed_giant_teammate_for_opponent_scope() {
+        let state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let opponent_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        assert!(!player_matches_target_filter_in_state(
+            &state,
+            &opponent_filter,
+            PlayerId(1),
+            Some(PlayerId(0))
+        ));
+        assert!(player_matches_target_filter_in_state(
+            &state,
+            &opponent_filter,
+            PlayerId(2),
+            Some(PlayerId(0))
+        ));
     }
 
     /// CR 702.26b: `matches_target_filter_including_phased_out` evaluates the
@@ -5048,6 +5159,79 @@ mod tests {
             !matches_target_filter(&state, unlinked, &filter, source),
             "unlinked object should not match ExiledBySource"
         );
+    }
+
+    #[test]
+    fn typed_exiled_by_source_matches_only_linked_exiled_cards() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let linked_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Linked Creature".into(),
+            Zone::Exile,
+        );
+        let unlinked_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Unlinked Creature".into(),
+            Zone::Exile,
+        );
+        let battlefield_creature = add_creature(&mut state, PlayerId(1), "Battlefield Creature");
+
+        for id in [linked_creature, unlinked_creature] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // CR 607.2a: "exiled this way" targets are linked to cards exiled by
+        // the same source, not every object matching the typed phrase.
+        state.exile_links.push(ExileLink {
+            exiled_id: linked_creature,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::ExiledBySource,
+            ],
+        };
+
+        assert!(matches_target_filter(
+            &state,
+            linked_creature,
+            &filter,
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            unlinked_creature,
+            &filter,
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            battlefield_creature,
+            &filter,
+            source
+        ));
     }
 
     #[test]
@@ -6443,6 +6627,7 @@ mod tests {
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
+                exclude_source: false,
             },
         ]));
         assert!(
@@ -7485,6 +7670,7 @@ mod tests {
             &FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
+                exclude_source: false,
             },
             &state,
             &enchanted_record,
@@ -7494,6 +7680,7 @@ mod tests {
             &FilterProp::HasAttachment {
                 kind: AttachmentKind::Equipment,
                 controller: None,
+                exclude_source: false,
             },
             &state,
             &enchanted_record,

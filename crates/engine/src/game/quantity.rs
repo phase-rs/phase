@@ -10,7 +10,8 @@ use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_counter_added_record,
     matches_target_filter_on_damage_record_source, matches_target_filter_on_zone_change_record,
-    player_matches_target_filter, spell_record_matches_filter, type_filter_matches, FilterContext,
+    player_matches_target_filter_in_state, spell_record_matches_filter, type_filter_matches,
+    FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
@@ -19,7 +20,7 @@ use crate::types::ability::{
     QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::CounterType;
+use crate::types::counter::{positive_counter_types, CounterType};
 use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -1484,8 +1485,9 @@ fn resolve_ref(
                     ZoneRef::Exile => {
                         for &obj_id in &state.exile {
                             if let Some(obj) = state.objects.get(&obj_id) {
-                                let owner_matches =
-                                    count_scope_owner_matches(scope, ctx, controller, obj.owner);
+                                let owner_matches = count_scope_owner_matches(
+                                    state, scope, ctx, controller, obj.owner,
+                                );
                                 if owner_matches {
                                     for ct in &obj.card_types.core_types {
                                         seen.insert(*ct);
@@ -1576,7 +1578,7 @@ fn resolve_ref(
                     for &obj_id in &state.exile {
                         if let Some(obj) = state.objects.get(&obj_id) {
                             let owner_matches =
-                                count_scope_owner_matches(scope, ctx, controller, obj.owner);
+                                count_scope_owner_matches(state, scope, ctx, controller, obj.owner);
                             if owner_matches && matches_zone_card_filter(state, obj_id, card_types)
                             {
                                 count += 1;
@@ -1628,11 +1630,11 @@ fn resolve_ref(
         //      "that many" for Ur-Dragon-style batched triggers; without it
         //      the `extract_amount_from_event` cascade below falls through to
         //      0 on `AttackersDeclared` and similar batched events.
-        //   2. CR 706.4: `die_result_this_resolution` — a die rolled
-        //      earlier in THIS resolution (no results table) outranks the
-        //      triggering event's own amount, so "roll a d20. <effect> equal to
-        //      the result" consumes the roll, not the combat damage / life
-        //      change that triggered it.
+        //   2. CR 706.4: `die_result_this_resolution` — die results recorded
+        //      earlier in THIS resolution (no results table) outrank the
+        //      triggering event's own amount, so "roll one or more dice.
+        //      <effect> equal to the result(s)" consumes the roll total, not
+        //      the combat damage / life change that triggered it.
         //   3. `extract_amount_from_event(current_trigger_event)` — scalar
         //      events with an inherent amount (damage dealt, life changed,
         //      cards drawn, counters added/removed, die rolls).
@@ -1645,10 +1647,11 @@ fn resolve_ref(
         QuantityRef::EventContextAmount => state
             .current_trigger_match_count
             .map(u32_to_i32_saturating)
-            // CR 706.4: A die rolled earlier in THIS resolution outranks the
-            // triggering event's own amount, so "roll a d20. <effect> equal to the result"
-            // consumes the roll, not the combat damage / life change that triggered it.
-            .or_else(|| state.die_result_this_resolution.map(i32::from))
+            // CR 706.4: Die results recorded earlier in THIS resolution
+            // outrank the triggering event's own amount, so "roll one or more
+            // dice. <effect> equal to the result(s)" consumes the roll total,
+            // not the combat damage / life change that triggered it.
+            .or(state.die_result_this_resolution)
             .or_else(|| {
                 state
                     .current_trigger_event
@@ -1782,6 +1785,11 @@ fn resolve_ref(
                             .is_some_and(|player| player == obj.controller),
                         ControllerRef::DefendingPlayer => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
+                                .is_some_and(|pid| pid == obj.controller)
+                        }
+                        // CR 613.1: Land controlled by the source's chosen player.
+                        ControllerRef::SourceChosenPlayer => {
+                            crate::game::game_object::source_chosen_player(state, ctx.source)
                                 .is_some_and(|pid| pid == obj.controller)
                         }
                         // CR 608.2c + CR 109.4: Land controlled by a chosen player.
@@ -2009,7 +2017,7 @@ fn resolve_ref(
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
-                    counter_added_actor_matches(actor, ctx, controller, record.actor)
+                    counter_added_actor_matches(state, actor, ctx, controller, record.actor)
                         && counters.matches(&record.counter_type)
                         && matches_target_filter_on_counter_added_record(
                             state,
@@ -2151,6 +2159,11 @@ fn resolve_ref(
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
+                        // CR 613.1: Attachment controlled by the source's chosen player.
+                        Some(ControllerRef::SourceChosenPlayer) => {
+                            crate::game::game_object::source_chosen_player(state, ctx.source)
+                                .is_some_and(|pid| pid == snap.controller)
+                        }
                         // CR 608.2c + CR 109.4: Attachment controlled by a chosen player.
                         Some(ControllerRef::ChosenPlayer { index }) => ability
                             .and_then(|a| a.chosen_players.get(*index as usize).copied())
@@ -2204,6 +2217,11 @@ fn damage_source_controller_matches(
             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                 .is_some_and(|player| actual == player)
         }
+        // CR 613.1: Damage source controlled by the source's chosen player.
+        ControllerRef::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .is_some_and(|player| actual == player)
+        }
         // CR 608.2c + CR 109.4: Damage source controlled by a chosen player.
         ControllerRef::ChosenPlayer { index } => ability
             .and_then(|ability| ability.chosen_players.get(*index as usize).copied())
@@ -2254,6 +2272,10 @@ fn scoped_players<'a>(
     state.players.iter().filter(move |p| match scope {
         CountScope::Controller | CountScope::Owner => p.id == controller,
         CountScope::ScopedPlayer => p.id == scoped_player,
+        CountScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .is_some_and(|player| p.id == player)
+        }
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
     })
@@ -2263,6 +2285,7 @@ fn scoped_players<'a>(
 /// known object owner. Mirrors `scoped_players` for global zones (exile)
 /// where iteration over players is replaced by per-object owner predication.
 fn count_scope_owner_matches(
+    state: &GameState,
     scope: &CountScope,
     ctx: QuantityContext,
     controller: PlayerId,
@@ -2271,12 +2294,17 @@ fn count_scope_owner_matches(
     match scope {
         CountScope::Controller | CountScope::Owner => owner == controller,
         CountScope::ScopedPlayer => owner == ctx.scoped_player.unwrap_or(controller),
+        CountScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .is_some_and(|player| owner == player)
+        }
         CountScope::All => true,
         CountScope::Opponents => owner != controller,
     }
 }
 
 fn counter_added_actor_matches(
+    state: &GameState,
     scope: &CountScope,
     ctx: QuantityContext,
     controller: PlayerId,
@@ -2285,6 +2313,10 @@ fn counter_added_actor_matches(
     match scope {
         CountScope::Controller | CountScope::Owner => actor == controller,
         CountScope::ScopedPlayer => actor == ctx.scoped_player.unwrap_or(controller),
+        CountScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .is_some_and(|player| actor == player)
+        }
         CountScope::All => true,
         CountScope::Opponents => actor != controller,
     }
@@ -2413,9 +2445,12 @@ fn damage_record_target_matches(
                 live_target_filter.as_ref().unwrap_or(filter);
             matches_target_filter(state, object_id, live_target_filter_ref, filter_ctx)
         }
-        TargetRef::Player(player_id) => {
-            player_matches_target_filter(filter, player_id, filter_ctx.source_controller)
-        }
+        TargetRef::Player(player_id) => player_matches_target_filter_in_state(
+            state,
+            filter,
+            player_id,
+            filter_ctx.source_controller,
+        ),
     }
 }
 
@@ -2507,8 +2542,9 @@ fn object_id_for_scope(
 /// CR 122.1: Distinct counter kinds present on permanents matching `filter`
 /// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
 /// resolver (zone from `filter.extract_in_zone()`, `zone_object_ids`,
-/// `matches_target_filter`), enumerating `obj.counters.keys()` the same way
-/// proliferate does. Returns a `Vec<CounterType>` SORTED by `CounterType::as_str`
+/// `matches_target_filter`), enumerating only positive-count counter kinds the
+/// same way proliferate does. Returns a `Vec<CounterType>` SORTED by
+/// `CounterType::as_str`
 /// for determinism — `CounterType` has no `Ord` (and must not gain one), so the
 /// underlying `HashSet` iteration order is nondeterministic and would cause
 /// replay desync if returned directly. Used both as the `len()` source for
@@ -2528,8 +2564,8 @@ pub(crate) fn distinct_counter_kinds_among(
             continue;
         }
         if let Some(obj) = state.objects.get(&id) {
-            for ct in obj.counters.keys() {
-                seen.insert(ct.clone());
+            for counter_type in positive_counter_types(&obj.counters) {
+                seen.insert(counter_type);
             }
         }
     }
@@ -2947,6 +2983,11 @@ fn resolve_single_player_scope(
         PlayerScope::ParentObjectTargetController => {
             ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
         }
+        // CR 613.1: the player persisted on the source via an "as ~ enters,
+        // choose a player" replacement (Entropic Specter, Sewer Nemesis).
+        PlayerScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+        }
         // Aggregate scopes have no single-player reading.
         PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
     }
@@ -3021,6 +3062,13 @@ where
             .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
+        // CR 613.1: the player persisted on the source via an "as ~ enters,
+        // choose a player" replacement (Entropic Specter, Sewer Nemesis).
+        PlayerScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+                .map_or(0, &mut extract)
+        }
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
             state.players.iter().filter(|p| p.id != controller),
             *aggregate,
@@ -3296,10 +3344,11 @@ pub(crate) fn resolve_player_count(
                             .iter()
                             .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
                         PlayerFilter::PerformedActionThisWay { relation, action } => {
-                            crate::game::players::matches_relation(p.id, controller, *relation)
-                                && crate::game::players::performed_action_this_way(
-                                    state, p.id, *action,
-                                )
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && crate::game::players::performed_action_this_way(
+                                state, p.id, *action,
+                            )
                         }
                         PlayerFilter::OwnersOfCardsExiledBySource => {
                             crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
@@ -3314,7 +3363,7 @@ pub(crate) fn resolve_player_count(
                         // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
                         // Falls back to plain Opponent semantics when no trigger event is in scope.
                         PlayerFilter::OpponentOtherThanTriggering => {
-                            if p.id == controller {
+                            if !crate::game::players::is_opponent(state, controller, p.id) {
                                 false
                             } else {
                                 let triggering =
@@ -3348,15 +3397,16 @@ pub(crate) fn resolve_player_count(
                             count,
                         } => {
                             let threshold = resolve_quantity(state, count, controller, source_id);
-                            crate::game::players::matches_relation(p.id, controller, *relation)
-                                && crate::game::effects::player_control_count_compares(
-                                    state,
-                                    p.id,
-                                    filter,
-                                    *comparator,
-                                    threshold,
-                                    source_id,
-                                )
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && crate::game::effects::player_control_count_compares(
+                                state,
+                                p.id,
+                                filter,
+                                *comparator,
+                                threshold,
+                                source_id,
+                            )
                         }
                         // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
                         // whose [scalar attr] [comparator] [value]" — count
@@ -3372,9 +3422,10 @@ pub(crate) fn resolve_player_count(
                             value,
                         } => {
                             let threshold = resolve_quantity(state, value, controller, source_id);
-                            crate::game::players::matches_relation(p.id, controller, *relation)
-                                && crate::game::effects::candidate_player_scalar(p, attr)
-                                    .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && crate::game::effects::candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                         }
                     }
             })
@@ -3677,9 +3728,10 @@ mod tests {
     }
 
     /// CR 122.1 + CR 109.4: count distinct counter kinds among permanents the
-    /// resolving player controls. An opponent's counter kind must be EXCLUDED,
-    /// and the same kind on two controlled permanents counts once. Order is
-    /// deterministic (sorted by `as_str`).
+    /// resolving player controls. An opponent's counter kind and stale
+    /// zero-count map entries must be EXCLUDED, and the same kind on two
+    /// controlled permanents counts once. Order is deterministic (sorted by
+    /// `as_str`).
     #[test]
     fn resolve_distinct_counter_kinds_among_controlled_permanents() {
         let mut state = GameState::new_two_player(42);
@@ -3722,6 +3774,8 @@ mod tests {
             let obj = state.objects.get_mut(&perm_c).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.counters.insert(CounterType::Plus1Plus1, 3);
+            obj.counters
+                .insert(CounterType::Generic("charge".to_string()), 0);
         }
         // OPPONENT's permanent: Stun counter — MUST be excluded (CR 109.4).
         let opp_perm = create_object(
@@ -3744,6 +3798,7 @@ mod tests {
         });
 
         // Direct helper: distinct kinds among controlled permanents = {P1P1, Lore},
+        // excluding Perm C's stale zero-count charge entry.
         // sorted by as_str ("P1P1" < "lore" by byte order; uppercase 'P' = 0x50,
         // lowercase 'l' = 0x6C).
         let ctx = FilterContext::from_source_with_controller(perm_a, PlayerId(0));
@@ -5219,6 +5274,83 @@ mod tests {
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
             4
         );
+    }
+
+    /// CR 613.1: `CountScope::SourceChosenPlayer` resolves to the player
+    /// persisted on the source via `ChosenAttribute::Player`, so CDA P/T can
+    /// track any chosen-player zone.
+    #[test]
+    fn resolve_quantity_source_chosen_player_zone_counts() {
+        let mut state = GameState::new_two_player(42);
+        // The CDA source, controlled by player 0, with player 1 chosen.
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sewer Nemesis".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Player(PlayerId(1)));
+        // Player 1: 2 cards in hand, 3 in graveyard, 4 in library, 1 in exile.
+        for i in 0..2 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                format!("H{i}"),
+                Zone::Hand,
+            );
+        }
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(20 + i),
+                PlayerId(1),
+                format!("G{i}"),
+                Zone::Graveyard,
+            );
+        }
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(30 + i),
+                PlayerId(1),
+                format!("L{i}"),
+                Zone::Library,
+            );
+        }
+        create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(1),
+            "E0".to_string(),
+            Zone::Exile,
+        );
+
+        for (zone, expected, label) in [
+            (ZoneRef::Hand, 2, "chosen player's hand"),
+            (ZoneRef::Graveyard, 3, "chosen player's graveyard"),
+            (ZoneRef::Library, 4, "chosen player's library"),
+            (ZoneRef::Exile, 1, "chosen player's exile"),
+        ] {
+            let qty = QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: Vec::new(),
+                    scope: CountScope::SourceChosenPlayer,
+                },
+            };
+            assert_eq!(
+                resolve_quantity(&state, &qty, PlayerId(0), src),
+                expected,
+                "{label}"
+            );
+        }
     }
 
     #[test]
