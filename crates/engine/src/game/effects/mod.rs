@@ -320,7 +320,7 @@ pub(crate) fn matches_player_scope(
                                 source_id,
                             )
                     }
-                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: "each [player class]
                     // whose [scalar attr] [comparator] [value]" — the candidate
                     // satisfies both `relation` and the per-candidate scalar
                     // comparison. `value` is the controller-relative threshold,
@@ -381,11 +381,12 @@ pub(crate) fn player_control_count_compares(
     )
 }
 
-/// CR 402.1 / 119.1 / 122.1f / 404.1: Read scalar `attr` for one candidate
-/// player DIRECTLY off the candidate `Player` (NOT via the controller-scoped
-/// `resolve_quantity`), so `PlayerFilter::PlayerAttribute` reads each player's
-/// own hand size / life / graveyard / player-counter rather than the
-/// controller's. Returns `None` for any non-scalar `QuantityRef`; the parser
+/// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: Read scalar `attr` for one
+/// candidate player DIRECTLY off the candidate `Player` (NOT via the
+/// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
+/// reads each player's own hand size / life total / life lost / graveyard /
+/// player-counter rather than the controller's. Returns `None` for any
+/// non-scalar `QuantityRef`; the parser
 /// invariant guarantees only the scalar subset reaches here, and `None` fails
 /// the candidate predicate closed.
 pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
@@ -395,6 +396,8 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
         // CR 119.1: the candidate's current life total.
         QuantityRef::LifeTotal { .. } => Some(p.life),
+        // CR 119.3: life lost this turn is tracked per candidate player.
+        QuantityRef::LifeLostThisTurn { .. } => Some(u32_to_i32_saturating(p.life_lost_this_turn)),
         // CR 404.1: cards in the candidate's graveyard.
         QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
         // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
@@ -14093,8 +14096,8 @@ mod tests {
         );
     }
 
-    /// CR 402.1 / 119.1 / 122.1f / 404.1: `candidate_player_scalar` reads each
-    /// of the four scalar `QuantityRef` attributes directly off the candidate
+    /// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: `candidate_player_scalar` reads each
+    /// scalar `QuantityRef` attribute directly off the candidate
     /// `Player`, and returns `None` for any non-scalar `QuantityRef` (failing
     /// the predicate closed). Exercises the building block across its full input
     /// range, not a single card.
@@ -14106,6 +14109,7 @@ mod tests {
         {
             let p = &mut state.players[1];
             p.life = 17;
+            p.life_lost_this_turn = 3;
             p.poison_counters = 4;
             p.hand.push_back(ObjectId(1));
             p.hand.push_back(ObjectId(2));
@@ -14136,6 +14140,16 @@ mod tests {
                 }
             ),
             Some(17)
+        );
+        // CR 119.3: life lost this turn reads p.life_lost_this_turn.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::ScopedPlayer
+                }
+            ),
+            Some(3)
         );
         // CR 404.1: graveyard size reads p.graveyard.len().
         assert_eq!(

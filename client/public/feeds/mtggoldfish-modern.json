@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-03T00:00:00Z",
+  "updated": "2026-06-04T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -320,55 +320,19 @@
       "author": "MTGGoldfish",
       "colors": [
         "R",
-        "W"
+        "G"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 1,
-          "name": "Arid Mesa"
-        },
-        {
           "count": 2,
           "name": "Artist's Talent"
         },
         {
-          "count": 4,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 4,
-          "name": "Desperate Ritual"
-        },
-        {
-          "count": 2,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 1,
-          "name": "Grapeshot"
-        },
-        {
-          "count": 4,
-          "name": "Manamorphose"
-        },
-        {
           "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 4,
-          "name": "Pyretic Ritual"
-        },
-        {
-          "count": 4,
-          "name": "Ral, Monsoon Mage"
+          "name": "Glimpse the Impossible"
         },
         {
           "count": 4,
@@ -376,115 +340,75 @@
         },
         {
           "count": 4,
-          "name": "Ruby Medallion"
+          "name": "Wrenn's Resolve"
+        },
+        {
+          "count": 1,
+          "name": "Flashback"
+        },
+        {
+          "count": 1,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
         },
         {
           "count": 2,
-          "name": "Sacred Foundry"
+          "name": "Commercial District"
         },
         {
-          "count": 4,
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 5,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Pinnacle Monk"
+        },
+        {
+          "count": 2,
           "name": "Scalding Tarn"
         },
         {
           "count": 1,
-          "name": "Sunbaked Canyon"
+          "name": "Stomping Ground"
         },
         {
           "count": 2,
           "name": "Valakut Awakening"
         },
         {
-          "count": 2,
-          "name": "Wish"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 4,
-          "name": "Heroes' Hangout"
-        },
-        {
-          "count": 4,
-          "name": "Wrenn's Resolve"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 4,
-          "name": "Orim's Chant"
-        },
-        {
           "count": 3,
-          "name": "Untimely Malfunction"
-        },
-        {
-          "count": 2,
-          "name": "Prismatic Ending"
+          "name": "Wooded Foothills"
         },
         {
           "count": 1,
-          "name": "Wear // Tear"
+          "name": "Goblin Anarchomancer"
         },
         {
-          "count": 1,
-          "name": "Brotherhood's End"
+          "count": 4,
+          "name": "Ral, Monsoon Mage"
         },
         {
-          "count": 1,
-          "name": "Past in Flames"
+          "count": 4,
+          "name": "Ruby Medallion"
         },
         {
           "count": 1,
           "name": "Grapeshot"
         },
         {
-          "count": 1,
-          "name": "Stormscale Scion"
+          "count": 3,
+          "name": "Past in Flames"
         },
         {
-          "count": 1,
-          "name": "Empty the Warrens"
-        }
-      ]
-    },
-    {
-      "name": "Belcher",
-      "author": "MTGGoldfish",
-      "colors": [],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Orim's Chant"
-        },
-        {
-          "count": 1,
-          "name": "Razorgrass Ambush"
-        },
-        {
-          "count": 4,
-          "name": "Witch Enchanter"
-        },
-        {
-          "count": 4,
-          "name": "Pinnacle Monk"
-        },
-        {
-          "count": 4,
-          "name": "Sundering Eruption"
-        },
-        {
-          "count": 4,
-          "name": "Legion Leadership"
-        },
-        {
-          "count": 4,
-          "name": "Stormscale Scion"
+          "count": 2,
+          "name": "Wish"
         },
         {
           "count": 4,
@@ -492,65 +416,57 @@
         },
         {
           "count": 4,
-          "name": "Pyretic Ritual"
-        },
-        {
-          "count": 4,
           "name": "Manamorphose"
         },
         {
           "count": 4,
-          "name": "Goblin Charbelcher"
-        },
-        {
-          "count": 4,
-          "name": "Talisman of Conviction"
-        },
-        {
-          "count": 4,
-          "name": "Irencrag Feat"
-        },
-        {
-          "count": 4,
-          "name": "Shatterskull Smashing"
-        },
-        {
-          "count": 4,
-          "name": "Strike It Rich"
-        },
-        {
-          "count": 3,
-          "name": "March of Reckless Joy"
+          "name": "Pyretic Ritual"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Static Prison"
+          "count": 1,
+          "name": "Brotherhood's End"
         },
         {
           "count": 1,
-          "name": "Mountain"
+          "name": "Empty the Warrens"
+        },
+        {
+          "count": 1,
+          "name": "Galvanic Relay"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 4,
+          "name": "Nature's Claim"
+        },
+        {
+          "count": 1,
+          "name": "Noxious Revival"
+        },
+        {
+          "count": 1,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 1,
+          "name": "Stormscale Scion"
+        },
+        {
+          "count": 1,
+          "name": "Surgical Extraction"
+        },
+        {
+          "count": 1,
+          "name": "Untimely Malfunction"
         },
         {
           "count": 2,
-          "name": "Redirect Lightning"
-        },
-        {
-          "count": 3,
-          "name": "Blood Moon"
-        },
-        {
-          "count": 2,
-          "name": "Shattering Spree"
-        },
-        {
-          "count": 2,
-          "name": "Silence"
-        },
-        {
-          "count": 3,
-          "name": "Wear // Tear"
+          "name": "Veil of Summer"
         }
       ]
     },
@@ -706,12 +622,116 @@
       ]
     },
     {
+      "name": "Belcher",
+      "author": "MTGGoldfish",
+      "colors": [],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Orim's Chant"
+        },
+        {
+          "count": 1,
+          "name": "Razorgrass Ambush"
+        },
+        {
+          "count": 4,
+          "name": "Witch Enchanter"
+        },
+        {
+          "count": 4,
+          "name": "Pinnacle Monk"
+        },
+        {
+          "count": 4,
+          "name": "Sundering Eruption"
+        },
+        {
+          "count": 4,
+          "name": "Legion Leadership"
+        },
+        {
+          "count": 4,
+          "name": "Stormscale Scion"
+        },
+        {
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        },
+        {
+          "count": 4,
+          "name": "Goblin Charbelcher"
+        },
+        {
+          "count": 4,
+          "name": "Talisman of Conviction"
+        },
+        {
+          "count": 4,
+          "name": "Irencrag Feat"
+        },
+        {
+          "count": 4,
+          "name": "Shatterskull Smashing"
+        },
+        {
+          "count": 4,
+          "name": "Strike It Rich"
+        },
+        {
+          "count": 3,
+          "name": "March of Reckless Joy"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Static Prison"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Redirect Lightning"
+        },
+        {
+          "count": 3,
+          "name": "Blood Moon"
+        },
+        {
+          "count": 2,
+          "name": "Shattering Spree"
+        },
+        {
+          "count": 2,
+          "name": "Silence"
+        },
+        {
+          "count": 3,
+          "name": "Wear // Tear"
+        }
+      ]
+    },
+    {
       "name": "Living End",
       "author": "MTGGoldfish",
       "colors": [
-        "R",
+        "U",
         "G",
-        "U"
+        "R"
       ],
       "tags": [
         "metagame"
@@ -719,71 +739,11 @@
       "main": [
         {
           "count": 1,
-          "name": "Stomping Ground"
-        },
-        {
-          "count": 4,
-          "name": "Violent Outburst"
-        },
-        {
-          "count": 4,
-          "name": "Street Wraith"
-        },
-        {
-          "count": 1,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Waker of Waves"
-        },
-        {
-          "count": 4,
-          "name": "Subtlety"
-        },
-        {
-          "count": 4,
-          "name": "Shardless Agent"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 1,
-          "name": "Oliphaunt"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 2,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 4,
-          "name": "Wistfulness"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
-          "name": "Island"
+          "name": "Boseiju, Who Endures"
         },
         {
           "count": 1,
           "name": "Breeding Pool"
-        },
-        {
-          "count": 3,
-          "name": "Living End"
         },
         {
           "count": 4,
@@ -791,15 +751,15 @@
         },
         {
           "count": 4,
-          "name": "Misty Rainforest"
-        },
-        {
-          "count": 2,
-          "name": "Colossal Skyturtle"
+          "name": "Endurance"
         },
         {
           "count": 4,
           "name": "Force of Negation"
+        },
+        {
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 4,
@@ -811,41 +771,109 @@
         },
         {
           "count": 1,
-          "name": "Commercial District"
+          "name": "Forest"
         },
         {
-          "count": 4,
-          "name": "Endurance"
+          "count": 3,
+          "name": "Living End"
         },
         {
           "count": 1,
           "name": "Mistrise Village"
+        },
+        {
+          "count": 4,
+          "name": "Misty Rainforest"
+        },
+        {
+          "count": 2,
+          "name": "Oliphaunt"
+        },
+        {
+          "count": 4,
+          "name": "Shardless Agent"
+        },
+        {
+          "count": 1,
+          "name": "Sink into Stupor"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Stomping Ground"
+        },
+        {
+          "count": 4,
+          "name": "Street Wraith"
+        },
+        {
+          "count": 2,
+          "name": "Striped Riverwinder"
+        },
+        {
+          "count": 4,
+          "name": "Subtlety"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 1,
+          "name": "Vibrance"
+        },
+        {
+          "count": 4,
+          "name": "Violent Outburst"
+        },
+        {
+          "count": 4,
+          "name": "Wistfulness"
+        },
+        {
+          "count": 1,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 1,
+          "name": "Commercial District"
         }
       ],
       "sideboard": [
+        {
+          "count": 1,
+          "name": "Brazen Borrower"
+        },
+        {
+          "count": 2,
+          "name": "Brotherhood's End"
+        },
+        {
+          "count": 2,
+          "name": "Force of Vigor"
+        },
+        {
+          "count": 2,
+          "name": "Inevitable Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Ingot Chewer"
+        },
         {
           "count": 3,
           "name": "Mystical Dispute"
         },
         {
           "count": 3,
-          "name": "Damping Matrix"
-        },
-        {
-          "count": 3,
-          "name": "Leyline of the Void"
-        },
-        {
-          "count": 3,
-          "name": "Force of Vigor"
+          "name": "Obsidian Charmaw"
         },
         {
           "count": 1,
-          "name": "Deafening Silence"
-        },
-        {
-          "count": 2,
-          "name": "Inevitable Betrayal"
+          "name": "Vibrance"
         }
       ]
     },

@@ -182,6 +182,18 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: Persistent, name-anchored
+    // exile-play permission — "[During your turn, ]you may play lands and cast
+    // spells from among cards exiled with ~." (The Matrix of Time) and the
+    // "you may look at cards exiled with ~, and you may play lands and cast
+    // spells from among those cards." variant (Prosper/Tibalt impulse-commander
+    // class). Lowers to `ExileCastPermission { pool: Persistent, play_mode:
+    // Play, frequency: Unlimited }` reading the lifetime `exile_links` set,
+    // distinct from the Maralen "this turn" rolling-pool handler above.
+    if let Some(result) = try_parse_persistent_exile_play_permission(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 601.2b + CR 118.9a + CR 601.2: Omniscience-class restricted free-cast
     // static. Optional " from your hand" zone qualifier — Dracogenesis's
     // "you may cast Dragon spells without paying their mana costs" relies on
@@ -1207,6 +1219,14 @@ pub(crate) fn parse_static_line_inner(
     // CR 701.23 + CR 609.3: Ashiok, Dream Render's first static. Subject-scoped
     // prohibition where `cause` identifies whose spells/abilities are muzzled.
     if let Some(def) = parse_cant_search_library(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "Triggered abilities <scope> can't cause you to sacrifice or exile <affected>" ---
+    // CR 603.2 + CR 609.3: The Master, Multiplied class. Subject-scoped prohibition
+    // where `cause` identifies whose triggered abilities are muzzled and `affected`
+    // identifies the protected objects.
+    if let Some(def) = parse_cant_cause_sacrifice_or_exile(&tp, &text) {
         return Some(def);
     }
 

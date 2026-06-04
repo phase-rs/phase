@@ -4998,6 +4998,32 @@ mod tests {
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
     }
 
+    /// Issue #1990 — Spellskite must parse to forced-self `ChangeTargets` so the
+    /// AI `SpellskitePriorityPolicy` effect-shape gate fires at runtime.
+    #[test]
+    fn spellskite_activated_change_targets_forced_to_self() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::game_state::RetargetScope;
+
+        let r = parse(
+            "{U/P}: Change a target of target spell or ability to ~.",
+            "Spellskite",
+            &[],
+            &["Artifact", "Creature"],
+            &["Phyrexian", "Horror"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
+        assert!(matches!(
+            r.abilities[0].effect.as_ref(),
+            Effect::ChangeTargets {
+                scope: RetargetScope::Single,
+                forced_to: Some(TargetFilter::SelfRef),
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn priest_of_titania_mana_ability_supported() {
         let r = parse(

@@ -252,6 +252,9 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "activated abilities of ",
     // CR 701.23 + CR 609.3: Ashiok-class search prohibition.
     "can't cause their controller to search their library",
+    // CR 603.2 + CR 609.3: The Master, Multiplied-class sacrifice/exile prohibition.
+    "triggered abilities ",
+    "can't cause you to sacrifice or exile",
     // CR 701.23 + CR 609.3: Mindlock Orb-class search prohibition.
     "can't search libraries",
     "cannot search libraries",
@@ -381,7 +384,36 @@ fn is_static_compound_pattern(lower: &str) -> bool {
             // Vivien on the Hunt static). Routes the line to `parse_static_line`
             // so it lowers to `StaticMode::TopOfLibraryCastPermission` instead
             // of falling through to `try_parse_cast_effect`'s impulse-draw flow.
-            || scan_contains(lower, "from the top of your library"))
+            || scan_contains(lower, "from the top of your library")
+            // CR 113.6b + CR 406.6: "you may play lands and cast spells from
+            // among cards exiled with ~" — persistent, name-anchored exile-play
+            // permission (The Matrix of Time). Routes to `parse_static_line` so
+            // it lowers to `StaticMode::ExileCastPermission { pool: Persistent }`
+            // instead of falling through to the imperative impulse-draw flow.
+            || scan_contains(lower, "from among cards exiled with"))
+    {
+        return true;
+    }
+    // CR 117.1c + CR 113.6b: The Matrix-of-Time form leads with the timing
+    // qualifier ("During your turn, you may play lands and cast spells from
+    // among cards exiled with ~."), so the "you may [play|cast]" prefix is not
+    // at the head of the line. The "play lands and cast spells from among cards
+    // exiled with" anchor is the diagnostic substring; route it to the static
+    // parser regardless of leading text.
+    if scan_contains(
+        lower,
+        "play lands and cast spells from among cards exiled with",
+    ) {
+        return true;
+    }
+    // CR 601.3f + CR 406.6: The "look-at" variant leads with "you may look at
+    // cards exiled with ~, and you may play lands and cast spells from among
+    // those cards." — the play/cast clause uses "those cards" (a back-reference
+    // to the exiled-with set) rather than repeating "cards exiled with". Require
+    // both the source-anchored exile anchor and the play/cast clause so this
+    // stays specific to the persistent exile-play permission.
+    if scan_contains(lower, "cards exiled with")
+        && scan_contains(lower, "play lands and cast spells from among those cards")
     {
         return true;
     }
