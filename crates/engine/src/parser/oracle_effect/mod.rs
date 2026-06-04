@@ -32127,6 +32127,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_an_article_subtype_addendum_condition() {
+        let def = parse_effect_chain(
+            "Return target creature card from your graveyard to the battlefield. If it's an Elf, create three 1/1 green Elf Warrior creature tokens.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional token addendum");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = &sub.condition else {
+            panic!(
+                "expected TargetMatchesFilter condition, got {:?}",
+                sub.condition
+            );
+        };
+        assert!(
+            !use_lki,
+            "present-tense 'it's an' subtype condition must not use LKI"
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed subtype filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.iter().any(
+                |type_filter| matches!(type_filter, TypeFilter::Subtype(name) if name == "Elf")
+            ),
+            "expected Elf subtype filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    #[test]
     fn parse_controlled_parent_target_addendum_condition() {
         let def = parse_effect_chain(
             "Return target nonland permanent to its owner's hand. If you controlled that permanent, draw a card.",

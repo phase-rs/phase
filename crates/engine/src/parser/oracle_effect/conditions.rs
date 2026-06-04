@@ -2476,17 +2476,29 @@ pub(super) fn try_nom_condition_as_ability_condition(
         }
     }
 
-    let (negated, rest_after_prefix) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("it's not a ").parse(lower.as_str())
+    let (negated, rest_after_prefix) = if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it's not a "),
+        tag("it's not an "),
+    ))
+    .parse(lower.as_str())
     {
         (true, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it's a ").parse(lower.as_str()) {
-        (false, Some(rest))
     } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("that card is a ").parse(lower.as_str())
+        alt((tag::<_, _, OracleError<'_>>("it's a "), tag("it's an "))).parse(lower.as_str())
     {
         (false, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it isn't a ").parse(lower.as_str())
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that card is a "),
+        tag("that card is an "),
+    ))
+    .parse(lower.as_str())
+    {
+        (false, Some(rest))
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it isn't a "),
+        tag("it isn't an "),
+    ))
+    .parse(lower.as_str())
     {
         (true, Some(rest))
     } else {
@@ -3877,6 +3889,30 @@ mod tests {
             tf.type_filters
                 .contains(&TypeFilter::Subtype("Goblin".to_string())),
             "expected Goblin subtype filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 608.2c + CR 205.3a: Article choice must not affect anaphoric subtype
+    /// gates. "If it's an Elf" is the same condition family as "If it's a Goblin".
+    #[test]
+    fn if_its_an_subtype_parses_condition() {
+        let (cond, body) = strip_leading_general_conditional(
+            "If it's an Elf, create three 1/1 green Elf Warrior creature tokens.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "create three 1/1 green Elf Warrior creature tokens.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = cond else {
+            panic!("expected TargetMatchesFilter for 'Elf' subtype, got {cond:?}");
+        };
+        assert!(!use_lki, "present-tense 'it's an' check must not use LKI");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for subtype");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Elf".to_string())),
+            "expected Elf subtype filter, got {:?}",
             tf.type_filters
         );
     }

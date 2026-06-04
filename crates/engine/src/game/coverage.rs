@@ -3415,9 +3415,6 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // Check replacements
         check_replacements(&face.replacements, &mut missing);
 
-        // Check parse warnings
-        check_parse_warnings(&face.parse_warnings, &mut missing);
-
         // Validate subtype references in AddSubtype modifications against
         // the printed-corpus lexicon. Catches parser misfires where English
         // filler words (`Gets`, `Until`, `And`) were tokenized as subtypes.
@@ -3430,6 +3427,11 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // Flag cards where the parser consumed Oracle text without producing
         // a corresponding parse item. Uses the parse tree computed above.
         check_silent_drops(&face.oracle_text, &parse_details, &mut missing);
+
+        let supported_before_parse_warnings = missing.is_empty();
+
+        // Check parse warnings
+        check_parse_warnings(&face.parse_warnings, &mut missing);
 
         let supported = missing.is_empty();
 
@@ -3465,16 +3467,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         let mut gap_details = extract_gap_details(&parse_details);
         // Append parse-warning gaps so they appear in per-card gap reporting.
         for warning in &face.parse_warnings {
-            if let crate::parser::oracle_ir::diagnostic::OracleDiagnostic::TargetFallback {
-                context,
-                ..
-            } = warning
-            {
-                let handler = if context.contains("trigger subject") {
-                    "ParseWarning:trigger-subject".to_string()
-                } else {
-                    "ParseWarning:target-fallback".to_string()
-                };
+            if let Some(handler) = parse_warning_gap_label(warning) {
                 gap_details.push(GapDetail {
                     handler,
                     source_text: Some(warning.to_string()),
@@ -3487,7 +3480,12 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             parse_warning_patterns
                 .entry((category, pattern))
                 .or_default()
-                .push(&face.name, supported, gap_count == 1, &legal_formats);
+                .push(
+                    &face.name,
+                    supported_before_parse_warnings,
+                    gap_count == 1,
+                    &legal_formats,
+                );
         }
 
         let printings = card_db
@@ -4130,27 +4128,41 @@ fn check_resolver_features(face: &CardFace, missing: &mut Vec<String>) {
     }
 }
 
-/// Target-fallback warnings indicate degraded targeting (TargetFilter::Any instead of a
-/// specific filter). Cards with these have silently incorrect behavior at runtime.
+/// Parser warning diagnostics indicate degraded or silently incomplete behavior.
+/// Cards with these diagnostics must not count as coverage-supported unless the
+/// warning is informational only.
 fn check_parse_warnings(
     warnings: &[crate::parser::oracle_ir::diagnostic::OracleDiagnostic],
     missing: &mut Vec<String>,
 ) {
-    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     for warning in warnings {
-        let label = match warning {
-            OracleDiagnostic::TargetFallback { context, .. } => {
-                if context.contains("trigger subject") {
-                    "ParseWarning:trigger-subject".to_string()
-                } else {
-                    "ParseWarning:target-fallback".to_string()
-                }
+        if let Some(label) = parse_warning_gap_label(warning) {
+            if !missing.contains(&label) {
+                missing.push(label);
             }
-            _ => continue,
-        };
-        if !missing.contains(&label) {
-            missing.push(label);
         }
+    }
+}
+
+fn parse_warning_gap_label(
+    warning: &crate::parser::oracle_ir::diagnostic::OracleDiagnostic,
+) -> Option<String> {
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    match warning {
+        OracleDiagnostic::TargetFallback { context, .. } => {
+            if context.contains("trigger subject") {
+                Some("ParseWarning:trigger-subject".to_string())
+            } else {
+                Some("ParseWarning:target-fallback".to_string())
+            }
+        }
+        OracleDiagnostic::SwallowedClause { detector, .. } => {
+            Some(format!("ParseWarning:swallowed-clause:{detector}"))
+        }
+        OracleDiagnostic::CascadeLoss { slot, .. } => {
+            Some(format!("ParseWarning:cascade-loss:{slot:?}"))
+        }
+        OracleDiagnostic::IgnoredRemainder { .. } => None,
     }
 }
 
@@ -8286,6 +8298,34 @@ mod tests {
             "Test Card".to_string(),
             Zone::Battlefield,
         )
+    }
+
+    #[test]
+    fn swallowed_clause_warning_counts_as_coverage_gap() {
+        let warnings = vec![
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                detector: "Condition_If".to_string(),
+                description: "If foo, draw a card.".to_string(),
+                line_index: 0,
+            },
+        ];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["ParseWarning:swallowed-clause:Condition_If"]);
+    }
+
+    #[test]
+    fn ignored_remainder_warning_remains_informational_for_coverage() {
+        let warnings = vec![
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::IgnoredRemainder {
+                text: "tail".to_string(),
+                parser: "test".to_string(),
+                line_index: 0,
+            },
+        ];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert!(missing.is_empty());
     }
 
     #[test]
