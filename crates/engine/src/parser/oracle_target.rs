@@ -1938,7 +1938,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // and "each card" forms are handled at the top of `parse_target` since
     // they bypass type-phrase parsing entirely.
     //
-    // Two grammars share the same lowering:
+    // These grammars share the same lowering:
     //   * `exiled with this <type>` / `exiled with ~` — explicit-source linkage
     //     (CR 406.6). The trailing type word is informational and consumed as
     //     a single non-space run via `take_till1` so it doesn't leak.
