@@ -1703,6 +1703,11 @@ pub enum AlternativeCastKeyword {
     /// spell/permanent uses the secondary power, toughness, and mana cost
     /// characteristics while it is a creature.
     Prototype,
+    /// CR 702.140a: Mutate alternative cost paid from hand. The spell becomes a
+    /// mutating creature spell targeting a non-Human creature the caster owns
+    /// (CR 702.140a); on resolution it merges with that creature (CR 730) rather
+    /// than entering the battlefield, unless the target is illegal (CR 702.140b).
+    Mutate,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -2449,6 +2454,20 @@ pub enum WaitingFor {
         /// string; the frontend renders the engine-provided description.
         #[serde(default)]
         alternative_additional_cost: Option<AbilityCost>,
+    },
+    /// CR 702.140c + CR 730.2a: As a mutating creature spell resolves with a
+    /// legal target, the spell's controller chooses whether the spell is put on
+    /// TOP of the target creature or on the BOTTOM. `merging_id` is the resolving
+    /// mutate spell object (popped from the stack into a paused state); `target_id`
+    /// is the surviving battlefield creature whose `ObjectId` the merged permanent
+    /// keeps (CR 730.2c). The choice only sets which component supplies copiable
+    /// characteristics (CR 730.2a); the merged permanent always has the union of
+    /// all components' abilities (CR 702.140e). Resolved by
+    /// `merge::handle_mutate_merge_choice` via `GameAction::ChooseMutateMergeSide`.
+    MutateMergeChoice {
+        player: PlayerId,
+        merging_id: ObjectId,
+        target_id: ObjectId,
     },
     /// CR 601.2b: Player chooses which legal cast permission / variant to use
     /// when more than one applies to the same spell from the same zone.
@@ -3282,6 +3301,7 @@ impl WaitingFor {
             | WaitingFor::CastOffer { player, .. }
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::AlternativeCastChoice { player, .. }
+            | WaitingFor::MutateMergeChoice { player, .. }
             | WaitingFor::CastingVariantChoice { player, .. }
             | WaitingFor::ChoosePermanentTypeSlot { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
@@ -3805,6 +3825,19 @@ pub enum CastingVariant {
     /// stack display plus layer evaluation use the secondary mana cost and P/T
     /// while it is a creature.
     Prototype,
+    /// CR 702.140a-c: Cast from hand via Mutate's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Mutate(cost)` at cast preparation
+    /// (mirrors Bestow). The spell gains a single target — a non-Human creature
+    /// the caster owns (CR 702.140a) — attached Bestow-style before preparation.
+    /// On resolution (`stack::resolve_top`): if the target is illegal
+    /// (CR 702.140b) the spell reverts to a plain creature spell and enters the
+    /// battlefield normally; if legal (CR 702.140c) it does NOT enter — instead
+    /// it merges with the target creature (CR 730) and the controller chooses
+    /// top/bottom. Unlike Bestow this variant neither exiles on leaving the stack
+    /// nor restores a front face, so it is intentionally absent from
+    /// `exiles_when_leaving_stack_for_any_reason` and
+    /// `restores_front_face_after_stack_exit`.
+    Mutate,
     /// CR 702.173a: Cast from hand via Freerunning's alternative cost. Legal
     /// only when a player was dealt combat damage this turn by an Assassin
     /// creature or a commander under the caster's control. The printed mana
@@ -3844,6 +3877,9 @@ impl CastingVariant {
             | CastingVariant::Disturb
             | CastingVariant::Impending
             | CastingVariant::Prototype
+            // CR 702.140a: Mutate replaces the spell's mana cost with the mutate
+            // cost — an alternative cost, so only one may apply (CR 118.9a).
+            | CastingVariant::Mutate
             | CastingVariant::Freerunning => true,
             CastingVariant::Normal
             | CastingVariant::Adventure
@@ -4211,6 +4247,13 @@ pub struct GameState {
     /// after the zone change completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_spell_resolution: Option<PendingSpellResolution>,
+
+    /// CR 702.140c + CR 730.2: Transient context for a mutating creature spell
+    /// whose resolution is paused awaiting the controller's top/bottom merge
+    /// choice. Set in `stack::resolve_top` (legal-target branch), consumed by
+    /// `merge::handle_mutate_merge_choice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_mutate_merge: Option<PendingMutateMerge>,
 
     /// CR 614.12a + CR 707.9 + CR 603.2: `ZoneChanged`-to-battlefield events
     /// for an object whose entry is paused mid-resolution awaiting an
@@ -5252,6 +5295,24 @@ pub struct PendingSpellResolution {
     pub convoked_creatures: Vec<ObjectId>,
 }
 
+/// CR 702.140c + CR 730.2: Context stored when a mutating creature spell resolves
+/// with a legal target. Resolution pauses (the stack entry is popped, mirroring
+/// the Clone replacement-needs-choice detour) until the spell's controller chooses
+/// top or bottom via `GameAction::ChooseMutateMergeSide`; then
+/// `merge::handle_mutate_merge_choice` performs the merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMutateMerge {
+    /// The resolving mutate spell object (the card/token being merged onto the
+    /// target). Retains its original owner so CR 730.3 can route it correctly.
+    pub merging_id: ObjectId,
+    /// The surviving battlefield creature. The merged permanent keeps THIS
+    /// object's `ObjectId` (CR 730.2c continuity).
+    pub target_id: ObjectId,
+    /// The mutate spell's controller — the player who chooses top/bottom
+    /// (CR 702.140c).
+    pub controller: PlayerId,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTurnControl {
     pub target_player: PlayerId,
@@ -5300,6 +5361,22 @@ impl GameState {
             .copied()
             .filter(|id| self.objects.get(id).is_some_and(|obj| obj.is_phased_in()))
             .collect()
+    }
+
+    /// CR 730.2: True if `object_id` is an absorbed (non-surviving) component of
+    /// some merged permanent. Such a component is part of one battlefield object
+    /// (the merged permanent, identified by the surviving target's `ObjectId`) and
+    /// is NOT independently present in `state.battlefield`, yet its `GameObject`
+    /// is retained in `state.objects` so the CR 730.3 leave-split can restore it.
+    ///
+    /// Any code that scans `state.objects` and gates on `obj.zone == Battlefield`
+    /// to enumerate independent permanents MUST skip these ids — otherwise the
+    /// single merged permanent would be observed as multiple permanents (double-
+    /// counted as a same-name permanent, an extra mana source, etc.).
+    pub fn is_absorbed_merge_component(&self, object_id: ObjectId) -> bool {
+        self.objects.get(&object_id).is_some_and(|obj| {
+            obj.zone == Zone::Battlefield && !self.battlefield.contains(&object_id)
+        })
     }
 
     /// CR 508.6: True if `attacker` declared one or more creatures attacking
@@ -5364,6 +5441,7 @@ impl GameState {
             post_replacement_event_source: None,
             post_replacement_event_target: None,
             pending_spell_resolution: None,
+            pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: LayersDirty::full(),
             static_gate_truth: std::collections::HashMap::new(),

@@ -241,6 +241,9 @@ impl KeywordTriggerInstaller {
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
+            // CR 702.25a: Flanking — a becomes-blocked debuff trigger. CR 702.25b:
+            // each instance triggers separately (one trigger per instance).
+            Keyword::Flanking => vec![build_flanking_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
             Keyword::Increment => vec![build_increment_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
@@ -282,6 +285,7 @@ impl KeywordTriggerInstaller {
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
+            Keyword::Flanking => is_flanking_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
             Keyword::Increment => is_increment_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
@@ -2768,6 +2772,13 @@ pub fn synthesize_exalted(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Exalted));
 }
 
+/// CR 702.25a: Flanking — install the becomes-blocked debuff trigger that gives
+/// each blocking creature without flanking -1/-1 until end of turn. CR 702.25b:
+/// each instance triggers separately (one trigger per `Keyword::Flanking`).
+pub fn synthesize_flanking(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Flanking));
+}
+
 /// CR 702.45a: Bushido N — "Whenever this creature blocks or becomes blocked, it
 /// gets +N/+N until end of turn." Two self-triggers (blocks + becomes-blocked),
 /// since there is no combined block trigger mode. CR 702.45b: each instance
@@ -3290,6 +3301,58 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
 fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::Attacks)
         && matches!(t.condition, Some(TriggerCondition::Not { .. }))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                target: TargetFilter::TriggeringSource,
+                ..
+            })
+        )
+}
+
+/// CR 702.25a: Build the Flanking trigger — "whenever this creature becomes
+/// blocked by a creature without flanking, the blocking creature gets -1/-1
+/// until end of turn." `collect_matching_triggers` splits `BecomesBlocked`
+/// events per qualifying blocker so each blocker creates its own stack object.
+fn build_flanking_trigger() -> TriggerDefinition {
+    let debuff = Effect::Pump {
+        power: PtValue::Fixed(-1),
+        toughness: PtValue::Fixed(-1),
+        target: TargetFilter::TriggeringSource,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, debuff)
+        .duration(Duration::UntilEndOfTurn)
+        .description(
+            "CR 702.25a: Flanking — blocking creatures without flanking get -1/-1 until end of turn"
+                .to_string(),
+        );
+    TriggerDefinition::new(TriggerMode::BecomesBlocked)
+        .valid_card(TargetFilter::SelfRef)
+        .valid_target(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::WithoutKeyword {
+                value: Keyword::Flanking,
+            }],
+        )))
+        .execute(execute)
+        .description(
+            "CR 702.25a: Flanking — whenever this creature becomes blocked by a creature \
+             without flanking, the blocking creature gets -1/-1 until end of turn."
+                .to_string(),
+        )
+}
+
+/// CR 702.25a: A Flanking-shaped trigger — a self-scoped `BecomesBlocked` trigger
+/// whose blocker filter excludes creatures with flanking.
+/// Used by `RemoveKeyword` symmetric removal.
+fn is_flanking_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.valid_target.as_ref(),
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::WithoutKeyword {
+                value: Keyword::Flanking,
+            })
+        )
         && matches!(
             t.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::Pump {
@@ -5430,6 +5493,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // whenever a creature you control attacks alone. CR 702.83b: each instance
     // triggers separately.
     synthesize_exalted(face);
+    // CR 702.25a: Flanking — becomes-blocked trigger giving each blocking
+    // creature without flanking -1/-1 until end of turn.
+    synthesize_flanking(face);
     // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
     // each opponent for 1 life. CR 702.101b: each instance triggers separately.
     synthesize_extort(face);
@@ -8608,6 +8674,69 @@ mod exalted_synthesis_tests {
             .filter(|t| is_exalted_trigger(t))
             .count();
         assert_eq!(count, 2);
+    }
+}
+
+#[cfg(test)]
+mod flanking_synthesis_tests {
+    //! CR 702.25a shape tests: a self-scoped BecomesBlocked trigger whose
+    //! `Effect::Pump(-1/-1)` debuffs the triggering blocker without flanking.
+    use super::*;
+
+    #[test]
+    fn synthesize_flanking_adds_becomes_blocked_debuff_trigger() {
+        // CR 702.25a: Flanking installs a self BecomesBlocked trigger that gives
+        // each blocking creature without flanking -1/-1 until end of turn.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flanking);
+        synthesize_flanking(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_flanking_trigger(t))
+            .expect("flanking should add a BecomesBlocked trigger");
+        assert!(matches!(trigger.mode, TriggerMode::BecomesBlocked));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("flanking execute must be Effect::Pump");
+        };
+        assert!(matches!(power, PtValue::Fixed(-1)));
+        assert!(matches!(toughness, PtValue::Fixed(-1)));
+        assert!(matches!(target, TargetFilter::TriggeringSource));
+        let Some(TargetFilter::Typed(tf)) = trigger.valid_target.as_ref() else {
+            panic!("expected Typed non-flanking blocker filter");
+        };
+        assert!(tf.properties.contains(&FilterProp::WithoutKeyword {
+            value: Keyword::Flanking,
+        }));
+    }
+
+    #[test]
+    fn synthesize_flanking_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flanking);
+        synthesize_flanking(&mut face);
+        synthesize_flanking(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_flanking_trigger(t))
+                .count(),
+            1,
+            "flanking trigger should be deduped across passes"
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_flanking(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_flanking_trigger(t)));
     }
 }
 

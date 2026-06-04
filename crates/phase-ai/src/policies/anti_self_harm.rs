@@ -94,7 +94,12 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
 /// - Harmful spell (destroy) but opponents have no creatures → would kill own.
 fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // CR 704.5j: Penalise casting a legendary permanent when we already control one
-    // with the same name — the legend rule SBA will force us to sacrifice one.
+    // with the same name — the legend rule SBA will force us to put one into the
+    // graveyard. Skip same-name copies that the engine's legend-rule SBA would
+    // exclude under a "legend rule doesn't apply" exemption (Mirror Gallery /
+    // Sakashima / Sliver Gravemother class).
+    // Reuse the engine's own legend-rule predicate (`engine::game::sba::legend_rule_exempt`)
+    // rather than re-deriving the exemption logic in the AI — the engine owns the rule.
     let legend_penalty = ctx
         .source_object()
         .filter(|source| source.card_types.supertypes.contains(&Supertype::Legendary))
@@ -107,7 +112,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
                         o.controller == ctx.ai_player
                             && o.card_types.supertypes.contains(&Supertype::Legendary)
                             && o.name == source.name
-                    })
+                    }) && !engine::game::sba::legend_rule_exempt(ctx.state, id)
                 })
                 .then_some(-8.0)
         })
@@ -1673,6 +1678,102 @@ mod tests {
         assert!(
             score >= -1.0,
             "Casting first copy of a legendary should not be penalised, got {score}"
+        );
+    }
+
+    /// CR 704.5j: A "legend rule doesn't apply" exemption (Mirror Gallery's
+    /// global static, Sakashima/Sliver Gravemother's scoped variants) means a
+    /// second same-name legendary is legal and will NOT be put into the
+    /// graveyard. The anti-self-harm legend penalty must defer to the engine's
+    /// exemption predicate and apply no penalty when an exemption covers the
+    /// controlled copy.
+    #[test]
+    fn pre_cast_does_not_penalise_duplicate_legendary_under_global_exemption() {
+        let mut state = make_state();
+
+        // AI already controls a legendary creature on the battlefield.
+        let existing = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Thalia".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&existing).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.power = Some(2);
+        obj.toughness = Some(1);
+
+        // A Mirror-Gallery-class permanent grants a GLOBAL legend-rule exemption
+        // (affected = None => applies to every legendary permanent).
+        let gallery = create_object(
+            &mut state,
+            CardId(210),
+            PlayerId(0),
+            "Mirror Gallery".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&gallery)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::LegendRuleDoesntApply));
+
+        // AI tries to cast a second copy from hand.
+        let spell_id = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Thalia".to_string(),
+            Zone::Hand,
+        );
+        let obj2 = state.objects.get_mut(&spell_id).unwrap();
+        obj2.card_types.core_types.push(CoreType::Creature);
+        obj2.card_types.supertypes.push(Supertype::Legendary);
+        obj2.power = Some(2);
+        obj2.toughness = Some(1);
+        obj2.abilities = Arc::new(vec![engine::types::ability::AbilityDefinition::new(
+            engine::types::ability::AbilityKind::Spell,
+            Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                target: engine::types::ability::TargetFilter::Controller,
+            },
+        )]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(201),
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert_eq!(
+            score, 0.0,
+            "Legend-rule exemption must zero the duplicate-legendary penalty, got {score}"
         );
     }
 

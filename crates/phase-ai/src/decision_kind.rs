@@ -121,6 +121,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::RepeatDecision { .. }
         | WaitingFor::TopOrBottomChoice { .. }
+        // CR 702.140c + CR 730.2a: mutate top/bottom merge side — a forced
+        // mid-resolution choice; route to the ability catch-all.
+        | WaitingFor::MutateMergeChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }

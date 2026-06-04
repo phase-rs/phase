@@ -1226,10 +1226,12 @@ pub(crate) fn opponent_land_color_options(
 ) -> Vec<ManaType> {
     let opponents = super::players::opponents(state, controller);
     let mut options = Vec::new();
-    for (object_id, obj) in state.objects.iter() {
-        if obj.zone != Zone::Battlefield {
+    // CR 730.2: iterate `state.battlefield` (the independent-permanent list) so an
+    // absorbed merge component is never counted as a separate mana source.
+    for object_id in state.battlefield.iter() {
+        let Some(obj) = state.objects.get(object_id) else {
             continue;
-        }
+        };
         if !opponents.contains(&obj.controller) {
             continue;
         }
@@ -1331,10 +1333,11 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
     controller: PlayerId,
 ) -> Vec<ObjectId> {
     let mut sources = Vec::new();
-    for (&object_id, obj) in state.objects.iter() {
-        if obj.zone != Zone::Battlefield {
+    // CR 730.2: iterate the independent-permanent list (excludes absorbed merge components).
+    for &object_id in state.battlefield.iter() {
+        let Some(obj) = state.objects.get(&object_id) else {
             continue;
-        }
+        };
         if obj.controller != controller {
             continue;
         }
@@ -1390,10 +1393,11 @@ pub(crate) fn produceable_mana_types_by_filter(
     // costs) or in synthetic test contexts.
     let filter_ctx = FilterContext::from_source_with_controller(self_source_id, controller);
     let mut options = Vec::new();
-    for (object_id, obj) in state.objects.iter() {
-        if obj.zone != Zone::Battlefield {
+    // CR 730.2: iterate the independent-permanent list (excludes absorbed merge components).
+    for object_id in state.battlefield.iter() {
+        let Some(obj) = state.objects.get(object_id) else {
             continue;
-        }
+        };
         if !obj.card_types.core_types.contains(&CoreType::Land) {
             continue;
         }

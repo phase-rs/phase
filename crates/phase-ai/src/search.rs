@@ -547,6 +547,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseTopOrBottom { top: true })
         }
 
+        // CR 702.140c + CR 730.2a: mutate merge side — default to placing the
+        // mutating spell on top (the candidate generator still explores bottom).
+        WaitingFor::MutateMergeChoice { .. } => Some(GameAction::ChooseMutateMergeSide {
+            side: engine::game::merge::MergeSide::Top,
+        }),
+
         // CR 701.30b: clash opponent choice — fall back to the first candidate.
         WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
             .first()

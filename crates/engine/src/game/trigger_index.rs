@@ -587,6 +587,10 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::AttractionOpened { .. } | GameEvent::AttractionsRolledToVisit { .. } => {}
         GameEvent::AttractionVisited { .. } => push(TriggerEventKey::VisitAttraction),
         GameEvent::Specialized { .. } => push(TriggerEventKey::Specializes),
+        // CR 702.140c-d: `TriggerMode::Mutates` is routed to the always-checked
+        // unclassified bucket (see `keys_from_trigger_def`), so the `Mutated`
+        // event needs no dedicated index key — `match_mutates` is always consulted.
+        GameEvent::Mutated { .. } => {}
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }

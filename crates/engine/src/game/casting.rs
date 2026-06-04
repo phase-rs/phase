@@ -2708,6 +2708,20 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.140a: When the caller explicitly opted into Mutate (via
+    // `variant_override = Some(CastingVariant::Mutate)`), substitute the mutate
+    // mana cost taken from the hand object's `Keyword::Mutate(cost)` payload.
+    // Mirrors the Bestow cost-selection pattern. The target requirement (a
+    // non-Human creature you own, CR 702.140a) is attached separately in
+    // `continue_with_prepared` because it needs a `&mut GameState` handle.
+    let mutate_cost = if casting_variant == CastingVariant::Mutate {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Mutate(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     // CR 702.113a + CR 118.9: When the caller explicitly opted into Awaken (via
     // `variant_override = Some(CastingVariant::Awaken)`), read the
     // `Keyword::Awaken { count, cost }` payload from the hand object. `cost`
@@ -2916,6 +2930,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(overload_cost)
             .or(mtmte_cost)
             .or(bestow_cost)
+            .or(mutate_cost)
             .or(awaken_cost)
             .or(cleave_cost)
             .or(impending_cost)
@@ -4668,6 +4683,49 @@ pub(crate) fn revert_bestow_aura_form(obj: &mut crate::game::game_object::GameOb
     obj.bestow_form = None;
 }
 
+/// CR 702.140a + CR 108.3 (B1): The mutate spell's target — "a non-Human creature
+/// with the same owner as this spell." For a cast spell the owner is the caster,
+/// so this is a non-Human creature the caster owns. Built from existing typed
+/// primitives (no new `FilterProp`/variant): `Creature`, `Non(Subtype("Human"))`,
+/// and `Owned { controller: You }`. Single authority used by both the cast-offer
+/// gate and the target-attachment branch in `continue_with_prepared`. Also reused
+/// by the CR 608.2b resolution-time re-validation in `stack::resolve_top` so the
+/// cast-time and resolution-time legality predicates cannot drift.
+pub(crate) fn mutate_target_filter() -> TargetFilter {
+    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter, TypedFilter};
+    TargetFilter::Typed(
+        TypedFilter::creature()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Human".to_string(),
+            ))))
+            .properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }]),
+    )
+}
+
+/// CR 702.140a: Mark a hand/stack object as a mutating creature spell. Unlike
+/// Bestow, mutate is NOT a type-changing effect — the spell stays a creature
+/// spell (CR 702.140a) — so this only sets the typed marker. The target
+/// requirement is attached in `continue_with_prepared` (the `mutate_form` branch,
+/// mirroring the Aura/Enchant target-slot path). Idempotent.
+fn apply_mutate_form(obj: &mut crate::game::game_object::GameObject) {
+    if obj.mutate_form.is_some() {
+        return;
+    }
+    obj.mutate_form = Some(crate::game::game_object::MutateFormState);
+}
+
+/// CR 702.140b: Clear the mutate marker. Called when the mutating creature
+/// spell's target is illegal at resolution (the spell reverts to a plain creature
+/// spell and enters the battlefield normally), and on a cast-preparation error so
+/// a failed mutate cast leaves the hand object in its printed form. Idempotent.
+pub fn revert_mutate_form(state: &mut GameState, object_id: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.mutate_form = None;
+    }
+}
+
 /// CR 702.103e + CR 702.103f: Public entry-point for bestow form revert.
 /// Used by stack resolution (illegal-target revert) and SBA (unattached
 /// override). Marks layers dirty so any continuous effects re-evaluate
@@ -4757,6 +4815,75 @@ pub fn handle_bestow_cost_choice_with_payment_mode(
         return continue_with_prepared(state, player, prepared, events);
     }
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+}
+
+/// CR 702.140a: Public entry-point for the Mutate cost choice (auto payment mode).
+pub fn handle_mutate_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    handle_mutate_cost_choice_with_payment_mode(
+        state,
+        player,
+        object_id,
+        card_id,
+        decision,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+/// CR 702.140a-c: Handle the Mutate cost choice and proceed with casting. On
+/// `AlternativeCastDecision::Alternative`, mark the hand object as a mutating
+/// creature spell (`apply_mutate_form`) BEFORE preparing the cast, then prepare
+/// with `CastingVariant::Mutate` (which substitutes the mutate mana cost). On
+/// `Normal`, the cast proceeds as the printed creature spell. Mirrors
+/// `handle_bestow_cost_choice_with_payment_mode`.
+pub fn handle_mutate_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match (a future third decision variant is a compile error here).
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            // CR 702.140a: mark the spell as mutating BEFORE preparing the cast,
+            // so the `continue_with_prepared` target-attachment branch (mirroring
+            // the Aura/Enchant path) sees the mutate form and requests the
+            // non-Human creature target. Reverted by `revert_mutate_form` on a
+            // preparation error or on an illegal target at resolution
+            // (CR 702.140b).
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                apply_mutate_form(obj);
+            }
+            let mut prepared = match prepare_spell_cast_with_variant_override(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Mutate),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    revert_mutate_form(state, object_id);
+                    return Err(e);
+                }
+            };
+            prepared.payment_mode = payment_mode;
+            continue_with_prepared(state, player, prepared, events)
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
 }
 
 /// CR 702.148a-b + CR 612: Apply the cleave text-changing effect to a hand
@@ -6165,6 +6292,76 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
+    // CR 702.140a: Mutate — when a card being cast has `Keyword::Mutate(cost)`
+    // and both the printed creature cost AND the mutate cost are affordable AND
+    // there is at least one legal "non-Human creature you own" to merge with,
+    // present the choice. Auto-skip when only one path is viable. Mirrors the
+    // Bestow opt-in flow: mutate is opt-in via `variant_override`, so a
+    // fall-through proceeds as a normal creature cast.
+    //
+    // Offered from the hand and from the command zone — CR 702.140a places no
+    // zone restriction, and a mutate creature that is also a commander (e.g.
+    // Otrimi, the Ever-Playful) is cast for its mutate cost straight from the
+    // command zone (CR 903.9 cast permission applies; commander tax is added by
+    // the normal cost pipeline).
+    //
+    // CR 702.140a + CR 108.3: "a non-Human creature with the same owner as this
+    // spell" == a non-Human creature the caster owns (for a cast spell the owner
+    // is the caster). B1: `TypeFilter::Non(Subtype("Human"))` +
+    // `FilterProp::Owned { controller: You }` — no new filter prop / variant.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if matches!(obj.zone, Zone::Hand | Zone::Command) {
+            if let Some(mutate_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Mutate(cost) => Some(cost.clone()),
+                _ => None,
+            }) {
+                let mutate_target_filter = mutate_target_filter();
+                let has_legal_mutate_target =
+                    !targeting::find_legal_targets(state, &mutate_target_filter, player, object_id)
+                        .is_empty();
+                // CR 601.2f + CR 118.9d: affordability and displayed costs reflect
+                // active cost modifiers — applied to BOTH the printed cost and the
+                // mutate alternative cost.
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let mutate_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, mutate_cost.clone())
+                        .unwrap_or_else(|| mutate_cost.clone());
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let mutate_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &mutate_cost_eff);
+                if has_legal_mutate_target && normal_affordable && mutate_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Mutate,
+                        normal_cost,
+                        alternative_cost: Some(mutate_cost_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if has_legal_mutate_target && !normal_affordable && mutate_affordable {
+                    // Only the mutate path is payable — proceed via mutate.
+                    return handle_mutate_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
+                // Otherwise (normal-only / no legal target / neither affordable):
+                // fall through to the normal cast path.
+            }
+        }
+    }
+
     // CR 702.113a: Awaken — when a hand card has `Keyword::Awaken { cost }` and
     // both the printed cost AND the awaken cost are affordable AND there is at
     // least one land you control to awaken, present the choice. Auto-skip when
@@ -6462,15 +6659,19 @@ fn continue_with_prepared(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // Permanent spells with no spell ability skip modal/targeting/effect resolution
-    // and proceed directly to cost payment — unless they are Auras, which target
-    // via the Enchant keyword and need the Aura targeting path below.
+    // and proceed directly to cost payment — unless they are Auras (which target
+    // via the Enchant keyword) or mutating creature spells (CR 702.140a: a vanilla
+    // creature cast for its mutate cost still targets a non-Human creature you
+    // own), both of which need the target-attachment path below.
     if prepared.ability_def.is_none() {
-        let is_aura = state
-            .objects
-            .get(&prepared.object_id)
+        let obj = state.objects.get(&prepared.object_id);
+        let is_aura = obj
             .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
             .unwrap_or(false);
-        if !is_aura {
+        // CR 702.140a: a mutating creature spell carries a target even with no
+        // spell ability — route it through the mutate target-slot branch below.
+        let is_mutate = obj.map(|obj| obj.mutate_form.is_some()).unwrap_or(false);
+        if !is_aura && !is_mutate {
             return continue_with_no_ability(state, player, prepared, events);
         }
     }
@@ -6637,6 +6838,74 @@ fn continue_with_prepared(
                     selection,
                 });
             }
+        }
+    }
+
+    // CR 702.140a: Mutate — a mutating creature spell targets a non-Human creature
+    // the caster owns (B1). The spell is NOT an Aura, so it doesn't go through the
+    // Enchant branch above; instead it carries a single object target which the
+    // resolution divert in `stack::resolve_top` reads. Mirrors the Aura
+    // target-slot path: build the legal-target slot, auto-select or pause for
+    // selection, and thread the target through `assign_targets_in_chain` (which,
+    // for a vanilla creature with no target sink, simply stores it in
+    // `ability.targets`).
+    let obj = state.objects.get(&prepared.object_id).unwrap();
+    if obj.mutate_form.is_some() {
+        let filter = mutate_target_filter();
+        let legal = targeting::find_legal_targets(state, &filter, player, prepared.object_id);
+        if legal.is_empty() {
+            // CR 702.140a: a mutating creature spell requires a legal target; if
+            // none exists the mutate cost can't be paid. (The cast-offer gate
+            // already screens this, so reaching here means the board changed.)
+            return Err(EngineError::ActionNotAllowed(
+                "No legal target for mutate".to_string(),
+            ));
+        }
+        let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
+            legal_targets: legal,
+            optional: false,
+        }];
+        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
+            let mut resolved = resolved;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            return check_additional_cost_or_pay(
+                state,
+                player,
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                &prepared.mana_cost,
+                Some(prepared.base_mana_cost.clone()),
+                prepared.casting_variant,
+                prepared.cast_timing_permission,
+                prepared.origin_zone,
+                prepared.payment_mode,
+                events,
+            );
+        } else {
+            let selection = begin_target_selection(&target_slots, &[])?;
+            let mut pending_mutate = PendingCast::new(
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                prepared.mana_cost.clone(),
+            );
+            pending_mutate.base_cost = Some(prepared.base_mana_cost.clone());
+            pending_mutate.casting_variant = prepared.casting_variant;
+            pending_mutate.cast_timing_permission = prepared.cast_timing_permission;
+            pending_mutate.distribute = prepared
+                .ability_def
+                .as_ref()
+                .and_then(|a| a.distribute.clone());
+            pending_mutate.origin_zone = prepared.origin_zone;
+            pending_mutate.payment_mode = prepared.payment_mode;
+            return Ok(WaitingFor::TargetSelection {
+                player,
+                pending_cast: Box::new(pending_mutate),
+                target_slots,
+                mode_labels: Vec::new(),
+                selection,
+            });
         }
     }
 

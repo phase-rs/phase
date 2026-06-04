@@ -96,6 +96,16 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.mtmteSubtitle", { name: cardName }),
       };
+    // CR 702.140a: Mutate — pay the mutate cost to cast as a mutating creature
+    // spell targeting a non-Human creature you own.
+    case "Mutate":
+      return {
+        eyebrow: t("alternativeCost.mutateEyebrow"),
+        normalLabel: t("alternativeCost.mutateNormalLabel"),
+        altLabel: t("alternativeCost.mutateAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.mutateSubtitle", { name: cardName }),
+      };
   }
 }
 
