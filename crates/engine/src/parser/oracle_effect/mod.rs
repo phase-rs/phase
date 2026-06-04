@@ -33566,6 +33566,37 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: Cross-sentence "Otherwise" — the conditional lives in a
+    /// prior sentence/chunk and the "Otherwise" clause is a separate sentence.
+    /// The lowering must walk backward across chunk boundaries to attach the
+    /// else_ability. Regression test for the `OtherwiseFallback` → cross-chunk
+    /// resolution fix (Garna, Bloodfist of Keld pattern).
+    #[test]
+    fn otherwise_cross_chunk_attaches_else_ability() {
+        // "draw a card if it was attacking. Otherwise, ~ deals 1 damage to each opponent."
+        // The condition is a suffix on the first sentence; "Otherwise" is a new sentence.
+        let chain = parse_effect_chain(
+            "draw a card if it was attacking. Otherwise, ~ deals 1 damage to each opponent.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        // The first def should have a condition ("if it was attacking") and an else_ability.
+        assert!(
+            chain.condition.is_some(),
+            "first def should have a condition, got: {:?}",
+            chain
+        );
+        assert!(
+            chain.else_ability.is_some(),
+            "cross-chunk Otherwise should attach as else_ability, got: {:?}",
+            chain
+        );
+        let else_ab = chain.else_ability.as_deref().unwrap();
+        assert!(
+            matches!(*else_ab.effect, Effect::DealDamage { .. }),
+            "else_ability should be DealDamage, got: {:?}",
+            else_ab.effect
+        );
+    }
     #[test]
     fn creature_card_of_the_chosen_type_conditional() {
         // Herald's Horn pattern: "look at top, if it's a creature card of the chosen type,

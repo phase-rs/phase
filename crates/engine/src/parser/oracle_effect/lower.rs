@@ -101,14 +101,29 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         true
                     }
                     SpecialClause::OtherwiseFallback(else_def) => {
-                        defs.push(AbilityDefinition::new(
-                            kind,
-                            Effect::Unimplemented {
-                                name: "otherwise".to_string(),
-                                description: Some("Otherwise".to_string()),
-                            },
-                        ));
-                        defs.push(*else_def.clone());
+                        // CR 608.2c: The "otherwise" clause appeared in a
+                        // separate sentence/chunk from its conditional. Walk
+                        // defs backward (cross-chunk) to find the most recent
+                        // conditional and attach as else_ability.
+                        let attached = defs.iter_mut().rev().any(|d| {
+                            if d.condition.is_some() {
+                                d.else_ability = Some(else_def.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if !attached {
+                            // Genuine fallback: no conditional found anywhere.
+                            defs.push(AbilityDefinition::new(
+                                kind,
+                                Effect::Unimplemented {
+                                    name: "otherwise".to_string(),
+                                    description: Some("Otherwise".to_string()),
+                                },
+                            ));
+                            defs.push(*else_def.clone());
+                        }
                         true
                     }
                     SpecialClause::DieExileRider(rider_def) => {
