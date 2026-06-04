@@ -35,8 +35,7 @@ export function RecentFormBadge({ outcomes, count = 10, className = "" }: Recent
       <div className="flex items-center gap-0.5">
         {recent.map((outcome, i) => (
           <span
-            // eslint-disable-next-line react/no-array-index-key
-            key={i}
+            key={i} // index key is safe: static ordered list, no reorder
             title={PIP_LABEL[outcome]}
             className={`flex h-5 w-5 items-center justify-center rounded-sm text-[9px] font-bold text-white ${PIP_CLASS[outcome]}`}
           >

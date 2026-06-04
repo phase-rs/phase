@@ -277,8 +277,7 @@ function HistoryCard() {
           <div className="flex items-center gap-0.5">
             {recent.map((r, i) => (
               <span
-                // eslint-disable-next-line react/no-array-index-key
-                key={i}
+                key={i} // index key is safe: static ordered list, no reorder
                 className={`h-2 w-2 rounded-full ${
                   r.outcome === "win" ? "bg-emerald-500" : r.outcome === "loss" ? "bg-red-600" : "bg-slate-500"
                 }`}

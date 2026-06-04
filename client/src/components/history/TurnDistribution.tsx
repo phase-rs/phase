@@ -27,15 +27,6 @@ function bucketIndex(turns: number): number {
   return BUCKETS.length - 1;
 }
 
-interface TooltipState {
-  idx: number;
-  count: number;
-  wins: number;
-  losses: number;
-  draws: number;
-  x: number;
-  y: number;
-}
 
 export function TurnDistribution({ records }: TurnDistributionProps) {
   const { t } = useTranslation("history");
