@@ -6,11 +6,11 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
+use super::oracle_effect::imperative::parse_discard_card_filter;
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
-use super::oracle_effect::imperative::parse_discard_card_filter;
 use super::oracle_quantity::parse_for_each_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
