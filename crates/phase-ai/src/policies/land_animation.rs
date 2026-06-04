@@ -4,6 +4,10 @@
 //! animating lands every turn regardless of strategic value, considering mana needs,
 //! color requirements, and combat value.
 
+use engine::game::game_object;
+use engine::types::ability::{
+    AbilityDefinition, ContinuousModification, CostCategory, Effect, ManaProduction,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -14,12 +18,11 @@ use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
-use engine::game::game_object;
 
 /// Penalty for animating a land when mana is needed for other spells.
 const MANA_NEEDED_PENALTY: f64 = -2.0;
 
-/// Penalty for animating a tapped land (can't animate tapped lands).
+/// Penalty for animation abilities whose cost needs an untapped source.
 const TAPPED_LAND_PENALTY: f64 = -100.0;
 
 /// Bonus for animating when sufficient alternative mana sources exist.
@@ -80,25 +83,7 @@ impl TacticalPolicy for LandAnimationPolicy {
             };
         };
 
-        // Check if the ability adds Creature type (animation)
-        let adds_creature_type = match &*ability_def.effect {
-            engine::types::ability::Effect::Animate { .. } => true,
-            engine::types::ability::Effect::GenericEffect {
-                static_abilities, ..
-            } => static_abilities.iter().any(|s| {
-                s.modifications.iter().any(|m| {
-                    matches!(
-                        m,
-                        engine::types::ability::ContinuousModification::AddType {
-                            core_type: engine::types::card_type::CoreType::Creature
-                        }
-                    )
-                })
-            }),
-            _ => false,
-        };
-
-        if !adds_creature_type {
+        if !ability_animates_land(ability_def) {
             return PolicyVerdict::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("land_animation_not_animation"),
@@ -107,10 +92,8 @@ impl TacticalPolicy for LandAnimationPolicy {
 
         let mut delta = 0.0;
 
-        // Penalize if the land is tapped (can't animate tapped lands)
-        // CR 302.5: A permanent that’s tapped can’t activate abilities unless the ability
-        // or another effect specifically allows it.
-        if obj.tapped {
+        // CR 107.5: A permanent that's already tapped can't be tapped again to pay a cost.
+        if obj.tapped && ability_taps_source(ability_def) {
             return PolicyVerdict::Score {
                 delta: TAPPED_LAND_PENALTY,
                 reason: PolicyReason::new("land_animation_tapped"),
@@ -180,10 +163,9 @@ fn is_only_source_of_color(ctx: &PolicyContext<'_>, land_id: ObjectId) -> bool {
 
 /// Get the colors a land can produce.
 fn colors_produced_by_land(land: &game_object::GameObject) -> Vec<engine::types::mana::ManaColor> {
-    use engine::types::ability::ManaProduction;
     let mut colors = Vec::new();
     for ability in land.abilities.iter() {
-        if let engine::types::ability::Effect::Mana { produced, .. } = &*ability.effect {
+        if let Effect::Mana { produced, .. } = &*ability.effect {
             match produced {
                 ManaProduction::Fixed {
                     colors: produced_colors,
@@ -218,6 +200,44 @@ fn colors_produced_by_land(land: &game_object::GameObject) -> Vec<engine::types:
         }
     }
     colors
+}
+
+fn ability_animates_land(ability: &AbilityDefinition) -> bool {
+    crate::cast_facts::collect_definition_effects(ability)
+        .into_iter()
+        .any(effect_animates_land)
+}
+
+fn effect_animates_land(effect: &Effect) -> bool {
+    match effect {
+        Effect::Animate { .. } => true,
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(|static_ability| {
+            static_ability
+                .modifications
+                .iter()
+                .any(modification_adds_creature_type)
+        }),
+        _ => false,
+    }
+}
+
+fn modification_adds_creature_type(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddType {
+            core_type: CoreType::Creature
+        }
+    )
+}
+
+fn ability_taps_source(ability: &AbilityDefinition) -> bool {
+    ability.cost.as_ref().is_some_and(|cost| {
+        cost.categories()
+            .into_iter()
+            .any(|category| category == CostCategory::TapsSelf)
+    })
 }
 
 /// Check if the AI needs mana for spells in hand.
@@ -265,4 +285,169 @@ fn has_sufficient_mana_sources(ctx: &PolicyContext<'_>, exclude_land: ObjectId) 
         .count();
 
     land_count >= 3 // Heuristic: need at least 3 other lands
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::config::AiConfig;
+    use crate::context::AiContext;
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::zones::create_object;
+    use engine::types::ability::{AbilityKind, QuantityExpr, StaticDefinition, TargetFilter};
+    use engine::types::game_state::WaitingFor;
+    use engine::types::identifiers::CardId;
+    use engine::types::mana::ManaColor;
+    use engine::types::statics::StaticMode;
+    use engine::types::zones::Zone;
+
+    const AI: PlayerId = PlayerId(0);
+
+    fn mana_effect(colors: Vec<ManaColor>) -> Effect {
+        Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors,
+                contribution: Default::default(),
+            },
+            restrictions: Vec::new(),
+            grants: Vec::new(),
+            expiry: None,
+            target: None,
+        }
+    }
+
+    fn animate_effect() -> Effect {
+        Effect::Animate {
+            power: Some(2),
+            toughness: Some(2),
+            types: vec!["Creature".to_string()],
+            remove_types: Vec::new(),
+            target: TargetFilter::SelfRef,
+            keywords: Vec::new(),
+        }
+    }
+
+    fn generic_creature_type_effect() -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(StaticMode::Continuous).modifications(
+                vec![ContinuousModification::AddType {
+                    core_type: CoreType::Creature,
+                }],
+            )],
+            duration: None,
+            target: Some(TargetFilter::SelfRef),
+        }
+    }
+
+    fn land_with_ability(state: &mut GameState, ability: AbilityDefinition) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.objects.len() as u64 + 1),
+            AI,
+            "Test Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        id
+    }
+
+    fn policy_verdict(state: &GameState, source_id: ObjectId) -> PolicyVerdict {
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata {
+                actor: Some(AI),
+                tactical_class: TacticalClass::Ability,
+            },
+        };
+        let config = AiConfig::default();
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+        LandAnimationPolicy.verdict(&ctx)
+    }
+
+    fn assert_score(verdict: PolicyVerdict, expected_reason: &str) {
+        let PolicyVerdict::Score { delta, reason } = verdict else {
+            panic!("expected score verdict");
+        };
+        assert_eq!(delta, 0.0);
+        assert_eq!(reason.kind, expected_reason);
+    }
+
+    #[test]
+    fn mana_ability_on_land_is_not_animation() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = land_with_ability(
+            &mut state,
+            AbilityDefinition::new(AbilityKind::Activated, mana_effect(vec![ManaColor::Green])),
+        );
+
+        assert_score(
+            policy_verdict(&state, source_id),
+            "land_animation_not_animation",
+        );
+    }
+
+    #[test]
+    fn ability_animates_land_walks_sub_ability_chain() {
+        let mut ability =
+            AbilityDefinition::new(AbilityKind::Activated, mana_effect(vec![ManaColor::Green]));
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Activated,
+            animate_effect(),
+        )));
+
+        assert!(ability_animates_land(&ability));
+    }
+
+    #[test]
+    fn ability_animates_land_detects_generic_creature_type_grant() {
+        let ability =
+            AbilityDefinition::new(AbilityKind::Activated, generic_creature_type_effect());
+
+        assert!(ability_animates_land(&ability));
+    }
+
+    #[test]
+    fn colors_produced_by_land_handles_any_one_color() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = land_with_ability(
+            &mut state,
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![ManaColor::White, ManaColor::Blue],
+                        contribution: Default::default(),
+                    },
+                    restrictions: Vec::new(),
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            ),
+        );
+
+        let colors = colors_produced_by_land(state.objects.get(&source_id).unwrap());
+        assert_eq!(colors, vec![ManaColor::White, ManaColor::Blue]);
+    }
 }
