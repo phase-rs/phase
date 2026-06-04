@@ -2524,6 +2524,108 @@ pub fn synthesize_riot(face: &mut CardFace) {
     }
 }
 
+/// CR 702.98a: Unleash — the optional ETB +1/+1 counter replacement. "You may
+/// have this permanent enter with an additional +1/+1 counter on it." An
+/// `Optional` `Moved`→battlefield replacement with no decline branch (declining
+/// simply enters without the counter), mirroring `build_riot_replacement` minus
+/// the Riot haste alternative.
+fn build_unleash_counter_replacement() -> ReplacementDefinition {
+    let counter_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("This permanent enters with an additional +1/+1 counter on it".to_string());
+
+    ReplacementDefinition {
+        event: ReplacementEvent::Moved,
+        execute: Some(Box::new(counter_branch)),
+        mode: crate::types::ability::ReplacementMode::Optional { decline: None },
+        valid_card: Some(TargetFilter::SelfRef),
+        destination_zone: Some(Zone::Battlefield),
+        description: Some(
+            "CR 702.98a: Unleash — this permanent may enter with an additional +1/+1 counter on it."
+                .to_string(),
+        ),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    }
+}
+
+/// CR 702.98a: Identity predicate for the Unleash optional ETB +1/+1 counter
+/// replacement, used for idempotent synthesis.
+fn is_unleash_counter_replacement(r: &ReplacementDefinition) -> bool {
+    matches!(r.event, ReplacementEvent::Moved)
+        && matches!(r.destination_zone, Some(Zone::Battlefield))
+        && matches!(r.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            r.mode,
+            crate::types::ability::ReplacementMode::Optional { decline: None }
+        )
+        && r.execute.as_deref().is_some_and(|a| {
+            matches!(
+                &*a.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }
+            )
+        })
+}
+
+/// CR 702.98a: Unleash's "can't block as long as it has a +1/+1 counter on it"
+/// static — a `CantBlock` static gated on the source having ≥1 +1/+1 counter.
+/// The condition is re-evaluated continuously by `active_static_definitions`, so
+/// the prohibition turns on/off as +1/+1 counters are added/removed (CR 604.1).
+fn build_unleash_cantblock_static() -> StaticDefinition {
+    StaticDefinition::new(StaticMode::CantBlock)
+        .affected(TargetFilter::SelfRef)
+        .condition(StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        })
+}
+
+/// CR 702.98a: Identity predicate for the Unleash can't-block static.
+fn is_unleash_cantblock_static(s: &StaticDefinition) -> bool {
+    matches!(s.mode, StaticMode::CantBlock)
+        && matches!(s.affected, Some(TargetFilter::SelfRef))
+        && matches!(
+            s.condition.as_ref(),
+            Some(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                minimum: 1,
+                maximum: None,
+            })
+        )
+}
+
+/// CR 702.98a: Synthesize Unleash's two static abilities — the optional ETB
+/// +1/+1 counter (a `Moved` replacement) and the conditional `CantBlock` static.
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Unleash`, so every printed
+/// Unleash creature flows through this one synthesizer. Idempotent across
+/// repeated invocations.
+pub fn synthesize_unleash(face: &mut CardFace) {
+    if !face.keywords.iter().any(|k| matches!(k, Keyword::Unleash)) {
+        return;
+    }
+    if !face.replacements.iter().any(is_unleash_counter_replacement) {
+        face.replacements.push(build_unleash_counter_replacement());
+    }
+    if !face
+        .static_abilities
+        .iter()
+        .any(is_unleash_cantblock_static)
+    {
+        face.static_abilities.push(build_unleash_cantblock_static());
+    }
+}
+
 fn static_grants_riot(static_def: &StaticDefinition) -> bool {
     static_def.mode == StaticMode::Continuous
         && static_def.modifications.iter().any(|modification| {
@@ -6959,6 +7061,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     // haste. Static grants of Riot synthesize matching ETB replacements from
     // their affected filters.
     synthesize_riot(face);
+    synthesize_unleash(face);
     // CR 702.93a: Undying — dies trigger that returns the permanent with a
     // +1/+1 counter, gated on having had no +1/+1 counter at death (LKI).
     synthesize_undying(face);
@@ -20179,5 +20282,112 @@ mod champion_runtime_tests {
                 .any(|link| { link.source_id == champion_id && link.exiled_id == elf_id }),
             "Champion LTB return should consume the source-tracked exile link"
         );
+    }
+}
+
+#[cfg(test)]
+mod unleash_synthesis_tests {
+    //! CR 702.98a shape tests: Unleash is two static abilities, previously
+    //! parsed/typed but unimplemented. `synthesize_unleash` installs (1) an
+    //! optional ETB +1/+1 counter replacement and (2) a `CantBlock` static gated
+    //! on the source having a +1/+1 counter. Both are condition-/zone-correct by
+    //! construction; the can't-block prohibition turns on/off via
+    //! `active_static_definitions` re-evaluating the `HasCounters` condition.
+    use super::*;
+    use crate::types::ability::{ReplacementMode, StaticCondition};
+
+    fn unleash_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Unleash);
+        face
+    }
+
+    #[test]
+    fn unleash_synthesizes_optional_etb_counter_replacement() {
+        let mut face = unleash_face();
+        synthesize_unleash(&mut face);
+        let r = face
+            .replacements
+            .iter()
+            .find(|r| is_unleash_counter_replacement(r))
+            .expect("Unleash should add an optional ETB +1/+1 counter replacement");
+        assert!(matches!(r.event, ReplacementEvent::Moved));
+        assert!(matches!(r.destination_zone, Some(Zone::Battlefield)));
+        assert!(matches!(r.valid_card, Some(TargetFilter::SelfRef)));
+        // CR 702.98a: "you MAY have it enter with a counter" — optional, and
+        // declining simply enters without the counter (no decline branch).
+        assert!(matches!(
+            r.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let effect = &*r.execute.as_deref().expect("execute body").effect;
+        assert!(matches!(
+            effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    #[test]
+    fn unleash_synthesizes_conditional_cantblock_static() {
+        let mut face = unleash_face();
+        synthesize_unleash(&mut face);
+        let s = face
+            .static_abilities
+            .iter()
+            .find(|s| is_unleash_cantblock_static(s))
+            .expect("Unleash should add a conditional CantBlock static");
+        assert!(matches!(s.mode, StaticMode::CantBlock));
+        assert!(matches!(s.affected, Some(TargetFilter::SelfRef)));
+        // CR 702.98a: "can't block as long as it has a +1/+1 counter on it."
+        assert!(matches!(
+            s.condition.as_ref(),
+            Some(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                minimum: 1,
+                maximum: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn unleash_is_idempotent() {
+        let mut face = unleash_face();
+        synthesize_unleash(&mut face);
+        synthesize_unleash(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_unleash_counter_replacement(r))
+                .count(),
+            1,
+            "repeated synthesis must not duplicate the Unleash counter replacement"
+        );
+        assert_eq!(
+            face.static_abilities
+                .iter()
+                .filter(|s| is_unleash_cantblock_static(s))
+                .count(),
+            1,
+            "repeated synthesis must not duplicate the Unleash can't-block static"
+        );
+    }
+
+    #[test]
+    fn unleash_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_unleash(&mut face);
+        assert!(face
+            .replacements
+            .iter()
+            .all(|r| !is_unleash_counter_replacement(r)));
+        assert!(face
+            .static_abilities
+            .iter()
+            .all(|s| !is_unleash_cantblock_static(s)));
     }
 }
