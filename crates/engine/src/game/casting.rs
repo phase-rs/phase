@@ -6677,6 +6677,33 @@ fn continue_with_prepared(
             );
         }
 
+        // CR 702.56a: Replicate is a repeatable optional additional cost, so it
+        // must be declared before targets are chosen just like Casualty.
+        if let Some(replicate_cost) =
+            casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+        {
+            return casting_costs::begin_optional_cost_before_targets(
+                state,
+                player,
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                prepared.mana_cost,
+                Some(prepared.base_mana_cost.clone()),
+                replicate_cost,
+                SpellCostSource::Other,
+                prepared.casting_variant,
+                prepared.cast_timing_permission,
+                prepared
+                    .ability_def
+                    .as_ref()
+                    .and_then(|a| a.distribute.clone()),
+                prepared.origin_zone,
+                prepared.payment_mode,
+                events,
+            );
+        }
+
         // CR 702.48a/b: Offering sacrifice must be declared before targets are chosen.
         // When cast_timing_permission == Offering, the player used Offering to unlock
         // instant-speed timing and is required to pay the sacrifice. Otherwise it is

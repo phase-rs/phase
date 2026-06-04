@@ -1797,9 +1797,8 @@ pub fn synthesize_casualty(face: &mut CardFace) {
 /// *repeatable* additional cost (CR 702.56a: "pay [cost] any number of times")
 /// that copies the spell once per payment. That per-payment count flows through
 /// `repeat_for = QuantityRef::AdditionalCostPaymentCount`, which the
-/// `resolve_chain_body` iteration loop reads (CR 609.3) to drive N `CopySpell`
-/// iterations — each producing one stack copy with its own CR 707.10c retarget
-/// step.
+/// `resolve_chain_body` iteration loop reads to drive N `CopySpell` iterations
+/// — each producing one stack copy with its own CR 707.10c retarget step.
 pub fn replicate_copy_ability_definition() -> AbilityDefinition {
     let mut def = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -1815,9 +1814,9 @@ pub fn replicate_copy_ability_definition() -> AbilityDefinition {
     // no-op (no SpellCopied events) when replicate was declined, matching the
     // intervening-if phrasing exactly.
     .condition(AbilityCondition::additional_cost_paid_any());
-    // CR 702.56a + CR 609.3: "copy it for each time its replicate cost was
-    // paid." The replicate cost is a repeatable additional cost, so the number
-    // of copies equals the cast-time payment count
+    // CR 702.56a: "copy it for each time its replicate cost was paid." The
+    // replicate cost is a repeatable additional cost, so the number of copies
+    // equals the cast-time payment count
     // (`SpellContext::additional_cost_payment_count`).
     def.repeat_for = Some(QuantityExpr::Ref {
         qty: QuantityRef::AdditionalCostPaymentCount,
@@ -1891,20 +1890,13 @@ pub fn synthesize_replicate(face: &mut CardFace) {
         matches!(t.mode, TriggerMode::SpellCast)
             && matches!(t.valid_card, Some(TargetFilter::SelfRef))
             && t.trigger_zones.contains(&Zone::Stack)
-            && t.execute.as_deref().is_some_and(|a| {
-                matches!(
-                    &*a.effect,
-                    Effect::CopySpell {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    }
-                ) && matches!(
-                    a.repeat_for,
-                    Some(QuantityExpr::Ref {
-                        qty: QuantityRef::AdditionalCostPaymentCount,
-                    })
-                )
-            })
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::CopySpell {
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
     });
     if already_has_trigger {
         return;
@@ -12544,7 +12536,7 @@ mod replicate_synthesis_tests {
             }
             other => panic!("expected CopySpell, got {other:?}"),
         }
-        // CR 609.3: one copy per replicate payment.
+        // CR 702.56a: one copy per replicate payment.
         assert!(matches!(
             execute.repeat_for,
             Some(QuantityExpr::Ref {

@@ -1630,6 +1630,57 @@ fn collect_pending_triggers(
                     die_result: None,
                 }));
             }
+
+            // CR 702.56a: Replicate's copy trigger is synthesized onto printed
+            // Replicate cards by `synthesize_replicate`. Dynamically granted
+            // Replicate (StaticMode::CastWithKeyword) has no face-level trigger,
+            // so mirror the dynamic Casualty seam here and reuse the canonical
+            // Replicate ability definition.
+            let dynamically_granted_replicate = state
+                .objects
+                .get(cast_obj_id)
+                .filter(|obj| {
+                    !obj.keywords
+                        .iter()
+                        .any(|k| matches!(k, Keyword::Replicate(_)))
+                })
+                .and_then(|obj| {
+                    let payment_count = obj.additional_cost_payment_count;
+                    (payment_count > 0).then_some((obj.controller, payment_count))
+                })
+                .and_then(|(controller, payment_count)| {
+                    let has_replicate =
+                        super::casting::effective_spell_keywords(state, controller, *cast_obj_id)
+                            .iter()
+                            .any(|keyword| matches!(keyword, Keyword::Replicate(_)));
+                    has_replicate.then_some((controller, payment_count))
+                });
+            if let Some((controller, payment_count)) = dynamically_granted_replicate {
+                let mut replicate_ability = build_resolved_from_def(
+                    &crate::database::synthesis::replicate_copy_ability_definition(),
+                    *cast_obj_id,
+                    controller,
+                );
+                replicate_ability.context.additional_cost_paid = true;
+                replicate_ability.context.additional_cost_payment_count = payment_count;
+                let timestamp = state.next_timestamp() as u32;
+                pending.push(PendingTriggerContext::single(PendingTrigger {
+                    source_id: *cast_obj_id,
+                    controller,
+                    condition: None,
+                    ability: replicate_ability,
+                    timestamp,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: Some(event.clone()),
+                    modal: None,
+                    mode_abilities: vec![],
+                    description: Some("Replicate".to_string()),
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                }));
+            }
         }
 
         // CR 725.2: At the beginning of the monarch's end step, that player draws a card.
