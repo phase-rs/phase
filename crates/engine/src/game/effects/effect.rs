@@ -169,6 +169,22 @@ fn register_transient_effect(
         return;
     }
 
+    // Shared registration for player-scope fan-out arms: bind one
+    // `SpecificPlayer` TCE per player id. Takes `state` as a parameter so the
+    // sibling object/single-player arms below retain exclusive access to it.
+    let register_for_players = |state: &mut GameState, ids: Vec<PlayerId>| {
+        for player_id in ids {
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                TargetFilter::SpecificPlayer { id: player_id },
+                modifications.clone(),
+                static_def.condition.clone(),
+            );
+        }
+    };
+
     // Non-targeted: resolve the affected filter (SelfRef handled above).
     match resolved_filter {
         // CR 113.10 + CR 702.16j: Player-scoped affected filter — register the
@@ -209,22 +225,13 @@ fn register_transient_effect(
         // spell-applied player-scoped statics like Everybody Lives! never reach
         // those queries.
         Some(TargetFilter::Player) => {
-            let player_ids: Vec<_> = state
+            let player_ids: Vec<PlayerId> = state
                 .players
                 .iter()
                 .filter(|p| !p.is_eliminated)
                 .map(|p| p.id)
                 .collect();
-            for player_id in player_ids {
-                state.add_transient_continuous_effect(
-                    ability.source_id,
-                    ability.controller,
-                    duration.clone(),
-                    TargetFilter::SpecificPlayer { id: player_id },
-                    modifications.clone(),
-                    static_def.condition.clone(),
-                );
-            }
+            register_for_players(state, player_ids);
         }
         // CR 119.7 + CR 119.8 + CR 113.10: Bare player-scope `Typed` affected
         // filter. A `TargetFilter::Typed` with no `type_filters` and no
@@ -234,14 +241,18 @@ fn register_transient_effect(
         // life total can't change" parser (Teferi's Protection) and the
         // "[possessor] can't gain/lose life" restriction parser emit player-scoped
         // statics with this shape. Resolve the `controller` ref to concrete
-        // player(s) and bind each as `SpecificPlayer` so player-scoped runtime
-        // queries (`player_has_cant_gain_life`, etc.) can find them. Without this
-        // arm the grant falls through to the object-broadcast branch below, binds
-        // to (zero, under Teferi's mass phase-out) battlefield objects as
-        // `SpecificObject`, and the life-lock silently never applies. Filters
+        // player(s) via the shared `collect_player_targets` authority — which
+        // matches every `ControllerRef` variant exhaustively with per-variant CR
+        // annotations (no `_ => true` wildcard over the closed enum) — and bind
+        // each as `SpecificPlayer` so player-scoped runtime queries
+        // (`player_has_cant_gain_life`, etc.) can find them. Without this arm the
+        // grant falls through to the object-broadcast branch below, binds to
+        // (zero, under Teferi's mass phase-out) battlefield objects as
+        // `SpecificObject`, and the life-lock silently never applies. The guard
+        // keeps the arm scoped to `You`/`Opponent`/unscoped controllers; filters
         // carrying `properties` or a context-relative controller are genuine
         // object filters and stay on the broadcast path.
-        Some(TargetFilter::Typed(tf))
+        Some(player_filter @ TargetFilter::Typed(tf))
             if tf.type_filters.is_empty()
                 && tf.properties.is_empty()
                 && matches!(
@@ -249,30 +260,19 @@ fn register_transient_effect(
                     None | Some(ControllerRef::You) | Some(ControllerRef::Opponent)
                 ) =>
         {
-            let player_ids: Vec<PlayerId> = state
+            // CR 104.2: eliminated players hold no game-state restrictions.
+            let eliminated: std::collections::HashSet<PlayerId> = state
                 .players
                 .iter()
-                .filter(|p| !p.is_eliminated)
-                .filter(|p| match tf.controller {
-                    Some(ControllerRef::You) => p.id == ability.controller,
-                    // CR 119.7: An opponent-scoped lock binds to every opponent
-                    // of the ability's controller (1v1 and multiplayer).
-                    Some(ControllerRef::Opponent) => p.id != ability.controller,
-                    // No scope ("Players' life totals can't change") → all players.
-                    _ => true,
-                })
+                .filter(|p| p.is_eliminated)
                 .map(|p| p.id)
                 .collect();
-            for player_id in player_ids {
-                state.add_transient_continuous_effect(
-                    ability.source_id,
-                    ability.controller,
-                    duration.clone(),
-                    TargetFilter::SpecificPlayer { id: player_id },
-                    modifications.clone(),
-                    static_def.condition.clone(),
-                );
-            }
+            let player_ids: Vec<PlayerId> =
+                crate::game::ability_utils::collect_player_targets(state, ability, player_filter)
+                    .into_iter()
+                    .filter(|id| !eliminated.contains(id))
+                    .collect();
+            register_for_players(state, player_ids);
         }
         Some(TargetFilter::None) | None => {}
         // CR 608.2k: A grant whose affected object is the ability's cost-paid
