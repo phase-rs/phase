@@ -5,8 +5,8 @@
 // Tests 1–4 mock `isWaitingForHandled` to inject an "unhandled" verdict for an
 // otherwise-handled variant (`Priority`); they exercise the modal + store
 // round-trip, NOT the registry. Test 5 uses the real registry (no override)
-// with a genuinely-unhandled variant (`OrphanEngineChoice`) — exercises real
-// that proves `HANDLED_WAITING_FOR_TYPES` membership end-to-end.
+// with a genuinely-unhandled variant (`OrphanEngineChoice`) — the only case
+// that exercises real `HANDLED_WAITING_FOR_TYPES` membership end-to-end.
 
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
