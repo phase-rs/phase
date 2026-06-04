@@ -33554,6 +33554,44 @@ mod tests {
         );
     }
 
+    /// CR 601.2a + CR 113.6b + CR 406.6: The public cast action must accept the
+    /// same persistent linked-exile permission surfaced by the castable-object
+    /// preview.
+    #[test]
+    fn persistent_exile_play_permission_casts_linked_card_through_action() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source_id = add_exile_cast_permission_source_with(
+            &mut state,
+            player,
+            "The Matrix of Time",
+            TargetFilter::Any,
+            CastFrequency::Unlimited,
+            CardPlayMode::Play,
+            ExileCastCost::PayNormalCost,
+            ExileCardPool::Persistent,
+            ExileCastTiming::YourTurnOnly,
+        );
+        let exiled = add_exiled_card(&mut state, player, "Exiled Bear");
+        link_exiled_to_source(&mut state, exiled, source_id);
+        state.objects.get_mut(&exiled).unwrap().mana_cost = ManaCost::zero();
+        let card_id = state.objects.get(&exiled).unwrap().card_id;
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: exiled,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .expect("linked exiled spell should cast through the public action");
+
+        let obj = state.objects.get(&exiled).unwrap();
+        assert_eq!(obj.zone, Zone::Stack);
+        assert_eq!(state.stack.back().unwrap().id, exiled);
+    }
+
     /// CR 113.6b: A card NOT linked to the source (no `exile_links` entry, not
     /// in the per-turn list) must not be granted by the persistent static —
     /// the permission is scoped to the source's own exile pool.
@@ -33653,6 +33691,41 @@ mod tests {
             !spell_objects_available_to_cast(&state, player).contains(&land),
             "lands are never offered on the cast path"
         );
+    }
+
+    /// CR 305.1 + CR 113.6b + CR 406.6: The public play-land action must accept
+    /// a linked exiled land authorized by a Play-mode persistent permission.
+    #[test]
+    fn persistent_exile_play_permission_plays_linked_land_through_action() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source_id = add_exile_cast_permission_source_with(
+            &mut state,
+            player,
+            "The Matrix of Time",
+            TargetFilter::Any,
+            CastFrequency::Unlimited,
+            CardPlayMode::Play,
+            ExileCastCost::PayNormalCost,
+            ExileCardPool::Persistent,
+            ExileCastTiming::YourTurnOnly,
+        );
+        let land = add_exiled_land(&mut state, player, "Exiled Island");
+        link_exiled_to_source(&mut state, land, source_id);
+        let card_id = state.objects.get(&land).unwrap().card_id;
+
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land,
+                card_id,
+            },
+        )
+        .expect("linked exiled land should play through the public action");
+
+        let obj = state.objects.get(&land).unwrap();
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(obj.played_from_zone, Some(Zone::Exile));
     }
 
     /// PR #1441: Teferi, Time Raveler's +1 ("you may cast sorcery spells as
