@@ -367,6 +367,10 @@ fn trigger_tree_has_optional(trigger: &TriggerDefinition) -> bool {
 /// handling the "if you don't" alternative.
 fn effect_has_internal_optionality(effect: &Effect) -> bool {
     match effect {
+        // CR 701.23j: Outside-game searches are optional at the selection
+        // level; the parser lowers "you may reveal a ... card you own from
+        // outside the game" as `count: UpTo(1)` instead of `def.optional`.
+        Effect::SearchOutsideGame { count, .. } if count.is_up_to() => true,
         Effect::Dig { up_to: true, .. }
         | Effect::GrantCastingPermission { .. }
         | Effect::CastFromZone { .. }
@@ -2268,6 +2272,7 @@ fn effect_name(effect: &Effect) -> &str {
 mod tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool};
     use crate::types::statics::StaticMode;
 
     fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
@@ -2301,6 +2306,15 @@ mod tests {
                 } if warning_detector == detector
             )
         })
+    }
+
+    fn find_search_outside_game(def: &AbilityDefinition) -> Option<&Effect> {
+        if matches!(&*def.effect, Effect::SearchOutsideGame { .. }) {
+            return Some(&def.effect);
+        }
+        def.sub_ability
+            .as_deref()
+            .and_then(find_search_outside_game)
     }
 
     #[test]
@@ -2339,6 +2353,64 @@ mod tests {
             &["Instant"],
         );
 
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_outside_game_wish_search() {
+        let parsed = parse_named(
+            "You may reveal a sorcery card you own from outside the game and put it into your hand. \
+             Exile Burning Wish.",
+            "Burning Wish",
+            &["Sorcery"],
+        );
+
+        let effect = parsed
+            .abilities
+            .iter()
+            .find_map(find_search_outside_game)
+            .expect("expected outside-game wish search to parse");
+        match effect {
+            Effect::SearchOutsideGame {
+                count, source_pool, ..
+            } => {
+                assert!(
+                    count.is_up_to(),
+                    "wish search must encode the optional reveal as an up-to count"
+                );
+                assert_eq!(*source_pool, OutsideGameSourcePool::Sideboard);
+            }
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_outside_game_face_up_exile_disjunction() {
+        let parsed = parse_named(
+            "You may reveal an Eldrazi card you own from outside the game or choose a \
+             face-up Eldrazi card you own in exile. Put that card into your hand.",
+            "Coax from the Blind Eternities",
+            &["Sorcery"],
+        );
+
+        let effect = parsed
+            .abilities
+            .iter()
+            .find_map(find_search_outside_game)
+            .expect("expected outside-game Coax search to parse");
+        match effect {
+            Effect::SearchOutsideGame {
+                count, source_pool, ..
+            } => {
+                assert!(
+                    count.is_up_to(),
+                    "Coax search must encode the optional reveal as an up-to count"
+                );
+                assert_eq!(*source_pool, OutsideGameSourcePool::SideboardAndFaceUpExile);
+            }
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
