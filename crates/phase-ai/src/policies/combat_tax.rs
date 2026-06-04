@@ -41,6 +41,9 @@ const AGGRO_AMP: f64 = 1.4;
 /// Control archetypes conserve mana for interaction — multiplier penalty on acceptance.
 const CONTROL_DAMP: f64 = 0.6;
 
+/// Bonus for paying block tax to preserve valuable blockers.
+const BLOCKER_VALUE_BONUS: f64 = 0.25;
+
 pub struct CombatTaxPaymentPolicy;
 
 impl TacticalPolicy for CombatTaxPaymentPolicy {
@@ -153,8 +156,17 @@ impl TacticalPolicy for CombatTaxPaymentPolicy {
                 0.0
             };
 
+        // Blocker value bonus: when blocking, add bonus for paying tax to preserve
+        // valuable blockers. This addresses issue #1541 where blockers disappear
+        // due to aggressive tax decline.
+        let blocker_value_bonus = if matches!(context, CombatTaxContext::Blocking) && accept {
+            BLOCKER_VALUE_BONUS
+        } else {
+            0.0
+        };
+
         let delta = if accept {
-            base_delta + tap_out_penalty + collapse_bonus
+            base_delta + tap_out_penalty + collapse_bonus + blocker_value_bonus
         } else {
             // Decline: sign-flipped base_delta (declining is the opposite decision).
             -base_delta
@@ -253,9 +265,10 @@ fn archetype_multiplier(features: &DeckFeatures, context: CombatTaxContext) -> f
         CombatTaxContext::Attacking => {
             1.0 + (AGGRO_AMP - 1.0) * aggro - (1.0 - CONTROL_DAMP) * control
         }
-        // Block side: aggro doesn't care much (rarely blocks), control wants to
-        // save mana; keep a mild multiplier.
-        CombatTaxContext::Blocking => 1.0 - (1.0 - CONTROL_DAMP) * control,
+        // Block side: reduced control dampening to prevent aggressive tax decline
+        // that causes blockers to disappear (issue #1541). Control decks still
+        // conserve mana, but the penalty is less severe to preserve valuable blockers.
+        CombatTaxContext::Blocking => 1.0 - (1.0 - 0.8) * control,
     }
 }
 

@@ -9,6 +9,7 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -23,6 +24,7 @@ pub struct EffectProfile {
     pub has_counter_spell: bool,
     pub has_direct_removal_text: bool,
     pub has_mass_damage_or_mass_shrink_text: bool,
+    pub has_flash_granting: bool,
 }
 
 impl EffectProfile {
@@ -42,6 +44,7 @@ impl EffectProfile {
             has_mass_damage_or_mass_shrink_text: effects
                 .iter()
                 .any(|e| is_mass_damage_or_shrink(e)),
+            has_flash_granting: false, // Flash-granting is a static, not an effect
         }
     }
 
@@ -51,7 +54,10 @@ impl EffectProfile {
     /// immediate-ETB trigger effects, this includes attack/dies/upkeep/etc. triggers
     /// too, since draft-pick evaluation cares about a card's whole effect surface.
     pub fn from_face(face: &CardFace) -> Self {
-        Self::from_effects(&collect_face_effects(face))
+        let profile = Self::from_effects(&collect_face_effects(face));
+        // Flash-granting is detected at activation time, not at card-face level
+        // for Alchemist's Refuge-style activated abilities
+        profile
     }
 }
 
@@ -109,6 +115,9 @@ impl<'a> CastFacts<'a> {
     }
     pub fn has_mass_damage_or_mass_shrink_text(&self) -> bool {
         self.profile.has_mass_damage_or_mass_shrink_text
+    }
+    pub fn has_flash_granting(&self) -> bool {
+        self.profile.has_flash_granting
     }
 
     pub fn immediate_effects(&self) -> Vec<&'a Effect> {
@@ -196,7 +205,25 @@ pub fn effect_profile_for_action(
             let object = state.objects.get(source_id)?;
             let ability = object.abilities.get(*ability_index)?;
             let effects: Vec<_> = collect_definition_effects(ability);
-            Some(EffectProfile::from_effects(&effects))
+            let mut profile = EffectProfile::from_effects(&effects);
+            // Check if the ability creates a static that grants flash (e.g., Alchemist's Refuge)
+            // Flash-granting is granted via static abilities in Effect::GenericEffect
+            profile.has_flash_granting = effects.iter().any(|e| {
+                if let Effect::GenericEffect {
+                    static_abilities, ..
+                } = e
+                {
+                    static_abilities.iter().any(|static_def| {
+                        matches!(
+                            static_def.mode,
+                            StaticMode::CastWithFlash | StaticMode::CastWithKeyword { .. }
+                        )
+                    })
+                } else {
+                    false
+                }
+            });
+            Some(profile)
         }
         _ => None,
     }
