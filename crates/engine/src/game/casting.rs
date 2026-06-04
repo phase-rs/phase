@@ -440,6 +440,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                 && (has_harmonize_keyword(obj)
                     || has_flashback_keyword(state, obj_id)
                     || has_aftermath_keyword(state, obj_id)
+                    || has_disturb_keyword(state, obj_id)
                     || retrace_has_discardable_land(state, player, obj_id)
                     || graveyard_has_enough_for_escape(state, player, obj_id))
         })
@@ -557,6 +558,11 @@ fn has_aftermath_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Aftermath)
 }
 
+/// CR 702.146: Check if an object has the Disturb keyword.
+fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Disturb)
+}
+
 fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
     obj.keywords.iter().find_map(|keyword| match keyword {
         Keyword::Foretell(cost) => Some(cost.clone()),
@@ -642,7 +648,7 @@ pub fn handle_foretell(
 }
 
 // CR 702.34 (Flashback) / CR 702.81 (Retrace) / CR 702.127 (Aftermath) /
-// CR 702.138 (Escape) / CR 702.180 (Harmonize): graveyard-cast alternative
+// CR 702.138 (Escape) / CR 702.146 (Disturb) / CR 702.180 (Harmonize): graveyard-cast alternative
 // permissions. Sneak (CR 702.190a) is a HAND-cast alt-cost and is deliberately
 // NOT listed here — including it would misclassify graveyard objects with a
 // granted Sneak as castable from the graveyard, which the rules do not permit.
@@ -659,6 +665,7 @@ fn has_effective_graveyard_cast_keyword(
             .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
         || has_flashback_keyword(state, object_id)
         || has_aftermath_keyword(state, object_id)
+        || super::keywords::effective_disturb_cost(state, object_id).is_some()
 }
 
 fn upsert_keyword_by_kind(keywords: &mut Vec<Keyword>, keyword: Keyword) {
@@ -2147,6 +2154,9 @@ fn casting_variant_candidates(
         if has_aftermath_keyword(state, object_id) {
             candidates.push(CastingVariant::Aftermath);
         }
+        if super::keywords::effective_disturb_cost(state, object_id).is_some() {
+            candidates.push(CastingVariant::Disturb);
+        }
         if let Some(source) = graveyard_permission_source(state, player, object_id) {
             let slot_type = if source.frequency == CastFrequency::OncePerTurnPerPermanentType {
                 let slots = available_permanent_type_slots(state, source.source_id, object_id);
@@ -2445,6 +2455,13 @@ fn prepare_spell_cast_with_variant_override_inner(
         None
     };
 
+    // CR 702.146a: Disturb — use disturb cost when casting from graveyard.
+    let disturb_cost = if obj.zone == Zone::Graveyard {
+        super::keywords::effective_disturb_cost(state, object_id)
+    } else {
+        None
+    };
+
     // CR 702.190a: Sneak alt-cost when casting from HAND. The
     // `effective_sneak_cost` lookup goes through `effective_keyword_for_object`
     // so off-zone keyword grants (e.g., statics that grant Sneak to cards in
@@ -2475,7 +2492,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     let (flashback_mana_cost, flashback_non_mana_cost) =
         split_flashback_cost_components(flashback_cost.as_ref());
 
-    // Precedence: Escape > Retrace > Harmonize > Flashback > Aftermath > GraveyardPermission > Warp > Normal.
+    // Precedence: Escape > Retrace > Harmonize > Flashback > Aftermath > Disturb >
+    // GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
     // keyword overrides an external source's grant (GraveyardPermission).
     //
@@ -2542,6 +2560,8 @@ fn prepare_spell_cast_with_variant_override_inner(
             )
         {
             CastingVariant::Aftermath
+        } else if disturb_cost.is_some() {
+            CastingVariant::Disturb
         } else if let Some(source) = graveyard_permission_src {
             // CR 110.4: For OncePerTurnPerPermanentType permissions, auto-pick
             // the slot when only one is available. When multiple slots are
@@ -2808,6 +2828,11 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    let effective_disturb_cost_for_path = if casting_variant == CastingVariant::Disturb {
+        disturb_cost
+    } else {
+        None
+    };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || next_spell_without_paying
@@ -2833,6 +2858,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
+            .or(effective_disturb_cost_for_path)
             .or(effective_sneak_cost_for_path)
             .or(effective_web_slinging_cost_for_path)
             .or(alt_cost_from_exile)
@@ -4189,14 +4215,13 @@ pub fn handle_overload_cost_choice_with_payment_mode(
     }
 }
 
-/// CR 702.162a + CR 712.14a: Handle More Than Meets the Eye cost choice and
+/// CR 702.162a + CR 712.8c + CR 712.11a-c + CR 712.14a: Handle More Than Meets the Eye cost choice and
 /// proceed with casting. For `AlternativeCastDecision::Alternative`, the cast is
 /// prepared with `CastingVariant::MoreThanMeetsTheEye` — the MTMTE mana cost
 /// substitutes for the printed cost and the spell is cast CONVERTED, so the
-/// resolving permanent enters the battlefield with its back face up (CR 712.14a,
-/// seeded in `stack.rs`). MTMTE only substitutes the cost; the back-face swap is
-/// performed at resolution, so no object mutation happens before preparation
-/// (unlike Bestow/Cleave). For `Normal`, the cast proceeds normally (front face).
+/// stack spell uses back-face characteristics and the resolving permanent
+/// enters the battlefield with its back face up. For `Normal`, the cast
+/// proceeds normally (front face).
 pub fn handle_mtmte_cost_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -4227,32 +4252,14 @@ pub fn handle_mtmte_cost_choice_with_payment_mode(
 ) -> Result<WaitingFor, EngineError> {
     use crate::types::actions::AlternativeCastDecision;
     match decision {
-        AlternativeCastDecision::Alternative => {
-            // CR 712.11a + CR 702.162a: a spell cast "converted" is put onto
-            // the stack with its back face up. Swap before preparation so the
-            // stack spell is evaluated using back-face characteristics (CR
-            // 712.11c); `prepare_spell_cast_with_variant_override_inner` reads
-            // the MTMTE cost back through the stored front-face snapshot.
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                swap_to_alternative_spell_face(obj);
-            }
-            let mut prepared = match prepare_spell_cast_with_variant_override(
-                state,
-                player,
-                object_id,
-                Some(CastingVariant::MoreThanMeetsTheEye),
-            ) {
-                Ok(prepared) => prepared,
-                Err(err) => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        swap_to_alternative_spell_face(obj);
-                    }
-                    return Err(err);
-                }
-            };
-            prepared.payment_mode = payment_mode;
-            continue_with_prepared(state, player, prepared, events)
-        }
+        AlternativeCastDecision::Alternative => continue_cast_with_alternative_spell_face(
+            state,
+            player,
+            object_id,
+            CastingVariant::MoreThanMeetsTheEye,
+            payment_mode,
+            events,
+        ),
         AlternativeCastDecision::Normal => {
             continue_cast_from_prepared(state, player, object_id, payment_mode, events)
         }
@@ -4873,6 +4880,43 @@ fn continue_cast_from_prepared(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut prepared = prepare_spell_cast(state, player, object_id)?;
+    if prepared.casting_variant == CastingVariant::Disturb {
+        return continue_cast_with_alternative_spell_face(
+            state,
+            player,
+            object_id,
+            CastingVariant::Disturb,
+            payment_mode,
+            events,
+        );
+    }
+    prepared.payment_mode = payment_mode;
+    continue_with_prepared(state, player, prepared, events)
+}
+
+fn continue_cast_with_alternative_spell_face(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant: CastingVariant,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 712.8c + CR 712.11a-c: cast-transformed/converted spells are put on
+    // the stack back face up and evaluated using only back-face characteristics.
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        swap_to_alternative_spell_face(obj);
+    }
+    let mut prepared =
+        match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant)) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    swap_to_alternative_spell_face(obj);
+                }
+                return Err(err);
+            }
+        };
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
 }
@@ -4925,6 +4969,20 @@ fn continue_cast_with_variant(
             };
         prepared.payment_mode = payment_mode;
         return continue_with_prepared(state, player, prepared, events);
+    }
+
+    if matches!(
+        variant,
+        CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
+    ) {
+        return continue_cast_with_alternative_spell_face(
+            state,
+            player,
+            object_id,
+            variant,
+            payment_mode,
+            events,
+        );
     }
 
     let mut prepared =
@@ -9906,9 +9964,13 @@ pub fn handle_cancel_cast(
         }
     }
 
-    if pending.casting_variant == CastingVariant::MoreThanMeetsTheEye {
-        // CR 601.2i + CR 712.11a: backing out of a converted cast before it
-        // completes restores the card's normal front face in its origin zone.
+    if pending
+        .casting_variant
+        .restores_front_face_after_stack_exit()
+    {
+        // CR 601.2i + CR 712.11a: backing out of a cast with an alternative
+        // spell face before it completes restores the card's normal front face
+        // in its origin zone.
         if let Some(obj) = state.objects.get_mut(&pending.object_id) {
             swap_to_alternative_spell_face(obj);
         }
@@ -25667,6 +25729,128 @@ mod tests {
             prepared.mana_cost, flashback_cost,
             "Should use flashback cost, not card mana cost"
         );
+    }
+
+    fn add_disturb_creature_to_graveyard(
+        state: &mut GameState,
+        player: PlayerId,
+        disturb_cost: ManaCost,
+        mana_cost: ManaCost,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let obj_id = create_object(
+            state,
+            card_id,
+            player,
+            "Lunarch Veteran".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = mana_cost.clone();
+        obj.base_mana_cost = mana_cost;
+        obj.base_keywords
+            .push(Keyword::Disturb(disturb_cost.clone()));
+        obj.keywords = obj.base_keywords.clone();
+        obj.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Luminous Phantom".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            loyalty: None,
+            defense: None,
+            card_types: {
+                let mut card_types = crate::types::card_type::CardType::default();
+                card_types.core_types.push(CoreType::Creature);
+                card_types
+            },
+            mana_cost: ManaCost::zero(),
+            keywords: Vec::new(),
+            abilities: Vec::new(),
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![ManaColor::White],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Transform),
+        });
+        obj_id
+    }
+
+    #[test]
+    fn disturb_uses_disturb_cost_from_graveyard() {
+        let mut state = setup_game_at_main_phase();
+        let disturb_cost = ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::White],
+        };
+        let card_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        };
+        let obj_id = add_disturb_creature_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            disturb_cost.clone(),
+            card_cost,
+        );
+
+        let prepared = prepare_spell_cast(&state, PlayerId(0), obj_id).unwrap();
+        assert_eq!(
+            prepared.casting_variant,
+            CastingVariant::Disturb,
+            "graveyard Disturb must use CastingVariant::Disturb"
+        );
+        assert_eq!(
+            prepared.mana_cost, disturb_cost,
+            "should use disturb cost, not card mana cost"
+        );
+    }
+
+    #[test]
+    fn disturb_cast_uses_back_face_on_stack_and_battlefield() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = add_disturb_creature_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            ManaCost::zero(),
+            ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::White],
+            },
+        );
+        let card_id = state.objects.get(&obj_id).unwrap().card_id;
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .expect("zero-cost Disturb card should cast from graveyard");
+
+        assert_eq!(state.stack.back().unwrap().id, obj_id);
+        let stack_obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(stack_obj.zone, Zone::Stack);
+        assert_eq!(stack_obj.name, "Luminous Phantom");
+        assert!(!stack_obj.transformed);
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        let battlefield_obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(battlefield_obj.zone, Zone::Battlefield);
+        assert_eq!(battlefield_obj.name, "Luminous Phantom");
+        assert!(battlefield_obj.transformed);
     }
 
     #[test]
