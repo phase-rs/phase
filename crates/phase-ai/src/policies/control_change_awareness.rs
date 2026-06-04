@@ -7,6 +7,11 @@
 //! The policy detects `Effect::GainControl` and `Effect::ExchangeControl` in
 //! ability effects and applies severe penalties when the target would hit the
 //! AI's own permanents.
+//!
+//! CR 800.4a: When an object changes controller, any Auras, Equipment, or
+//! Fortifications attached to that object become unattached if they can't be
+//! attached to the new controller. This policy prevents the AI from losing
+//! valuable attachments by giving away control.
 
 use engine::types::ability::{Effect, TargetFilter};
 use engine::types::actions::GameAction;

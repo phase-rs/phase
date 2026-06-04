@@ -41,6 +41,10 @@ const AGGRO_AMP: f64 = 1.4;
 /// Control archetypes conserve mana for interaction — multiplier penalty on acceptance.
 const CONTROL_DAMP: f64 = 0.6;
 
+/// Reduced control dampening for blocking decisions to prevent aggressive tax decline
+/// that causes blockers to disappear (issue #1541).
+const BLOCKING_CONTROL_DAMP: f64 = 0.8;
+
 /// Bonus for paying block tax to preserve valuable blockers.
 const BLOCKER_VALUE_BONUS: f64 = 0.25;
 
@@ -268,7 +272,7 @@ fn archetype_multiplier(features: &DeckFeatures, context: CombatTaxContext) -> f
         // Block side: reduced control dampening to prevent aggressive tax decline
         // that causes blockers to disappear (issue #1541). Control decks still
         // conserve mana, but the penalty is less severe to preserve valuable blockers.
-        CombatTaxContext::Blocking => 1.0 - (1.0 - 0.8) * control,
+        CombatTaxContext::Blocking => 1.0 - (1.0 - BLOCKING_CONTROL_DAMP) * control,
     }
 }
 

@@ -4,6 +4,10 @@
 //! which mills 3 cards and lets you put artifact creature/Vehicle cards from
 //! those milled cards into your hand. This policy evaluates target selection
 //! based on the probability of hitting desired card types.
+//!
+//! CR 701.13a: To mill a player, a player puts the top cards of their library
+//! into their graveyard. This policy optimizes targeting for mill effects that
+//! have conditional retrieval from the milled cards.
 
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;

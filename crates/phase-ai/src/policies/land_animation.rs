@@ -22,9 +22,6 @@ const MANA_NEEDED_PENALTY: f64 = -2.0;
 /// Penalty for animating a tapped land (can't animate tapped lands).
 const TAPPED_LAND_PENALTY: f64 = -100.0;
 
-/// Bonus for animating when the creature form has high value (hexproof, good stats).
-const HIGH_VALUE_CREATURE_BONUS: f64 = 0.5;
-
 /// Bonus for animating when sufficient alternative mana sources exist.
 const SUFFICIENT_MANA_BONUS: f64 = 0.3;
 
@@ -111,6 +108,8 @@ impl TacticalPolicy for LandAnimationPolicy {
         let mut delta = 0.0;
 
         // Penalize if the land is tapped (can't animate tapped lands)
+        // CR 302.6: A creature can't attack or block unless it's been under its controller's
+        // control continuously since the most recent turn began. Tapped lands can't animate.
         if obj.tapped {
             return PolicyVerdict::Score {
                 delta: TAPPED_LAND_PENALTY,
@@ -128,13 +127,6 @@ impl TacticalPolicy for LandAnimationPolicy {
         let mana_needed = mana_needed_in_hand(ctx);
         if mana_needed {
             delta += MANA_NEEDED_PENALTY;
-        }
-
-        // Bonus if creature form has high value (hexproof, good stats)
-        // Simplified: check if the ability has keyword grants or stat modifications
-        let has_good_stats = has_good_stats(ability_def);
-        if has_good_stats {
-            delta += HIGH_VALUE_CREATURE_BONUS;
         }
 
         // Bonus if sufficient alternative mana sources exist
@@ -253,14 +245,6 @@ fn mana_needed_in_hand(ctx: &PolicyContext<'_>) -> bool {
     });
 
     has_spells && !has_untapped_mana
-}
-
-/// Check if the creature form has good stats (3/3 or better).
-fn has_good_stats(_ability_def: &engine::types::ability::AbilityDefinition) -> bool {
-    // Simplified: assume any creature animation is valuable
-    // In a full implementation, we'd check the actual stat modifications
-    // by examining the effect chain
-    true
 }
 
 /// Check if the AI has sufficient alternative mana sources.
