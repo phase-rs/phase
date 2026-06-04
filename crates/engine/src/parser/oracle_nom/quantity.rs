@@ -74,7 +74,7 @@ pub fn parse_half_rounded(input: &str) -> OracleResult<'_, QuantityExpr> {
     parse_fraction_rounded(input)
 }
 
-fn parse_fraction_divisor(input: &str) -> OracleResult<'_, u32> {
+pub(crate) fn parse_fraction_divisor(input: &str) -> OracleResult<'_, u32> {
     alt((
         value(2, tag("half ")),
         value(3, alt((tag("a third "), tag("one third "), tag("third ")))),
@@ -355,15 +355,19 @@ fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
 /// expressions. When absent (malformed text or upstream trimming), defaults
 /// to `Down` — the more common direction in actual Magic cards and a safe
 /// fallback for misparses.
-fn parse_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
-    let (rest, rounding) = opt(alt((
+pub(crate) fn parse_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
+    let (rest, rounding) = opt(parse_explicit_rounding_suffix).parse(input)?;
+    Ok((rest, rounding.unwrap_or(RoundingMode::Down)))
+}
+
+pub(crate) fn parse_explicit_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
+    alt((
         value(RoundingMode::Up, tag(", rounded up")),
         value(RoundingMode::Down, tag(", rounded down")),
         value(RoundingMode::Up, tag(", round up")),
         value(RoundingMode::Down, tag(", round down")),
-    )))
-    .parse(input)?;
-    Ok((rest, rounding.unwrap_or(RoundingMode::Down)))
+    ))
+    .parse(input)
 }
 
 /// Parse a literal number OR the variable `X` in filter-threshold contexts.
@@ -583,6 +587,10 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // whose " you control" suffix would otherwise not match but whose
         // type-word prefix overlaps.
         parse_controlled_by_extremum_player,
+        // CR 604.3: "<type> of the chosen type on the battlefield" — global CDA
+        // count; must precede `parse_number_of_controlled_type`, whose
+        // " you control" suffix does not match the battlefield-wide form.
+        parse_number_of_chosen_type_on_battlefield,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -763,6 +771,42 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
                 type_filters,
                 controller: Some(controller),
                 properties: Vec::new(),
+            }),
+        },
+    ))
+}
+
+/// CR 604.3 + CR 613.1: Parse "<type> of the chosen type [on the battlefield]"
+/// after "the number of" → a battlefield-wide (any-controller) population count
+/// of permanents whose subtypes include the source's chosen creature type.
+///
+/// Distinct from `parse_number_of_controlled_type`, whose " you control" suffix
+/// restricts the count to a single controller. This is the global form that
+/// backs characteristic-defining power/toughness abilities such as Caller of
+/// the Hunt ("~'s power and toughness are each equal to the number of creatures
+/// of the chosen type on the battlefield"). The chosen type is read at
+/// evaluation time via `FilterProp::IsChosenCreatureType` (mirrors the existing
+/// "<type> you control of the chosen type" filter), so this covers every CDA in
+/// the class, not a single card.
+///
+/// Prefix variants such as "other"/"another"/"non-X"/"legendary" are
+/// intentionally out of scope for this global chosen-type CDA class; this mirrors
+/// the controlled chosen-type sibling below and avoids shadowing its controller
+/// suffix.
+fn parse_number_of_chosen_type_on_battlefield(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, head) = parse_type_filter_word(input)?;
+    let (rest, _) = alt((tag(" of the chosen type"), tag(" of that type"))).parse(rest)?;
+    // CR 400.1: the population is battlefield-wide; tolerate an explicit
+    // " on the battlefield" scope phrase without altering the default
+    // battlefield zone of the resulting `ObjectCount`.
+    let (rest, _) = opt(tag(" on the battlefield")).parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![head],
+                controller: None,
+                properties: vec![FilterProp::IsChosenCreatureType],
             }),
         },
     ))
@@ -2677,6 +2721,32 @@ mod tests {
         let (rest, q) = parse_quantity("3 damage").unwrap();
         assert_eq!(q, QuantityExpr::Fixed { value: 3 });
         assert_eq!(rest, " damage");
+    }
+
+    #[test]
+    fn parse_number_of_chosen_type_on_battlefield_global_count() {
+        // CR 604.3: Caller of the Hunt — "the number of creatures of the chosen
+        // type on the battlefield" is a battlefield-wide CDA count (any
+        // controller), distinct from the " you control" controlled-type form.
+        for text in [
+            "the number of creatures of the chosen type on the battlefield",
+            "the number of creatures of the chosen type",
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "", "{text:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(tf.controller, None, "{text:?}: counts every controller");
+                    assert!(
+                        tf.properties.contains(&FilterProp::IsChosenCreatureType),
+                        "{text:?}: must gate on the source's chosen creature type"
+                    );
+                }
+                other => panic!("{text:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
     }
 
     #[test]

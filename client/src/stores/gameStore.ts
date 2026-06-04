@@ -44,13 +44,27 @@ export {
   clearP2PHostSession,
 } from "../services/gamePersistence";
 
-export type GameMode = "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match";
+export type GameMode =
+  | "ai"
+  | "online"
+  | "local"
+  | "p2p-host"
+  | "p2p-join"
+  | "draft-match"
+  | "spectate"
+  | "playtest";
 
 /** True for modes where the engine state is shared across the wire —
  * undo/rewind would desync from the authoritative game, so the client
  * must not build a stateHistory or expose an Undo affordance. */
 export function isMultiplayerMode(mode: GameMode | null): boolean {
-  return mode === "online" || mode === "p2p-host" || mode === "p2p-join" || mode === "draft-match";
+  return (
+    mode === "online"
+    || mode === "p2p-host"
+    || mode === "p2p-join"
+    || mode === "draft-match"
+    || mode === "spectate"
+  );
 }
 
 interface GameStoreState {

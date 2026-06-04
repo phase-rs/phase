@@ -625,6 +625,7 @@ fn parse_self_enters_pay_cost_replacement(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     );
 
@@ -2802,6 +2803,7 @@ fn parse_creature_die_exile_replacement(
                 // the anaphor clause carried a "with N <type> counter(s) on it"
                 // modifier. Empty otherwise.
                 enter_with_counters: anaphor.enter_with_counters,
+                face_down_profile: None,
             },
         );
         // CR 614.6: Trailing clauses (e.g., "and you gain 2 life", "and put a
@@ -3033,6 +3035,7 @@ fn self_die_exile_anaphor_execute(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: anaphor.enter_with_counters,
+            face_down_profile: None,
         },
     );
     let continuation = anaphor.continuation.original.trim();
@@ -3152,6 +3155,7 @@ fn parse_graveyard_exile_replacement(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     );
 

@@ -733,10 +733,21 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
 /// per guest; only the acting guest needs a populated legal-actions map.
 pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsFull {
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
-    // MulliganBottomCards, OpeningHandBottomCards), every pending player has a legal action set. Use
-    // `acting_players()` so guests in a multiplayer mulligan can see and
-    // submit their own decisions concurrently.
-    if state.waiting_for.acting_players().contains(&viewer) {
+    // MulliganBottomCards, OpeningHandBottomCards), every pending player has a
+    // legal action set, so guests in a multiplayer mulligan can see and submit
+    // their own decisions concurrently.
+    //
+    // CR 723.5 + CR 723.8: Under a turn-control effect (Mindslaver, Emrakul,
+    // Word of Command, Opposition Agent) the *controller* makes the controlled
+    // player's choices while still making their own — but the controlled
+    // player remains the active player (CR 723.3), so `acting_players()`
+    // reports the controlled seat, not the authorized submitter. Authorize the
+    // viewer through `is_authorized_submitter`, which maps every acting seat to
+    // its authorized submitter, so the controller receives the controlled
+    // turn's legal actions instead of an empty set (which would freeze the
+    // controlled turn for them). Coincides with `acting_players().contains`
+    // whenever no turn-control effect is active.
+    if crate::game::turn_control::is_authorized_submitter(state, viewer) {
         legal_actions_full(state)
     } else {
         (Vec::new(), HashMap::new(), HashMap::new())
@@ -992,6 +1003,43 @@ mod tests {
         assert!(
             grouped.is_empty(),
             "non-acting viewer must receive no grouped actions"
+        );
+    }
+
+    /// CR 723.3 + CR 723.5 (issue #2012): under a turn-control effect the
+    /// controlled player is still the active/acting seat, but the *controller*
+    /// makes their choices. `legal_actions_for_viewer` must authorize the
+    /// controller (the authorized submitter), returning the controlled turn's
+    /// actions to them — not an empty set, which would freeze the turn.
+    #[test]
+    fn legal_actions_for_viewer_routes_to_turn_controller() {
+        use crate::types::player::PlayerId;
+
+        let mut state = GameState::new_two_player(42);
+        let controlled = PlayerId(1);
+        let controller = PlayerId(0);
+
+        // CR 723.3: P1 is still the active player while controlled by P0.
+        state.active_player = controlled;
+        state.turn_decision_controller = Some(controller);
+        state.waiting_for = WaitingFor::Priority { player: controlled };
+        // The authorized submitter is the controller, not the acting seat.
+        state.priority_player = crate::game::turn_control::turn_decision_maker(&state);
+
+        // The acting seat (P1) is NOT the authorized submitter, so it gets none.
+        let (controlled_actions, _, _) = legal_actions_for_viewer(&state, controlled);
+        assert!(
+            controlled_actions.is_empty(),
+            "the controlled seat is not the authorized submitter"
+        );
+
+        // CR 723.5: the controller receives the controlled turn's full set,
+        // matching the unfiltered engine view.
+        let (controller_actions, _, _) = legal_actions_for_viewer(&state, controller);
+        let full = legal_actions_full(&state);
+        assert_eq!(
+            controller_actions, full.0,
+            "CR 723.5: the controller must receive the controlled player's legal actions"
         );
     }
 

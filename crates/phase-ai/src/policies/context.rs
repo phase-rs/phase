@@ -1,8 +1,11 @@
 use engine::ai_support::{AiDecisionContext, CandidateAction};
 use engine::game::game_object::GameObject;
-use engine::types::ability::{AbilityDefinition, Effect, ResolvedAbility};
+use engine::game::targeting::find_legal_targets;
+use engine::types::ability::{AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::{
@@ -147,6 +150,26 @@ impl<'a> PolicyContext<'a> {
             return Some(facts.profile.clone());
         }
         effect_profile_for_action(self.state, &self.candidate.action, self.ai_player)
+    }
+
+    /// CR 702.11 / 702.16 / 702.18: True when `filter` has at least one legal
+    /// opponent-controlled creature target, per the engine's targeting legality.
+    pub(crate) fn has_legal_opponent_creature_target(
+        &self,
+        filter: &TargetFilter,
+        source_id: ObjectId,
+        mut is_relevant: impl FnMut(ObjectId) -> bool,
+    ) -> bool {
+        find_legal_targets(self.state, filter, self.ai_player, source_id)
+            .into_iter()
+            .any(|target| match target {
+                TargetRef::Object(id) => self.state.objects.get(&id).is_some_and(|object| {
+                    object.controller != self.ai_player
+                        && object.card_types.core_types.contains(&CoreType::Creature)
+                        && is_relevant(id)
+                }),
+                TargetRef::Player(_) => false,
+            })
     }
 }
 

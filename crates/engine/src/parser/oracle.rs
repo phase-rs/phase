@@ -496,6 +496,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             up_to: false,
             // CR 122.1: entry counters parsed from "with [N] [type] counter(s) on it".
             enter_with_counters,
+            face_down_profile: None,
         },
     )
     .description(line.to_string());
@@ -2738,6 +2739,16 @@ pub(crate) fn parse_oracle_ir(
         // Spells (instants/sorceries) with Suspend would otherwise be caught by
         // the is_spell branch and produce an Unimplemented effect.
         if lower_starts_with(&lower, "suspend ") {
+            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                result.extracted_keywords.push(kw);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Digital-only Specialize: "specialize {cost}" — MTGJSON may omit the keyword
+        // when it appears as a standalone rules line; intercept before dispatch fallback.
+        if lower_starts_with(&lower, "specialize ") {
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
                 result.extracted_keywords.push(kw);
                 i += 1;

@@ -104,6 +104,15 @@ describe("adapter boundary guardrails", () => {
     expect(isWaitingForHandled(waitingFor)).toBe(true);
   });
 
+  it("handles the populate creature-token choice waiting payload", () => {
+    const waitingFor: WaitingFor = {
+      type: "PopulateChoice",
+      data: { player: 0, source_id: 1, valid_tokens: [10, 11] },
+    };
+
+    expect(isWaitingForHandled(waitingFor)).toBe(true);
+  });
+
   it("handles the copy-retarget waiting payload", () => {
     const waitingFor: WaitingFor = {
       type: "CopyRetarget",

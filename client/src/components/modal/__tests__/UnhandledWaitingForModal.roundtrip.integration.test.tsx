@@ -5,8 +5,8 @@
 // Tests 1–4 mock `isWaitingForHandled` to inject an "unhandled" verdict for an
 // otherwise-handled variant (`Priority`); they exercise the modal + store
 // round-trip, NOT the registry. Test 5 uses the real registry (no override)
-// with a genuinely-unhandled variant (`PopulateChoice`) — it is the only case
-// that proves `HANDLED_WAITING_FOR_TYPES` membership end-to-end.
+// with a genuinely-unhandled variant (`OrphanEngineChoice`) — the only case
+// that exercises real `HANDLED_WAITING_FOR_TYPES` membership end-to-end.
 
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -153,8 +153,8 @@ describe("UnhandledWaitingForModal round-trip (issue #337)", () => {
     // HANDLED_WAITING_FOR_TYPES membership end-to-end.
     vi.mocked(isWaitingForHandled).mockImplementation((wf) => realIsHandled(wf));
     const orphan = {
-      type: "PopulateChoice",
-      data: { player: 0, source_id: 0, valid_tokens: [] },
+      type: "OrphanEngineChoice",
+      data: { player: 0 },
     } as unknown as WaitingFor;
     seedStoreFromState(orphan, { gameMode: "ai", activePlayerId: 0 });
 
@@ -164,7 +164,7 @@ describe("UnhandledWaitingForModal round-trip (issue #337)", () => {
 
     expect(screen.getByText("Action required, but UI is missing")).toBeInTheDocument();
     expect(
-      container.querySelector('[data-unhandled-waiting-for="PopulateChoice"]'),
+      container.querySelector('[data-unhandled-waiting-for="OrphanEngineChoice"]'),
     ).not.toBeNull();
   });
 });
