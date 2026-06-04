@@ -20,6 +20,23 @@ pub(crate) enum InvertedAsLongAs {
     Allow,
     Skip,
 }
+
+fn parse_each_other_players_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            space1,
+            alt((
+                tag("during each other player's untap step"),
+                tag("during each other player\u{2019}s untap step"),
+            )),
+            opt(tag(".")),
+            space0,
+        )),
+    )
+    .parse(input)
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -252,18 +269,11 @@ pub(crate) fn parse_static_line_inner(
         // which handles the full range of type + controller phrases.
         let (filter, remainder) = parse_type_phrase(rest.original);
         let remainder_lower = remainder.to_lowercase();
-        // Accept "during each other player's untap step" with straight and curly apostrophes.
-        let tail = remainder_lower.trim().trim_end_matches('.');
-        let during_ok = nom_on_lower(tail, tail, |i| {
-            value(
-                (),
-                alt((
-                    tag("during each other player's untap step"),
-                    tag("during each other player\u{2019}s untap step"),
-                )),
-            )
-            .parse(i)
-        })
+        let during_ok = nom_on_lower(
+            remainder,
+            &remainder_lower,
+            parse_each_other_players_untap_step_suffix,
+        )
         .is_some();
         // Require the subject filter to be controlled by "you" — rules text
         // variations outside this ("each player's permanents") would not be
@@ -291,33 +301,15 @@ pub(crate) fn parse_static_line_inner(
     // — the typed "you control" subject and these self-reference subjects are
     // disjoint, so neither shadows the other.
     if let Some(rest) = nom_tag_tp(&tp, "untap ") {
-        let self_subject = nom_on_lower(rest.original, rest.lower, |i| {
-            value(
-                (),
-                alt((
-                    tag("this artifact"),
-                    tag("this creature"),
-                    tag("this permanent"),
-                    tag("this enchantment"),
-                    tag("this land"),
-                    tag("~"),
-                )),
-            )
-            .parse(i)
-        });
-        if let Some(((), remainder)) = self_subject {
+        let self_subject =
+            nom_on_lower(rest.original, rest.lower, nom_target::parse_self_reference);
+        if let Some((TargetFilter::SelfRef, remainder)) = self_subject {
             let remainder_lower = remainder.to_lowercase();
-            let tail = remainder_lower.trim().trim_end_matches('.');
-            let during_ok = nom_on_lower(tail, tail, |i| {
-                value(
-                    (),
-                    alt((
-                        tag("during each other player's untap step"),
-                        tag("during each other player\u{2019}s untap step"),
-                    )),
-                )
-                .parse(i)
-            })
+            let during_ok = nom_on_lower(
+                remainder,
+                &remainder_lower,
+                parse_each_other_players_untap_step_suffix,
+            )
             .is_some();
             if during_ok {
                 return Some(
