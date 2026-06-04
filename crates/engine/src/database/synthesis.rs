@@ -243,11 +243,6 @@ impl KeywordTriggerInstaller {
             // other attacking creature gets +1/+0 until end of turn. CR 702.91b:
             // each instance triggers separately; one trigger per `Battlecry`.
             Keyword::Battlecry => vec![build_battlecry_trigger()],
-            // CR 702.25a: Flanking — whenever this creature becomes blocked by a
-            // creature without flanking, that blocking creature gets -1/-1 until
-            // end of turn. CR 702.25b: each instance triggers separately; one
-            // trigger per `Flanking`.
-            Keyword::Flanking => vec![build_flanking_trigger()],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
@@ -294,7 +289,6 @@ impl KeywordTriggerInstaller {
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
             Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
             Keyword::Battlecry => is_battlecry_trigger(trigger),
-            Keyword::Flanking => is_flanking_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
@@ -2922,14 +2916,6 @@ pub fn synthesize_battlecry(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Battlecry));
 }
 
-/// CR 702.25a: Flanking — "whenever this creature becomes blocked by a creature
-/// without flanking, the blocking creature gets -1/-1 until end of turn." CR
-/// 702.25b: each instance triggers separately, so one trigger is synthesized per
-/// `Keyword::Flanking`.
-pub fn synthesize_flanking(face: &mut CardFace) {
-    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Flanking));
-}
-
 /// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
 /// each opponent for 1 life. CR 702.101b: each instance triggers separately,
 /// so one trigger is synthesized per `Keyword::Extort` instance.
@@ -3604,60 +3590,6 @@ fn is_battlecry_trigger(t: &TriggerDefinition) -> bool {
                 toughness: PtValue::Fixed(0),
                 target: TargetFilter::Typed(tf),
             }) if *tf == battlecry_target_filter()
-        )
-}
-
-/// CR 702.25a: "each blocking creature without flanking" — creatures blocking
-/// the Flanking source (`BlockingSource`, source-relative via
-/// `FilterContext::from_ability`) that lack flanking themselves
-/// (`WithoutKeyword(Flanking)`, CR 702.25a). Shared by the builder and the
-/// `RemoveKeyword` matcher.
-fn flanking_target_filter() -> TypedFilter {
-    let mut tf = TypedFilter::creature();
-    tf.properties = vec![
-        FilterProp::BlockingSource,
-        FilterProp::WithoutKeyword {
-            value: Keyword::Flanking,
-        },
-    ];
-    tf
-}
-
-/// CR 702.25a: Build the Flanking becomes-blocked trigger — a mass
-/// `Effect::PumpAll` of -1/-1 over the non-flanking blockers of this creature.
-fn build_flanking_trigger() -> TriggerDefinition {
-    let pump = Effect::PumpAll {
-        power: PtValue::Fixed(-1),
-        toughness: PtValue::Fixed(-1),
-        target: TargetFilter::Typed(flanking_target_filter()),
-    };
-    let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(
-        "CR 702.25a: Flanking — each non-flanking blocker -1/-1 until end of turn".to_string(),
-    );
-    TriggerDefinition::new(TriggerMode::BecomesBlocked)
-        .valid_card(TargetFilter::SelfRef)
-        .execute(execute)
-        .description(
-            "CR 702.25a: Flanking — whenever this creature becomes blocked by a \
-             creature without flanking, that blocking creature gets -1/-1 until \
-             end of turn."
-                .to_string(),
-        )
-}
-
-/// CR 702.25a/b: A Flanking trigger — a `BecomesBlocked` trigger scoped to the
-/// source whose execute is the canonical `PumpAll(-1/-1)` over
-/// `flanking_target_filter()`. Used by `RemoveKeyword` symmetric removal.
-fn is_flanking_trigger(t: &TriggerDefinition) -> bool {
-    matches!(t.mode, TriggerMode::BecomesBlocked)
-        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-        && matches!(
-            t.execute.as_deref().map(|a| &*a.effect),
-            Some(Effect::PumpAll {
-                power: PtValue::Fixed(-1),
-                toughness: PtValue::Fixed(-1),
-                target: TargetFilter::Typed(tf),
-            }) if *tf == flanking_target_filter()
         )
 }
 
@@ -5777,9 +5709,6 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.91a: Battle cry — attack trigger pumping each other attacking
     // creature +1/+0 until end of turn.
     synthesize_battlecry(face);
-    // CR 702.25a: Flanking — becomes-blocked trigger giving each non-flanking
-    // blocker -1/-1 until end of turn.
-    synthesize_flanking(face);
     // CR 702.95a: Soulbond — two optional ETB triggers that create pair
     // relationships under the resolution checks in CR 702.95c-d.
     synthesize_soulbond(face);
@@ -9365,104 +9294,6 @@ mod battlecry_synthesis_tests {
         assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
             &triggers[0],
             &Keyword::Flanking
-        ));
-    }
-}
-
-#[cfg(test)]
-mod flanking_synthesis_tests {
-    //! CR 702.25a shape tests: one `BecomesBlocked` trigger whose execute is a
-    //! mass `Effect::PumpAll(-1/-1)` over non-flanking blockers of the source.
-    use super::*;
-
-    #[test]
-    fn synthesize_flanking_adds_becomes_blocked_pump_all_trigger() {
-        // CR 702.25a: Flanking installs one becomes-blocked trigger giving each
-        // non-flanking blocker -1/-1 until end of turn.
-        let mut face = CardFace::default();
-        face.keywords.push(Keyword::Flanking);
-        synthesize_flanking(&mut face);
-
-        let triggers: Vec<_> = face
-            .triggers
-            .iter()
-            .filter(|t| is_flanking_trigger(t))
-            .collect();
-        assert_eq!(triggers.len(), 1);
-        let t = triggers[0];
-        assert!(matches!(t.mode, TriggerMode::BecomesBlocked));
-        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
-        let Some(Effect::PumpAll {
-            power,
-            toughness,
-            target,
-        }) = t.execute.as_deref().map(|a| &*a.effect)
-        else {
-            panic!("flanking execute must be Effect::PumpAll");
-        };
-        assert!(matches!(power, PtValue::Fixed(-1)));
-        assert!(matches!(toughness, PtValue::Fixed(-1)));
-        let TargetFilter::Typed(tf) = target else {
-            panic!("flanking target must be Typed");
-        };
-        // CR 702.25a: blockers of this creature lacking flanking.
-        assert_eq!(
-            tf.properties,
-            vec![
-                FilterProp::BlockingSource,
-                FilterProp::WithoutKeyword {
-                    value: Keyword::Flanking
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn synthesize_flanking_is_idempotent_and_noop_without_keyword() {
-        let mut face = CardFace::default();
-        face.keywords.push(Keyword::Flanking);
-        synthesize_flanking(&mut face);
-        synthesize_flanking(&mut face);
-        assert_eq!(
-            face.triggers
-                .iter()
-                .filter(|t| is_flanking_trigger(t))
-                .count(),
-            1
-        );
-
-        let mut bare = CardFace::default();
-        synthesize_flanking(&mut bare);
-        assert!(bare.triggers.iter().all(|t| !is_flanking_trigger(t)));
-    }
-
-    #[test]
-    fn flanking_multiplicity_installs_one_trigger_per_instance() {
-        // CR 702.25b: each instance of flanking triggers separately (-1/-1 each).
-        let mut face = CardFace::default();
-        face.keywords.push(Keyword::Flanking);
-        face.keywords.push(Keyword::Flanking);
-        synthesize_flanking(&mut face);
-        assert_eq!(
-            face.triggers
-                .iter()
-                .filter(|t| is_flanking_trigger(t))
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn flanking_triggers_for_and_matcher_roundtrip() {
-        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Flanking);
-        assert_eq!(triggers.len(), 1);
-        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
-            &triggers[0],
-            &Keyword::Flanking
-        ));
-        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
-            &triggers[0],
-            &Keyword::Battlecry
         ));
     }
 }
