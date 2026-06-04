@@ -123,8 +123,8 @@ describe("gameStore replay actions", () => {
           replayIndex: null,
           liveGameState: null,
           gameMode: "ai",
-          legalActions: [{ type: "PassPriority", data: { player: 0 } }],
-          legalActionsByObject: { "1": [{ type: "PassPriority", data: { player: 0 } }] },
+          legalActions: [{ type: "PassPriority" }],
+          legalActionsByObject: { "1": [{ type: "PassPriority" }] },
         });
       });
       act(() => useGameStore.getState().enterReplay());
@@ -226,7 +226,7 @@ describe("gameStore replay actions", () => {
         useGameStore.setState({ adapter });
       });
 
-      const events = await useGameStore.getState().dispatch({ type: "PassPriority", data: { player: 0 } });
+      const events = await useGameStore.getState().dispatch({ type: "PassPriority" });
       expect(events).toEqual([]);
       // gameState should remain at the replayed checkpoint (cp2 = turn 2), not the live state
       expect(useGameStore.getState().gameState?.turn_number).toBe(2);

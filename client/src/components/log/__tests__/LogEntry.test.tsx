@@ -12,7 +12,7 @@ function makeEntry(overrides: Partial<GameLogEntry> = {}): GameLogEntry {
     seq: 0,
     turn: 1,
     phase: "PreCombatMain",
-    category: "Action",
+    category: "Stack",
     segments: [],
     ...overrides,
   };
@@ -69,7 +69,7 @@ describe("LogEntry", () => {
 
   it("renders zone segments as italic text", () => {
     const entry = makeEntry({
-      segments: [{ type: "Zone", value: "graveyard" }],
+      segments: [{ type: "Zone", value: "Graveyard" as const }],
     });
     render(<LogEntry entry={entry} />);
     const el = screen.getByText("graveyard");
@@ -97,7 +97,7 @@ describe("LogEntry", () => {
       useMultiplayerStore.setState({ playerNames: new Map([[0, "Alice"]]) });
     });
     const entry = makeEntry({
-      segments: [{ type: "PlayerName", value: { player_id: 0 } }],
+      segments: [{ type: "PlayerName", value: { name: "Player 1", player_id: 0 } }],
     });
     render(<LogEntry entry={entry} />);
     expect(screen.getByText("Alice")).toBeInTheDocument();
@@ -126,7 +126,7 @@ describe("LogEntry", () => {
     act(() => useGameStore.setState({ gameState }));
 
     const entry = makeEntry({
-      segments: [{ type: "PlayerName", value: { player_id: 0 } }],
+      segments: [{ type: "PlayerName", value: { name: "Player 1", player_id: 0 } }],
     });
     // Just verify it renders without error when seat_order is present
     expect(() => render(<LogEntry entry={entry} />)).not.toThrow();
