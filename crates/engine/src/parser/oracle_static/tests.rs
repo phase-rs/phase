@@ -3891,6 +3891,47 @@ fn static_legend_rule_routes_through_classifier() {
 }
 
 #[test]
+fn static_legend_rule_creature_tokens_scope() {
+    // CR 704.5j: The Master, Multiplied — "doesn't apply to creature tokens you control."
+    let def = parse_static_line(
+        "The \"legend rule\" doesn't apply to creature tokens you control.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
+    ));
+}
+
+#[test]
+fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
+    // CR 603.2 + CR 609.3: The Master, Multiplied.
+    let def = parse_static_line(
+        "Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCauseSacrificeOrExile {
+            cause: ProhibitionScope::Controller,
+        }
+    );
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
+    ));
+}
+
+#[test]
 fn static_legend_rule_defers_unparseable_scopes() {
     // CR 704.5j: scopes this parser cannot resolve precisely, and conditional
     // forms, must NOT be emitted as a LegendRuleDoesntApply static — they are

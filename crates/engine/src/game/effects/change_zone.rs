@@ -838,6 +838,26 @@ pub fn resolve(
             })
             .map(|(id, _)| *id)
             .collect();
+        let eligible: Vec<ObjectId> = if dest_zone == Zone::Exile {
+            eligible
+                .into_iter()
+                .filter(|id| {
+                    let acting_player = state
+                        .objects
+                        .get(id)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(ability.controller);
+                    !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                        state,
+                        ability,
+                        *id,
+                        acting_player,
+                    )
+                })
+                .collect()
+        } else {
+            eligible
+        };
 
         if eligible.is_empty() {
             if !up_to {
@@ -995,6 +1015,22 @@ pub fn resolve(
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
     for (i, obj_id) in targeted_objects.iter().enumerate() {
+        if dest_zone == Zone::Exile {
+            let acting_player = state
+                .objects
+                .get(obj_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(ability.controller);
+            if crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                state,
+                ability,
+                *obj_id,
+                acting_player,
+            ) {
+                continue;
+            }
+        }
+
         match process_one_zone_move(state, &ctx, *obj_id, events) {
             ZoneMoveResult::Done => {}
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
