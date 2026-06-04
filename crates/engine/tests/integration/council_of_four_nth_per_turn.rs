@@ -107,15 +107,7 @@ fn council_of_four_spell_trigger_fires_on_second_spell() {
     );
 
     let cast = |runner: &mut GameRunner, obj| {
-        let card_id = runner.state().objects[&obj].card_id;
-        runner
-            .act(GameAction::CastSpell {
-                object_id: obj,
-                card_id,
-                targets: vec![],
-            })
-            .expect("cast should be accepted");
-        runner.advance_until_stack_empty();
+        runner.cast(obj).resolve();
     };
 
     // First spell — no Knight token (count == 1, trigger wants n == 2).
@@ -168,34 +160,20 @@ fn council_of_four_draw_trigger_fires_on_second_draw() {
         &[ManaType::Blue, ManaType::Colorless, ManaType::Colorless],
     );
 
-    let hand_before = runner.state().players[0].hand.len();
     let library_before = runner.state().players[0].library.len();
 
-    let card_id = runner.state().objects[&divination].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: divination,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Divination cast should be accepted");
-    runner.advance_until_stack_empty();
+    let outcome = runner.cast(divination).resolve();
 
     // Divination draws 2; the Council's "second card during their turn" trigger
-    // fires once on the 2nd draw and draws 1 more. Net: 3 cards drawn, Divination
-    // itself leaves hand. Hand delta = 3 (drawn) - 1 (Divination cast) = +2.
-    let hand_after = runner.state().players[0].hand.len();
-    let library_after = runner.state().players[0].library.len();
+    // fires once on the 2nd draw and draws 1 more. Net: 3 cards drawn. The
+    // stack-commit baseline already excludes the cast Divination (CR 601.2a), so
+    // `hand_drawn` reads the clean +3 resolution delta.
     assert_eq!(
-        library_before - library_after,
+        library_before - outcome.zone_count(P0, Zone::Library),
         3,
         "Divination draws 2 + Council's draw trigger draws 1 = 3 cards leave the library"
     );
-    assert_eq!(
-        hand_after,
-        hand_before - 1 + 3,
-        "hand gains 3 drawn cards and loses the cast Divination"
-    );
+    outcome.assert_hand_drawn(P0, 3);
 }
 
 /// CR 500 + CR 117.1: The per-turn spell counter resets on the turn boundary.
@@ -367,15 +345,7 @@ fn council_of_four_spell_trigger_creates_white_knight() {
     );
 
     for obj in [spell_a, spell_b] {
-        let card_id = runner.state().objects[&obj].card_id;
-        runner
-            .act(GameAction::CastSpell {
-                object_id: obj,
-                card_id,
-                targets: vec![],
-            })
-            .expect("cast should be accepted");
-        runner.advance_until_stack_empty();
+        runner.cast(obj).resolve();
     }
 
     let token = runner

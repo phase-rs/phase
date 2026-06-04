@@ -170,20 +170,11 @@ fn summoning_sick_tap_draw_ability_activates_with_tyvar_static() {
         .id();
     scenario.add_card_to_library_top(P0, "Library Card");
     let mut runner = scenario.build();
-    let hand_before = runner.state().players[P0.0 as usize].hand.len();
 
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: drawer_id,
-            ability_index: 0,
-        })
-        .expect("the {T}: draw ability must activate with Tyvar's static in play");
-    // The activated ability goes on the stack — resolve it.
-    runner.resolve_top();
-    assert!(
-        runner.state().players[P0.0 as usize].hand.len() > hand_before,
-        "the {{T}}: draw ability must resolve and draw a card",
-    );
+    // The {T}: draw ability goes on the stack and resolves; the harness drives
+    // it to completion and reports the net cards drawn since stack commit.
+    let outcome = runner.activate(drawer_id, 0).resolve();
+    outcome.assert_hand_drawn(P0, 1);
 }
 
 /// CR 109.4: Tyvar's static is controller-scoped ("creatures you control"). An

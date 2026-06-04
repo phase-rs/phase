@@ -18,9 +18,7 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
-use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -35,29 +33,6 @@ Whenever Unstoppable Slasher deals combat damage to a player, that player loses 
 half their life, rounded up.\n\
 When Unstoppable Slasher dies, if it had no counters on it, return it to the \
 battlefield tapped and with two stun counters under its owner's control.";
-
-/// Drive priority/trigger resolution until the stack is empty (auto-passing
-/// priority). Mirrors `old_growth_troll_return_as_aura`'s drain helper.
-fn drain_to_priority(runner: &mut engine::game::scenario::GameRunner) {
-    let mut guard = 0;
-    loop {
-        guard += 1;
-        assert!(
-            guard < 256,
-            "drain_to_priority exceeded its safety bound; waiting_for = {:?}, stack = {}",
-            runner.state().waiting_for,
-            runner.state().stack.len()
-        );
-        match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            _ => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-        }
-    }
-}
 
 /// Verified Oracle clause from `client/public/card-data.json`
 /// (`jq '.["unstoppable slasher"]'`).
@@ -150,7 +125,7 @@ fn unstoppable_slasher_dies_with_no_counters_returns_tapped_with_two_stun() {
          no counters on it' is satisfied — the Slasher had none)"
     );
 
-    drain_to_priority(&mut runner);
+    runner.advance_until_stack_empty();
 
     let returned = &runner.state().objects[&slasher];
     assert_eq!(
@@ -195,7 +170,7 @@ fn unstoppable_slasher_dies_with_counter_does_not_return() {
          fails (the Slasher had stun counters), so nothing is put on the stack"
     );
 
-    drain_to_priority(&mut runner);
+    runner.advance_until_stack_empty();
 
     assert_eq!(
         runner.state().objects[&slasher].zone,

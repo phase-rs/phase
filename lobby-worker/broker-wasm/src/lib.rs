@@ -77,6 +77,17 @@ fn to_dtos(outs: Vec<Outbound>) -> Vec<OutboundDto> {
     outs.into_iter().map(OutboundDto::from).collect()
 }
 
+/// Single `Error` reply for a frame rejected at the parse/validation boundary.
+/// Sent to the originating socket so the client's pending RPC fails fast rather
+/// than waiting out its timeout. Malformed/unknown frames never reach
+/// `Broker::handle`, so this boundary crate is the only place that can answer
+/// them.
+fn reject_reply(message: &str) -> Vec<Outbound> {
+    vec![Outbound::ToSelf(LobbyServerMessage::Error {
+        message: message.to_string(),
+    })]
+}
+
 /// Whether a client frame can mutate the shared `LobbyManager` (and therefore
 /// requires the shell to re-snapshot it to DO storage). Conservative: read-only
 /// frames return `false` so a periodic `Ping`/`SubscribeLobby` never triggers a
@@ -163,8 +174,19 @@ impl WasmBroker {
                 let dirty = mutates_lobby(&msg);
                 (self.inner.handle(&mut conn, *msg, &env), dirty, None)
             }
-            ParsedFrame::UnknownTag(tag) => (Vec::new(), false, Some(format!("unknown tag: {tag}"))),
-            ParsedFrame::Malformed(e) => (Vec::new(), false, Some(format!("malformed frame: {e}"))),
+            // A frame the parser couldn't accept — an unknown tag or a field
+            // that failed validation (e.g. a blank display_name). Reply with an
+            // `Error` so the client's pending RPC resolves immediately instead
+            // of hanging until its timeout, and still flag `reject` so the shell
+            // logs it and skips the state snapshot (nothing mutated).
+            ParsedFrame::UnknownTag(tag) => {
+                let reason = format!("unknown tag: {tag}");
+                (reject_reply(&reason), false, Some(reason))
+            }
+            ParsedFrame::Malformed(e) => {
+                let reason = format!("malformed frame: {e}");
+                (reject_reply(&reason), false, Some(reason))
+            }
         };
 
         result_json(CallResult { conn, outbounds: to_dtos(outbounds), dirty, reject })

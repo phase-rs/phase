@@ -202,6 +202,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::AttractionOpened { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
         | GameEvent::AttractionVisited { .. }
+        | GameEvent::Specialized { .. }
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. }
@@ -645,6 +646,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::Transformed { object_id } => {
             vec![card_seg(state, *object_id), text(" transforms")]
+        }
+
+        GameEvent::Specialized { object_id, color } => {
+            vec![
+                card_seg(state, *object_id),
+                text(&format!(" specializes ({color:?})")),
+            ]
         }
 
         GameEvent::TurnedFaceUp { object_id } => {

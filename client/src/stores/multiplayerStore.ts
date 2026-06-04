@@ -1211,6 +1211,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           return await resolveGuestOver(socket, code, password, {
             signal: ac.signal,
             reservationToken: opts?.reservationToken,
+            // The broker rejects a blank display_name on the resolve frame
+            // (required-label rule) and the worker shell drops it without a
+            // reply — the guest then times out at deck-select. Always carry
+            // the player's name so the frame validates.
+            displayName: get().displayName || "Player",
           });
         } finally {
           pendingJoinRpcAborts.delete(ac);

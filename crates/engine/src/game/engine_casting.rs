@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction};
+use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, WaitingFor,
@@ -10,6 +10,7 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::engine::EngineError;
 use super::{casting, casting_costs, mana_abilities};
+use casting_costs::{CostSelection, SpellCostPayment};
 
 pub(super) fn cancel_pending_cast(
     state: &mut GameState,
@@ -105,20 +106,11 @@ pub(super) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
     pending_cast: PendingCast,
-    selection_bounds: (usize, usize),
-    permanents: &[ObjectId],
-    chosen: &[ObjectId],
+    paid_cost: Option<SpellCostPayment<'_>>,
+    selection: CostSelection<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    casting::handle_sacrifice_for_cost(
-        state,
-        player,
-        pending_cast,
-        selection_bounds,
-        permanents,
-        chosen,
-        events,
-    )
+    casting::handle_sacrifice_for_cost(state, player, pending_cast, paid_cost, selection, events)
 }
 
 pub(super) fn handle_return_to_hand_for_cost(
@@ -276,6 +268,29 @@ pub(super) fn handle_exile_for_cost(
         zone,
         pending_cast,
         count,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_exile_materials_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    materials: TargetFilter,
+    pending_cast: PendingCast,
+    bounds: (usize, usize),
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_exile_materials_for_cost(
+        state,
+        player,
+        materials,
+        pending_cast,
+        bounds,
         legal_cards,
         chosen,
         events,

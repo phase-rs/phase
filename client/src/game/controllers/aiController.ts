@@ -135,7 +135,24 @@ export function createAIController(config: AIControllerConfig): AIController {
         !("player" in waitingFor.data)
       )
         return;
-      waitingPlayerId = waitingFor.data.player as number;
+      // CR 723.5: Under a turn-control effect (Emrakul, the Promised End /
+      // Worst Fears / Mindslaver) the seat that must *submit* this decision is
+      // the authorized submitter, NOT the semantic acting player
+      // (`waiting_for.data.player`, which is the controlled seat). The engine is
+      // the single authority for this and re-derives `priority_player` to the
+      // authorized submitter (see `game/public_state.rs`
+      // `sync_priority_player_from_waiting_for`). Driving the AI off
+      // `data.player` would dispatch as the controlled seat, which the engine
+      // rejects with `WrongPlayer` — the controller then burns through its
+      // failure budget and hard-stops via `notifyEngineLost`, which surfaced as
+      // a game crash when a human gained control of an AI's turn (#2012).
+      //
+      // Using the authorized submitter keeps the AI silent while a human
+      // controls the turn (submitter is the human → bail), and makes the AI act
+      // as the controller seat when an AI gains control of another seat's turn.
+      // In games with no turn-control effect, `priority_player === data.player`
+      // for every single-acting state, so this is a no-op.
+      waitingPlayerId = state.priority_player;
       if (waitingPlayerId === PLAYER_ID) return;
     }
 
@@ -204,9 +221,10 @@ export function createAIController(config: AIControllerConfig): AIController {
               return match ?? { type: "PassPriority" };
             });
           })();
-      // Dispatch the fallback as the AI seat that's being unstuck — NEVER
-      // as the local human. The engine guard would reject a human-seat actor
-      // while the WaitingFor belongs to the AI. A rejection from
+      // Dispatch the fallback as the authorized submitter being unstuck —
+      // NEVER as the local human (which `checkAndSchedule` already excludes via
+      // the `waitingPlayerId === PLAYER_ID` early-return above, CR 723.5). The
+      // engine guard would reject a non-authorized actor. A rejection from
       // getLegalActions routes into the existing .catch() below.
       fallbackPromise
         .then((fallback) => dispatchAction(fallback, waitingPlayerId))

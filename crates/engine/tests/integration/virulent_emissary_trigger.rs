@@ -12,7 +12,8 @@
 //! **you** control".
 //!
 //! This file is the regression deliverable: it pins the trigger's behavior by
-//! driving the real `apply` pipeline (cast → stack → resolve → ETB → trigger →
+//! driving the real `apply` pipeline via the opinionated cast harness
+//! (`runner.cast(spell).resolve()`: cast → stack → resolve → ETB → trigger →
 //! life gain) — no synthetic `GameEvent`s, no manual `GameState` poking beyond
 //! the documented `state_mut()` escape hatch for setting the active player.
 //!
@@ -22,8 +23,6 @@
 //! are permanents and their entry fires the same ETB trigger (Case B).
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::actions::GameAction;
-use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -32,32 +31,6 @@ use engine::types::zones::Zone;
 /// `client/public/card-data.json` and MTGJSON `AtomicCards.json` (set ECL).
 const VIRULENT_EMISSARY: &str =
     "Deathtouch\nWhenever another creature you control enters, you gain 1 life.";
-
-/// Read the current zone of an object.
-fn zone_of(runner: &engine::game::scenario::GameRunner, id: ObjectId) -> Zone {
-    runner.state().objects.get(&id).expect("object exists").zone
-}
-
-/// Drive a creature spell from a player's hand through the real cast → stack →
-/// resolve pipeline. Vanilla creatures created by the scenario builder have
-/// `ManaCost::zero()`, so casting requires no mana payment prompt — the spell
-/// goes straight onto the stack.
-fn cast_creature_from_hand(runner: &mut engine::game::scenario::GameRunner, hand_card: ObjectId) {
-    let card_id = runner
-        .state()
-        .objects
-        .get(&hand_card)
-        .expect("hand card exists")
-        .card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: hand_card,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting a 0-cost vanilla creature should succeed");
-    runner.advance_until_stack_empty();
-}
 
 /// Case A — another creature **you control** enters via a creature SPELL
 /// resolving: Virulent Emissary's trigger fires and its controller gains 1 life.
@@ -76,20 +49,15 @@ fn virulent_emissary_triggers_on_your_creature_spell() {
     let bear = scenario.add_creature_to_hand(P0, "Grizzly Bear", 2, 2).id();
 
     let mut runner = scenario.build();
-    let life_before = runner.life(P0);
+    // Vanilla creatures have ManaCost::zero(), so the cast auto-pays and the
+    // ETB trigger resolves through the harness's resolution driver.
+    let outcome = runner.cast(bear).resolve();
 
-    cast_creature_from_hand(&mut runner, bear);
-
-    assert_eq!(
-        zone_of(&runner, bear),
-        Zone::Battlefield,
-        "the cast creature must resolve onto the battlefield"
-    );
-    assert_eq!(
-        runner.life(P0),
-        life_before + 1,
-        "Virulent Emissary's 'another creature you control enters' trigger \
-         must gain its controller exactly 1 life (CR 603.6a)"
+    outcome.assert_zone(&[bear], Zone::Battlefield);
+    outcome.assert_life_delta(
+        P0,
+        1, // Virulent Emissary's "another creature you control enters" trigger
+          // gains its controller exactly 1 life (CR 603.6a).
     );
 }
 
@@ -121,22 +89,17 @@ fn virulent_emissary_controller_relative_you_filter() {
         state.waiting_for = engine::types::game_state::WaitingFor::Priority { player: P1 };
     }
 
-    let p0_life_before = runner.life(P0);
-    let p1_life_before = runner.life(P1);
+    let outcome = runner.cast(bear).resolve();
 
-    cast_creature_from_hand(&mut runner, bear);
-
-    assert_eq!(
-        runner.life(P1),
-        p1_life_before + 1,
-        "P1's Emissary must gain P1 1 life — `controller: You` resolves \
-         relative to that Emissary's controller"
+    outcome.assert_life_delta(
+        P1,
+        1, // P1's Emissary gains P1 1 life — `controller: You` resolves relative
+          // to that Emissary's controller.
     );
-    assert_eq!(
-        runner.life(P0),
-        p0_life_before,
-        "P0's Emissary must NOT fire — the creature is controlled by P1, \
-         not P0 ('another creature YOU control')"
+    outcome.assert_life_delta(
+        P0,
+        0, // P0's Emissary must NOT fire — the creature is controlled by P1, not
+          // P0 ('another creature YOU control').
     );
 }
 
@@ -160,34 +123,19 @@ fn virulent_emissary_triggers_on_your_token() {
         .id();
 
     let mut runner = scenario.build();
-    let life_before = runner.life(P0);
-    let battlefield_creatures_before = count_creatures(&runner, P0);
+    let battlefield_creatures_before = count_creatures(runner.state(), P0);
 
-    let card_id = runner
-        .state()
-        .objects
-        .get(&token_maker)
-        .expect("token maker exists")
-        .card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: token_maker,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting a 0-cost token-making sorcery should succeed");
-    runner.advance_until_stack_empty();
+    let outcome = runner.cast(token_maker).resolve();
 
     assert_eq!(
-        count_creatures(&runner, P0),
+        count_creatures(outcome.state(), P0),
         battlefield_creatures_before + 1,
         "the token-making spell must create exactly one creature token"
     );
-    assert_eq!(
-        runner.life(P0),
-        life_before + 1,
-        "Virulent Emissary must trigger on a token creature you control \
-         entering (CR 111.1 + CR 603.6a)"
+    outcome.assert_life_delta(
+        P0,
+        1, // Virulent Emissary triggers on a token creature you control entering
+          // (CR 111.1 + CR 603.6a).
     );
 }
 
@@ -212,20 +160,13 @@ fn virulent_emissary_does_not_trigger_on_opponent_creature() {
         state.waiting_for = engine::types::game_state::WaitingFor::Priority { player: P1 };
     }
 
-    let p0_life_before = runner.life(P0);
+    let outcome = runner.cast(bear).resolve();
 
-    cast_creature_from_hand(&mut runner, bear);
-
-    assert_eq!(
-        zone_of(&runner, bear),
-        Zone::Battlefield,
-        "P1's creature must resolve onto the battlefield"
-    );
-    assert_eq!(
-        runner.life(P0),
-        p0_life_before,
-        "Virulent Emissary must NOT trigger when an opponent's creature \
-         enters — 'another creature you control' excludes opponent ETBs"
+    outcome.assert_zone(&[bear], Zone::Battlefield);
+    outcome.assert_life_delta(
+        P0,
+        0, // Virulent Emissary must NOT trigger when an opponent's creature
+          // enters — 'another creature you control' excludes opponent ETBs.
     );
 }
 
@@ -244,30 +185,22 @@ fn virulent_emissary_does_not_trigger_on_its_own_entry() {
         .id();
 
     let mut runner = scenario.build();
-    let life_before = runner.life(P0);
+    let outcome = runner.cast(emissary).resolve();
 
-    cast_creature_from_hand(&mut runner, emissary);
-
-    assert_eq!(
-        zone_of(&runner, emissary),
-        Zone::Battlefield,
-        "Virulent Emissary must resolve onto the battlefield"
-    );
-    assert_eq!(
-        runner.life(P0),
-        life_before,
-        "Virulent Emissary's own entry must NOT gain its controller life — \
-         the 'another' clause excludes the trigger source itself"
+    outcome.assert_zone(&[emissary], Zone::Battlefield);
+    outcome.assert_life_delta(
+        P0,
+        0, // Virulent Emissary's own entry must NOT gain its controller life —
+          // the 'another' clause excludes the trigger source itself.
     );
 }
 
 /// Count creatures controlled by `player` on the battlefield.
-fn count_creatures(runner: &engine::game::scenario::GameRunner, player: PlayerId) -> usize {
-    runner
-        .state()
+fn count_creatures(state: &engine::types::game_state::GameState, player: PlayerId) -> usize {
+    state
         .battlefield
         .iter()
-        .filter_map(|id| runner.state().objects.get(id))
+        .filter_map(|id| state.objects.get(id))
         .filter(|o| {
             o.controller == player
                 && o.card_types
