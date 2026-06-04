@@ -10049,7 +10049,7 @@ pub enum TriggerCondition {
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
-    /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
+    /// CR 508.1a + CR 603.2c: "Whenever ~ and at least N other creatures attack".
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
     MinCoAttackers { minimum: u32 },
@@ -10282,8 +10282,20 @@ pub enum TriggerCondition {
     ///     CR 506.2), so counting "≠ trigger controller" is equivalent to counting the
     ///     triggering player's creatures.
     ///
+    /// `filter` is the condition-level type axis (CR 508.1): when `Some(f)`,
+    /// only attackers whose object matches `f` are counted, so "you attack with
+    /// two or more Dinosaurs" fires only on ≥2 Dinosaurs — not on one Dinosaur
+    /// plus an unrelated attacker. When `None`, every attacker in the scoped
+    /// batch is counted (the untyped "attack with two or more creatures"
+    /// behavior, preserved byte-for-byte).
+    ///
     /// True when the count meets or exceeds `minimum`.
-    AttackersDeclaredMin { scope: ControllerRef, minimum: u32 },
+    AttackersDeclaredMin {
+        scope: ControllerRef,
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 506.2 + CR 603.4: Intervening-if "if none of those creatures attacked you".
     /// Reads the triggering `AttackersDeclared` event's per-attacker `AttackTarget` tuples
     /// (CR 508.1b) and returns true iff no attacker in the batch targeted the trigger's

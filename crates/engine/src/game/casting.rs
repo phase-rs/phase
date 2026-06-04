@@ -643,6 +643,10 @@ pub fn handle_foretell(
             turn_foretold: state.turn_number,
         });
     }
+    events.push(GameEvent::Foretold {
+        player_id: player,
+        object_id,
+    });
 
     Ok(WaitingFor::Priority { player })
 }

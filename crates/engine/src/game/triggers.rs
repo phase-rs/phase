@@ -3708,7 +3708,7 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::EchoDue => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
-        // CR 508.1a: Count co-attackers excluding the source creature.
+        // CR 508.1a + CR 603.2c: Count co-attackers excluding the source creature.
         TriggerCondition::MinCoAttackers { minimum } => {
             state.combat.as_ref().is_some_and(|combat| {
                 let co_attacker_count = combat
@@ -3727,20 +3727,36 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 508.1 + CR 603.2c: Count attackers in the triggering AttackersDeclared
         // batch whose controller matches `scope` relative to the trigger controller.
-        TriggerCondition::AttackersDeclaredMin { scope, minimum } => {
+        TriggerCondition::AttackersDeclaredMin {
+            scope,
+            minimum,
+            filter,
+        } => {
             let Some(GameEvent::AttackersDeclared { attacker_ids, .. }) = trigger_event else {
                 return false;
             };
             let count = attacker_ids
                 .iter()
                 .filter(|id| {
-                    state.objects.get(id).is_some_and(|obj| match scope {
+                    let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
                         ControllerRef::You => obj.controller == controller,
                         ControllerRef::Opponent => obj.controller != controller,
                         // Other ControllerRef variants are not used by the attacks-with-N
                         // combinator; treat as permissive to avoid silently dropping matches.
                         _ => true,
-                    })
+                    });
+                    // CR 508.1: only attackers matching the filtered class count
+                    // toward the typed minimum, preventing "attack with two or more
+                    // Dinosaurs" from over-firing on mixed attacker batches.
+                    scope_ok
+                        && filter.as_ref().is_none_or(|f| {
+                            crate::game::trigger_matchers::target_filter_matches_object(
+                                state,
+                                **id,
+                                f,
+                                source_id.unwrap_or(ObjectId(0)),
+                            )
+                        })
                 })
                 .count();
             count >= *minimum as usize
@@ -11959,6 +11975,7 @@ pub mod tests {
         let cond = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::You,
             minimum: 2,
+            filter: None,
         };
         assert!(check_trigger_condition(
             &state,
@@ -11972,6 +11989,7 @@ pub mod tests {
         let cond3 = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::You,
             minimum: 3,
+            filter: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -12012,6 +12030,7 @@ pub mod tests {
         let cond = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::Opponent,
             minimum: 2,
+            filter: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -12020,6 +12039,104 @@ pub mod tests {
             None,
             Some(&event),
         ));
+    }
+
+    // CR 508.1 + CR 603.2c: Over-fire guard for the condition-level type axis on
+    // `AttackersDeclaredMin` ("you attack with two or more Dinosaurs"). The
+    // count must include ONLY attackers matching `filter` — so 1 Dinosaur + 1
+    // non-Dinosaur attacker must NOT satisfy `minimum: 2`, but 2 Dinosaurs must.
+    #[test]
+    fn attackers_declared_min_typed_filter_no_over_fire() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let dino1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dino1".to_string(),
+            Zone::Battlefield,
+        );
+        let dino2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dino2".to_string(),
+            Zone::Battlefield,
+        );
+        let goblin = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, subtype) in [(dino1, "Dinosaur"), (dino2, "Dinosaur"), (goblin, "Goblin")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec![subtype.to_string()];
+        }
+
+        let dino_filter =
+            TargetFilter::Typed(TypedFilter::creature().subtype("Dinosaur".to_string()));
+        let cond = TriggerCondition::AttackersDeclaredMin {
+            scope: ControllerRef::You,
+            minimum: 2,
+            filter: Some(dino_filter),
+        };
+
+        // 1 Dinosaur attacking → only 1 matching attacker → must NOT fire.
+        let lone_dino = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                dino1,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&lone_dino)),
+            "1 Dinosaur must NOT satisfy minimum=2 Dinosaurs (off-by-one guard)"
+        );
+
+        // 1 Dinosaur + 1 Goblin attacking → only 1 matching attacker → must NOT fire.
+        let mixed = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1, goblin],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (
+                    dino1,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    goblin,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&mixed)),
+            "1 Dinosaur + 1 Goblin must NOT satisfy minimum=2 Dinosaurs (over-fire guard)"
+        );
+
+        // 2 Dinosaurs attacking → 2 matching attackers → must fire.
+        let both_dinos = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1, dino2],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (
+                    dino1,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    dino2,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, trigger_controller, None, Some(&both_dinos)),
+            "2 Dinosaurs must satisfy minimum=2 Dinosaurs"
+        );
     }
 
     // CR 506.2 + CR 508.1b: Unit tests for `NoneOfAttackersTargetedYou`.

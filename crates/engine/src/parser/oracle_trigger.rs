@@ -5505,6 +5505,8 @@ fn try_parse_event(
                 let mut def = make_base();
                 def.mode = TriggerMode::Attacks;
                 def.valid_card = Some(subject.clone());
+                // CR 508.1a: Battalion/Pack Tactics counts any N *other* creatures
+                // (untyped head noun) → no condition-level type axis.
                 def.condition = Some(TriggerCondition::MinCoAttackers { minimum: n });
                 return Some((TriggerMode::Attacks, def));
             }
@@ -7019,6 +7021,33 @@ fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<FilterProp>)
     (subject, None)
 }
 
+/// CR 508.1a: True when `filter` narrows the attacker class beyond a bare
+/// "creature[s]" head noun — i.e. it carries a subtype/negated-type/property
+/// constraint or a non-creature type. Used to decide whether a typed
+/// attacker-COUNT trigger ("two or more Dinosaurs attack") needs the
+/// condition-level type axis on `AttackersDeclaredMin`, or whether the untyped
+/// "two or more creatures attack" path can keep `filter: None`.
+///
+/// Controller scope ("creatures you control") does NOT narrow the class for
+/// counting purposes — it is already enforced by `matching_you_attack_pairs`'
+/// attacking-player gate, and every attacker in a CR 506.2 batch shares one
+/// controller — so a bare `Creature`/`Permanent` filter with only a controller
+/// set still returns `false` here.
+fn filter_narrows_beyond_creature(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            !tf.properties.is_empty()
+                || tf
+                    .type_filters
+                    .iter()
+                    .any(|t| !matches!(t, TypeFilter::Creature | TypeFilter::Permanent))
+        }
+        // Disjunctions, SelfRef, Another, etc. always carry a meaningful
+        // narrowing — count them.
+        _ => true,
+    }
+}
+
 /// Append `attachment_prop` to a `TargetFilter::Typed`'s properties if present,
 /// else return the filter unchanged. Non-Typed filters are returned as-is.
 fn apply_attachment_prop(filter: TargetFilter, prop: Option<FilterProp>) -> TargetFilter {
@@ -7068,13 +7097,22 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
 
         let mut def = make_base();
         def.mode = TriggerMode::YouAttack;
-        def.valid_card = Some(filter);
+        def.valid_card = Some(filter.clone());
         if attacks_player {
             def.valid_target = Some(TargetFilter::Player);
         }
         if min_count > 1 {
-            def.condition = Some(TriggerCondition::MinCoAttackers {
-                minimum: min_count - 1,
+            // CR 508.1a + CR 603.2c: the count condition must count only attackers
+            // of the SAME filtered class (e.g. Dinosaurs), not every co-attacker —
+            // otherwise "two or more Dinosaurs attack" over-fires on 1 Dinosaur +
+            // 1 unrelated attacker. This head-noun form is not source-relative,
+            // so use the AttackersDeclared batch count rather than the
+            // source-excluding MinCoAttackers condition.
+            let count_filter = filter_narrows_beyond_creature(&filter).then_some(filter);
+            def.condition = Some(TriggerCondition::AttackersDeclaredMin {
+                scope: ControllerRef::You,
+                minimum: min_count,
+                filter: count_filter,
             });
         }
         // CR 603.2c: "One or more creatures ... attack" fires once per batch of
@@ -7102,8 +7140,12 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
 ///     known — this drives `match_you_attack`'s attacking-player filter AND
 ///     feeds `resolve_they_pronoun` so a trailing "they draw a card" resolves
 ///     to `TargetFilter::TriggeringPlayer`.
-///   - `condition = AttackersDeclaredMin { scope, minimum }` so only batches
-///     with at least N attackers from the scoped player fire the trigger.
+///   - `condition = AttackersDeclaredMin { scope, minimum, filter }` so only
+///     batches with at least N attackers from the scoped player — matching the
+///     typed `filter` when present — fire the trigger. The typed count>1 case
+///     ("attack with two or more Dinosaurs") parses the head-noun type phrase
+///     into both the matcher's `valid_card` gate and the condition's `filter`
+///     (CR 508.1), so it counts only Dinosaurs and cannot over-fire.
 fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     use nom::combinator::opt;
 
@@ -7178,23 +7220,24 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         return Some((TriggerMode::YouAttack, def));
     }
 
-    // count > 1 ("two or more creatures"): byte-identical to the pre-existing
-    // behavior — hardcoded "creatures" head noun, count condition via
-    // `AttackersDeclaredMin`, no `valid_card`. Typed count>1 ("two or more Gods")
-    // is deferred — populating `valid_card` for count>1 without a condition-level
-    // type axis would over-fire (≥1 God + ≥2 any-attackers).
-    let (after_creatures, ()) = value((), tag::<_, _, OracleError<'_>>("creatures"))
-        .parse(after_or_more)
-        .ok()?;
+    // count > 1 ("two or more <TYPE> creatures"): capture the head-noun type
+    // phrase via the shared `parse_type_phrase` building block (same as the
+    // count==1 branch above), then parameterize the count condition with the
+    // condition-level type axis. The previously-deferred typed case
+    // ("two or more Gods") now counts ONLY attackers matching `filter`, so it
+    // can no longer over-fire on ≥1 God + ≥2 any-attackers. The untyped
+    // "creatures" head noun yields `filter: None` on the condition, preserving
+    // byte-identical pre-fix behavior.
+    let (filter, remainder) = parse_type_phrase(after_or_more);
     // Accept optional trailing " each turn" / " this turn" qualifier (unused here,
     // but keeps the matcher permissive for CR 603.4 timing qualifiers). Must end
     // at the condition boundary — the caller already split the effect text off,
-    // so `after_creatures` should be empty or punctuation-only.
+    // so the remainder should be empty or punctuation-only.
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>(" each turn"),
         tag(" this turn"),
     )))
-    .parse(after_creatures)
+    .parse(remainder)
     .ok()?;
     if !rest.trim().is_empty() {
         return None;
@@ -7209,9 +7252,20 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(actor.clone()),
     ));
+    // CR 508.1: the per-attacker type gate the matcher reads — set only when the
+    // type phrase narrows beyond a bare "creatures" head noun, mirroring the
+    // count==1 branch which always populates `valid_card`. Counting is enforced
+    // by the condition's `filter` below; `valid_card` keeps the matcher's
+    // "≥1 matching attacker" gate aligned with the typed minimum.
+    let narrows = filter_narrows_beyond_creature(&filter);
+    if narrows {
+        def.valid_card = Some(filter.clone());
+    }
+    let count_filter = narrows.then_some(filter);
     def.condition = Some(TriggerCondition::AttackersDeclaredMin {
         scope: actor,
         minimum: n,
+        filter: count_filter,
     });
 
     Some((TriggerMode::YouAttack, def))
@@ -20457,7 +20511,8 @@ mod tests {
 
     #[test]
     fn trigger_two_or_more_creatures_attack() {
-        // CR 508.1a: "two or more" uses MinCoAttackers with minimum=1 (2-1).
+        // CR 508.1a + CR 603.2c: head-noun counts use the full attackers-declared
+        // batch, not source-relative co-attacker counting.
         let def = parse_trigger_line(
             "Whenever two or more creatures you control attack a player, draw a card.",
             "Edric, Spymaster of Trest",
@@ -20465,10 +20520,50 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::YouAttack);
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::MinCoAttackers { minimum: 1 })
+            Some(TriggerCondition::AttackersDeclaredMin {
+                scope: ControllerRef::You,
+                minimum: 2,
+                filter: None
+            })
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
         assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn trigger_two_or_more_typed_creatures_attack() {
+        let def = parse_trigger_line(
+            "Whenever two or more Dinosaurs attack, draw a card.",
+            "Test Dinosaur Lord",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert!(def.batched);
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+                "expected Dinosaur subtype in valid_card, got {:?}",
+                tf.type_filters,
+            ),
+            other => panic!("expected Typed valid_card with Dinosaur, got {other:?}"),
+        }
+        match &def.condition {
+            Some(TriggerCondition::AttackersDeclaredMin {
+                scope: ControllerRef::You,
+                minimum: 2,
+                filter: Some(TargetFilter::Typed(tf)),
+            }) => assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+                "expected Dinosaur subtype in condition filter, got {:?}",
+                tf.type_filters,
+            ),
+            other => {
+                panic!("expected AttackersDeclaredMin {{ You, 2, Some(Dinosaur) }}, got {other:?}")
+            }
+        }
     }
 
     // --- Plan 03: SpellCast trigger sub-patterns ---
@@ -23285,14 +23380,13 @@ mod tests {
         }
     }
 
-    /// Issue #610 REV 2 GUARDRAIL (deferral lock). The actor-led count>1 form
-    /// ("two or more creatures") must remain byte-identical to pre-fix behavior:
-    /// `valid_card` UNSET and the count condition is the unchanged 2-field
-    /// `AttackersDeclaredMin { scope, minimum }`. Populating `valid_card` for
-    /// count>1 without a condition-level type axis would over-fire. This test
-    /// locks the deferral so a future edit cannot silently regress it.
+    /// CR 508.1a + CR 603.2c: the UNTYPED actor-led count>1 form
+    /// ("two or more creatures") stays byte-identical to pre-fix behavior:
+    /// `valid_card` UNSET and the count condition carries `filter: None`.
+    /// (Formerly the deferral lock — the typed count>1 form is now implemented;
+    /// see `trigger_you_attack_with_two_or_more_typed_creatures`.)
     #[test]
-    fn you_attack_with_two_or_more_creatures_defers_filter() {
+    fn you_attack_with_two_or_more_creatures_untyped_no_filter() {
         let def = parse_trigger_line(
             "Whenever you attack with two or more creatures, draw a card.",
             "Firemane Commando",
@@ -23300,15 +23394,60 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::YouAttack);
         assert_eq!(
             def.valid_card, None,
-            "count>1 must NOT set valid_card (REV 2 deferral)"
+            "untyped count>1 must NOT set valid_card"
         );
         assert_eq!(
             def.condition,
             Some(TriggerCondition::AttackersDeclaredMin {
                 scope: ControllerRef::You,
                 minimum: 2,
+                filter: None,
             })
         );
+    }
+
+    /// CR 508.1a + CR 603.2c: the TYPED actor-led count>1 form
+    /// ("two or more Dinosaurs") now parses the type phrase into BOTH the
+    /// matcher's `valid_card` gate AND the condition-level type axis
+    /// (`AttackersDeclaredMin.filter`), so the count enforces ≥N *Dinosaurs*
+    /// rather than ≥N *any* attackers. This is the over-fire guard.
+    #[test]
+    fn trigger_you_attack_with_two_or_more_typed_creatures() {
+        let def = parse_trigger_line(
+            "Whenever you attack with two or more Dinosaurs, draw a card.",
+            "Test Dinosaur Lord",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert!(def.batched);
+        // valid_card carries the Dinosaur subtype so the matcher's
+        // "≥1 matching attacker" gate aligns with the typed minimum.
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+                "expected Dinosaur subtype in valid_card, got {:?}",
+                tf.type_filters,
+            ),
+            other => panic!("expected Typed valid_card with Dinosaur, got {other:?}"),
+        }
+        // The count condition carries the SAME filter as the type axis.
+        match &def.condition {
+            Some(TriggerCondition::AttackersDeclaredMin {
+                scope: ControllerRef::You,
+                minimum: 2,
+                filter: Some(TargetFilter::Typed(tf)),
+            }) => assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Dinosaur")),
+                "expected Dinosaur subtype in condition filter, got {:?}",
+                tf.type_filters,
+            ),
+            other => {
+                panic!("expected AttackersDeclaredMin {{ You, 2, Some(Dinosaur) }}, got {other:?}")
+            }
+        }
     }
 
     #[test]
@@ -23330,6 +23469,7 @@ mod tests {
             Some(TriggerCondition::AttackersDeclaredMin {
                 scope: ControllerRef::You,
                 minimum: 2,
+                filter: None,
             })
         );
     }
@@ -23357,6 +23497,7 @@ mod tests {
                     TriggerCondition::AttackersDeclaredMin {
                         scope: ControllerRef::Opponent,
                         minimum: 2,
+                        filter: None,
                     }
                 ));
                 assert!(matches!(
@@ -23405,6 +23546,7 @@ mod tests {
             Some(TriggerCondition::AttackersDeclaredMin {
                 scope: ControllerRef::Opponent,
                 minimum: 2,
+                filter: None,
             })
         );
         assert!(def.batched);

@@ -2,15 +2,20 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use draft_core::pack_source::PackSource;
-use draft_core::types::{DraftAction, DraftConfig, DraftSeat, DraftStatus};
+use draft_core::types::{
+    DraftAction, DraftConfig, DraftDeckSubmission, DraftPairing, DraftSeat, DraftStatus,
+    PairingStatus,
+};
 use draft_core::view::DraftPlayerView;
 use engine::types::player::PlayerId;
 use rand::Rng;
 use tracing::{info, warn};
 
+use crate::deck_resolve;
 use crate::persist::{PersistedDraftSession, PersistedLobbyMeta};
+use crate::protocol::DeckData;
 use crate::reconnect::ReconnectManager;
-use crate::session::generate_player_token;
+use crate::session::{generate_player_token, SessionManager};
 
 /// Server-side draft session, mirroring `GameSession` for game play.
 /// Wraps `draft_core::types::DraftSession` (the pure reducer state) with
@@ -414,6 +419,148 @@ impl DraftSessionManager {
         Ok(())
     }
 
+    /// Server-internal: generate Swiss/SE pairings when the pod reaches `Pairing`.
+    pub fn ensure_pairings_generated(&mut self, draft_code: &str) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get_mut(draft_code)
+            .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
+        if session.session.status != DraftStatus::Pairing {
+            return Ok(());
+        }
+        let round = session.session.current_round.max(1);
+        draft_core::session::apply(
+            &mut session.session,
+            DraftAction::GeneratePairings { round },
+            None,
+        )
+        .map_err(|e| format!("GeneratePairings failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Spawn 2-player game sessions for pending pairings in `round` using submitted decks.
+    pub fn spawn_match_games_for_round(
+        &mut self,
+        draft_code: &str,
+        game_mgr: &mut SessionManager,
+        db: &engine::database::CardDatabase,
+        round: u8,
+    ) -> Result<Vec<DraftMatchSpawn>, String> {
+        let session = self
+            .sessions
+            .get_mut(draft_code)
+            .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
+
+        let match_config = session.config.kind.match_config();
+        let format_config = engine::types::format::FormatConfig::limited();
+        let mut spawns = Vec::new();
+
+        let pairings: Vec<DraftPairing> = session
+            .session
+            .pairings
+            .iter()
+            .filter(|p| p.round == round && p.status == PairingStatus::Pending)
+            .cloned()
+            .collect();
+
+        for pairing in pairings {
+            if session.active_matches.contains_key(&pairing.match_id) {
+                continue;
+            }
+
+            let deck_payloads: Result<Vec<_>, String> = pairing
+                .players
+                .iter()
+                .map(|pid| {
+                    let seat = pid.0 as usize;
+                    let submission = session.session.submitted_decks.get(pid).ok_or_else(|| {
+                        format!(
+                            "seat {} has not submitted a deck for match {}",
+                            seat, pairing.match_id
+                        )
+                    })?;
+                    deck_payload_from_submission(db, submission)
+                })
+                .collect();
+            let decks = match deck_payloads {
+                Ok(decks) => decks,
+                Err(error) => {
+                    warn!(
+                        draft = %draft_code,
+                        match_id = %pairing.match_id,
+                        error = %error,
+                        "draft match spawn skipped for pairing"
+                    );
+                    continue;
+                }
+            };
+
+            let seat0 = pairing.players[0].0 as usize;
+            let seat1 = pairing.players[1].0 as usize;
+            let name0 = session
+                .display_names
+                .get(seat0)
+                .cloned()
+                .unwrap_or_else(|| format!("Player {}", seat0));
+            let name1 = session
+                .display_names
+                .get(seat1)
+                .cloned()
+                .unwrap_or_else(|| format!("Player {}", seat1));
+
+            let (game_code, token0) = game_mgr.create_game_n_players(
+                decks[0].clone(),
+                name0,
+                None,
+                2,
+                match_config,
+                Some(format_config.clone()),
+            );
+            let (token1, _) = game_mgr.join_game_with_name(&game_code, decks[1].clone(), name1)?;
+
+            game_mgr
+                .sessions
+                .get_mut(&game_code)
+                .ok_or_else(|| format!("spawned game missing: {game_code}"))?
+                .start_game(db)
+                .map_err(|e| format!("start_game failed for {game_code}: {e:?}"))?;
+
+            session
+                .active_matches
+                .insert(pairing.match_id.clone(), game_code.clone());
+
+            spawns.push(DraftMatchSpawn {
+                match_id: pairing.match_id,
+                round,
+                game_code,
+                player_a: DraftMatchPlayer {
+                    draft_seat: pairing.players[0].0,
+                    game_token: token0,
+                    game_player: PlayerId(0),
+                },
+                player_b: DraftMatchPlayer {
+                    draft_seat: pairing.players[1].0,
+                    game_token: token1,
+                    game_player: PlayerId(1),
+                },
+                opponent_names: [
+                    session
+                        .display_names
+                        .get(seat1)
+                        .cloned()
+                        .unwrap_or_default(),
+                    session
+                        .display_names
+                        .get(seat0)
+                        .cloned()
+                        .unwrap_or_default(),
+                ],
+            });
+        }
+
+        Ok(spawns)
+    }
+
     /// Scan active_matches across all sessions to find the draft owning a game.
     pub fn draft_for_game_code(&self, game_code: &str) -> Option<String> {
         self.sessions
@@ -433,6 +580,40 @@ impl DraftSessionManager {
         }
         Some(session)
     }
+}
+
+/// A spawned draft match game session.
+#[derive(Debug, Clone)]
+pub struct DraftMatchSpawn {
+    pub match_id: String,
+    pub round: u8,
+    pub game_code: String,
+    pub player_a: DraftMatchPlayer,
+    pub player_b: DraftMatchPlayer,
+    /// Opponent display name indexed by draft seat (0 = player_a.seat, 1 = player_b.seat).
+    pub opponent_names: [String; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct DraftMatchPlayer {
+    pub draft_seat: u8,
+    pub game_token: String,
+    pub game_player: PlayerId,
+}
+
+fn deck_payload_from_submission(
+    db: &engine::database::CardDatabase,
+    submission: &DraftDeckSubmission,
+) -> Result<engine::game::deck_loading::PlayerDeckPayload, String> {
+    let deck = DeckData {
+        main_deck: submission.main_deck.clone(),
+        sideboard: Vec::new(),
+        commander: Vec::new(),
+        attraction_deck: Vec::new(),
+        signature_spell: Vec::new(),
+        ..Default::default()
+    };
+    deck_resolve::resolve_deck(db, &deck)
 }
 
 impl Default for DraftSessionManager {
@@ -524,6 +705,7 @@ mod tests {
     use draft_core::types::{
         DeckAddableCards, DraftKind, DraftSource, PodPolicy, SpectatorVisibility, TournamentFormat,
     };
+    use engine::database::CardDatabase;
 
     fn test_config() -> DraftConfig {
         DraftConfig {
@@ -660,6 +842,38 @@ mod tests {
 
         assert_eq!(mgr.draft_for_game_code("GAME01"), Some(code));
         assert_eq!(mgr.draft_for_game_code("NONEXIST"), None);
+    }
+
+    #[test]
+    fn spawn_match_games_skips_pairing_without_submitted_decks() {
+        let mut draft_mgr = DraftSessionManager::new();
+        let (code, _host_token, _) = draft_mgr.create_draft(test_config(), "Alice".to_string());
+        draft_mgr
+            .join_draft(&code, "Bob".to_string(), None)
+            .unwrap();
+
+        draft_mgr
+            .sessions
+            .get_mut(&code)
+            .unwrap()
+            .session
+            .pairings
+            .push(DraftPairing {
+                round: 1,
+                table: 0,
+                players: [PlayerId(0), PlayerId(1)],
+                match_id: "r1-t0".to_string(),
+                status: PairingStatus::Pending,
+                winner: None,
+            });
+
+        let mut game_mgr = SessionManager::new();
+        let spawns = draft_mgr
+            .spawn_match_games_for_round(&code, &mut game_mgr, &CardDatabase::default(), 1)
+            .expect("missing deck submissions should skip only the incomplete pairing");
+
+        assert!(spawns.is_empty());
+        assert!(game_mgr.sessions.is_empty());
     }
 
     #[test]
