@@ -1601,4 +1601,77 @@ mod tests {
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
     }
+
+    /// CR 608.2c: "[Mandatory action]. If you do, [rider]." — a mandatory effect
+    /// that performs its action satisfies the `IfYouDo`
+    /// (`EffectOutcome { OptionalEffectPerformed }`) gate on its sibling, even
+    /// though there was no "you may" decision. Regression for issue #1514: Dark
+    /// Depths' "sacrifice it. If you do, create Marit Lage" never created the
+    /// token because the mandatory sacrifice left `optional_effect_performed`
+    /// false. Building-block test on the `Sacrifice` → `Token` chain (covers the
+    /// whole mandatory-rider class, not just Dark Depths).
+    #[test]
+    fn mandatory_sacrifice_if_you_do_rider_fires() {
+        use crate::types::ability::{AbilityCondition, PtValue, SubAbilityLink};
+
+        let mut state = GameState::new_two_player(42);
+        let victim = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Doomed Permanent".to_string(),
+            Zone::Battlefield,
+        );
+
+        // "Sacrifice it. If you do, create a 1/1 token." — a mandatory sacrifice
+        // with an `IfYouDo`-gated Token sibling, exactly the shape the parser
+        // emits for Dark Depths' Marit Lage rider.
+        let mut rider = ResolvedAbility::new(
+            Effect::Token {
+                name: "Test Token".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::effect_performed());
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut ability = make_sacrifice_ability(victim);
+        ability.sub_ability = Some(Box::new(rider));
+
+        let tokens_before = state.battlefield.len();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // The victim was sacrificed and the IfYouDo rider created the token.
+        assert!(
+            !state.battlefield.contains(&victim),
+            "mandatory sacrifice must remove the victim"
+        );
+        let created = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .any(|obj| obj.is_token && obj.name == "Test Token");
+        assert!(
+            created,
+            "the mandatory-sacrifice IfYouDo rider must create the token \
+             (battlefield went from {tokens_before} to {})",
+            state.battlefield.len()
+        );
+    }
 }

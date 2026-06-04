@@ -1512,6 +1512,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking,
             up_to: false,
             enter_with_counters,
+            face_down_profile: None,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -1529,6 +1530,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         TargetedImperativeAst::ReturnAllToZone {
             target,
@@ -1548,6 +1550,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 target,
                 enters_under,
                 enter_tapped,
+                face_down_profile: None,
             }
         }
         TargetedImperativeAst::Fight { target } => Effect::Fight {
@@ -1796,6 +1799,7 @@ pub(super) fn parse_search_and_creation_ast(
                 power,
                 toughness,
                 types,
+                supertypes,
                 colors,
                 keywords,
                 tapped,
@@ -1810,6 +1814,7 @@ pub(super) fn parse_search_and_creation_ast(
                     power: Some(power),
                     toughness: Some(toughness),
                     types,
+                    supertypes,
                     colors,
                     keywords,
                     tapped,
@@ -1997,7 +2002,8 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner: TargetFilter::Controller,
             attach_to: token.attach_to,
             enters_attacking: token.enters_attacking,
-            supertypes: vec![],
+            // CR 205.4a: Preserve parsed token supertypes (legendary/snow).
+            supertypes: token.supertypes,
             static_abilities: token.static_abilities,
             enter_with_counters: vec![],
         },
@@ -2032,6 +2038,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             ])),
             enters_under: None,
             enter_tapped: false,
+            face_down_profile: None,
         },
     }
 }
@@ -3486,6 +3493,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped,
+                    face_down_profile: None,
                 }
             } else {
                 Effect::ChangeZone {
@@ -3501,6 +3509,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enters_attacking,
                     up_to,
                     enter_with_counters,
+                    face_down_profile: None,
                 }
             }
         }
@@ -3906,6 +3915,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -3932,6 +3942,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -4042,6 +4053,7 @@ pub(super) fn lower_multi_filter_search_library(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        face_down_profile: None,
     };
 
     // CR 107.1c + CR 701.23d: Wrap the count in `UpTo` once at the helper's
@@ -4204,6 +4216,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         target: TargetFilter::Controller,
         enters_under: None,
         enter_tapped: false,
+        face_down_profile: None,
     }
 }
 
@@ -5473,9 +5486,19 @@ pub(super) fn parse_imperative_family_ast(
             .is_some()
             {
                 Some(ImperativeFamilyAst::RollToVisitAttractions)
+            } else if let Some(ast) = try_parse_roll_n_dice(lower) {
+                // CR 706.1: "roll two six-sided dice" / "roll X d12" — the
+                // multi-dice form. Tried before the single-die path; returns
+                // None for count == 1 so "roll a d6" / "roll one d6" falls through.
+                Some(ast)
             } else {
-                try_parse_roll_die_with_modifier(lower)
-                    .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier })
+                try_parse_roll_die_with_modifier(lower).map(|(sides, modifier)| {
+                    ImperativeFamilyAst::RollDie {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        sides,
+                        modifier,
+                    }
+                })
             }
         }
         // CR 701.51b: "open an Attraction" / "open two Attractions"
@@ -6086,14 +6109,71 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
     Some(ImperativeFamilyAst::FlipCoins { count: expr })
 }
 
+/// CR 706.1: Parse "roll N six-sided dice" / "roll X d12" / "roll two d6" —
+/// the multi-dice form. Mirrors `try_parse_flip_n_coins`: strip the
+/// "roll "/"rolls " prefix, take the count via `parse_count_expr` (digit,
+/// word-number, and `X` forms), then parse the die size from the remainder.
+/// Returns None for count == 1 so "roll a d6" / "roll one d6" falls through
+/// to the existing single-die path.
+fn try_parse_roll_n_dice(lower: &str) -> Option<ImperativeFamilyAst> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll "), tag("rolls ")))
+        .parse(lower)
+        .ok()?;
+
+    // `parse_count_expr` returns the remainder with leading whitespace trimmed
+    // ("two six-sided dice" → after = "six-sided dice").
+    let (expr, after) = parse_count_expr(rest)?;
+
+    // CR 706.1: Reject count == 1 so "roll a d6" / "roll one d6" prefers the
+    // single-die `RollDie { count: Fixed(1), .. }` path.
+    if matches!(expr, QuantityExpr::Fixed { value: 1 }) {
+        return None;
+    }
+
+    let (sides, rest_after_sides) = parse_die_sides_with_rest(after)?;
+    // CR 706.1: The remainder must be only the plural/singular die noun
+    // (possibly with trailing punctuation) — a wider clause means this isn't a
+    // bare multi-dice roll, so fall through to higher-level chain parsing.
+    let rest_after_sides = rest_after_sides
+        .trim_start()
+        .trim_end_matches(['.', ',', ';'])
+        .trim();
+    if !rest_after_sides.is_empty() {
+        return None;
+    }
+
+    Some(ImperativeFamilyAst::RollDie {
+        count: expr,
+        sides,
+        // CR 706.2: multi-dice forms with a result-shifting modifier are
+        // vanishingly rare and parsed via the table path; the bare form has
+        // no modifier.
+        modifier: None,
+    })
+}
+
 /// CR 706.1a: Returns `(sides, remainder)`. The remainder is the slice immediately after
 /// the consumed die phrase, with whitespace untrimmed. Callers needing to
 /// attach trailing modifiers / clauses can branch on the remainder shape.
 fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
-    // Strip the "roll a " / "rolls a " prefix.
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll a "), tag("rolls a ")))
-        .parse(lower)
-        .ok()?;
+    // Strip the single-die article/count prefix.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("roll a "),
+        tag("rolls a "),
+        tag("roll one "),
+        tag("rolls one "),
+    ))
+    .parse(lower)
+    .ok()?;
+    parse_die_sides_with_rest(rest)
+}
+
+/// CR 706.1a: Parse a die size (`dN` numeric form or `N-sided`/word form) from
+/// the text immediately following the count/article, returning `(sides,
+/// remainder)`. Shared by the single-die (`roll a dN`) and multi-dice (`roll N
+/// dN`) parsers so both pick up every die-size spelling uniformly. The
+/// trailing " die"/" dice" noun is consumed when present.
+fn parse_die_sides_with_rest(rest: &str) -> Option<(u8, &str)> {
     // CR 706.1a: Numeric form — consume "d" followed by the longest run of
     // ASCII digits. This permits trailing text like " and add the number of
     // cards in your hand" or terminating punctuation.
@@ -6122,10 +6202,13 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     ))
     .parse(rest)
     .ok()?;
-    // Consume the optional " die" suffix so it doesn't leak into the
-    // modifier-detection path. Tolerant of absence ("roll a six-sided").
+    // Consume the optional " dice"/" die" noun so it doesn't leak into the
+    // modifier-detection path. " dice" (plural, multi-dice form) is tried
+    // before " die" so it isn't mis-consumed as " die" + "ce". Tolerant of
+    // absence ("roll a six-sided").
     let after_word = alt((
-        value((), tag::<_, _, OracleError<'_>>(" die")),
+        value((), tag::<_, _, OracleError<'_>>(" dice")),
+        value((), tag(" die")),
         value((), tag("")),
     ))
     .parse(after_word)
@@ -6533,9 +6616,14 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Clash => Effect::Clash,
         ImperativeFamilyAst::GainKeyword(effect) => effect,
         ImperativeFamilyAst::LoseKeyword(effect) => effect,
-        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame,
-        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame,
-        ImperativeFamilyAst::RollDie { sides, modifier } => Effect::RollDie {
+        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame { target: None },
+        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame { target: None },
+        ImperativeFamilyAst::RollDie {
+            count,
+            sides,
+            modifier,
+        } => Effect::RollDie {
+            count,
             sides,
             results: vec![],
             modifier,
@@ -6834,6 +6922,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 }
             } else {
                 Effect::ChangeZone {
@@ -6847,6 +6936,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters,
+                    face_down_profile: None,
                 }
             }
         }
@@ -8347,6 +8437,7 @@ mod tests {
                 target: TargetFilter::Or { filters },
                 enters_under: None,
                 enter_tapped,
+                face_down_profile: None,
             } => {
                 assert_eq!(origin, None);
                 assert_eq!(destination, Zone::Battlefield);
@@ -10727,11 +10818,16 @@ mod tests {
         let def = super::super::parse_effect_chain("Roll a d20.", AbilityKind::Spell);
         match &*def.effect {
             Effect::RollDie {
+                count,
                 sides,
                 modifier,
                 results,
             } => {
                 assert_eq!(*sides, 20);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
                 assert!(modifier.is_none());
                 assert!(results.is_empty());
             }
@@ -10767,6 +10863,35 @@ mod tests {
                     },
                     other => panic!("expected Add modifier, got {other:?}"),
                 }
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1a + CR 706.2: The single-die parser accepts word-count "one"
+    /// as the same semantic count as article "a", including modifier clauses.
+    #[test]
+    fn roll_one_d20_with_add_modifier_parses_to_roll_die_with_modifier() {
+        let def = super::super::parse_effect_chain(
+            "Roll one d20 and add the number of cards in your hand.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::RollDie {
+                count,
+                sides,
+                modifier,
+                ..
+            } => {
+                assert_eq!(*sides, 20);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+                assert!(matches!(
+                    modifier,
+                    Some(crate::types::ability::DieRollModifier::Add { .. })
+                ));
             }
             other => panic!("expected RollDie, got {other:?}"),
         }
@@ -10808,6 +10933,84 @@ mod tests {
             } => {
                 assert_eq!(*sides, 6);
                 assert!(modifier.is_none());
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1: "Roll two six-sided dice" is the multi-dice word form —
+    /// parses to `RollDie { count: Fixed(2), sides: 6 }`. Mirrors the
+    /// `FlipCoins { count }` precedent for the dice axis.
+    #[test]
+    fn roll_two_six_sided_dice_parses_to_roll_die_count_two() {
+        let def = super::super::parse_effect_chain("Roll two six-sided dice.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie {
+                count,
+                sides,
+                modifier,
+                ..
+            } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 2 }
+                );
+                assert!(modifier.is_none());
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1: The single-die path is unchanged — "Roll a six-sided die"
+    /// still lowers to `count: Fixed(1)` so back-compat with existing
+    /// single-die cards holds.
+    #[test]
+    fn roll_a_six_sided_die_lowers_to_count_one() {
+        let def = super::super::parse_effect_chain("Roll a six-sided die.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1: The `dN` shorthand also supports a leading count: "Roll two
+    /// d6" → `count: Fixed(2), sides: 6`.
+    #[test]
+    fn roll_two_d6_parses_to_roll_die_count_two() {
+        let def = super::super::parse_effect_chain("Roll two d6.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 2 }
+                );
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1 + CR 107.3a: "Roll X twelve-sided dice" binds the count to the
+    /// announced `X`, lowering to `count: Variable("X"), sides: 12`.
+    #[test]
+    fn roll_x_twelve_sided_dice_parses_to_variable_count() {
+        let def = super::super::parse_effect_chain("Roll X twelve-sided dice.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 12);
+                assert!(matches!(
+                    count,
+                    crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable { .. }
+                    }
+                ));
             }
             other => panic!("expected RollDie, got {other:?}"),
         }

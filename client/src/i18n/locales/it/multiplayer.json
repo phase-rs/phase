@@ -156,7 +156,8 @@
     "hostGame": "Ospita partita",
     "hostP2PGame": "Ospita partita P2P",
     "passwordRequired": "Password richiesta",
-    "passwordPlaceholder": "Inserisci password"
+    "passwordPlaceholder": "Inserisci password",
+    "watch": "Watch"
   },
   "hostSetup": {
     "hostDirectMatch": "Ospita partita diretta",

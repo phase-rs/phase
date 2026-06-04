@@ -182,7 +182,8 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // CR 701.43a: exerting adds a CantUntap transient (which sets
             // layers_dirty → Gate 1); mark the exerted object directly so its
             // display reflects the exert even on the layers-clean path.
-            GameEvent::CreatureExerted { object_id } => {
+            GameEvent::CreatureExerted { object_id }
+            | GameEvent::Foretold { object_id, .. } => {
                 mark_public_state_object_dirty(state, *object_id);
             }
             GameEvent::ManaAdded { player_id, .. }
@@ -203,6 +204,14 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             GameEvent::ManaExpended { player_id, .. } => {
                 mark_public_state_player_dirty(state, *player_id);
                 mark_mana_display_dirty(state);
+            }
+            // CR 702.140c + CR 730.2: a merge changes the surviving permanent's
+            // displayed characteristics. `merge_object_onto` already marks
+            // `layers_dirty` (Gate 1 caught it), but mark the merged object here
+            // too so this arm is sound even if a future caller skips the full mark.
+            GameEvent::Mutated { merged_id, .. } => {
+                mark_object_dirty_with_mana(state, *merged_id);
+                mark_battlefield_display_dirty(state);
             }
             GameEvent::CounterAdded { object_id, .. }
             | GameEvent::CounterRemoved { object_id, .. }

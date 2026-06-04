@@ -399,8 +399,8 @@ fn redundancy_delta(
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::PreventDamage { .. }
-        | Effect::LoseTheGame
-        | Effect::WinTheGame
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
         | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }

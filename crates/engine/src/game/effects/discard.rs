@@ -323,6 +323,7 @@ mod tests {
                     CounterType::Plus1Plus1,
                     QuantityExpr::Fixed { value: 2 },
                 )],
+                face_down_profile: None,
             },
         )));
         replacement
@@ -414,6 +415,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         state

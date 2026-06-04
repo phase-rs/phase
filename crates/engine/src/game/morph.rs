@@ -32,20 +32,40 @@ pub struct FaceDownData {
 
 /// CR 708.2a: Face-down permanents have no characteristics except those
 /// defined by the effect that put them face down. Manifest/morph-style face
-/// down permanents are 2/2 creatures with no name, subtypes, mana cost, color,
-/// abilities, or rules text.
-pub fn apply_face_down_creature_characteristics(obj: &mut crate::game::game_object::GameObject) {
+/// down permanents default to 2/2 creatures with no name, subtypes, mana cost,
+/// color, abilities, or rules text.
+///
+/// `profile` is the "otherwise specified by the effect" override from CR 708.2a:
+/// power/toughness default to 2 when `None`, `Creature` is always present in the
+/// core types (CR 708.2a), and any `extra_core_types`/`subtypes` the effect
+/// listed are applied on top (CR 205.1a). `FaceDownProfile::vanilla_2_2()`
+/// reproduces the manifest/morph default.
+pub fn apply_face_down_creature_characteristics(
+    obj: &mut crate::game::game_object::GameObject,
+    profile: &crate::types::ability::FaceDownProfile,
+) {
     obj.face_down = true;
     obj.name = String::new();
     obj.base_name = String::new();
-    obj.power = Some(2);
-    obj.toughness = Some(2);
-    obj.base_power = Some(2);
-    obj.base_toughness = Some(2);
+    // CR 708.2a: power/toughness default to 2 unless the effect specifies otherwise.
+    let power = profile.power.unwrap_or(2);
+    let toughness = profile.toughness.unwrap_or(2);
+    obj.power = Some(power);
+    obj.toughness = Some(toughness);
+    obj.base_power = Some(power);
+    obj.base_toughness = Some(toughness);
+    // CR 708.2a + CR 205.1a: Creature is always present; the effect may add
+    // further core types (e.g. Artifact) without removing Creature.
+    let mut core_types = vec![CoreType::Creature];
+    for ct in &profile.extra_core_types {
+        if !core_types.contains(ct) {
+            core_types.push(*ct);
+        }
+    }
     obj.card_types = CardType {
         supertypes: vec![],
-        core_types: vec![CoreType::Creature],
-        subtypes: vec![],
+        core_types,
+        subtypes: profile.subtypes.clone(),
     };
     obj.base_card_types = obj.card_types.clone();
     obj.mana_cost = ManaCost::NoCost;
@@ -107,7 +127,10 @@ pub fn play_face_down(
 
     // Apply face-down overrides
     let obj = state.objects.get_mut(&object_id).unwrap();
-    apply_face_down_creature_characteristics(obj);
+    apply_face_down_creature_characteristics(
+        obj,
+        &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+    );
 
     // Store original characteristics so turn_face_up can restore them
     obj.back_face = Some(original);
@@ -217,7 +240,10 @@ pub fn manifest_card(
 
     // Apply face-down overrides — CR 701.40a: 2/2 creature with no text/name/subtypes/mana cost
     let obj = state.objects.get_mut(&object_id).unwrap();
-    apply_face_down_creature_characteristics(obj);
+    apply_face_down_creature_characteristics(
+        obj,
+        &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+    );
     obj.back_face = Some(original);
 
     Ok(())
@@ -495,6 +521,52 @@ mod tests {
         assert!(!obj.face_down);
         assert_eq!(obj.name, "Manifest Target");
         assert_eq!(obj.power, Some(5));
+    }
+
+    #[test]
+    fn face_down_profile_applies_specified_characteristics() {
+        // CR 708.2a + CR 205.1a: A Cyber-Controller-style profile overrides the
+        // vanilla 2/2 default: 2/2, [Creature, Artifact], subtype "Cyberman".
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let secret_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "secret-oracle-id".to_string(),
+            face_name: "Secret Creature".to_string(),
+        };
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.printed_ref = Some(secret_ref.clone());
+        }
+
+        let original = snapshot_object_face(&state.objects[&id]);
+        let profile = crate::types::ability::FaceDownProfile {
+            power: Some(2),
+            toughness: Some(2),
+            extra_core_types: vec![CoreType::Artifact],
+            subtypes: vec!["Cyberman".to_string()],
+        };
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            apply_face_down_creature_characteristics(obj, &profile);
+            obj.back_face = Some(original);
+        }
+
+        let obj = &state.objects[&id];
+        assert!(obj.face_down);
+        assert_eq!(obj.name, "");
+        assert_eq!(obj.power, Some(2));
+        assert_eq!(obj.toughness, Some(2));
+        // CR 708.2a: Creature always present; Artifact added (CR 205.1a).
+        assert_eq!(
+            obj.card_types.core_types,
+            vec![CoreType::Creature, CoreType::Artifact]
+        );
+        assert_eq!(obj.card_types.subtypes, vec!["Cyberman".to_string()]);
+        // printed_ref cleared (no exposed identity); the real face is in back_face.
+        assert_eq!(obj.printed_ref, None);
+        assert!(obj.back_face.is_some());
+        assert_eq!(obj.back_face.as_ref().unwrap().name, "Secret Creature");
     }
 
     #[test]

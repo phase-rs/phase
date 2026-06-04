@@ -1999,12 +1999,11 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.objects[&battle_id].defense, Some(0));
-        assert_eq!(
-            state.objects[&battle_id]
+        assert!(
+            !state.objects[&battle_id]
                 .counters
-                .get(&CounterType::Defense)
-                .copied(),
-            Some(0)
+                .contains_key(&CounterType::Defense),
+            "zero-count defense entry should be pruned after damage removes the last counter"
         );
     }
 

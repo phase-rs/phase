@@ -15,7 +15,9 @@ use crate::combat_ai::is_lethal_attack_available;
 use crate::config::AiConfig;
 use crate::context::AiContext;
 use crate::policies::context::{collect_ability_effects, PolicyContext};
-use crate::policies::effect_classify::{effect_polarity, targets_creatures_only, EffectPolarity};
+use crate::policies::effect_classify::{
+    effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
+};
 use crate::policies::stack_awareness::{has_pending_removal, will_target_die_from_stack};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -319,24 +321,39 @@ fn target_choice_penalty(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
 }
 
 fn is_redundant_creature_only_removal(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> bool {
-    let has_creature_only_harm = effects.iter().any(|effect| {
-        matches!(effect_polarity(effect), EffectPolarity::Harmful) && targets_creatures_only(effect)
-    });
-    if !has_creature_only_harm {
+    // The source supplies the targeting quality (color/type) the engine needs
+    // to evaluate Protection / HexproofFrom; without it, fail open.
+    let Some(source) = ctx.source_object() else {
         return false;
-    }
+    };
 
-    !ctx.state.battlefield.iter().any(|&object_id| {
-        let Some(object) = ctx.state.objects.get(&object_id) else {
+    let mut saw_creature_only_harm = false;
+    for effect in effects {
+        if !(matches!(effect_polarity(effect), EffectPolarity::Harmful)
+            && targets_creatures_only(effect))
+        {
+            continue;
+        }
+        saw_creature_only_harm = true;
+        let Some(filter) = extract_target_filter(effect) else {
+            // Can't analyze the filter — not provably redundant.
             return false;
         };
-        object.controller != ctx.ai_player
-            && object.card_types.core_types.contains(&CoreType::Creature)
-            && !will_target_die_from_stack(ctx.state, object_id)
-            // CR 702.11b + CR 702.18a: Hexproof/Shroud prevent targeting.
-            && !object.has_keyword(&Keyword::Hexproof)
-            && !object.has_keyword(&Keyword::Shroud)
-    })
+        // CR 702.11/702.16/702.18 + CR 608.2b: defer targeting legality to the
+        // engine (Shroud, Hexproof-vs-opponents, "Hexproof from [quality]",
+        // Protection, ignore-hexproof) instead of re-checking keywords here.
+        let has_live_opponent_target =
+            ctx.has_legal_opponent_creature_target(filter, source.id, |id| {
+                // A target already dying to a stack effect is not a reason to
+                // keep this redundant removal.
+                !will_target_die_from_stack(ctx.state, id)
+            });
+        if has_live_opponent_target {
+            return false;
+        }
+    }
+
+    saw_creature_only_harm
 }
 
 fn pure_fixed_pump_bonus(effects: &[&Effect]) -> Option<(i32, i32)> {

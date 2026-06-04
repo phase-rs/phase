@@ -181,6 +181,7 @@ function occupiedSeatCount(state: SeatState): number {
 function aiActorFromWaitingFor(
   waitingFor: WaitingFor,
   seats: SeatState["seats"],
+  authorizedSubmitter: PlayerId,
 ): PlayerId | null {
   if (
     waitingFor.type === "MulliganDecision" ||
@@ -193,7 +194,18 @@ function aiActorFromWaitingFor(
     );
   }
 
-  return "player" in waitingFor.data ? waitingFor.data.player : null;
+  // CR 723.5: Under a turn-control effect (Emrakul, the Promised End / Worst
+  // Fears / Mindslaver) the seat that must *submit* this decision is the
+  // authorized submitter, NOT the semantic acting player
+  // (`waiting_for.data.player`, which is the controlled seat). The engine is the
+  // single authority and re-derives `priority_player` to the authorized
+  // submitter (`crates/engine/src/game/public_state.rs`). Routing the host AI
+  // loop off `data.player` would `submitAction` as the controlled seat, which
+  // the engine rejects with `WrongPlayer`, stalling the controlled turn in
+  // multiplayer. This mirrors the `aiController.ts` fix for #2012. With no
+  // turn-control effect, `priority_player === data.player` for every
+  // single-acting state, so this is a no-op.
+  return "player" in waitingFor.data ? authorizedSubmitter : null;
 }
 
 function playerSlotsFromSeatView(view: SeatView): PlayerSlot[] {
@@ -690,7 +702,11 @@ export class P2PHostAdapter implements EngineAdapter {
       if (!("data" in waitingFor) || !waitingFor.data) {
         return;
       }
-      const actor = aiActorFromWaitingFor(waitingFor as WaitingFor, this.pregameSeatState.seats);
+      const actor = aiActorFromWaitingFor(
+        waitingFor as WaitingFor,
+        this.pregameSeatState.seats,
+        state.priority_player,
+      );
       if (actor == null) {
         return;
       }
