@@ -62,6 +62,7 @@ pub(crate) mod sacrifice;
 pub mod sba;
 pub mod scenario;
 pub mod scenario_db;
+pub mod specialize;
 pub mod speed;
 pub mod stack;
 pub mod static_abilities;

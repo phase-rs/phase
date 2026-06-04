@@ -146,6 +146,10 @@ interface UiStoreState {
   debugPanelTab: "console" | "actions";
   debugInteractionMode: boolean;
   debugContextMenu: { objectId: ObjectId; x: number; y: number } | null;
+  /** Debug-only library browser: when set, a modal lists the player's full
+   *  library (in a stable randomized order) so individual cards can be moved to
+   *  any zone via the standard debug context menu. `null` when closed. */
+  debugLibraryViewer: { playerId: number } | null;
   helpSheetOpen: boolean;
   /** Object currently being "previewed" by a debug-panel control (e.g. an
    *  ObjectSelect dropdown option under the cursor). Drives a distinct,
@@ -205,6 +209,8 @@ interface UiStoreActions {
   toggleDebugInteractionMode: () => void;
   openDebugContextMenu: (menu: { objectId: ObjectId; x: number; y: number }) => void;
   closeDebugContextMenu: () => void;
+  openDebugLibraryViewer: (playerId: number) => void;
+  closeDebugLibraryViewer: () => void;
   setHelpSheetOpen: (open: boolean) => void;
   toggleHelpSheet: () => void;
   /** Set or clear the debug-panel preview highlight for an object. */
@@ -246,6 +252,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   debugPanelTab: "console",
   debugInteractionMode: false,
   debugContextMenu: null,
+  debugLibraryViewer: null,
   helpSheetOpen: false,
   debugHighlightedObjectId: null,
   debugHighlightedPlayerId: null,
@@ -493,6 +500,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   })),
   openDebugContextMenu: (menu) => set({ debugContextMenu: menu, selectedObjectId: menu.objectId }),
   closeDebugContextMenu: () => set({ debugContextMenu: null }),
+  openDebugLibraryViewer: (playerId) => set({ debugLibraryViewer: { playerId } }),
+  closeDebugLibraryViewer: () => set({ debugLibraryViewer: null }),
   setHelpSheetOpen: (open) => set({ helpSheetOpen: open }),
   toggleHelpSheet: () => set((state) => ({ helpSheetOpen: !state.helpSheetOpen })),
   setLogPanelOpen: (open) => set({ logPanelOpen: open }),
