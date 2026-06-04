@@ -1185,6 +1185,15 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // --- "~ can be attached only to {filter}" ---
+    // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction on an
+    // Aura/Equipment — the source can only attach to a host matching the parsed
+    // `TargetFilter` (Strata Scythe, Brass Knuckles, Konda's Banner). Enforced in
+    // game/effects/attach.rs::attachment_illegality.
+    if let Some(def) = parse_attach_only_restriction(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Spells and abilities <scope> can't cause their controller to search their library" ---
     // CR 701.23 + CR 609.3: Ashiok, Dream Render's first static. Subject-scoped
     // prohibition where `cause` identifies whose spells/abilities are muzzled.

@@ -583,6 +583,59 @@ fn static_cant_be_blocked_by_more_than_two_creatures() {
 }
 
 #[test]
+fn static_attach_only_restriction_power_ge_lowers_to_filter() {
+    // CR 301.5 + CR 303.4 + CR 701.3a: Strata Scythe class — a positive
+    // attachment restriction lowers to `AttachmentRestriction` whose `filter` is
+    // the reused `TargetFilter` for "a creature with power 3 or greater".
+    let def =
+        parse_static_line("~ can be attached only to a creature with power 3 or greater.").unwrap();
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::AttachmentRestriction { filter }
+            if matches!(
+                filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.properties.contains(&FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::GE,
+                            value: QuantityExpr::Fixed { value: 3 },
+                        })
+            )
+        ),
+        "Expected AttachmentRestriction with PtComparison(Power, GE, 3), got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn static_attach_only_restriction_legendary_lowers_to_filter() {
+    // CR 301.5 + CR 303.4 + CR 701.3a: Konda's Banner class — "a legendary
+    // creature" host whitelist via the reused `TargetFilter` legendary property.
+    let def = parse_static_line("~ can be attached only to a legendary creature.").unwrap();
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::AttachmentRestriction { filter }
+            if matches!(
+                filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.properties.contains(&FilterProp::HasSupertype {
+                            value: crate::types::card_type::Supertype::Legendary,
+                        })
+            )
+        ),
+        "Expected AttachmentRestriction with Legendary creature filter, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
 fn static_source_power_cant_block_creatures_you_control() {
     let def = parse_static_line(
         "Creatures with power less than ~'s power can't block creatures you control.",
