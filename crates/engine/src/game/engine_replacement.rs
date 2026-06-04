@@ -410,6 +410,14 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 601.2h + CR 602.2b + CR 616.1: Resume cast/activation cost payment paused for a
+            // replacement choice during discard or sacrifice cost payment.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+            {
+                waiting_for = super::casting_costs::resume_interrupted_cost_payment(state, events)?;
+            }
+
             Ok(waiting_for)
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => Ok(
@@ -1193,6 +1201,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 ))
                 .description("Rest in Peace".to_string()),
@@ -1313,6 +1322,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let mut events = Vec::new();
         crate::game::sacrifice::apply_sacrifice_after_replacement(&mut state, event, &mut events);
@@ -1815,6 +1825,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -1993,6 +2004,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {

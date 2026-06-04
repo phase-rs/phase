@@ -1810,6 +1810,18 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::SpecializeColor {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|&color| {
+                candidate(
+                    GameAction::ChooseSpecializeColor { color },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 702.139a: Companion reveal candidates
         WaitingFor::CompanionReveal {
             player,
@@ -5053,6 +5065,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )
         .cost(AbilityCost::Mana {

@@ -212,7 +212,7 @@ pub(crate) fn parse_compound_subject_rule_static(
         nom_primitives::scan_preceded(lower, parse_rule_static_predicate_nom)?;
     let (rest, mut predicates) = many0(preceded(
         parse_rule_static_separator_nom,
-        parse_rule_static_predicate_nom,
+        parse_rule_static_tail_predicate_nom,
     ))
     .parse(after_first)
     .ok()?;
@@ -294,8 +294,10 @@ pub(crate) fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, (
     value(
         (),
         alt((
+            tag::<_, _, OracleError<'_>>(", or "),
             tag::<_, _, OracleError<'_>>(", and "),
             tag(", "),
+            tag(" or "),
             tag(" and "),
         )),
     )

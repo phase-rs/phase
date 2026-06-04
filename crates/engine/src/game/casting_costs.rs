@@ -8,7 +8,8 @@ use crate::types::ability::{
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit, GameState,
-    PayCostKind, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
+    StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -141,6 +142,7 @@ pub(crate) fn handle_decide_additional_cost(
         _ => {}
     }
 
+    let cost_source = pending.additional_cost_source;
     let mut ability = pending.ability;
 
     // CR 702.166a: Track whether this decision paid an optional additional cost
@@ -203,6 +205,7 @@ pub(crate) fn handle_decide_additional_cost(
     };
 
     let mut updated_pending = PendingCast { ability, ..pending };
+    updated_pending.additional_cost_source = SpellCostSource::Other;
 
     // CR 601.2b: When an optional additional cost (e.g. Casualty) was declared
     // before targets (deferred_target_selection = true), clear the flow after
@@ -240,7 +243,7 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     if let Some(cost) = cost_to_pay {
-        pay_additional_cost(state, player, cost, updated_pending, events)
+        pay_additional_cost_with_source(state, player, cost, cost_source, updated_pending, events)
     } else {
         finish_pending_cost_or_cast(state, player, updated_pending, events)
     }
@@ -477,7 +480,16 @@ fn finish_pending_cost_or_cast(
         Some(AdditionalCost::Required(_))
     ) {
         if let Some(AdditionalCost::Required(cost)) = pending.additional_cost_flow.take() {
-            return pay_additional_cost(state, player, cost, pending, events);
+            let cost_source = pending.additional_cost_source;
+            pending.additional_cost_source = SpellCostSource::Other;
+            return pay_additional_cost_with_source(
+                state,
+                player,
+                cost,
+                cost_source,
+                pending,
+                events,
+            );
         }
     }
 
@@ -616,7 +628,16 @@ fn finish_pending_cost_or_cast(
                 "Cannot pay required additional cost".to_string(),
             ));
         }
-        return pay_additional_cost(state, player, req_cost, pending, events);
+        let cost_source = pending.additional_cost_source;
+        pending.additional_cost_source = SpellCostSource::Other;
+        return pay_additional_cost_with_source(
+            state,
+            player,
+            req_cost,
+            cost_source,
+            pending,
+            events,
+        );
     }
 
     let base_cost = pending.base_cost.clone();
@@ -801,20 +822,81 @@ pub(crate) fn handle_discard_for_cost(
         }
     }
 
-    // CR 601.2h: Discard each chosen card through the replacement pipeline
+    // CR 601.2h + CR 616.1: Discard each chosen card through the replacement pipeline
     // so Madness (CR 702.35) etc. can intercept.
-    for &card_id in chosen {
+    for (index, &card_id) in chosen.iter().enumerate() {
         match super::effects::discard::discard_as_cost(state, card_id, player, events) {
             super::effects::discard::DiscardOutcome::Complete => {}
-            super::effects::discard::DiscardOutcome::NeedsReplacementChoice(_) => {
-                // CR 118.3: Replacement choice during cost payment is extremely rare.
-                // TODO: Surface replacement choice to player during cost payment.
-                // For now, proceed — the discard was not completed, but the
-                // replacement pipeline has already handled the event.
+            super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                    player,
+                    pending: pending.clone(),
+                    chosen: chosen.to_vec(),
+                    paused_at_index: index,
+                });
+                super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
+                return Ok(state.waiting_for.clone());
             }
         }
     }
 
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 601.2h + CR 616.1: After a replacement choice during discard-for-cost payment, finish
+/// discarding any remaining cards and continue the cast/activation pipeline.
+pub(crate) fn resume_interrupted_cost_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(resume) = state.pending_discard_for_cost.take() {
+        let player = resume.player;
+        let pending = resume.pending;
+        for &card_id in resume.chosen.iter().skip(resume.paused_at_index + 1) {
+            match super::effects::discard::discard_as_cost(state, card_id, player, events) {
+                super::effects::discard::DiscardOutcome::Complete => {}
+                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                    let paused_at_index = resume
+                        .chosen
+                        .iter()
+                        .position(|&id| id == card_id)
+                        .unwrap_or(resume.paused_at_index + 1);
+                    state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                        player,
+                        pending: pending.clone(),
+                        chosen: resume.chosen.clone(),
+                        paused_at_index,
+                    });
+                    super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
+                    return Ok(state.waiting_for.clone());
+                }
+            }
+        }
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+
+    let Some(pending) = state.pending_cast.take() else {
+        return Ok(WaitingFor::Priority {
+            player: state.active_player,
+        });
+    };
+    let pending = *pending;
+    let player = state
+        .objects
+        .get(&pending.object_id)
+        .map(|o| o.controller)
+        .unwrap_or(state.active_player);
+    if let Some(activation_ability_index) = pending.activation_ability_index {
+        return push_activated_ability_to_stack(
+            state,
+            player,
+            pending.object_id,
+            activation_ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
+            events,
+        );
+    }
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -872,16 +954,33 @@ pub(crate) fn handle_activation_cost_one_of_choice(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct SpellCostPayment<'a> {
+    pub(crate) cost: &'a AbilityCost,
+    pub(crate) source: SpellCostSource,
+}
+
+pub(crate) struct CostSelection<'a> {
+    pub(crate) min_count: usize,
+    pub(crate) count: usize,
+    pub(crate) legal_permanents: &'a [ObjectId],
+    pub(crate) chosen: &'a [ObjectId],
+}
+
 pub(crate) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
-    selection_bounds: (usize, usize),
-    legal_permanents: &[ObjectId],
-    chosen: &[ObjectId],
+    paid_cost: Option<SpellCostPayment<'_>>,
+    selection: CostSelection<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (min_count, count) = selection_bounds;
+    let CostSelection {
+        min_count,
+        count,
+        legal_permanents,
+        chosen,
+    } = selection;
     if chosen.len() < min_count || chosen.len() > count {
         let requirement = if min_count == count {
             format!("exactly {} permanent(s)", count)
@@ -901,6 +1000,15 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // CR 702.48b: If this sacrifice is paying an Offering additional cost,
+    // CR 702.48c: use the chosen permanent's ObjectId BEFORE it leaves the
+    // battlefield so `apply_offering_cost_reduction` can read its mana cost
+    // when recomputing the spell's total cost.
+    let is_offering_sacrifice = paid_cost.is_some_and(|payment| {
+        payment.source == SpellCostSource::Offering
+            && is_offering_sacrifice_cost(state, player, pending.object_id, payment.cost)
+    });
+
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the sacrificed object's public
     // characteristics BEFORE it leaves the battlefield, stamping it onto the
     // resolving ability for later cost-paid-object references.
@@ -912,6 +1020,15 @@ pub(crate) fn handle_sacrifice_for_cost(
                     object_id: first,
                     lki: obj.snapshot_for_mana_spent(),
                 });
+        }
+    }
+
+    // CR 702.48c: When paying the Offering additional cost, reduce the spell's
+    // total mana cost by the sacrificed permanent's mana cost BEFORE the
+    // permanent leaves the battlefield so its mana cost is still readable.
+    if is_offering_sacrifice {
+        if let Some(&first) = chosen.first() {
+            apply_offering_cost_reduction(state, first, &mut pending.cost);
         }
     }
 
@@ -975,7 +1092,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
 
     if pending.activation_ability_index.is_some() {
         if let Some(cost) = pending.activation_cost.take() {
-            // CR 118.3 + CR 602.2h: A player pays an activated ability's total
+            // CR 118.3 + CR 601.2h + CR 602.2b: A player pays an activated ability's total
             // cost before that ability becomes activated. For self-bounce costs
             // such as Maze's End, pay automatic components like {T} while the
             // source is still on the battlefield, then perform the chosen return.
@@ -1027,7 +1144,7 @@ pub(crate) fn handle_remove_counter_for_cost(
 
     if pending.activation_ability_index.is_some() {
         if let Some(cost) = pending.activation_cost.take() {
-            // CR 602.2b/h: Pay automatic activation-cost components such as
+            // CR 601.2h + CR 602.2b: Pay automatic activation-cost components such as
             // {T} before removing the chosen counter and putting the ability
             // on the stack. The targeted RemoveCounter sub-cost no-ops in
             // `pay_ability_cost` because this handler pays that choice.
@@ -1250,44 +1367,74 @@ pub(crate) fn handle_exile_for_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != expected {
+    finish_exile_selection_for_cost(
+        state,
+        player,
+        pending,
+        (expected, expected),
+        legal_cards,
+        chosen,
+        events,
+        "card(s)",
+        "Selected card not eligible for exile",
+        |state, player, id, _pending| {
+            // Re-validate: chosen cards must still be in the cost's source zone.
+            let still_in_zone = state
+                .players
+                .get(player.0 as usize)
+                .is_some_and(|p| match zone {
+                    ExileCostSourceZone::Hand => p.hand.contains(&id),
+                    ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
+                });
+            if !still_in_zone {
+                return Err(EngineError::InvalidAction(format!(
+                    "Selected card is no longer in {:?}",
+                    zone.as_zone()
+                )));
+            }
+            Ok(())
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_exile_selection_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    bounds: (usize, usize),
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+    object_label: &str,
+    illegal_message: &str,
+    revalidate: impl Fn(&GameState, PlayerId, ObjectId, &PendingCast) -> Result<(), EngineError>,
+) -> Result<WaitingFor, EngineError> {
+    let (min_count, max_count) = bounds;
+    if chosen.len() < min_count || chosen.len() > max_count {
+        let expected = if min_count == max_count {
+            format!("exactly {min_count}")
+        } else {
+            format!("{min_count} to {max_count}")
+        };
         return Err(EngineError::InvalidAction(format!(
-            "Must exile exactly {} card(s), got {}",
-            expected,
+            "Must exile {expected} {object_label}, got {}",
             chosen.len()
         )));
     }
     for id in chosen {
         if !legal_cards.contains(id) {
-            return Err(EngineError::InvalidAction(
-                "Selected card not eligible for exile".to_string(),
-            ));
+            return Err(EngineError::InvalidAction(illegal_message.to_string()));
         }
     }
 
-    // Re-validate: chosen cards must still be in the cost's source zone.
     for &id in chosen {
-        let still_in_zone = state
-            .players
-            .get(player.0 as usize)
-            .is_some_and(|p| match zone {
-                ExileCostSourceZone::Hand => p.hand.contains(&id),
-                ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
-            });
-        if !still_in_zone {
-            return Err(EngineError::InvalidAction(format!(
-                "Selected card is no longer in {:?}",
-                zone.as_zone()
-            )));
-        }
+        revalidate(state, player, id, &pending)?;
     }
 
-    // CR 608.2k: Capture the first exiled card's public characteristics BEFORE
-    // it leaves the zone, stamping it (recursively into the sub_ability) onto
-    // the resolving ability so `TargetFilter::CostPaidObject` ("the exiled
-    // card") resolves at ability resolution. Inert for pitch/escape callers —
-    // their effects never reference the cost-paid object.
-    let mut pending = pending;
+    // CR 608.2k: Capture the first exiled object's public characteristics BEFORE
+    // it leaves the zone, stamping it recursively onto the resolving ability so
+    // `TargetFilter::CostPaidObject` resolves during ability resolution.
     if let Some(&first) = chosen.first() {
         if let Some(obj) = state.objects.get(&first) {
             pending
@@ -1306,6 +1453,52 @@ pub(crate) fn handle_exile_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 702.167a/b + CR 601.2b: Resolve a craft materials cost. The player has
+/// chosen objects from the battlefield/graveyard union; validate the
+/// count and legality, re-validate eligibility against the live state via the
+/// single-authority `eligible_craft_materials`, exile each chosen object, then
+/// resume the pending activation (whose remaining Mana + self-exile sub-costs
+/// are paid by `push_activated_ability_to_stack`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_materials_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    materials: TargetFilter,
+    pending: PendingCast,
+    bounds: (usize, usize),
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let still_eligible = super::cost_payability::eligible_craft_materials(
+        state,
+        player,
+        pending.object_id,
+        &materials,
+    );
+    // CR 702.167a/b + CR 601.2h: chosen materials are revalidated against the
+    // live battlefield/graveyard union immediately before payment.
+    finish_exile_selection_for_cost(
+        state,
+        player,
+        pending,
+        bounds,
+        legal_cards,
+        chosen,
+        events,
+        "material(s)",
+        "Selected object not eligible as craft material",
+        move |_state, _player, id, _pending| {
+            if !still_eligible.contains(&id) {
+                return Err(EngineError::InvalidAction(
+                    "Selected craft material is no longer eligible".to_string(),
+                ));
+            }
+            Ok(())
+        },
+    )
+}
+
 /// Push an activated ability to the stack after costs are paid.
 /// Shared by: direct path in `handle_activate_ability`, sacrifice detour, and
 /// waterbend/ManaPayment finalization in the PassPriority handler.
@@ -1318,8 +1511,9 @@ pub(super) fn push_activated_ability_to_stack(
     remaining_cost: Option<&crate::types::ability::AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // Pay remaining sub-costs (Tap, Mana, etc.) — choice-based costs already paid
-    // by a WaitingFor flow are no-ops here, so resuming with the full cost is idempotent.
+    // Pay any activation-cost tail still outstanding. Cost-selection flows may
+    // pass the original full cost; choice-based sub-costs already paid by a
+    // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
         if super::casting::variable_speed_payment_range(
             cost,
@@ -1336,13 +1530,26 @@ pub(super) fn push_activated_ability_to_stack(
                 ability_index,
             ));
         }
-        super::casting::pay_ability_cost(state, player, source_id, cost, events)?;
+        if let super::casting::AbilityCostPaymentOutcome::Paused { remaining_cost } =
+            super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
+        {
+            let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending.activation_cost = remaining_cost;
+            pending.activation_ability_index = Some(ability_index);
+            state.pending_cast = Some(Box::new(pending));
+            return Ok(state.waiting_for.clone());
+        }
     }
 
     // CR 602.2b: Check if the ability has targets that need selection.
     // This handles cases where cost payment (sacrifice, waterbend) detoured
     // before target selection in handle_activate_ability.
     let target_slots = build_target_slots(state, &resolved)?;
+    let assigned_targets = flatten_targets_in_chain(&resolved);
+    if !target_slots.is_empty() && assigned_targets.len() >= target_slots.len() {
+        emit_targeting_events(state, &assigned_targets, source_id, player, events);
+        return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+    }
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: Random-target activated abilities — game picks
         // uniformly via `state.rng`, no controller prompt.
@@ -1398,7 +1605,6 @@ pub(super) fn push_activated_ability_to_stack(
         });
     }
 
-    let assigned_targets = flatten_targets_in_chain(&resolved);
     emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
     push_ability_entry(state, player, source_id, ability_index, resolved, events)
@@ -1651,6 +1857,7 @@ pub(super) fn begin_optional_cost_before_targets(
     cost: ManaCost,
     base_cost: Option<ManaCost>,
     optional_cost: AdditionalCost,
+    cost_source: SpellCostSource,
     casting_variant: CastingVariant,
     cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
@@ -1667,6 +1874,7 @@ pub(super) fn begin_optional_cost_before_targets(
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
     pending.additional_cost_flow = Some(optional_cost);
+    pending.additional_cost_source = cost_source;
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -1701,6 +1909,7 @@ pub(super) fn begin_required_cost_before_targets(
     cost: ManaCost,
     base_cost: Option<ManaCost>,
     required_cost: AbilityCost,
+    cost_source: SpellCostSource,
     casting_variant: CastingVariant,
     cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
@@ -1717,6 +1926,7 @@ pub(super) fn begin_required_cost_before_targets(
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
     pending.additional_cost_flow = Some(AdditionalCost::Required(required_cost));
+    pending.additional_cost_source = cost_source;
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -1796,29 +2006,49 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         .and_then(|obj| obj.additional_cost.clone())
         .or(flash_additional);
 
-    // CR 601.2b: Optional costs (Casualty) must be declared before required additional
-    // costs. When obj.additional_cost is Required and the spell also has Casualty (e.g.,
-    // Village Rites gaining Casualty via a static effect), offer Casualty first and stash
-    // the Required cost in additional_cost_flow for processing after Casualty resolves.
-    let (additional, deferred_required) = if let Some(AdditionalCost::Required(ref req)) =
-        obj_additional
-    {
-        if let Some(casualty) = effective_casualty_additional_cost(state, player, object_id) {
-            if !req.is_payable(state, player, object_id) {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot pay required additional cost".to_string(),
-                ));
+    // CR 601.2b: Optional costs (Casualty/Replicate) must be declared before
+    // required additional costs. When obj.additional_cost is Required and the
+    // spell also has a granted optional cost (e.g., Village Rites gaining
+    // Casualty via a static effect), offer the optional cost first and stash the
+    // Required cost in additional_cost_flow for processing after it resolves.
+    let casualty_additional = effective_casualty_additional_cost(state, player, object_id);
+    let replicate_additional = effective_replicate_additional_cost(state, player, object_id);
+    let granted_optional_additional = casualty_additional
+        .clone()
+        .or_else(|| replicate_additional.clone());
+    let offering_additional = effective_offering_additional_cost(state, player, object_id);
+
+    let (additional, deferred_required, additional_cost_source) =
+        if let Some(AdditionalCost::Required(ref req)) = obj_additional {
+            if let Some(granted_optional) = granted_optional_additional {
+                if !req.is_payable(state, player, object_id) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay required additional cost".to_string(),
+                    ));
+                }
+                (
+                    Some(granted_optional),
+                    obj_additional,
+                    SpellCostSource::Other,
+                )
+            } else {
+                (obj_additional, None, SpellCostSource::Other)
             }
-            (Some(casualty), obj_additional)
+        } else if obj_additional.is_some() {
+            (obj_additional, None, SpellCostSource::Other)
+        } else if let Some(casualty) = casualty_additional {
+            (Some(casualty), None, SpellCostSource::Other)
+        } else if let Some(replicate) = replicate_additional {
+            (Some(replicate), None, SpellCostSource::Other)
+        } else if let Some(offering) = offering_additional {
+            // CR 702.48a: Offering — optional sacrifice before target selection
+            // (becomes Required when cast via Offering instant-speed timing; that
+            // case is handled in the casting dispatch which routes to
+            // `begin_required_cost_before_targets` before this function is reached).
+            (Some(offering), None, SpellCostSource::Offering)
         } else {
-            (obj_additional, None)
-        }
-    } else {
-        (
-            obj_additional.or_else(|| effective_casualty_additional_cost(state, player, object_id)),
-            None,
-        )
-    };
+            (None, None, SpellCostSource::Other)
+        };
 
     // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
     // before total cost determination and paid rather than the spell's mana
@@ -1860,7 +2090,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.cast_timing_permission = cast_timing_permission;
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
-                return pay_additional_cost(state, player, req_cost.clone(), pending, events);
+                return pay_additional_cost_with_source(
+                    state,
+                    player,
+                    req_cost.clone(),
+                    additional_cost_source,
+                    pending,
+                    events,
+                );
             }
             AdditionalCost::Kicker { costs, repeatable } => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
@@ -1917,6 +2154,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
+                pending.additional_cost_source = additional_cost_source;
                 // When a Required cost was deferred so Casualty could be offered first
                 // (e.g., Village Rites + Casualty), stash it so finish_pending_cost_or_cast
                 // can pay it after the Casualty decision.
@@ -2356,6 +2594,17 @@ fn pay_additional_cost(
     pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    pay_additional_cost_with_source(state, player, cost, SpellCostSource::Other, pending, events)
+}
+
+fn pay_additional_cost_with_source(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: AbilityCost,
+    cost_source: SpellCostSource,
+    pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     if pending.ability.chosen_x.is_none() {
         if let Some(max) = additional_cost_x_max(state, player, pending.object_id, &cost) {
             let min = pending.ability.min_x_value;
@@ -2532,8 +2781,13 @@ fn pay_additional_cost(
                     choices: eligible,
                     count: max_count,
                     min_count,
-                    resume: CostResume::Spell {
+                    resume: CostResume::SpellCost {
                         spell: Box::new(pending),
+                        cost: Box::new(AbilityCost::Sacrifice {
+                            target: target.clone(),
+                            count,
+                        }),
+                        source: cost_source,
                     },
                 });
             }
@@ -2749,6 +3003,22 @@ fn prepend_deferred_required_cost(cost: AbilityCost, pending: &mut PendingCast) 
     }
 }
 
+fn is_offering_sacrifice_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    let Some(quality) = effective_offering_quality(state, player, object_id) else {
+        return false;
+    };
+    matches!(
+        cost,
+        AbilityCost::Sacrifice { target, count: 1 }
+            if *target == offering_quality_filter(&quality)
+    )
+}
+
 fn additional_cost_x_max(
     state: &GameState,
     player: PlayerId,
@@ -2818,6 +3088,141 @@ pub(super) fn effective_casualty_additional_cost(
         },
         repeatable: false,
     })
+}
+
+/// CR 702.56a: Return the repeatable optional additional cost from a spell's
+/// effective Replicate keyword, including keywords granted by statics.
+pub(super) fn effective_replicate_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AdditionalCost> {
+    let cost = super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Replicate(cost) => Some(cost),
+            _ => None,
+        })?;
+    Some(AdditionalCost::Optional {
+        cost: AbilityCost::Mana { cost },
+        repeatable: true,
+    })
+}
+
+/// CR 702.48a: Return the quality (creature subtype) string from a spell's
+/// Offering keyword, if it has one. Uses `effective_spell_keywords` so
+/// layer-granted copies are included.
+pub(super) fn effective_offering_quality(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<String> {
+    super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Offering(quality) => Some(quality),
+            _ => None,
+        })
+}
+
+/// CR 702.48a: Build a `TargetFilter` that matches any permanent on the
+/// battlefield whose type line includes `quality` (e.g. "Spirit").
+/// The filter matches any permanent type that has `quality` as a subtype.
+fn offering_quality_filter(quality: &str) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::permanent().subtype(quality.to_string()))
+}
+
+pub(super) fn offering_sacrifice_cost(quality: &str) -> AbilityCost {
+    AbilityCost::Sacrifice {
+        target: offering_quality_filter(quality),
+        count: 1,
+    }
+}
+
+/// CR 702.48a: Returns `true` when the controller has at least one permanent
+/// on the battlefield that could be sacrificed for the Offering cost.
+pub(super) fn can_pay_offering_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let Some(quality) = effective_offering_quality(state, player, object_id) else {
+        return false;
+    };
+    !super::casting::find_eligible_sacrifice_targets(
+        state,
+        player,
+        object_id,
+        &offering_quality_filter(&quality),
+    )
+    .is_empty()
+}
+
+/// CR 702.48a: Build the `AdditionalCost::Optional` representing the Offering
+/// sacrifice choice. The `repeatable` flag is `false` — Offering is paid at
+/// most once per cast.
+pub(super) fn effective_offering_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AdditionalCost> {
+    let quality = effective_offering_quality(state, player, object_id)?;
+    Some(AdditionalCost::Optional {
+        cost: offering_sacrifice_cost(&quality),
+        repeatable: false,
+    })
+}
+
+/// CR 702.48c: Reduce `spell_cost` by the sacrificed permanent's mana cost.
+///
+/// Rules:
+/// - Generic mana in the sacrificed cost reduces generic mana in the spell cost.
+/// - Each colored/colorless shard in the sacrificed cost first tries to cancel
+///   a matching shard in the spell cost; excess reduces generic instead.
+///
+/// If the permanent no longer exists the function is a no-op.
+pub(super) fn apply_offering_cost_reduction(
+    state: &GameState,
+    sacrifice_id: ObjectId,
+    spell_cost: &mut ManaCost,
+) {
+    let Some(sacrificed_obj) = state.objects.get(&sacrifice_id) else {
+        return;
+    };
+    let sacrificed_mana_cost = sacrificed_obj.mana_cost.clone();
+
+    let ManaCost::Cost {
+        shards: ref sac_shards,
+        generic: sac_generic,
+    } = sacrificed_mana_cost
+    else {
+        return;
+    };
+
+    let ManaCost::Cost {
+        shards: ref mut spell_shards,
+        generic: ref mut spell_generic,
+    } = spell_cost
+    else {
+        return;
+    };
+
+    // CR 702.48c: Each colored/colorless shard reduces a matching spell shard;
+    // unmatched excess reduces generic instead.
+    for &sac_shard in sac_shards {
+        let pos = spell_shards
+            .iter()
+            .position(|&s| super::casting::cost_shard_matches_reduction(s, sac_shard));
+        if let Some(idx) = pos {
+            spell_shards.remove(idx);
+        } else {
+            // Excess colored/colorless reduces generic (floor 0).
+            *spell_generic = spell_generic.saturating_sub(1);
+        }
+    }
+
+    // CR 702.48c: Generic in sacrificed cost reduces generic in spell cost.
+    *spell_generic = spell_generic.saturating_sub(sac_generic);
 }
 
 pub(super) fn retrace_discard_land_cost() -> AbilityCost {
@@ -3455,6 +3860,10 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
 
     // CR 601.2f: Consume any one-shot pending cost reductions now that the spell is finalized.
     super::casting::consume_pending_spell_cost_reduction(state, player);
+
+    // CR 601.2f: Stamp and consume one-shot "the next spell …" modifiers.
+    super::casting::apply_pending_next_spell_stack_grants(state, player, object_id);
+    super::casting::consume_pending_next_spell_modifiers(state, player, object_id);
 
     // CR 700.14: Track cumulative mana spent on spells this turn for Expend triggers.
     // Uses actual mana deducted from pool (accounts for cost reduction, convoke, etc.).
@@ -5106,14 +5515,18 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        PtStat, PtValueScope, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+        PtStat, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
 
     fn make_pending(source_id: ObjectId) -> PendingCast {
@@ -5139,6 +5552,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -5149,6 +5563,27 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
         }
+    }
+
+    fn install_optional_discard_replacement(state: &mut GameState) -> ObjectId {
+        let replacement_source = create_object(
+            state,
+            CardId(9_002),
+            PlayerId(0),
+            "Discard Replacement".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Discard)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Apply discard replacement".to_string()),
+            );
+        replacement_source
     }
 
     /// CR 603.10a + CR 701.21a + CR 601.2h: when a spell's additional cost
@@ -6581,9 +7016,13 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
-            (1, 1),
-            &legal,
-            &chosen,
+            None,
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &legal,
+                chosen: &chosen,
+            },
             &mut events,
         );
 
@@ -6621,9 +7060,13 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
-            (1, 1),
-            &legal,
-            &[],
+            None,
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &legal,
+                chosen: &[],
+            },
             &mut events,
         );
         assert!(result.is_err());
@@ -6663,9 +7106,13 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
-            (1, 1),
-            &legal,
-            &chosen,
+            None,
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &legal,
+                chosen: &chosen,
+            },
             &mut events,
         );
         assert!(result.is_err());
@@ -6736,9 +7183,13 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
-            (0, legal.len()),
-            &legal,
-            &chosen,
+            None,
+            CostSelection {
+                min_count: 0,
+                count: legal.len(),
+                legal_permanents: &legal,
+                chosen: &chosen,
+            },
             &mut events,
         )
         .expect("variable sacrifice selection should succeed");
@@ -6755,6 +7206,76 @@ mod tests {
         assert_eq!(chosen_x, Some(2));
         assert_eq!(state.objects[&squirrel_a].zone, Zone::Graveyard);
         assert_eq!(state.objects[&squirrel_b].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn discard_for_cost_resume_can_pause_on_each_remaining_discard() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        install_optional_discard_replacement(&mut state);
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Discard Outlet".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )]);
+        let first = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "First Card".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Second Card".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        let waiting = handle_discard_for_cost(
+            &mut state,
+            PlayerId(0),
+            make_pending(source),
+            2,
+            &[first, second],
+            &[first, second],
+            &mut events,
+        )
+        .expect("first discard should pause for replacement choice");
+
+        assert!(matches!(waiting, WaitingFor::ReplacementChoice { .. }));
+        assert_eq!(state.objects[&first].zone, Zone::Hand);
+        assert!(state.stack.is_empty());
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("first replacement choice should resume to the second discard");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(state.objects[&first].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&second].zone, Zone::Hand);
+        assert!(state.stack.is_empty());
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("second replacement choice should finish cost payment");
+        assert_eq!(state.objects[&second].zone, Zone::Graveyard);
+        assert_eq!(state.stack.len(), 1, "activation should reach the stack");
     }
 
     /// CR 603.6c + CR 118.3: Sacrificing a permanent as part of a cost is a
@@ -6845,9 +7366,13 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
-            (1, 1),
-            &[treasure],
-            &[treasure],
+            None,
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &[treasure],
+                chosen: &[treasure],
+            },
             &mut events,
         )
         .expect("cost-payment sacrifice succeeds");
@@ -6960,9 +7485,13 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
-            (1, 1),
-            &[token],
-            &[token],
+            None,
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &[token],
+                chosen: &[token],
+            },
             &mut events,
         )
         .expect("cost-payment sacrifice succeeds");
@@ -8490,6 +9019,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -8610,6 +9140,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -8699,6 +9230,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -8777,6 +9309,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -8888,6 +9421,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Graveyard,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -9885,6 +10419,308 @@ many tokens that are copies of it.)";
         );
     }
 
+    // -----------------------------------------------------------------------
+    // CR 702.56a: Replicate — repeatable optional additional cost paid any
+    // number of times at cast (CR 601.2b/f-h), then a "when you cast this
+    // spell" trigger copies the spell once per replicate payment (CR 707.10).
+    // Reuses the same repeatable-`Optional` cost flow as Squad/multikicker and
+    // the same `CopySpell` machinery as Casualty — the copy count comes from
+    // `repeat_for = AdditionalCostPaymentCount`.
+    // -----------------------------------------------------------------------
+
+    /// Build a targetless "draw a card" instant in P0's hand carrying Replicate
+    /// {1}. A targetless spell avoids the per-copy `CopyRetarget` prompt
+    /// (CR 707.10c), so the copies resolve straight through and the copy count
+    /// is observable via `SpellCopied` events alone.
+    fn replicate_draw_scenario() -> (crate::game::scenario::GameRunner, ObjectId, CardId) {
+        use crate::game::scenario::GameScenario;
+
+        const REPLICATE_DRAW_ORACLE: &str = "Replicate {1} (As an additional cost to cast this \
+spell, you may pay {1} any number of times. When you cast this spell, copy it for each time \
+its replicate cost was paid.)\nDraw a card.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        let mut builder =
+            scenario.add_spell_to_hand_from_oracle(PlayerId(0), "Test Replicate Draw", true, "");
+        // {0} base cost — only the replicate payments cost mana.
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        builder.from_oracle_text_with_keywords(&["replicate:{1}"], REPLICATE_DRAW_ORACLE);
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let runner = scenario.build();
+        (runner, spell_id, card_id)
+    }
+
+    fn granted_replicate_static() -> StaticDefinition {
+        let replicate_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        };
+        StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Replicate(replicate_cost),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
+        ))
+    }
+
+    fn granted_replicate_draw_scenario() -> (crate::game::scenario::GameRunner, ObjectId, CardId) {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        scenario
+            .add_creature(PlayerId(0), "Replicate Grantor", 1, 1)
+            .with_static_definition(granted_replicate_static());
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Granted Replicate Draw", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        builder.from_oracle_text("Draw a card.");
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let runner = scenario.build();
+        (runner, spell_id, card_id)
+    }
+
+    /// Count `SpellCopied` events emitted while resolving the stack to empty.
+    /// Each `Effect::CopySpell` iteration emits exactly one (CR 707.10), so the
+    /// total equals the number of replicate copies created.
+    fn drain_counting_spell_copies(runner: &mut crate::game::scenario::GameRunner) -> usize {
+        use crate::types::actions::GameAction;
+        let mut copies = 0usize;
+        for _ in 0..40 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            match runner.act(GameAction::PassPriority) {
+                Ok(result) => {
+                    copies += result
+                        .events
+                        .iter()
+                        .filter(|e| {
+                            matches!(e, crate::types::events::GameEvent::SpellCopied { .. })
+                        })
+                        .count();
+                }
+                Err(_) => break,
+            }
+        }
+        copies
+    }
+
+    /// CR 702.56a: Replicate paid twice copies the spell twice — two extra
+    /// copies on the stack (plus the original spell), per CR 707.10.
+    #[test]
+    fn replicate_paid_twice_creates_two_copies() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = replicate_draw_scenario();
+        fund_colorless(&mut runner, 2); // {1} + {1} for two replicate payments
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the replicate spell must be accepted");
+
+        // CR 601.2b/f-h: the repeatable additional cost surfaces as the same
+        // `OptionalCostChoice` prompt Squad/multikicker use.
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                cost, times_kicked, ..
+            } => {
+                assert!(
+                    matches!(
+                        cost,
+                        AdditionalCost::Optional {
+                            cost: AbilityCost::Mana { .. },
+                            repeatable: true,
+                        }
+                    ),
+                    "replicate must surface a repeatable Optional mana cost: {cost:?}"
+                );
+                assert_eq!(times_kicked, 0, "first replicate prompt count must be 0");
+            }
+            other => panic!("expected the first replicate prompt, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("first replicate payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("second replicate payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining further replicate payments must finish the cast");
+
+        // CR 601.2i + CR 603.3: after the cast commits, the stack holds the
+        // original spell plus its "when you cast this spell" replicate trigger.
+        assert!(
+            runner.state().stack.iter().any(|e| e.id == spell_id),
+            "the original replicate spell must be on the stack after the cast commits"
+        );
+
+        // CR 702.56a + CR 707.10: resolving the cast trigger copies the spell
+        // once per replicate payment — exactly two copies.
+        let copies = drain_counting_spell_copies(&mut runner);
+        assert_eq!(
+            copies, 2,
+            "replicate paid twice must create exactly two copies (original + 2 copies)"
+        );
+    }
+
+    /// CR 702.56a: Replicate granted by `CastWithKeyword` must use the same
+    /// optional payment and copy-on-cast machinery as printed Replicate.
+    #[test]
+    fn granted_replicate_paid_twice_creates_two_copies() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = granted_replicate_draw_scenario();
+        fund_colorless(&mut runner, 2);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the granted-replicate spell must be accepted");
+
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                cost, times_kicked, ..
+            } => {
+                assert!(
+                    matches!(
+                        cost,
+                        AdditionalCost::Optional {
+                            cost: AbilityCost::Mana { .. },
+                            repeatable: true,
+                        }
+                    ),
+                    "granted Replicate must surface a repeatable Optional mana cost: {cost:?}"
+                );
+                assert_eq!(times_kicked, 0, "first granted Replicate prompt count");
+            }
+            other => panic!("expected granted Replicate prompt, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("first granted Replicate payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("second granted Replicate payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining further granted Replicate payments must finish the cast");
+
+        let copies = drain_counting_spell_copies(&mut runner);
+        assert_eq!(
+            copies, 2,
+            "granted Replicate paid twice must create exactly two copies"
+        );
+    }
+
+    /// CR 601.2b + CR 702.56a: Replicate's optional cost is declared before
+    /// target selection for targeted spells, including when granted by a static.
+    #[test]
+    fn granted_replicate_targeted_spell_prompts_before_target_selection() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::GameAction;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        scenario
+            .add_creature(PlayerId(0), "Replicate Grantor", 1, 1)
+            .with_static_definition(granted_replicate_static());
+        scenario.add_creature(PlayerId(1), "Target Bear", 2, 2);
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Granted Replicate Bolt", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        builder.with_ability(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        });
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let mut runner = scenario.build();
+        fund_colorless(&mut runner, 1);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting targeted granted-Replicate spell must start");
+
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "granted Replicate must prompt before target selection, got {:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// CR 702.56a: Paying replicate zero times makes no copies — the "if a
+    /// replicate cost was paid" intervening clause is false, and the
+    /// `AdditionalCostPaymentCount`-driven copy count is zero.
+    #[test]
+    fn replicate_paid_zero_times_creates_no_copies() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = replicate_draw_scenario();
+        // {0} base cost — no mana needed when replicate is declined.
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the replicate spell must be accepted");
+
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    times_kicked: 0,
+                    ..
+                }
+            ),
+            "expected the first replicate prompt"
+        );
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining replicate must finish the cast");
+
+        let copies = drain_counting_spell_copies(&mut runner);
+        assert_eq!(
+            copies, 0,
+            "declining replicate must create zero copies (just the original spell)"
+        );
+        assert!(
+            !runner.state().cancelled_casts.contains(&spell_id),
+            "declining replicate must NOT cancel the cast"
+        );
+    }
+
     /// Engine test 2b — `CancelCast` at the first kicker prompt aborts the
     /// cast: the spell returns to its origin zone and lands in `cancelled_casts`.
     /// Proves abort and decline are genuinely distinct engine outcomes.
@@ -10214,5 +11050,692 @@ many tokens that are copies of it.)";
         let snapshot = stack_cost_paid_object(runner.state(), spell_id)
             .expect("the cost_paid_object snapshot is unconditional, even for Blight 0");
         assert_eq!(snapshot.object_id, target);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // CR 702.48: Offering
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// CR 702.48a: A Spirit-offering spell at sorcery speed presents an
+    /// optional sacrifice prompt for a Spirit permanent the controller controls.
+    #[test]
+    fn spirit_offering_presents_optional_sacrifice_for_spirit() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(10),
+            caster,
+            "Thief of Hope Spirit Sac".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(11),
+            caster,
+            "Kitsune Blademaster".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            };
+        }
+
+        let mut events = Vec::new();
+        // Use NoCost so the test focuses on Offering detection, not mana payment.
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(11),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            None,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("Spirit offering spell must be castable");
+
+        match waiting {
+            WaitingFor::OptionalCostChoice { ref cost, .. } => {
+                assert!(
+                    matches!(
+                        cost,
+                        AdditionalCost::Optional {
+                            cost: AbilityCost::Sacrifice { count: 1, .. },
+                            repeatable: false,
+                        }
+                    ),
+                    "expected optional Spirit sacrifice, got {cost:?}"
+                );
+            }
+            other => panic!("expected OptionalCostChoice for Offering, got {other:?}"),
+        }
+    }
+
+    /// CR 702.48c: `apply_offering_cost_reduction` reduces by the sacrificed
+    /// permanent's mana cost. {1}{G} sacrifice reduces {3}{W} spell to {1}{W}.
+    ///   shard {G} → no match in {W} → excess reduces generic: 3→2
+    ///   sac generic 1 → generic: 2→1. Result: {W}{1}.
+    #[test]
+    fn offering_cost_reduction_applies_per_cr_702_48c() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        // Spirit with {1}{G} mana cost.
+        let spirit = create_object(
+            &mut state,
+            CardId(20),
+            caster,
+            "Floating Spirit Sac".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&spirit).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+
+        // Spell with Spirit offering.
+        let spell = create_object(
+            &mut state,
+            CardId(21),
+            caster,
+            "Spirit Offering Spell".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .keywords
+            .push(Keyword::Offering("Spirit".to_string()));
+
+        let mut spell_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 3,
+        };
+        apply_offering_cost_reduction(&state, spirit, &mut spell_cost);
+
+        assert_eq!(
+            spell_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            },
+            "{{3}}{{W}} reduced by {{1}}{{G}} must equal {{W}}{{1}}"
+        );
+    }
+
+    /// CR 702.48b: Accepting the Offering prompts to sacrifice a qualifying
+    /// permanent before target selection.
+    #[test]
+    fn accepting_spirit_offering_prompts_sacrifice_selection() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(22),
+            caster,
+            "Selectable Spirit".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(23),
+            caster,
+            "Spirit Offering Spell 2".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::NoCost;
+        }
+
+        let mut events = Vec::new();
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(23),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            None,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("Spirit offering spell must be castable");
+
+        let WaitingFor::OptionalCostChoice {
+            cost: ref offering_cost,
+            pending_cast: ref pending_box,
+            ..
+        } = waiting
+        else {
+            panic!("expected OptionalCostChoice for Offering, got {waiting:?}");
+        };
+        let pending_cast = *pending_box.clone();
+
+        // Accept the Offering.
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            pending_cast,
+            offering_cost,
+            true,
+            &mut events,
+        )
+        .expect("accepting offering must succeed");
+
+        // Engine should now prompt for which Spirit to sacrifice.
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            ref choices,
+            ..
+        } = waiting
+        else {
+            panic!("expected PayCost(Sacrifice) for Offering, got {waiting:?}");
+        };
+        assert!(
+            choices.contains(&spirit),
+            "spirit must be in eligible sacrifice list"
+        );
+    }
+
+    /// CR 702.48b: Selecting a Spirit for sacrifice removes it from the battlefield.
+    /// CR 702.48c: The selected Spirit's mana cost reduces the spell's pending
+    /// mana payment.
+    #[test]
+    fn accepting_spirit_offering_sacrifices_permanent_and_reduces_cost() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(24),
+            caster,
+            "Sacrificed Spirit".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(25),
+            caster,
+            "Spirit Offering Spell 3".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            };
+        }
+        for _ in 0..4 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::White,
+                ObjectId(940),
+                false,
+                Vec::new(),
+            ));
+        }
+
+        let mut events = Vec::new();
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(25),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            },
+            Some(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            }),
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Manual,
+            &mut events,
+        )
+        .expect("Spirit offering spell must be castable");
+
+        let WaitingFor::OptionalCostChoice {
+            cost: ref offering_cost,
+            pending_cast: ref pending_box,
+            ..
+        } = waiting
+        else {
+            panic!("expected OptionalCostChoice for Offering, got {waiting:?}");
+        };
+        let pending_cast = *pending_box.clone();
+
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            pending_cast,
+            offering_cost,
+            true,
+            &mut events,
+        )
+        .expect("accepting offering must succeed");
+
+        // Confirm the sacrifice selection prompt includes the spirit.
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            ref choices,
+            ref resume,
+            ..
+        } = waiting
+        else {
+            panic!("expected PayCost(Sacrifice) for Offering, got {waiting:?}");
+        };
+        assert!(choices.contains(&spirit), "spirit must be in eligible list");
+
+        // Execute sacrifice selection and verify the spirit leaves the battlefield.
+        let CostResume::SpellCost {
+            spell: ref pending_box2,
+            cost: ref offering_pay_cost,
+            source,
+            ..
+        } = resume
+        else {
+            panic!("expected CostResume::SpellCost");
+        };
+        assert_eq!(
+            *source,
+            SpellCostSource::Offering,
+            "Offering sacrifice prompt must carry Offering source identity"
+        );
+        let pending2 = *pending_box2.clone();
+
+        // Move spell to stack (normally done by announce_spell_on_stack in the
+        // real casting pipeline — needed by finalize_cast_to_stack).
+        crate::game::stack::push_to_stack(
+            &mut state,
+            crate::types::game_state::StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: caster,
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(25),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut events,
+        );
+
+        let waiting = handle_sacrifice_for_cost(
+            &mut state,
+            caster,
+            pending2,
+            Some(SpellCostPayment {
+                cost: offering_pay_cost.as_ref(),
+                source: *source,
+            }),
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: choices,
+                chosen: &[spirit],
+            },
+            &mut events,
+        )
+        .expect("sacrifice selection must succeed");
+
+        assert!(
+            !state.battlefield.contains(&spirit),
+            "sacrificed spirit must leave battlefield"
+        );
+        let WaitingFor::ManaPayment { .. } = waiting else {
+            panic!("expected ManaPayment after offering sacrifice, got {waiting:?}");
+        };
+        let pending = state
+            .pending_cast
+            .as_ref()
+            .expect("pending cast must exist");
+        assert_eq!(
+            pending.cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            },
+            "{{3}}{{W}} reduced by {{1}}{{G}} must equal {{1}}{{W}}"
+        );
+    }
+
+    /// CR 702.48c: Only the Offering additional cost reduces the spell. A
+    /// different sacrifice cost on an Offering spell must not reduce the cost
+    /// just because the sacrificed permanent also matches the Offering quality.
+    #[test]
+    fn non_offering_sacrifice_on_offering_spell_does_not_reduce_cost() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(26),
+            caster,
+            "Sacrificed Spirit For Other Cost".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            };
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(27),
+            caster,
+            "Spirit Offering Spell With Other Cost".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            };
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            spell,
+            caster,
+        );
+        ability.context.additional_cost_paid = true;
+        let mut pending = PendingCast::new(
+            spell,
+            CardId(27),
+            ability,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            },
+        );
+        pending.base_cost = Some(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 3,
+        });
+        pending.payment_mode = CastPaymentMode::Manual;
+
+        let mut events = Vec::new();
+        crate::game::stack::push_to_stack(
+            &mut state,
+            crate::types::game_state::StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: caster,
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(27),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut events,
+        );
+
+        let non_offering_cost = AbilityCost::Sacrifice {
+            target: offering_quality_filter("Spirit"),
+            count: 1,
+        };
+        let waiting = handle_sacrifice_for_cost(
+            &mut state,
+            caster,
+            pending,
+            Some(SpellCostPayment {
+                cost: &non_offering_cost,
+                source: SpellCostSource::Other,
+            }),
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &[spirit],
+                chosen: &[spirit],
+            },
+            &mut events,
+        )
+        .expect("non-offering sacrifice selection must succeed");
+
+        let WaitingFor::ManaPayment { .. } = waiting else {
+            panic!("expected ManaPayment after non-offering sacrifice, got {waiting:?}");
+        };
+        let pending = state
+            .pending_cast
+            .as_ref()
+            .expect("pending cast must exist");
+        assert_eq!(
+            pending.cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            },
+            "non-offering sacrifice must not reduce an Offering spell's cost"
+        );
+    }
+
+    /// CR 702.48a: Declining the Offering leaves the spell's cost unchanged.
+    #[test]
+    fn declining_spirit_offering_preserves_full_cost() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(30),
+            caster,
+            "Declining Spirit".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(31),
+            caster,
+            "Kitsune Blademaster 3".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            };
+        }
+
+        let printed_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 3,
+        };
+        // Fund enough mana to pass the affordability pre-check.
+        for _ in 0..4 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::White,
+                ObjectId(930),
+                false,
+                Vec::new(),
+            ));
+        }
+        let mut events = Vec::new();
+
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(31),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &printed_cost,
+            Some(printed_cost.clone()),
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Manual, // manual so mana payment pauses, not auto-completes
+            &mut events,
+        )
+        .expect("Spirit offering spell must be castable");
+
+        let WaitingFor::OptionalCostChoice {
+            cost: ref offering_cost,
+            pending_cast: ref pending_box,
+            ..
+        } = waiting
+        else {
+            panic!("expected OptionalCostChoice, got {waiting:?}");
+        };
+        let pending_cast = *pending_box.clone();
+
+        // Pre-announce spell to the stack (normally done by announce_spell_on_stack).
+        crate::game::stack::push_to_stack(
+            &mut state,
+            crate::types::game_state::StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: caster,
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(31),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut events,
+        );
+
+        // Decline the Offering.
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            pending_cast,
+            offering_cost,
+            false,
+            &mut events,
+        )
+        .expect("declining offering must succeed");
+
+        // Spirit survives.
+        assert!(
+            state.battlefield.contains(&spirit),
+            "spirit must survive when offering is declined"
+        );
+
+        // After declining, engine proceeds to mana payment with unchanged cost.
+        let WaitingFor::ManaPayment { .. } = waiting else {
+            panic!("expected ManaPayment after declining offering, got {waiting:?}");
+        };
+        let pending = state
+            .pending_cast
+            .as_ref()
+            .expect("pending cast must exist");
+        assert_eq!(
+            pending.cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            },
+            "declined offering must leave cost at full {{3}}{{W}}"
+        );
     }
 }

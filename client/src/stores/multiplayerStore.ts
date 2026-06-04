@@ -112,6 +112,12 @@ const pendingJoinRpcAborts: Set<AbortController> = new Set();
 const lobbySubscribers: Set<(games: LobbyGame[]) => void> = new Set();
 /** Most recent `LobbyUpdate` snapshot, used to seed new subscribers. */
 let lobbySnapshot: LobbyGame[] | null = null;
+
+/** Lobby row for a game/draft code from the cached subscription snapshot. */
+export function findLobbyGameByCode(code: string): LobbyGame | undefined {
+  const normalized = code.trim().toUpperCase();
+  return lobbySnapshot?.find((g) => g.game_code.toUpperCase() === normalized);
+}
 /** Per-socket detach returned by `subscribeLobbyOver`. Re-bound on
  * reconnect; `null` when no socket is attached. */
 let lobbyAttachDetach: (() => void) | null = null;
@@ -1211,6 +1217,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           return await resolveGuestOver(socket, code, password, {
             signal: ac.signal,
             reservationToken: opts?.reservationToken,
+            // The broker rejects a blank display_name on the resolve frame
+            // (required-label rule) and the worker shell drops it without a
+            // reply — the guest then times out at deck-select. Always carry
+            // the player's name so the frame validates.
+            displayName: get().displayName || "Player",
           });
         } finally {
           pendingJoinRpcAborts.delete(ac);

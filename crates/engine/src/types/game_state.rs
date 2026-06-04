@@ -308,6 +308,9 @@ pub enum NextSpellModifier {
     HasKeyword { keyword: Keyword },
     /// "The next spell you cast this turn can be cast as though it had flash."
     CastAsThoughFlash,
+    /// CR 118.9a: "The next [filter] spell you cast this turn can be cast without
+    /// paying its mana cost." Additional costs still apply (CR 118.8).
+    WithoutPayingManaCost,
 }
 
 /// CR 400.7: Snapshot of an object's properties at the time of a zone change,
@@ -987,6 +990,11 @@ pub struct PendingCast {
     /// kicker costs and multikicker loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost_flow: Option<AdditionalCost>,
+    /// CR 601.2b + CR 702.48c: Source of the currently pending additional-cost
+    /// component. This disambiguates same-shaped costs when a later object
+    /// selection resumes payment.
+    #[serde(default)]
+    pub additional_cost_source: SpellCostSource,
     /// CR 601.2b + CR 700.2a: Modal spells with kicker-dependent mode caps
     /// announce kicker intent before choosing modes, but pay those costs later
     /// in the normal cost-payment step.
@@ -1037,6 +1045,17 @@ fn default_origin_zone() -> Zone {
     Zone::Hand
 }
 
+/// CR 601.2h + CR 616.1: Resume paying a discard cost after a replacement choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDiscardForCostResume {
+    pub player: PlayerId,
+    pub pending: PendingCast,
+    pub chosen: Vec<ObjectId>,
+    /// Index into `chosen` whose discard was paused; that discard completes
+    /// during `handle_replacement_choice` before this resume runs.
+    pub paused_at_index: usize,
+}
+
 impl PendingCast {
     pub fn new(
         object_id: ObjectId,
@@ -1058,6 +1077,7 @@ impl PendingCast {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -1679,6 +1699,10 @@ pub enum AlternativeCastKeyword {
     /// permanent enters with N time counters and isn't a creature until the last
     /// is removed. An end-step trigger removes one counter per turn.
     Impending,
+    /// CR 702.160a: Prototype alternative cost paid from hand. The resulting
+    /// spell/permanent uses the secondary power, toughness, and mana cost
+    /// characteristics while it is a creature.
+    Prototype,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -1701,6 +1725,13 @@ pub enum PayCostKind {
     /// Exile objects from the specified zone.
     ExileFromZone {
         zone: ExileCostSourceZone,
+    },
+    /// CR 702.167a/b: Exile craft materials chosen from the union of the
+    /// battlefield (permanents you control) and your graveyard. `materials` is
+    /// the dual-zone `TargetFilter` the choices were drawn from; the handler
+    /// re-validates eligibility against it before exiling.
+    ExileMaterials {
+        materials: TargetFilter,
     },
     /// Exile objects from any zone (mana-ability exile costs).
     ExileFromManaZone {
@@ -1725,10 +1756,26 @@ pub enum CostResume {
         #[serde(rename = "Spell")]
         spell: Box<PendingCast>,
     },
+    SpellCost {
+        #[serde(rename = "Spell")]
+        spell: Box<PendingCast>,
+        cost: Box<AbilityCost>,
+        source: SpellCostSource,
+    },
     ManaAbility {
         #[serde(rename = "ManaAbility")]
         mana_ability: Box<PendingManaAbility>,
     },
+}
+
+/// CR 601.2h + CR 702.48c: Identifies which spell-cost component a
+/// `WaitingFor::PayCost` choice is paying when the same `AbilityCost` shape can
+/// come from different rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpellCostSource {
+    #[default]
+    Other,
+    Offering,
 }
 
 /// The specific kind of cast offer being presented to the player.
@@ -2623,6 +2670,12 @@ pub enum WaitingFor {
         options: Vec<u8>,
         option_names: Vec<String>,
     },
+    /// Digital-only Specialize: choose which color specialization to apply.
+    SpecializeColor {
+        player: PlayerId,
+        object_id: crate::types::identifiers::ObjectId,
+        options: Vec<crate::types::mana::ManaColor>,
+    },
     /// CR 118.3 + CR 601.2b + CR 605.3b: Player must select `count` objects
     /// from `choices` to pay a cost, then the engine resumes via `resume`.
     /// Replaces: DiscardForCost, SacrificeForCost, ReturnToHandForCost,
@@ -3234,6 +3287,7 @@ impl WaitingFor {
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
+            | WaitingFor::SpecializeColor { player, .. }
             | WaitingFor::PayCost { player, .. }
             | WaitingFor::ActivationCostOneOfChoice { player, .. }
             | WaitingFor::BlightChoice { player, .. }
@@ -3338,6 +3392,10 @@ impl WaitingFor {
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
+                }
+                | CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. } => None,
             },
@@ -3364,6 +3422,10 @@ impl WaitingFor {
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
+                }
+                | CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. } => None,
             },
@@ -3567,6 +3629,10 @@ pub enum CastingVariant {
     /// CR 702.127a: Cast an aftermath half of a split card from a graveyard.
     /// If it was cast from a graveyard, exile it any time it leaves the stack.
     Aftermath,
+    /// CR 702.146a-b + CR 712.8c: Cast transformed from graveyard for disturb
+    /// cost. The stack spell uses its back-face characteristics and the
+    /// permanent enters the battlefield back face up on resolution.
+    Disturb,
     /// CR 601.2a: Cast from graveyard via a static permission source (e.g. Lurrus).
     /// Stores the granting permanent's ObjectId for per-turn tracking.
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting permission.
@@ -3734,11 +3800,59 @@ pub enum CastingVariant {
     /// with N time counters (from the keyword) and is not a creature while any
     /// remain. At the beginning of your end step one time counter is removed.
     Impending,
+    /// CR 702.160a: Cast from hand prototyped. The printed mana cost is replaced
+    /// by the prototype cost during cast preparation, and the object is tagged so
+    /// stack display plus layer evaluation use the secondary mana cost and P/T
+    /// while it is a creature.
+    Prototype,
+    /// CR 702.173a: Cast from hand via Freerunning's alternative cost. Legal
+    /// only when a player was dealt combat damage this turn by an Assassin
+    /// creature or a commander under the caster's control. The printed mana
+    /// cost is replaced by the `Keyword::Freerunning(cost)` payload at cast
+    /// preparation (mirrors `Overload` / `Foretell`). Resolution routing
+    /// matches a normal cast — no on-resolve special behavior — so this is a
+    /// casting-context tag, not a resolution-affecting variant.
+    Freerunning,
 }
 
 impl CastingVariant {
     pub fn is_normal(&self) -> bool {
         *self == CastingVariant::Normal
+    }
+
+    /// CR 118.9a: Only one alternative cost can be applied to a spell.
+    pub fn uses_alternative_cost(self) -> bool {
+        match self {
+            CastingVariant::Warp
+            | CastingVariant::Escape
+            | CastingVariant::Harmonize
+            | CastingVariant::Flashback
+            | CastingVariant::HandPermission { .. }
+            | CastingVariant::Sneak { .. }
+            | CastingVariant::WebSlinging { .. }
+            | CastingVariant::Miracle
+            | CastingVariant::Madness
+            | CastingVariant::Evoke
+            | CastingVariant::Suspend
+            | CastingVariant::Plot
+            | CastingVariant::Foretell
+            | CastingVariant::Overload
+            | CastingVariant::Bestow
+            | CastingVariant::Awaken
+            | CastingVariant::Cleave
+            | CastingVariant::MoreThanMeetsTheEye
+            | CastingVariant::Disturb
+            | CastingVariant::Impending
+            | CastingVariant::Prototype
+            | CastingVariant::Freerunning => true,
+            CastingVariant::Normal
+            | CastingVariant::Adventure
+            | CastingVariant::Omen
+            | CastingVariant::Retrace
+            | CastingVariant::Aftermath
+            | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::ExilePermission { .. } => false,
+        }
     }
 
     pub fn exiles_when_leaving_stack_for_any_reason(self) -> bool {
@@ -3772,7 +3886,10 @@ impl CastingVariant {
     pub fn restores_front_face_after_stack_exit(self) -> bool {
         matches!(
             self,
-            CastingVariant::Adventure | CastingVariant::Omen | CastingVariant::MoreThanMeetsTheEye
+            CastingVariant::Adventure
+                | CastingVariant::Omen
+                | CastingVariant::MoreThanMeetsTheEye
+                | CastingVariant::Disturb
         )
     }
 }
@@ -3833,7 +3950,7 @@ pub enum StackEntryKind {
         /// original resolution scope cleared) can re-stamp
         /// `die_result_this_resolution`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        die_result: Option<u8>,
+        die_result: Option<i32>,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -4635,6 +4752,15 @@ pub struct GameState {
     /// of deep-copying them on the AI-search hot path.
     #[serde(default)]
     pub damage_dealt_this_turn: im::Vector<DamageRecord>,
+    /// CR 702.173a + CR 608.2i: Set of players P such that, at some point this
+    /// turn, a creature controlled by P that was an Assassin OR a commander
+    /// (snapshot at damage-dealing time per CR 608.2i — "looks back in time")
+    /// dealt combat damage to ANY player. Populated by the trigger pipeline's
+    /// `DamageDealt` observer in `game::triggers` and cleared in
+    /// `turns::start_next_turn` per CR 514. Read by `casting_variant_candidates`
+    /// to gate the Freerunning cast permission on the spell's controller.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub assassin_or_commander_dealt_combat_damage_this_turn: HashSet<PlayerId>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -4847,18 +4973,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
 
-    /// CR 706.2: The actual result (natural + modifiers, clamped at 0) of the
-    /// most recent die roll within the current ability resolution. Set by
-    /// `roll_die::resolve` immediately after emitting `GameEvent::DieRolled`, read by
-    /// `QuantityRef::EventContextAmount` so an inline "equal to the result" sub_ability
-    /// (CR 706.4 — no results table) consumes the rolled value rather than the
-    /// numeric amount of the triggering event (e.g. combat damage). Resolution-scoped:
-    /// cleared at `apply()` entry and at every depth-0 chain entry, so it is `Some`
-    /// only between the roll and the sub_ability that reads it. Follows the
-    /// `last_effect_amount` PartialEq-OMISSION pattern: NOT compared in the
-    /// hand-written `PartialEq` (safe — always cleared at comparison boundaries).
+    /// CR 706.2 + CR 706.4: The actual scalar result available to the current
+    /// ability resolution. During a results-table roll, `roll_die::resolve`
+    /// stamps each individual die result before resolving that die's branch
+    /// (CR 706.3a). After a no-table multi-die roll, it stamps the aggregate
+    /// total so an inline "equal to the result(s)" sub_ability consumes the
+    /// rolled value rather than the numeric amount of the triggering event
+    /// (e.g. combat damage). Resolution-scoped: cleared at `apply()` entry and
+    /// at cross-resolution stack boundaries. Follows the `last_effect_amount`
+    /// PartialEq-OMISSION pattern: NOT compared in the hand-written `PartialEq`
+    /// (safe — always cleared at comparison boundaries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub die_result_this_resolution: Option<u8>,
+    pub die_result_this_resolution: Option<i32>,
 
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
@@ -4983,6 +5109,12 @@ pub struct GameState {
     #[serde(skip)]
     pub cost_payment_failed_flag: bool,
 
+    /// CR 601.2h + CR 616.1: Resume state when `handle_discard_for_cost` pauses mid-loop
+    /// for a replacement choice. The card at `paused_at_index` is completed by
+    /// `handle_replacement_choice`; resume continues at `paused_at_index + 1`.
+    #[serde(skip)]
+    pub pending_discard_for_cost: Option<PendingDiscardForCostResume>,
+
     /// Pending cast info saved when entering ManaPayment state (X-cost or convoke).
     /// Consumed by the (ManaPayment, PassPriority) handler to finalize the cast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5001,7 +5133,6 @@ pub struct GameState {
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
-
     /// CR 510.2 + CR 615.7: Transient per-shield combat-damage prevention tally.
     /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
     /// simultaneous combat-damage batch. While `Some`, the `Prevention::All`
@@ -5324,6 +5455,7 @@ impl GameState {
             zone_changes_this_turn: Vec::new(),
             battlefield_entries_this_turn: Vec::new(),
             damage_dealt_this_turn: im::Vector::new(),
+            assassin_or_commander_dealt_combat_damage_this_turn: HashSet::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),
@@ -5375,6 +5507,7 @@ impl GameState {
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
             cost_payment_failed_flag: false,
+            pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),
             ring_bearer: HashMap::new(),
@@ -5622,6 +5755,8 @@ impl PartialEq for GameState {
             && self.zone_changes_this_turn == other.zone_changes_this_turn
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
+            && self.assassin_or_commander_dealt_combat_damage_this_turn
+                == other.assassin_or_commander_dealt_combat_damage_this_turn
             && self.pending_spell_cost_reductions == other.pending_spell_cost_reductions
             && self.pending_next_spell_modifiers == other.pending_next_spell_modifiers
             && self.pending_etb_counters == other.pending_etb_counters
@@ -5864,6 +5999,7 @@ mod tests {
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
+                additional_cost_source: SpellCostSource::Other,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
                 chosen_modes: Vec::new(),
@@ -6189,6 +6325,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),

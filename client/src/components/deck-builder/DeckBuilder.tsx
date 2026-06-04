@@ -16,6 +16,7 @@ import type { GameFormat } from "../../adapter/types";
 import { CommanderPanel } from "./CommanderPanel";
 import { DeckBuilderToolbar } from "./DeckBuilderToolbar";
 import { DeckBuilderTabBar } from "./DeckBuilderTabBar";
+import { PlaytestPanel } from "./PlaytestPanel";
 import { panelId, tabId } from "./deckBuilderTabs";
 import { useDeckBuilder } from "./useDeckBuilder";
 
@@ -219,6 +220,7 @@ export function DeckBuilder({
   // Phone: tab bar picks one surface. md+: both columns show.
   const mainVisible = activeSurface === "deck" ? "flex" : "hidden md:flex";
   const infoVisible = activeSurface === "info" ? "flex" : "hidden md:flex";
+  const playtestVisible = activeSurface === "playtest" ? "flex" : "hidden md:flex";
 
   return (
     <div className="flex h-screen flex-col bg-transparent">
@@ -450,6 +452,15 @@ export function DeckBuilder({
               onCardClick={handleScrollToCard}
             />
           </div>
+        </section>
+
+        <section
+          id={panelId("playtest")}
+          role="tabpanel"
+          aria-labelledby={tabId("playtest")}
+          className={`${playtestVisible} min-h-0 min-w-0 flex-1 flex-col overflow-hidden`}
+        >
+          <PlaytestPanel deck={deck} format={format} mainCount={deckCount} />
         </section>
       </div>
 

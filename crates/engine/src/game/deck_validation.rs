@@ -1099,7 +1099,7 @@ fn tiny_leaders_cost_identity_ok(db: &CardDatabase, name: &str) -> bool {
 fn tiny_leaders_face_cost_identity_ok(face: &CardFace) -> bool {
     face.mana_cost.mana_value() <= 3
         && face.keywords.iter().all(|keyword| match keyword {
-            Keyword::Prototype(cost) => cost.mana_value() <= 3,
+            Keyword::Prototype { cost, .. } => cost.mana_value() <= 3,
             _ => true,
         })
 }
