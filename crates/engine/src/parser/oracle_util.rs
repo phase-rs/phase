@@ -1696,7 +1696,10 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         | "away"
                         | "off"
                 );
-            if short_name.len() >= 3 && !is_common_english_word {
+            if short_name.len() >= 3
+                && !is_common_english_word
+                && !is_subtype_word(&lower_short)
+            {
                 result = replace_all_words(&result, short_name, "~");
             }
         }
@@ -2104,6 +2107,22 @@ mod tests {
             "should not replace 'copy' as first-word short name, got: {result}"
         );
         assert!(result.contains('~'), "should replace 'this enchantment'");
+    }
+
+    #[test]
+    fn normalize_of_short_name_skips_creature_subtype_wall() {
+        // Wall of Stolen Identity: the "of"-derived short name "Wall" is also a
+        // creature subtype in except-clause text ("except it's a Wall in addition
+        // to its other types") and must not be rewritten to ~.
+        let result = normalize_card_name_refs(
+            "You may have this creature enter as a copy of any creature on the battlefield, \
+             except it's a Wall in addition to its other types and has defender.",
+            "Wall of Stolen Identity",
+        );
+        assert!(
+            result.contains("it's a Wall in addition"),
+            "creature subtype Wall must survive normalization, got: {result}"
+        );
     }
 
     #[test]

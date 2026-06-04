@@ -9096,6 +9096,51 @@ mod tests {
         }
     }
 
+    /// CR 707.9a + CR 702.7: Wall of Stolen Identity — clone except adds Wall
+    /// subtype and defender via the "and has defender" shorthand.
+    #[test]
+    fn clone_wall_of_stolen_identity_except_defender() {
+        let def = parse_replacement_line(
+            "You may have this creature enter as a copy of any creature on the battlefield, \
+             except it's a Wall in addition to its other types and has defender. \
+             When you do, tap the copied creature and it doesn't untap during its controller's \
+             untap step for as long as you control this creature.",
+            "Wall of Stolen Identity",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                use crate::types::keywords::Keyword;
+                assert!(
+                    !additional_modifications.is_empty(),
+                    "expected except-clause modifications, got {additional_modifications:?}"
+                );
+                assert!(
+                    additional_modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Wall")
+                    }),
+                    "expected Wall subtype addition, got {additional_modifications:?}"
+                );
+                assert!(additional_modifications.iter().any(|m| {
+                    matches!(m, ContinuousModification::AddKeyword { keyword: Keyword::Defender })
+                }));
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+        assert!(
+            execute.sub_ability.is_some(),
+            "When you do reflexive trigger should be sub_ability"
+        );
+    }
+
     #[test]
     fn clone_enchantment() {
         // Estrid's Invocation, Copy Enchantment

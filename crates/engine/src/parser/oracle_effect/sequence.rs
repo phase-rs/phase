@@ -749,7 +749,7 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_ascii_lowercase();
-    let sequence_starts = alt((
+    if alt((
         tag::<_, _, OracleError<'_>>("then, if "),
         tag("then if "),
         tag("then "),
@@ -757,8 +757,17 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         tag("otherwise"),
     ))
     .parse(trimmed_lower.as_str())
-    .is_ok();
-    sequence_starts
+    .is_ok()
+    {
+        return true;
+    }
+    // CR 608.2d: Granted-ability quotes that end with a period are often
+    // followed by a fresh sentence starting with an uppercase letter
+    // ("…life." That creature's controller may have …" — Requiem Monolith).
+    trimmed
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
@@ -4245,6 +4254,22 @@ mod tests {
             vec![
                 "create a tapped 0/1 black Wizard creature token with \"Whenever you cast a noncreature spell, this token deals 1 damage to each opponent.\"",
                 "Then if you control four or more Wizards, transform ~",
+            ]
+        );
+    }
+
+    #[test]
+    fn quoted_grant_splits_before_following_sentence() {
+        // Requiem Monolith: period inside the granted trigger quote, then a new
+        // optional sentence starting with an uppercase letter.
+        let chunks = clause_texts(
+            "Until end of turn, target creature gains \"Whenever this creature is dealt damage, you draw that many cards and lose that much life.\" That creature's controller may have this artifact deal 1 damage to it.",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "Until end of turn, target creature gains \"Whenever this creature is dealt damage, you draw that many cards and lose that much life.\"",
+                "That creature's controller may have this artifact deal 1 damage to it",
             ]
         );
     }

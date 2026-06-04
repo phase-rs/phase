@@ -2221,7 +2221,14 @@ pub(crate) fn parse_oracle_ir(
         // Applies to Wildgrowth Archaic and cousin cards (Runadi, Boreal
         // Outrider, Torgal, …). `parse_replacement_line` handles all the
         // compositional variants (fixed / X / "where X is …").
-        if has_trigger_prefix(&lower) && scan_contains(&lower, "enters with") {
+        //
+        // Gate on "whenever you cast" — other trigger frames that merely contain
+        // "enters with" (e.g. Murderous Redcap Avatar's "enters with a counter
+        // on it" ETB gate) are real triggered abilities, not ETB replacements.
+        if has_trigger_prefix(&lower)
+            && scan_contains(&lower, "whenever you cast")
+            && scan_contains(&lower, "enters with")
+        {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                 result.replacements.push(rep_def);
                 i += 1;
@@ -2476,7 +2483,17 @@ pub(crate) fn parse_oracle_ir(
         // effect parser at Priority 9. Damage-verb lines are also deferred because
         // parse_effect_chain handles embedded statics via split_clause_sequence.
         if is_static_pattern(&lower) {
-            if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
+            // CR 614.1c: Lines that are both static-shaped (e.g. trailing
+            // "doesn't untap during…" from a reflexive "When you do" clause)
+            // and replacement-shaped ("enter as a copy of") must route to the
+            // replacement parser first — Wall of Stolen Identity class.
+            if is_replacement_pattern(&lower) {
+                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name)
+                {
+                    result.replacements.extend(rep_defs);
+                    i += 1;
+                    continue;
+                }
                 if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                     result.replacements.push(rep_def);
                     i += 1;
