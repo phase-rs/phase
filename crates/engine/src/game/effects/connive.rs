@@ -99,7 +99,7 @@ pub fn resolve(
             }
         },
     );
-    match &result {
+    match result {
         ReplacementResult::Execute(_) => {}
         ReplacementResult::Prevented => {
             // Draw was prevented — skip the discard step

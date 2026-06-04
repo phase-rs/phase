@@ -3810,16 +3810,6 @@ fn apply_single_replacement(
     // the same resolution step, right after the ZoneChange completes. Without this,
     // the chooser would never be prompted. Optional replacements set
     // `post_replacement_continuation` in `continue_replacement` when the player accepts.
-    //
-    // CR 614.1a + CR 614.6: Track the original proposed event count before replacement
-    // to detect Draw→Draw count modifiers. This is used to preserve sub_abilities
-    // that would otherwise be dropped by the replacement filter.
-    let original_draw_count = if let ProposedEvent::Draw { count, .. } = proposed {
-        Some(count)
-    } else {
-        None
-    };
-
     let (event_key, modifiers, mandatory_post_effect) = match repl_def_ref {
         Some(repl_def) => {
             let ability = match branch {
@@ -3907,36 +3897,12 @@ fn apply_single_replacement(
             // Only the "residual work beyond the event substitution" case (a
             // sub_ability chain or a non-event-substituting effect like Choose /
             // WinTheGame) belongs in the continuation slot.
-            // CR 614.1a + CR 614.6: For Draw→Draw count modifiers (e.g., Teferi's
-            // Ageless Insight "draw two cards instead"), preserve the continuation
-            // when the draw count was modified. This handles the case where the
-            // original ability has a sub_ability (e.g., Temmet's "then discard a card")
-            // but the replacement doesn't. The applier modifies the count, but the
-            // continuation handles the "then ..." part.
             let post_effect = post_effect.filter(|_| {
                 let Some(def) = ability else {
                     return true;
                 };
                 if def.sub_ability.is_some() {
                     return true;
-                }
-                // For Draw→Draw, preserve the continuation if the draw count was modified
-                // (indicating a count modifier). This handles the case where the original
-                // ability has a sub_ability but the replacement doesn't.
-                if matches!(
-                    (&proposed, &*def.effect),
-                    (ProposedEvent::Draw { .. }, Effect::Draw { .. })
-                ) {
-                    if let Some(original) = original_draw_count {
-                        if let ProposedEvent::Draw {
-                            count: new_count, ..
-                        } = proposed
-                        {
-                            if new_count > original {
-                                return true;
-                            }
-                        }
-                    }
                 }
                 !matches!(
                     (&proposed, &*def.effect),

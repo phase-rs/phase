@@ -87,14 +87,13 @@ pub fn resolve(
     };
 
     // CR 614.1a: Route draw through replacement pipeline (e.g. Dredge, Abundance).
-    let result = draw_through_replacement(
+    match draw_through_replacement(
         state,
         drawing_player,
         num_cards,
         events,
         apply_draw_after_replacement,
-    );
-    match result {
+    ) {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(_) => return Ok(()),
     }
@@ -110,7 +109,7 @@ pub fn resolve(
 /// CR 614.6 + CR 614.11 + CR 704.3: Single authority for the
 /// "propose Draw → replace → apply → drain post-replacement continuation"
 /// sequence. Every site that proposes a `ProposedEvent::Draw` MUST call this
-/// helper — otherwise a substituted mandatory post-effect (Jace WinTheGame,
+/// helper — otherwise a substituted mandatory-post-effect (Jace WinTheGame,
 /// Abundance reveal-until) leaks past the resolution step and drains against
 /// the wrong player on a later priority pass.
 ///
@@ -154,7 +153,7 @@ pub(crate) fn draw_through_replacement(
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(*player, state);
         }
-    };
+    }
     result
 }
 
@@ -284,9 +283,13 @@ pub(crate) fn record_first_draw_and_enqueue_miracle(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, StaticDefinition};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, StaticDefinition,
+        SubAbilityLink, TargetFilter,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::ProhibitionScope;
 
     fn make_ability(num_cards: u32) -> ResolvedAbility {
@@ -415,17 +418,33 @@ mod tests {
     }
 
     #[test]
+    fn normal_draw_does_not_set_flag() {
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+
+        let ability = make_ability(1);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.players[0].drew_from_empty_library,
+            "Normal draw should not set flag"
+        );
+    }
+
+    #[test]
     fn teferi_ageless_insight_preserves_sub_ability_discard() {
         // Regression test for issue #1964: Teferi's Ageless Insight replacement
         // ("draw two cards instead") should not remove the discard sub_ability from
         // Temmet, Naktamun's Will's attack trigger ("draw a card, then discard a card").
-        use crate::types::ability::{ReplacementDefinition, SubAbilityLink};
-        use crate::types::replacements::ReplacementEvent;
-        use crate::types::{AbilityDefinition, AbilityKind, TargetFilter};
-
         let mut state = GameState::new_two_player(42);
 
-        // Add a simple "draw 2 instead of 1" replacement (simplified Teferi)
         let teferi = create_object(
             &mut state,
             CardId(1),
@@ -446,30 +465,16 @@ mod tests {
         ))]
         .into();
 
-        // Add cards to library
-        let _c1 = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Card 1".to_string(),
-            Zone::Library,
-        );
-        let _c2 = create_object(
-            &mut state,
-            CardId(3),
-            PlayerId(0),
-            "Card 2".to_string(),
-            Zone::Library,
-        );
-        let _c3 = create_object(
-            &mut state,
-            CardId(4),
-            PlayerId(0),
-            "Card 3".to_string(),
-            Zone::Library,
-        );
+        for card_id in 2..=4 {
+            create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                format!("Card {card_id}"),
+                Zone::Library,
+            );
+        }
 
-        // Create Temmet's ability: "draw a card, then discard a card"
         let mut resolved = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -495,11 +500,9 @@ mod tests {
             sub.sub_link = SubAbilityLink::ContinuationStep;
         }
 
-        // Drive through the full pipeline via resolve_ability_chain
         let mut events = Vec::new();
         crate::game::effects::resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
 
-        // Should have drawn 2 cards (Teferi replacement) then discarded 1
         assert_eq!(
             state.players[0].hand.len(),
             1,

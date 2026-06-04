@@ -944,16 +944,16 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
         active,
         1,
         events,
-        |s, event, ev| {
+        |state, event, events| {
             let ProposedEvent::Draw {
                 player_id, count, ..
             } = event
             else {
                 return;
             };
-            let allowed = crate::game::effects::draw::allowed_draw_count(s, player_id, count);
+            let allowed = crate::game::effects::draw::allowed_draw_count(state, player_id, count);
 
-            let cards_to_draw: Vec<_> = s
+            let cards_to_draw: Vec<_> = state
                 .players
                 .iter()
                 .find(|p| p.id == player_id)
@@ -962,19 +962,19 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
 
             // CR 704.5b: Attempting to draw from an empty library causes a game loss.
             if allowed > 0 && cards_to_draw.len() < allowed as usize {
-                if let Some(p) = s.players.iter_mut().find(|p| p.id == player_id) {
+                if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
                     p.drew_from_empty_library = true;
                 }
             }
 
             for obj_id in cards_to_draw {
-                zones::move_to_zone(s, obj_id, Zone::Hand, ev);
+                zones::move_to_zone(state, obj_id, Zone::Hand, events);
                 // CR 121.1 + CR 504.1: Increment counters BEFORE emitting so
                 // `nth_in_step` (1-indexed) reflects this draw — the draw
                 // step's mandatory draw is `nth_in_step == 1` and is the
                 // anchor for `ExceptFirstDrawInDrawStep` exception clauses.
                 let (nth_in_turn, nth_in_step) =
-                    if let Some(p) = s.players.iter_mut().find(|p| p.id == player_id) {
+                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
                         p.has_drawn_this_turn = true;
                         p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
                         p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
@@ -983,20 +983,20 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
                         (1, 1)
                     };
                 // CR 121.1: Emit CardDrawn so "whenever a player draws" triggers fire.
-                ev.push(GameEvent::CardDrawn {
+                events.push(GameEvent::CardDrawn {
                     player_id,
                     object_id: obj_id,
                     nth_in_turn,
                     nth_in_step,
                 });
                 crate::game::effects::drawn_this_turn_choice::record_drawn_card(
-                    s, player_id, obj_id,
+                    state, player_id, obj_id,
                 );
             }
         },
     );
 
-    if matches!(&result, ReplacementResult::NeedsChoice(_)) {
+    if matches!(result, ReplacementResult::NeedsChoice(_)) {
         return Some(state.waiting_for.clone());
     }
 
