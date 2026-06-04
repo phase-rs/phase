@@ -1926,7 +1926,12 @@ fn parse_enters_with_counters(
     // sibling shorthand "counters on it equal to [quantity]", parse the
     // dynamic expression.
     if let Ok((_, (_, qty_text))) = nom_primitives::split_once_on(work_text, "equal to ") {
-        let trimmed = qty_text.trim().trim_end_matches('.');
+        // The quantity phrase never spans a sentence boundary, so isolate the
+        // first sentence before parsing — Slumbering Trudge trails a separate
+        // "If X is 2 or less, it enters tapped." clause after "equal to three
+        // minus X.", which would otherwise leave the quantity parsers a dangling
+        // tail and force the `Fixed { 1 }` fallback (only 1 stun counter).
+        let trimmed = qty_text.split('.').next().unwrap_or(qty_text).trim();
         if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
             count_expr = QuantityExpr::Ref { qty: qty_ref };
         } else if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
@@ -1935,11 +1940,24 @@ fn parse_enters_with_counters(
             crate::parser::oracle_quantity::parse_event_context_quantity(trimmed)
         {
             count_expr = qty;
+        } else if let Some((qty, rest_q)) = crate::parser::oracle_util::parse_count_expr(trimmed) {
+            // CR 107.3a: arithmetic over the cost variable ("three minus X").
+            // `parse_count_expr` emits `Variable("X")`; the rewrite below maps it
+            // to the entering object's `CostXPaid`. Require full consumption so a
+            // partial parse never silently truncates the quantity.
+            if rest_q.trim().is_empty() {
+                count_expr = qty;
+            }
         }
     }
     if let Some(qty) = parse_enters_with_where_x_suffix(work_text) {
         count_expr = qty;
     }
+    // CR 614.12: Any `Variable("X")` that survived the dynamic-quantity
+    // overrides above refers to the X paid on the *entering* object's cost, not
+    // a trigger-event source, so rewrite it to `CostXPaid` (idempotent —
+    // already-rewritten `CostXPaid` leaves are untouched).
+    rewrite_variable_x_to_cost_x_paid(&mut count_expr);
 
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
@@ -3227,6 +3245,15 @@ fn parse_damage_modification_replacement(
 /// `tag("the next time ")` prefix combinator succeeding, never a string
 /// heuristic. Returns `None` (fall-through) when the prefix or grammar fails.
 pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effect> {
+    // CR 614.9: passive-voice one-shot redirection — "the next N damage that
+    // would be dealt to ~ this turn is dealt to <recipient> instead" (the en-Kor
+    // cycle). This "would be dealt to" (passive, recipient-first) spine is not
+    // covered by the active "the next time [source] would deal" grammar below,
+    // so try it first and fall through on mismatch.
+    if let Some(effect) = parse_oneshot_next_n_damage_to_self_redirect(norm_lower) {
+        return Some(effect);
+    }
+
     // CR 614.1a + CR 514.2: "the next time ... this turn" — a replacement effect
     // ("instead", CR 614.1a) with a "this turn" duration that ends at cleanup
     // (CR 514.2). The one-opportunity consumption is CR 614.5 (see resolver).
@@ -3281,6 +3308,7 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
             target_filter,
             modification: Some(modification),
             redirect_to: None,
+            redirect_amount: None,
             redirect_object_filter: None,
             recipient_object_filter,
         });
@@ -3300,6 +3328,7 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
             target_filter,
             modification: None,
             redirect_to: Some(redirect_to),
+            redirect_amount: None,
             redirect_object_filter,
             recipient_object_filter,
         });
@@ -3325,6 +3354,61 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
     }
 
     None
+}
+
+/// CR 614.9 + CR 614.5: Parse the en-Kor cycle's one-shot redirection —
+/// "the next N damage that would be dealt to ~ this turn is dealt to target
+/// creature you control instead" (Nomads / Lancers / Outrider / Shaman / Spirit
+/// / Warrior en-Kor). The original recipient is the source itself (`~`), encoded
+/// as `recipient_object_filter: SelfRef`: the resolver hosts the shield on the
+/// source with `valid_card: SelfRef` so it fires only on damage to it, and the
+/// targeting layer surfaces no slot for the self recipient. The redirect
+/// recipient is a chosen object target ("target creature you control"). The
+/// amount N is retained as a depletion-style redirection cap so only that much
+/// damage is moved to the chosen recipient.
+fn parse_oneshot_next_n_damage_to_self_redirect(norm_lower: &str) -> Option<Effect> {
+    let (rest, (_, amount, _)) = (
+        tag::<_, _, OracleError<'_>>("the next "),
+        nom_primitives::parse_number,
+        tag::<_, _, OracleError<'_>>(" damage that would be dealt to ~ this turn is dealt to "),
+    )
+        .parse(norm_lower)
+        .ok()?;
+
+    // CR 115.1: redirect recipient — "target creature you control" (every en-Kor
+    // card) or the looser "target creature"; both become a chosen object target.
+    let (rest, redirect_object_filter) = alt((
+        value(
+            inject_controller(
+                TargetFilter::Typed(TypedFilter::creature()),
+                ControllerRef::You,
+            ),
+            tag::<_, _, OracleError<'_>>("target creature you control"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::creature()),
+            tag("target creature"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" instead").parse(rest).ok()?;
+    let (rest, _) = opt(char::<_, OracleError<'_>>('.')).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(Effect::CreateDamageReplacement {
+        source_filter: None,
+        combat_scope: None,
+        target_filter: None,
+        modification: None,
+        redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+        redirect_amount: Some(PreventionAmount::Next(amount)),
+        redirect_object_filter: Some(redirect_object_filter),
+        recipient_object_filter: Some(TargetFilter::SelfRef),
+    })
 }
 
 /// Split the one-shot body at the "this turn[,]" boundary into the would-deal
@@ -7118,6 +7202,63 @@ mod tests {
         ));
     }
 
+    /// Issue #1988 — Slumbering Trudge. "This creature enters with a number of
+    /// stun counters on it equal to three minus X. If X is 2 or less, it enters
+    /// tapped." The "three minus X" arithmetic plus the trailing tapped sentence
+    /// previously defeated every quantity parser, so `count` fell back to
+    /// `Fixed { 1 }` (1 stun counter regardless of X). The count must be the
+    /// `Offset { Multiply { -1, CostXPaid }, 3 }` expression so X=0 resolves to
+    /// 3 stun counters (and X>3 clamps to 0 in the resolver).
+    #[test]
+    fn slumbering_trudge_enters_with_three_minus_x_stun_counters() {
+        let def = parse_replacement_line(
+            "This creature enters with a number of stun counters on it equal to \
+             three minus X. If X is 2 or less, it enters tapped.",
+            "Slumbering Trudge",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("execute ability");
+        // "it enters tapped" → Tap wrapper with the counter as its sub_ability.
+        assert!(matches!(
+            *execute.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().expect("counter sub_ability");
+        match &*sub.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Stun);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                match count {
+                    QuantityExpr::Offset { inner, offset } => {
+                        assert_eq!(*offset, 3);
+                        match inner.as_ref() {
+                            QuantityExpr::Multiply { factor, inner } => {
+                                assert_eq!(*factor, -1);
+                                assert!(matches!(
+                                    inner.as_ref(),
+                                    QuantityExpr::Ref {
+                                        qty: QuantityRef::CostXPaid
+                                    }
+                                ));
+                            }
+                            other => panic!("expected Multiply{{-1, CostXPaid}}, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Offset{{.., 3}}, got {other:?}"),
+                }
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn self_enters_with_counters() {
         let def = parse_replacement_line(
@@ -7490,7 +7631,9 @@ mod tests {
             CounterType::Plus1Plus1,
             CounterType::Keyword(crate::types::keywords::KeywordKind::Flying),
             CounterType::Keyword(crate::types::keywords::KeywordKind::Deathtouch),
-            CounterType::Generic("shield".to_string()),
+            // CR 122.1c: "shield" is now a first-class counter type (issue #1959),
+            // no longer a Generic.
+            CounterType::Shield,
         ];
         for counter in expected {
             assert!(matches!(
@@ -7501,7 +7644,7 @@ mod tests {
                     target: TargetFilter::SelfRef,
                 } if *counter_type == counter
             ));
-            if counter == CounterType::Generic("shield".to_string()) {
+            if counter == CounterType::Shield {
                 assert!(cursor.sub_ability.is_none());
             } else {
                 cursor = cursor.sub_ability.as_deref().expect("next counter");
@@ -10590,6 +10733,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_amount: None,
                 source_filter: Some(TargetFilter::SelfRef),
                 combat_scope: Some(CombatDamageScope::CombatOnly),
                 target_filter: Some(DamageTargetFilter::Player { .. }),
@@ -10604,6 +10748,34 @@ mod snapshot_tests {
     }
 
     #[test]
+    fn oneshot_en_kor_next_n_damage_to_self_redirect() {
+        // The en-Kor cycle (Nomads / Lancers / Outrider / Shaman / Spirit /
+        // Warrior en-Kor): passive "the next N damage that would be dealt to ~"
+        // — the recipient is the source itself — redirected to a chosen creature
+        // you control.
+        let effect = parse_oneshot_damage_replacement(
+            "the next 1 damage that would be dealt to ~ this turn is dealt to target creature you control instead",
+        )
+        .expect("must parse the en-Kor one-shot redirection");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_amount: Some(PreventionAmount::Next(1)),
+                // CR 614.9: the recipient is the source itself (`~`), encoded as
+                // SelfRef so the resolver hosts the shield on the source.
+                recipient_object_filter: Some(TargetFilter::SelfRef),
+                // CR 115.1: "target creature you control" surfaces a redirect slot.
+                redirect_object_filter: Some(TargetFilter::Typed(_)),
+                source_filter: None,
+                combat_scope: None,
+                target_filter: None,
+            } => {}
+            other => panic!("expected en-Kor redirect-to-target, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn oneshot_redirect_to_source_passive_phrasing() {
         // Beacon of Destiny — passive "that damage is dealt to ~ instead".
         let effect = parse_oneshot_damage_replacement(
@@ -10614,6 +10786,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::SourceObject),
+                redirect_amount: None,
                 source_filter: Some(TargetFilter::ChosenDamageSource),
                 ..
             } => {}
@@ -10632,6 +10805,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_amount: None,
                 source_filter: Some(TargetFilter::ChosenDamageSource),
                 // CR 614.9: "would deal damage to target creature" — the
                 // protected creature is a chosen original-recipient target, not
@@ -10656,6 +10830,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_amount: None,
                 source_filter: Some(TargetFilter::SelfRef),
                 combat_scope: Some(CombatDamageScope::CombatOnly),
                 ..

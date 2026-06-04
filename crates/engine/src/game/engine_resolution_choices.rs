@@ -115,6 +115,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseDungeon { .. }
             | WaitingFor::ChooseDungeonRoom { .. }
+            | WaitingFor::SpecializeColor { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
@@ -2317,6 +2318,12 @@ pub(super) fn handle_resolution_choice(
                                 | ChoiceType::BasicLandType
                                 | ChoiceType::Color { .. }
                                 | ChoiceType::Keyword { .. }
+                                // CR 613.1: a persisted "choose a player" gates
+                                // CDA P/T that count the chosen player's objects
+                                // or zones (Sewer Nemesis, Skyshroud War Beast) —
+                                // recompute layers immediately.
+                                | ChoiceType::Player
+                                | ChoiceType::Opponent
                         ) {
                             crate::game::layers::mark_layers_full(state);
                         }
@@ -2436,6 +2443,24 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             effects::venture::handle_choose_room(state, player, dungeon, room_index, events);
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::SpecializeColor {
+                player,
+                object_id,
+                options,
+            },
+            GameAction::ChooseSpecializeColor { color },
+        ) => {
+            if !options.contains(&color) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid specialize color choice".to_string(),
+                ));
+            }
+            effects::specialize::handle_choose_specialize_color(
+                state, player, object_id, &options, color, events,
+            )?;
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (WaitingFor::ChooseLegend { candidates, .. }, GameAction::ChooseLegend { keep }) => {

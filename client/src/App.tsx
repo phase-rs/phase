@@ -1,7 +1,7 @@
 import { lazy, StrictMode, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
-import { BrowserRouter, Routes, Route, useLocation, useSearchParams } from "react-router";
+import { BrowserRouter, Routes, Route, useSearchParams } from "react-router";
 
-import { BuildBadge } from "./components/chrome/BuildBadge";
+import { AppShell } from "./components/chrome/AppShell";
 import { HostControlTile } from "./components/chrome/HostControlTile";
 import { EngineLostModal } from "./components/modal/EngineLostModal";
 import { NonFatalPanicToast } from "./components/modal/NonFatalPanicToast";
@@ -72,7 +72,6 @@ function AppContent() {
   const [showSplash, setShowSplash] = useState(true);
   const [progress, setProgress] = useState(0);
   const [loadLabel, setLoadLabel] = useState("Loading...");
-  const location = useLocation();
 
   // Run startup preload for shell-safe assets only.
   useEffect(() => {
@@ -98,19 +97,22 @@ function AppContent() {
       )}
       <Suspense fallback={<div className="flex min-h-screen items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-500 border-t-white" /></div>}>
         <Routes>
-          <Route path="/" element={<DevStrict><MenuPage /></DevStrict>} />
-          <Route path="/setup" element={<DevStrict><GameSetupPage /></DevStrict>} />
-          <Route path="/multiplayer" element={<DevStrict><MultiplayerPage /></DevStrict>} />
-          <Route path="/my-decks" element={<DevStrict><MyDecksPage /></DevStrict>} />
-          <Route path="/deck-builder" element={<DevStrict><DeckBuilderPage /></DevStrict>} />
-          <Route path="/coverage" element={<DevStrict><CoveragePage /></DevStrict>} />
-          <Route path="/draft" element={<DevStrict><DraftLandingPage /></DevStrict>} />
-          <Route path="/draft/quick" element={<DevStrict><DraftPage /></DevStrict>} />
-          <Route path="/draft-pod" element={<DraftPodPage />} />
+          {/* Modern app shell (rail + tab bar + single scene) wraps every
+              out-of-match surface; /game/:id stays full-screen outside it. */}
+          <Route element={<AppShell />}>
+            <Route path="/" element={<DevStrict><MenuPage /></DevStrict>} />
+            <Route path="/setup" element={<DevStrict><GameSetupPage /></DevStrict>} />
+            <Route path="/multiplayer" element={<DevStrict><MultiplayerPage /></DevStrict>} />
+            <Route path="/my-decks" element={<DevStrict><MyDecksPage /></DevStrict>} />
+            <Route path="/deck-builder" element={<DevStrict><DeckBuilderPage /></DevStrict>} />
+            <Route path="/coverage" element={<DevStrict><CoveragePage /></DevStrict>} />
+            <Route path="/draft" element={<DevStrict><DraftLandingPage /></DevStrict>} />
+            <Route path="/draft/quick" element={<DevStrict><DraftPage /></DevStrict>} />
+            <Route path="/draft-pod" element={<DraftPodPage />} />
+          </Route>
           <Route path="/game/:id" element={<GameRouteElement />} />
         </Routes>
       </Suspense>
-      {!location.pathname.startsWith("/game/") && <BuildBadge />}
       <HostControlTile />
       <EngineLostModal />
       <NonFatalPanicToast />

@@ -140,7 +140,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     // `parse_mana_production_clause` so the where-X count is resolved here,
     // co-located with `apply_where_x_count_expression`.
     if let Some((count, color_options)) = parse_repeated_count_color_choice(clause) {
-        let count = apply_where_x_count_expression(count, where_x_expression.as_deref());
+        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref());
         return Some(Effect::Mana {
             produced: ManaProduction::AnyOneColor {
                 count,
@@ -150,7 +150,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
-            target: None,
+            target,
         });
     }
 
@@ -185,7 +185,8 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     }
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
-        let count = apply_where_x_count_expression(count, where_x_expression.as_deref());
+        let (count, where_x_target) =
+            apply_where_x_count_expression(count, where_x_expression.as_deref());
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
@@ -251,7 +252,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: None,
+                target: where_x_target,
             });
         }
 
@@ -338,7 +339,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: mana_target,
+                target: mana_target.or(where_x_target),
             });
         }
 
@@ -353,7 +354,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: None,
+                target: where_x_target,
             });
         }
 
@@ -383,7 +384,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
-                target: mana_target,
+                target: mana_target.or(where_x_target),
             });
         }
 
@@ -402,7 +403,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
-                        target: None,
+                        target: where_x_target,
                     });
                 }
             }
@@ -421,7 +422,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
-                    target: None,
+                    target: where_x_target,
                 });
             }
         }
@@ -431,7 +432,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     let fallback_count = parse_mana_count_prefix(clause)
         .map(|(count, _)| count)
         .unwrap_or(QuantityExpr::Fixed { value: 1 });
-    let fallback_count =
+    let (fallback_count, fallback_target) =
         apply_where_x_count_expression(fallback_count, where_x_expression.as_deref());
 
     // Scan for mana production type at word boundaries using nom combinators.
@@ -441,7 +442,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         restrictions: vec![],
         grants: vec![],
         expiry: None,
-        target: None,
+        target: fallback_target,
     })
 }
 
@@ -721,7 +722,7 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
 pub(super) fn apply_where_x_count_expression(
     count: QuantityExpr,
     where_x_expression: Option<&str>,
-) -> QuantityExpr {
+) -> (QuantityExpr, Option<TargetFilter>) {
     match (&count, where_x_expression) {
         (
             QuantityExpr::Ref {
@@ -729,16 +730,30 @@ pub(super) fn apply_where_x_count_expression(
             },
             Some(expression),
         ) if name.eq_ignore_ascii_case("X") => {
-            crate::parser::oracle_quantity::parse_cda_quantity(expression).unwrap_or_else(|| {
+            if let Some(count) = super::parse_where_x_quantity_expression(expression) {
+                return (count, where_x_expression_target_filter(expression));
+            }
+            (
                 QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: expression.to_string(),
                     },
-                }
-            })
+                },
+                None,
+            )
         }
-        _ => count,
+        _ => (count, None),
     }
+}
+
+/// CR 115.1: Extract target player filters from where-X expressions.
+fn where_x_expression_target_filter(expression: &str) -> Option<TargetFilter> {
+    let lower = expression.to_ascii_lowercase();
+    let clause = tag::<_, _, OracleError<'_>>("the number of ")
+        .parse(lower.as_str())
+        .map(|(rest, _)| rest)
+        .unwrap_or(lower.as_str());
+    for_each_clause_target_filter(clause)
 }
 
 /// CR 106.1: Recognize a count-prefixed disjunctive color choice of the shape
@@ -1685,6 +1700,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{ControllerRef, TypeFilter};
 
     fn extract_combinations(oracle: &str) -> Option<Vec<Vec<ManaColor>>> {
         match try_parse_add_mana_effect(oracle) {
@@ -2143,6 +2159,55 @@ mod tests {
             } => {}
             other => panic!("expected ObjectCount ref for X, got {other:?}"),
         }
+    }
+
+    /// CR 106.1 + CR 115.1: Carpet of Flowers class — the `where X is …`
+    /// quantity can itself reference a target player. The mana effect must
+    /// surface that player target so `ControllerRef::TargetPlayer` has a
+    /// selected player at resolution time.
+    #[test]
+    fn any_one_color_where_x_target_opponent_controlled_land_count() {
+        let effect = try_parse_add_mana_effect(
+            "Add X mana of any one color, where X is the number of Islands target opponent controls.",
+        )
+        .expect("target-opponent where-X mana count must parse");
+        let Effect::Mana {
+            produced, target, ..
+        } = effect
+        else {
+            panic!("expected Effect::Mana, got something else");
+        };
+        let ManaProduction::AnyOneColor {
+            count,
+            color_options,
+            ..
+        } = produced
+        else {
+            panic!("expected AnyOneColor, got {produced:?}");
+        };
+        assert_eq!(color_options, all_mana_colors());
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("expected ObjectCount ref for X, got {count:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed object-count filter, got {filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+        assert!(
+            typed
+                .type_filters
+                .contains(&TypeFilter::Subtype("Island".to_string())),
+            "expected Island subtype in object-count filter, got {:?}",
+            typed.type_filters
+        );
+
+        let Some(TargetFilter::Typed(target_typed)) = target else {
+            panic!("expected target opponent filter, got {target:?}");
+        };
+        assert_eq!(target_typed.controller, Some(ControllerRef::Opponent));
     }
 
     /// CR 106.1: Three-color count-prefixed choice — the combinator builds for

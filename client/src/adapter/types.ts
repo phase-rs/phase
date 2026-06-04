@@ -131,8 +131,6 @@ export interface LobbyGame {
    * joiners to confirm before entering.
    */
   is_sandbox?: boolean;
-  /** `true` when the room uses competitive ranked rating updates. */
-  is_ranked?: boolean;
   /** Draft-specific metadata. Present when the room is a draft pod. */
   draft_metadata?: DraftLobbyMetadata | null;
 }
@@ -296,6 +294,10 @@ export type PayCostKind =
   | { type: "Sacrifice" }
   | { type: "ReturnToHand" }
   | { type: "ExileFromZone"; zone: ExileCostSourceZone }
+  // CR 702.167a/b: Craft materials exile across the battlefield/graveyard union.
+  // `materials` is the engine-side `TargetFilter` the choices were drawn from;
+  // the modal only renders `choices`, so it is opaque pass-through here.
+  | { type: "ExileMaterials"; materials: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
   | { type: "RemoveCounter"; counter_type: CounterMatch }
   | { type: "TapCreatures" }
@@ -1215,6 +1217,7 @@ export type WaitingFor =
     } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
+  | { type: "SpecializeColor"; data: { player: PlayerId; object_id: ObjectId; options: ManaColor[] } }
   | { type: "CategoryChoice"; data: {
       player: PlayerId;
       target_player: PlayerId;
@@ -1369,11 +1372,14 @@ export type DebugAction =
         owner: PlayerId;
         zone: Zone;
         attach_to?: AttachTarget;
+        run_etb: boolean;
       };
     }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
+  | { type: "Sacrifice"; data: { object_id: ObjectId } }
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
+  | { type: "Reveal"; data: { player_id: PlayerId; count: number } }
   | { type: "ShuffleLibrary"; data: { player_id: PlayerId } }
   | { type: "Proliferate"; data: { player_id: PlayerId } }
   | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }
@@ -1397,6 +1403,7 @@ export type DebugAction =
       type: "CreateToken";
       data: {
         request: DebugTokenRequest;
+        run_etb: boolean;
       };
     }
   | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };
@@ -1492,6 +1499,7 @@ export type GameAction =
   | { type: "LearnDecision"; data: { choice: LearnOption } }
   | { type: "ChooseDungeon"; data: { dungeon: DungeonId } }
   | { type: "ChooseDungeonRoom"; data: { room_index: number } }
+  | { type: "ChooseSpecializeColor"; data: { color: ManaColor } }
   | { type: "UnlockRoomDoor"; data: { object_id: ObjectId; door: RoomDoor } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
