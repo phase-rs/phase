@@ -2266,6 +2266,7 @@ fn effect_name(effect: &Effect) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::{def_tree_has_optional, trigger_tree_has_optional};
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::statics::StaticMode;
@@ -2670,6 +2671,96 @@ mod tests {
              You may choose new targets for the copies.",
             "Thousand-Year Storm",
             &["Enchantment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// Regression: issue #2277 — when the leading `If <X>, ` condition has no
+    /// typed recognizer, the structural fallback strips the head so the inner
+    /// `you may` optional choice is still extracted.
+    #[test]
+    fn optional_you_may_accepts_amareth_pattern() {
+        let parsed = parse(
+            "Whenever another permanent you control enters, look at the top card \
+             of your library. If it shares a card type with that permanent, you \
+             may reveal that card and put it into your hand.",
+            &["Creature"],
+        );
+
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "Amareth pattern must not emit Optional_YouMay swallow diagnostic"
+        );
+        assert!(
+            parsed.triggers.iter().any(trigger_tree_has_optional),
+            "Amareth's inner `you may reveal` continuation must be marked optional"
+        );
+    }
+
+    /// Regression: issue #2277 — Tithe's "If target opponent controls more
+    /// lands than you, you may search …" has an unrecognized leading condition;
+    /// the structural fallback strips the head so the optional flag is preserved.
+    #[test]
+    fn optional_you_may_accepts_tithe_optional_search() {
+        let parsed = parse_named(
+            "Search your library for a Plains card. If target opponent controls \
+             more lands than you, you may search your library for an additional \
+             Plains card. Reveal those cards, put them into your hand, then shuffle.",
+            "Tithe",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+        assert!(
+            parsed.abilities.iter().any(def_tree_has_optional),
+            "Tithe's optional second search must be marked optional"
+        );
+    }
+
+    /// CR 601.2f: Awaken the Blood Avatar's `you may sacrifice any number of
+    /// creatures` is an additional-cost optional, captured as
+    /// `AdditionalCost::Optional(_)` at the top level — `any_ability_is_optional`
+    /// recognizes this shape, so no `Optional_YouMay` swallow fires.
+    ///
+    /// **Status:** ignored — the parser doesn't currently extract the
+    /// `As an additional cost to cast this spell, you may sacrifice any number
+    /// of creatures` line into `AdditionalCost::Optional`. The investigator's
+    /// plan explicitly noted this case as a possible follow-up: "if it fails,
+    /// note it as a follow-up — do NOT expand scope". Tracked separately.
+    #[test]
+    #[ignore = "additional-cost extraction for `you may sacrifice any number` not in scope (issue #2277 follow-up)"]
+    fn optional_you_may_accepts_awaken_blood_avatar_additional_cost() {
+        let parsed = parse_named(
+            "As an additional cost to cast this spell, you may sacrifice any \
+             number of creatures. This spell costs {2} less to cast for each \
+             creature sacrificed this way.\n\
+             Each opponent sacrifices a creature of their choice. Create a 3/6 \
+             black and red Avatar creature token with haste and \"Whenever this \
+             token attacks, it deals 3 damage to each opponent.\"",
+            "Awaken the Blood Avatar",
+            &["Sorcery"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 701.20a: Atraxa, Grand Unifier — `you may put a card of that type
+    /// from among the revealed cards into your hand` carries the `from among`
+    /// continuation, so the `is_specialized_put_body` shape guard blocks the
+    /// `you may ` peel; the optionality is encoded as `up_to: true` on the
+    /// internal `ChangeZone` (Dig keep grammar). The refactor must NOT
+    /// regress this — verified via `effect_has_internal_optionality`.
+    #[test]
+    fn optional_you_may_accepts_atraxa_grand_unifier_from_among() {
+        let parsed = parse_named(
+            "Flying, vigilance, deathtouch, lifelink\n\
+             When this creature enters, reveal the top ten cards of your library. \
+             For each card type, you may put a card of that type from among the \
+             revealed cards into your hand. Put the rest on the bottom of your \
+             library in a random order.",
+            "Atraxa, Grand Unifier",
+            &["Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
