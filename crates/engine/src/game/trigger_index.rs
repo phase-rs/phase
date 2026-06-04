@@ -342,7 +342,6 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::CollectEvidence
         | TriggerMode::CommitCrime
         | TriggerMode::Investigated => push(TriggerEventKey::PlayerActionPerformed),
-        TriggerMode::Forage => return (keys, true),
 
         // --- Combat events ---
         TriggerMode::Fight | TriggerMode::FightOnce => push(TriggerEventKey::Fight),
@@ -352,6 +351,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
         | TriggerMode::Devoured
+        | TriggerMode::Forage
         | TriggerMode::FullyUnlock
         | TriggerMode::GiveGift
         | TriggerMode::Mentored

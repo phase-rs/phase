@@ -5359,7 +5359,7 @@ pub(super) fn parse_imperative_family_ast(
                 count,
             }))
         }
-        // Forage keyword action (CR 701.61a)
+        // Forage keyword action (CR 702.166a)
         "forage" => Some(ImperativeFamilyAst::GainKeyword(Effect::Forage)),
         // Collect evidence N keyword action (CR 702.163a)
         "collect" => {

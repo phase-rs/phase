@@ -45,7 +45,6 @@ use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
-use server_core::lookup_join_guard::guard_lookup_join_target;
 use server_core::protocol::{
     build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
     MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
@@ -2055,9 +2054,9 @@ async fn maybe_spawn_draft_matches(
                 your_player: player.game_player,
                 opponent_name: spawn.opponent_names[seat].clone(),
             };
-            let _ = players
-                .get(&PlayerId(player.draft_seat))
-                .map(|sender| sender.send(msg));
+            if let Some(sender) = players.get(&PlayerId(player.draft_seat)) {
+                let _ = sender.send(msg);
+            }
         }
     }
 }
@@ -3477,15 +3476,14 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, "LookupJoinTarget");
 
-            if let Err(reason) =
-                guard_lookup_join_target(&lobby_broker::LobbyClientMessage::LookupJoinTarget {
-                    game_code: game_code.clone(),
-                    password: password.clone(),
-                    reserve,
-                    display_name: display_name.clone(),
-                    release_reservation_token: release_reservation_token.clone(),
-                })
-            {
+            if let Err(reason) = lobby_broker::guard_lookup_join_target_inbound(
+                lobby_broker::LookupJoinTargetInbound {
+                    game_code: &game_code,
+                    password: password.as_deref(),
+                    display_name: display_name.as_deref(),
+                    release_reservation_token: release_reservation_token.as_deref(),
+                },
+            ) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -4862,7 +4860,7 @@ async fn handle_client_message(
                         );
                     }
 
-                    maybe_spawn_draft_matches(&draft_code, &draft_state, &state, &db, &connections)
+                    maybe_spawn_draft_matches(&draft_code, draft_state, state, db, connections)
                         .await;
 
                     // Persist draft session after mutation
@@ -5803,13 +5801,12 @@ mod handshake_tests {
     #[test]
     fn client_forbidden_draft_action_rejects_generate_pairings() {
         // Regression coverage: this rejection predates GH #1254 and must
-        // continue to fire. The user-facing reason ("not available yet")
-        // is distinct from SetSeatConnected ("server-internal"); both
-        // are forbidden but for different reasons.
+        // continue to fire. GeneratePairings is server-internal because
+        // match spawning now drives it after deck submission.
         let action = draft_core::types::DraftAction::GeneratePairings { round: 1 };
         let reason = client_forbidden_draft_action_reason(&action);
         assert!(reason.is_some());
-        assert!(reason.unwrap().contains("not available yet"));
+        assert!(reason.unwrap().contains("server-internal"));
     }
 
     #[test]

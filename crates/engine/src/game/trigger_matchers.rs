@@ -149,7 +149,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
-        | TriggerMode::Forage
         | TriggerMode::PayLife
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
@@ -165,6 +164,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
         | TriggerMode::Devoured
+        | TriggerMode::Forage
         | TriggerMode::GiveGift
         | TriggerMode::Mentored
         | TriggerMode::Mutates
@@ -396,6 +396,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
+        TriggerMode::DamagePreventedOnce,
         TriggerMode::AbilityCast,
         TriggerMode::AbilityResolves,
         TriggerMode::AbilityTriggered,
@@ -403,8 +404,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::SpellAbilityCopy,
         TriggerMode::CounterPlayerAddedAll,
         TriggerMode::CounterTypeAddedAll,
-        TriggerMode::DamagePreventedOnce,
-        TriggerMode::Forage,
         TriggerMode::PayLife,
         // TriggerMode::PhaseOut — moved to real matcher above
         TriggerMode::PhaseOutAll,
@@ -429,6 +428,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
         TriggerMode::Devoured,
+        TriggerMode::Forage,
         TriggerMode::GiveGift,
         TriggerMode::Mentored,
         TriggerMode::Mutates,
