@@ -411,6 +411,7 @@
     "chooseNewTarget": "Wybierz nowy cel czaru",
     "chooseNewTargetForSpell": "Wybierz nowy cel dla {{spell}}",
     "chooseCreatureToExplore": "Wybierz, który stwór eksploruje jako następny",
+    "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} ujawnił towarzysza: {{cardName}}",
     "companionMovedToHand": "{{player}} wziął towarzysza {{cardName}} do ręki",
     "powerToughnessChanged": "Obiekt {{objectId}} ma teraz {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Zdarzenie: {{type}}"
+    "genericEvent": "Zdarzenie: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Narzędzia silnika",
@@ -1019,6 +1039,12 @@
       "subtitle_one": "Wygnaj {{count}} kartę z {{source}}",
       "subtitle_other": "Wygnaj {{count}} kart z {{source}}"
     },
+    "craft": {
+      "title": "Wytwórz",
+      "subtitle_one": "Wygnaj {{count}} materiał, aby wytworzyć",
+      "subtitle_other": "Wygnaj {{count}} materiały, aby wytworzyć",
+      "subtitleRange": "Wygnaj od {{min}} do {{count}} materiałów, aby wytworzyć"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Wygnaj pasującego trwałego lub kartę",
@@ -1136,6 +1162,10 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Wybierz koszt rzucania",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Rzuć normalnie",
@@ -1358,6 +1388,15 @@
     "top": "Wierzch biblioteki",
     "bottom": "Spód biblioteki"
   },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
   "permanentTypeSlot": {
     "eyebrow": "Typ trwałego",
     "title": "Wybierz slot typu",
@@ -1483,5 +1522,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

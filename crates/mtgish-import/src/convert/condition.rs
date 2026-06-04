@@ -3270,7 +3270,8 @@ mod tests {
                     TargetFilter::Typed(TypedFilter { properties, .. })
                         if properties.contains(&FilterProp::HasAttachment {
                             kind: engine::types::ability::AttachmentKind::Aura,
-                            controller: None
+                            controller: None,
+                            exclude_source: false,
                         })
                 ));
             }

@@ -547,6 +547,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseTopOrBottom { top: true })
         }
 
+        // CR 702.140c + CR 730.2a: mutate merge side — default to placing the
+        // mutating spell on top (the candidate generator still explores bottom).
+        WaitingFor::MutateMergeChoice { .. } => Some(GameAction::ChooseMutateMergeSide {
+            side: engine::game::merge::MergeSide::Top,
+        }),
+
         // CR 701.30b: clash opponent choice — fall back to the first candidate.
         WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
             .first()
@@ -692,18 +698,27 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
-        // Copy retarget: keep current targets when present; freshly cast
-        // prepare/paradigm copies start empty, so choose the first legal target.
-        WaitingFor::CopyRetarget { target_slots, .. } => {
-            let targets: Option<Vec<_>> = target_slots
-                .iter()
-                .map(|slot| {
-                    slot.current
-                        .clone()
-                        .or_else(|| slot.legal_alternatives.first().cloned())
-                })
-                .collect();
-            targets.map(|new_targets| GameAction::RetargetSpell { new_targets })
+        // Copy retarget: keep copied targets when all slots already have a
+        // current value; freshly cast prepare/paradigm copies start empty, so
+        // choose the first legal target for the current slot.
+        WaitingFor::CopyRetarget {
+            target_slots,
+            current_slot,
+            ..
+        } => {
+            let slot = target_slots.get(*current_slot)?;
+            if target_slots.iter().all(|slot| slot.current.is_some()) {
+                Some(GameAction::KeepAllCopyTargets)
+            } else if slot.current.is_some() {
+                Some(GameAction::ChooseTarget { target: None })
+            } else {
+                slot.legal_alternatives
+                    .first()
+                    .cloned()
+                    .map(|target| GameAction::ChooseTarget {
+                        target: Some(target),
+                    })
+            }
         }
 
         // Assign combat damage: greedy lethal-to-each, mirroring the engine's
@@ -905,7 +920,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PayCost {
-            resume: CostResume::Spell { .. },
+            resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
             ..
         }
         | WaitingFor::BlightChoice { .. }
@@ -2445,6 +2460,7 @@ mod tests {
                 defending_player: PlayerId(0),
                 attack_target: AttackTarget::Player(PlayerId(0)),
                 blocked: false,
+                band_id: None,
             }],
             blocker_assignments: HashMap::new(),
             blocker_to_attacker: HashMap::new(),
@@ -2687,6 +2703,83 @@ mod tests {
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "foe"),
             "AI labeling opponent must pick foe, got {action:?}"
         );
+    }
+
+    #[test]
+    fn copy_retarget_fallback_keeps_existing_targets_with_legal_action() {
+        let mut state = make_state();
+        let original_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![engine::types::game_state::CopyTargetSlot {
+                current: Some(original_target),
+                legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
+            }],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(action, GameAction::KeepAllCopyTargets);
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn copy_retarget_fallback_keeps_current_slot_before_later_empty_slot() {
+        let mut state = make_state();
+        let current_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![
+                engine::types::game_state::CopyTargetSlot {
+                    current: Some(current_target),
+                    legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
+                },
+                engine::types::game_state::CopyTargetSlot {
+                    current: None,
+                    legal_alternatives: vec![TargetRef::Object(ObjectId(12))],
+                },
+            ],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(action, GameAction::ChooseTarget { target: None });
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CopyRetarget {
+                current_slot: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn copy_retarget_fallback_selects_first_target_for_fresh_copy_cast() {
+        let mut state = make_state();
+        let first_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![engine::types::game_state::CopyTargetSlot {
+                current: None,
+                legal_alternatives: vec![first_target.clone(), TargetRef::Object(ObjectId(11))],
+            }],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(
+            action,
+            GameAction::ChooseTarget {
+                target: Some(first_target),
+            }
+        );
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     /// A classic vote (`actor == player`) keeps the pre-existing "first

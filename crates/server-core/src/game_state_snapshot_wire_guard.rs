@@ -17,7 +17,7 @@ use engine::types::mana::ManaCost;
 use crate::game_action_payload_guard::MAX_ACTION_LIST_LEN;
 
 /// Max permanents/objects in a snapshot eligible for wire fan-out.
-pub const MAX_SNAPSHOT_OBJECTS: usize = 5_000;
+pub const MAX_SNAPSHOT_OBJECTS: usize = MAX_ACTION_LIST_LEN;
 /// Max events attached to a single `StateUpdate`.
 pub const MAX_SNAPSHOT_EVENTS: usize = 2_000;
 /// Max log lines attached to a single `StateUpdate`.
@@ -41,7 +41,9 @@ pub struct StateSnapshotParts<'a> {
 
 fn bound_count(field: &str, len: usize, max: usize) -> Result<(), String> {
     if len > max {
-        Err(format!("{field} has {len} entries; at most {max} allowed for broadcast"))
+        Err(format!(
+            "{field} has {len} entries; at most {max} allowed for broadcast"
+        ))
     } else {
         Ok(())
     }
@@ -53,11 +55,27 @@ fn legal_actions_by_object_total(map: &HashMap<ObjectId, Vec<GameAction>>) -> us
 
 /// Validate snapshot sizes before `filter_state_for_player` and per-connection clones.
 pub fn guard_state_snapshot_broadcast(parts: StateSnapshotParts<'_>) -> Result<(), String> {
-    bound_count("state.objects", parts.state.objects.len(), MAX_SNAPSHOT_OBJECTS)?;
+    bound_count(
+        "state.objects",
+        parts.state.objects.len(),
+        MAX_SNAPSHOT_OBJECTS,
+    )?;
     bound_count("events", parts.events.len(), MAX_SNAPSHOT_EVENTS)?;
-    bound_count("log_entries", parts.log_entries.len(), MAX_SNAPSHOT_LOG_ENTRIES)?;
-    bound_count("legal_actions", parts.legal_actions.len(), MAX_SNAPSHOT_LEGAL_ACTIONS)?;
-    bound_count("spell_costs", parts.spell_costs.len(), MAX_SNAPSHOT_SPELL_COSTS)?;
+    bound_count(
+        "log_entries",
+        parts.log_entries.len(),
+        MAX_SNAPSHOT_LOG_ENTRIES,
+    )?;
+    bound_count(
+        "legal_actions",
+        parts.legal_actions.len(),
+        MAX_SNAPSHOT_LEGAL_ACTIONS,
+    )?;
+    bound_count(
+        "spell_costs",
+        parts.spell_costs.len(),
+        MAX_SNAPSHOT_SPELL_COSTS,
+    )?;
     bound_count(
         "legal_actions_by_object",
         legal_actions_by_object_total(parts.legal_actions_by_object),
@@ -86,27 +104,38 @@ mod tests {
         GameLogEntry {
             seq,
             turn: 1,
-            phase: Phase::PrecombatMain,
+            phase: Phase::PreCombatMain,
             category: LogCategory::Game,
             segments: vec![LogSegment::Text("test".to_string())],
         }
     }
 
-    fn empty_parts(state: &GameState) -> StateSnapshotParts<'_> {
+    fn empty_parts<'a>(
+        state: &'a GameState,
+        legal_actions_by_object: &'a HashMap<ObjectId, Vec<GameAction>>,
+        spell_costs: &'a HashMap<ObjectId, ManaCost>,
+    ) -> StateSnapshotParts<'a> {
         StateSnapshotParts {
             state,
             events: &[],
             log_entries: &[],
             legal_actions: &[],
-            legal_actions_by_object: &HashMap::new(),
-            spell_costs: &HashMap::new(),
+            legal_actions_by_object,
+            spell_costs,
         }
     }
 
     #[test]
     fn snapshot_accepts_empty_board() {
         let state = GameState::new_two_player(1);
-        assert!(guard_state_snapshot_broadcast(empty_parts(&state)).is_ok());
+        let legal_actions_by_object = HashMap::new();
+        let spell_costs = HashMap::new();
+        assert!(guard_state_snapshot_broadcast(empty_parts(
+            &state,
+            &legal_actions_by_object,
+            &spell_costs
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -115,13 +144,20 @@ mod tests {
         for i in 0..=MAX_SNAPSHOT_OBJECTS {
             create_object(
                 &mut state,
-                CardId(i as u32 + 1),
+                CardId(i as u64 + 1),
                 PlayerId(0),
                 format!("Card{i}"),
                 Zone::Hand,
             );
         }
-        let err = guard_state_snapshot_broadcast(empty_parts(&state)).unwrap_err();
+        let legal_actions_by_object = HashMap::new();
+        let spell_costs = HashMap::new();
+        let err = guard_state_snapshot_broadcast(empty_parts(
+            &state,
+            &legal_actions_by_object,
+            &spell_costs,
+        ))
+        .unwrap_err();
         assert!(err.contains("state.objects"));
     }
 
@@ -134,13 +170,15 @@ mod tests {
             };
             MAX_SNAPSHOT_EVENTS + 1
         ];
+        let legal_actions_by_object = HashMap::new();
+        let spell_costs = HashMap::new();
         let parts = StateSnapshotParts {
             state: &state,
             events: &events,
             log_entries: &[],
             legal_actions: &[],
-            legal_actions_by_object: &HashMap::new(),
-            spell_costs: &HashMap::new(),
+            legal_actions_by_object: &legal_actions_by_object,
+            spell_costs: &spell_costs,
         };
         let err = guard_state_snapshot_broadcast(parts).unwrap_err();
         assert!(err.contains("events"));
@@ -150,15 +188,17 @@ mod tests {
     fn snapshot_rejects_oversized_log_batch() {
         let state = GameState::new_two_player(1);
         let log_entries: Vec<_> = (0..=MAX_SNAPSHOT_LOG_ENTRIES)
-            .map(sample_log_entry)
+            .map(|seq| sample_log_entry(seq as u32))
             .collect();
+        let legal_actions_by_object = HashMap::new();
+        let spell_costs = HashMap::new();
         let parts = StateSnapshotParts {
             state: &state,
             events: &[],
             log_entries: &log_entries,
             legal_actions: &[],
-            legal_actions_by_object: &HashMap::new(),
-            spell_costs: &HashMap::new(),
+            legal_actions_by_object: &legal_actions_by_object,
+            spell_costs: &spell_costs,
         };
         let err = guard_state_snapshot_broadcast(parts).unwrap_err();
         assert!(err.contains("log_entries"));
@@ -168,13 +208,15 @@ mod tests {
     fn snapshot_rejects_oversized_legal_action_list() {
         let state = GameState::new_two_player(1);
         let legal_actions = vec![GameAction::PassPriority; MAX_SNAPSHOT_LEGAL_ACTIONS + 1];
+        let legal_actions_by_object = HashMap::new();
+        let spell_costs = HashMap::new();
         let parts = StateSnapshotParts {
             state: &state,
             events: &[],
             log_entries: &[],
             legal_actions: &legal_actions,
-            legal_actions_by_object: &HashMap::new(),
-            spell_costs: &HashMap::new(),
+            legal_actions_by_object: &legal_actions_by_object,
+            spell_costs: &spell_costs,
         };
         let err = guard_state_snapshot_broadcast(parts).unwrap_err();
         assert!(err.contains("legal_actions"));
@@ -186,7 +228,7 @@ mod tests {
         for i in 0..=MAX_SNAPSHOT_OBJECTS {
             create_object(
                 &mut state,
-                CardId(i as u32 + 1),
+                CardId(i as u64 + 1),
                 PlayerId(0),
                 format!("Card{i}"),
                 Zone::Hand,

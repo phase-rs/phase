@@ -156,7 +156,8 @@
     "hostGame": "Hospedar Jogo",
     "hostP2PGame": "Hospedar Jogo P2P",
     "passwordRequired": "Senha Necessária",
-    "passwordPlaceholder": "Insira a senha"
+    "passwordPlaceholder": "Insira a senha",
+    "watch": "Watch"
   },
   "hostSetup": {
     "hostDirectMatch": "Hospedar Partida Direta",

@@ -67,7 +67,7 @@
   --color-surface-modal: rgba(11, 16, 32, 0.96);
 
   /* ---- Radii → rounded-card/panel/row/chip/tile/badge (pill = rounded-full) ---- */
-  --radius-card: 22px;
+  --radius-card: 12px;
   --radius-panel: 20px;
   --radius-row: 18px;
   --radius-chip: 16px;
@@ -302,11 +302,18 @@ body {
 .menu-scene__haze {
   position: absolute;
   inset: auto 0 0;
-  height: 32vh;
+  height: 42vh;
   pointer-events: none;
-  background:
-    linear-gradient(180deg, transparent 0%, rgba(9, 14, 30, 0.45) 38%, rgba(3, 5, 12, 0.84) 100%),
-    radial-gradient(circle at 50% 0%, rgba(255, 176, 89, 0.14), transparent 48%);
+  /* A single, gradual bottom-darkening fade. The warm radial that used to sit
+     here echoed the scene's top accent glow — on pages that don't fill the
+     height it read as a second glowing band with a hard upper edge ("repeat").
+     One slow gradient stretches cleanly into the scene with no visible cutoff. */
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(5, 8, 18, 0.4) 55%,
+    rgba(3, 5, 12, 0.82) 100%
+  );
 }
 
 .menu-scene__sigil {
@@ -468,7 +475,7 @@ body {
 .zone-viewer-strip .animate-pulse,
 .card-choice-strip [role="img"],
 .card-choice-strip .animate-pulse {
-  --strip-card-h: clamp(180px, 52vh, 420px);
+  --strip-card-h: clamp(240px, 64vh, 560px);
   width: auto !important;
   height: var(--strip-card-h) !important;
   aspect-ratio: 5 / 7;
@@ -644,6 +651,35 @@ body {
   .summoning-sickness-underwater::before,
   .summoning-sickness-underwater::after {
     animation: none;
+  }
+}
+
+/* Host control "waiting for the table to fill" — a breathing emerald glow that
+   draws the eye to the bottom-right panel while open seats remain. Emerald keeps
+   it consistent with the panel's live-room semantics (status dot + room code).
+   The base --shadow-panel is composed in so the panel keeps its depth shadow. */
+@keyframes host-awaiting-pulse {
+  0%,
+  100% {
+    box-shadow: var(--shadow-panel), 0 0 0 1px rgba(16, 185, 129, 0.35),
+      0 0 20px rgba(16, 185, 129, 0.2);
+  }
+
+  50% {
+    box-shadow: var(--shadow-panel), 0 0 0 1px rgba(16, 185, 129, 0.6),
+      0 0 34px rgba(16, 185, 129, 0.42);
+  }
+}
+
+.host-awaiting-glow {
+  animation: host-awaiting-pulse 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .host-awaiting-glow {
+    animation: none;
+    box-shadow: var(--shadow-panel), 0 0 0 1px rgba(16, 185, 129, 0.5),
+      0 0 24px rgba(16, 185, 129, 0.3);
   }
 }
 

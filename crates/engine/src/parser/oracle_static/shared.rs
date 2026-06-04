@@ -1529,6 +1529,7 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
             .properties(vec![FilterProp::HasAttachment {
                 kind,
                 controller: None,
+                exclude_source: false,
             }]),
     )
 }
@@ -1545,9 +1546,24 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
 /// you control"), and analogous "[other] commander(s) [you control | your
 /// opponents control]" subject phrases.
 pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let (filter, rest) = parse_commander_subject_filter_prefix(subject.trim())?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(filter)
+}
+
+/// CR 903.3 + CR 903.3d: Parse a commander subject prefix, returning the
+/// unconsumed text for trigger/event parsers that need to continue at the verb.
+pub(crate) fn parse_commander_subject_filter_prefix(subject: &str) -> Option<(TargetFilter, &str)> {
     type VE<'a> = OracleError<'a>;
-    let lower = subject.trim().to_lowercase();
+    let lower = subject.to_lowercase();
     let i = lower.as_str();
+
+    // Possessive "your commander(s)" is owner-scoped: it refers to the
+    // commander's designation for the evaluating player, not just any
+    // commander currently controlled by that player.
+    let (i, possessive_your) = opt(tag::<_, _, VE>("your ")).parse(i).ok()?;
 
     // Optional leading "other " — emits FilterProp::Another.
     let (i, other) = opt(tag::<_, _, VE>("other ")).parse(i).ok()?;
@@ -1597,12 +1613,13 @@ pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilt
     .parse(i)
     .ok()?;
 
-    if !i.trim().is_empty() {
-        return None;
+    let mut props = Vec::new();
+    if possessive_your.is_some() {
+        props.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        });
     }
-
-    // CR 903.3d: a commander, when controlled, is a permanent on the battlefield.
-    let mut props = vec![FilterProp::IsCommander];
+    props.push(FilterProp::IsCommander);
     if has_other {
         props.push(FilterProp::Another);
     }
@@ -1611,13 +1628,17 @@ pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilt
     }
     let mut typed = if is_creature_subject {
         TypedFilter::creature().properties(props)
+    } else if possessive_your.is_some() {
+        TypedFilter::default().properties(props)
     } else {
         TypedFilter::permanent().properties(props)
     };
     if let Some(c) = controller {
         typed = typed.controller(c);
     }
-    Some(TargetFilter::Typed(typed))
+
+    let consumed = lower.len() - i.len();
+    Some((TargetFilter::Typed(typed), &subject[consumed..]))
 }
 
 /// CR 205.1a / CR 205.3 / CR 111.1: Returns true when `descriptor` is a

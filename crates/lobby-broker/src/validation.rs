@@ -160,6 +160,27 @@ pub fn validate_join_game_with_password_fields(
     Ok(())
 }
 
+pub struct LookupJoinTargetFields<'a> {
+    pub game_code: &'a str,
+    pub password: Option<&'a str>,
+    pub display_name: Option<&'a str>,
+    pub release_reservation_token: Option<&'a str>,
+}
+
+pub fn validate_lookup_join_target_fields(
+    fields: LookupJoinTargetFields<'_>,
+) -> Result<(), String> {
+    validate_token("game_code", fields.game_code, MAX_GAME_CODE_LEN)?;
+    validate_optional_token("password", fields.password, MAX_PASSWORD_LEN)?;
+    validate_optional_label("display_name", fields.display_name, MAX_DISPLAY_NAME_LEN)?;
+    validate_optional_token(
+        "release_reservation_token",
+        fields.release_reservation_token,
+        MAX_TOKEN_LEN,
+    )?;
+    Ok(())
+}
+
 /// Validate every client-supplied field of a parsed lobby message against the
 /// size/shape bounds above. Returns the first violation as a human-readable
 /// reason suitable for an `Error` reply. Server-populated reply types
@@ -217,18 +238,12 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
             release_reservation_token,
             ..
         } => {
-            validate_token("game_code", game_code, MAX_GAME_CODE_LEN)?;
-            validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
-            validate_optional_label(
-                "display_name",
-                display_name.as_deref(),
-                MAX_DISPLAY_NAME_LEN,
-            )?;
-            validate_optional_token(
-                "release_reservation_token",
-                release_reservation_token.as_deref(),
-                MAX_TOKEN_LEN,
-            )?;
+            validate_lookup_join_target_fields(LookupJoinTargetFields {
+                game_code,
+                password: password.as_deref(),
+                display_name: display_name.as_deref(),
+                release_reservation_token: release_reservation_token.as_deref(),
+            })?;
         }
         M::UpdateLobbyMetadata {
             game_code,

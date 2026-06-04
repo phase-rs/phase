@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Scegli un nuovo bersaglio per la copia",
     "chooseTargetForCopy": "Scegli il bersaglio per la copia",
     "chooseCreatureToExplore": "Scegli quale creatura esplora dopo",
+    "chooseCreatureTokenToPopulate": "Scegli una pedina creatura da popolare",
     "chooseReturnAsAuraTarget": "Scegli un permanente da incantare",
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} ha rivelato il compagno: {{cardName}}",
     "companionMovedToHand": "{{player}} ha messo il compagno {{cardName}} in mano",
     "powerToughnessChanged": "L'oggetto {{objectId}} è ora {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Evento: {{type}}"
+    "genericEvent": "Evento: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Strumenti del motore",
@@ -1019,6 +1039,12 @@
       "subtitle_one": "Esilia {{count}} carta da {{source}}",
       "subtitle_other": "Esilia {{count}} carte da {{source}}"
     },
+    "craft": {
+      "title": "Fabbricare",
+      "subtitle_one": "Esilia {{count}} materiale per fabbricare",
+      "subtitle_other": "Esilia {{count}} materiali per fabbricare",
+      "subtitleRange": "Esilia da {{min}} a {{count}} materiali per fabbricare"
+    },
     "behold": {
       "title": "Contemplare",
       "subtitleExile": "Esilia un permanente o una carta corrispondente",
@@ -1136,6 +1162,10 @@
     "adventureTag": "(Avventura)"
   },
   "alternativeCost": {
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Scegli il costo di lancio",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Lancia normalmente",
@@ -1358,6 +1388,15 @@
     "top": "Top of library",
     "bottom": "Bottom of library"
   },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
   "permanentTypeSlot": {
     "eyebrow": "Tipo di permanente",
     "title": "Scegli lo slot del tipo",
@@ -1483,5 +1522,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

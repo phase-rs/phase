@@ -122,11 +122,13 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         DebugAction::AddMana { mana, .. } => {
             bound_list("Debug.AddMana.mana", mana.len())?;
         }
-        DebugAction::CreateToken { request } => {
+        DebugAction::CreateToken { request, .. } => {
             guard_debug_token_request_payload(request)?;
         }
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }
+        | DebugAction::Sacrifice { .. }
+        | DebugAction::Reveal { .. }
         | DebugAction::DrawCards { .. }
         | DebugAction::Mill { .. }
         | DebugAction::ShuffleLibrary { .. }
@@ -293,6 +295,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::DiscoverChoice { .. }
         | GameAction::CascadeChoice { .. }
         | GameAction::ChooseTopOrBottom { .. }
+        // CR 702.140c: mutate merge side carries a single typed enum — nothing
+        // client-controlled to bound.
+        | GameAction::ChooseMutateMergeSide { .. }
         | GameAction::ChooseLegend { .. }
         | GameAction::ChooseBattleProtector { .. }
         | GameAction::SetAutoPass { .. }

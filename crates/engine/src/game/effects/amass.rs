@@ -126,6 +126,7 @@ fn create_army_token(
     let proposed = ProposedEvent::CreateToken {
         owner: controller,
         spec: Box::new(spec),
+        copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
         applied: HashSet::new(),

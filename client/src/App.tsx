@@ -26,6 +26,9 @@ const CoveragePage = lazy(() => import("./pages/CoveragePage").then((m) => ({ de
 const DraftLandingPage = lazy(() => import("./pages/DraftLandingPage").then((m) => ({ default: m.DraftLandingPage })));
 const DraftPage = lazy(() => import("./pages/DraftPage").then((m) => ({ default: m.DraftPage })));
 const DraftPodPage = lazy(() => import("./pages/DraftPodPage").then((m) => ({ default: m.DraftPodPage })));
+const DraftSpectatorPage = lazy(() =>
+  import("./pages/DraftSpectatorPage").then((m) => ({ default: m.DraftSpectatorPage })),
+);
 
 function DevStrict({ children }: { children: ReactNode }) {
   if (!import.meta.env.DEV) return children;
@@ -109,6 +112,7 @@ function AppContent() {
             <Route path="/draft" element={<DevStrict><DraftLandingPage /></DevStrict>} />
             <Route path="/draft/quick" element={<DevStrict><DraftPage /></DevStrict>} />
             <Route path="/draft-pod" element={<DraftPodPage />} />
+            <Route path="/draft-spectator" element={<DraftSpectatorPage />} />
           </Route>
           <Route path="/game/:id" element={<GameRouteElement />} />
         </Routes>

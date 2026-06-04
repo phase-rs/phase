@@ -56,7 +56,7 @@ pub enum TriggerEventKey {
     DamagePrevented,
     /// CR 121.1: One or more cards were drawn.
     CardsDrawn,
-    /// CR 119.3 + CR 118.4 (life gain/loss): A player's life total changed.
+    /// CR 119.3 (life gain/loss): A player's life total changed.
     LifeChanged,
     /// CR 106 (mana) + CR 605 (mana abilities): Mana was added to a player's
     /// mana pool, OR a permanent emitted a `TappedForMana` event. Coarse key —
@@ -154,11 +154,21 @@ pub enum TriggerEventKey {
     ManifestDreadResolved,
     /// CR 701.44: An explore resolution.
     Explored,
+    /// CR 701.57a: A discover resolution.
+    DiscoverResolved,
+    /// CR 701.46a: An adapt resolution.
+    AdaptResolved,
+    /// CR 701.43d: A creature was exerted.
+    Exerted,
+    /// CR 702.143a: A card was foretold.
+    Foretold,
     /// CR 701.14: A fight resolution (separate from generic deals-damage
     /// because the matcher dispatches on `EffectResolved { kind: Fight }`).
     Fight,
     /// CR 702.26c: A permanent phased in.
     PhaseIn,
+    /// CR 702.26b: A permanent phased out.
+    PhaseOut,
 }
 
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
@@ -291,6 +301,8 @@ pub enum TriggerMode {
     /// CR 119.3: Triggers when a player loses life.
     LifeLost,
     LifeLostAll,
+    /// CR 119.3: Triggers when a player gains or loses life.
+    LifeChanged,
     PayLife,
     /// CR 702.24: Cumulative upkeep trigger.
     PayCumulativeUpkeep,
@@ -390,6 +402,9 @@ pub enum TriggerMode {
     // Land
     /// CR 305.1 + CR 505.6b: Triggers when a land is played.
     LandPlayed,
+    /// CR 601.1a + CR 701.18b: "Whenever you play a card" — playing a card means
+    /// playing it as a land OR casting it as a spell, so this fires on both events.
+    PlayCard,
 
     // Equipment / aura — CR 701.3 (Attach)
     /// CR 701.3: Triggers when an Aura, Equipment, or Fortification becomes attached.
@@ -610,7 +625,9 @@ impl FromStr for TriggerMode {
             "Immediate" => TriggerMode::Immediate,
             "Investigated" => TriggerMode::Investigated,
             "LandPlayed" => TriggerMode::LandPlayed,
+            "PlayCard" => TriggerMode::PlayCard,
             "LeavesBattlefield" => TriggerMode::LeavesBattlefield,
+            "LifeChanged" => TriggerMode::LifeChanged,
             "LifeGained" => TriggerMode::LifeGained,
             "LifeLost" => TriggerMode::LifeLost,
             "LifeLostAll" => TriggerMode::LifeLostAll,
@@ -874,7 +891,9 @@ mod tests {
             "Immediate",
             "Investigated",
             "LandPlayed",
+            "PlayCard",
             "LeavesBattlefield",
+            "LifeChanged",
             "LifeGained",
             "LifeLost",
             "LifeLostAll",
@@ -954,8 +973,8 @@ mod tests {
             }
         }
         assert!(
-            known_count >= 145,
-            "Expected 145+ known trigger modes, got {known_count}"
+            known_count >= 146,
+            "Expected 146+ known trigger modes, got {known_count}"
         );
     }
 }
