@@ -23,26 +23,35 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target_filter, without_paying, cast_transformed, alt_ability_cost, constraint, duration) =
-        match &ability.effect {
-            Effect::CastFromZone {
-                target,
-                without_paying_mana_cost,
-                cast_transformed,
-                alt_ability_cost,
-                constraint,
-                duration,
-                ..
-            } => (
-                target,
-                *without_paying_mana_cost,
-                *cast_transformed,
-                alt_ability_cost.clone(),
-                constraint.clone(),
-                duration.clone(),
-            ),
-            _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
-        };
+    let (
+        target_filter,
+        without_paying,
+        cast_transformed,
+        alt_ability_cost,
+        constraint,
+        duration,
+        driver,
+    ) = match &ability.effect {
+        Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            cast_transformed,
+            alt_ability_cost,
+            constraint,
+            duration,
+            driver,
+            ..
+        } => (
+            target,
+            *without_paying_mana_cost,
+            *cast_transformed,
+            alt_ability_cost.clone(),
+            constraint.clone(),
+            duration.clone(),
+            *driver,
+        ),
+        _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+    };
 
     // Collect target object IDs from the resolved ability's targets.
     let mut target_ids: Vec<_> = ability
@@ -78,6 +87,93 @@ pub fn resolve(
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
         });
+        return Ok(());
+    }
+
+    // CR 702.62a + CR 608.2g: Suspend's last-time-counter ability casts the
+    // card it is attached to, for free, AS THE TRIGGER RESOLVES. The card casts
+    // itself (the single resolved target IS the ability's source), there is no
+    // mana cost (`without_paying`), and no replacement alt-cost
+    // (`alt_ability_cost == None`). Per CR 702.62a/702.62d the cast happens
+    // during resolution — it must NOT be deferred to a lingering permission the
+    // player acts on at a later priority window (issue #1520: accepting the
+    // optional "cast it?" prompt appeared to do nothing because only a
+    // permission was stamped — the spell was never put on the stack, and a
+    // sorcery like Treasure Cruise was additionally blocked by the
+    // sorcery-speed timing gate at upkeep). Drive the cast immediately through
+    // the same cast-during-resolution authority Cascade/Discover use
+    // (`initiate_cast_during_resolution`).
+    //
+    // The router reads the EXPLICIT `driver` discriminator
+    // (`CastFromZoneDriver::DuringResolution`, set by
+    // `build_suspend_last_counter_cast_trigger`), NOT `duration`. `duration` is
+    // CR 611.2a permission-expiry and says nothing about the casting mechanism;
+    // routing on it conflated two axes. The structural-shape guard
+    // (`without_paying` + no alt-cost + single self target) is retained as a
+    // defense-in-depth invariant — a `DuringResolution` body must always be a
+    // self-free-cast, since `initiate_cast_during_resolution` casts the single
+    // card object itself at zero cost.
+    //
+    // FOLLOW-UP (#1520 twin): Rebound (CR 702.88a) is still a
+    // `LingeringPermission` driver because its recast permission legitimately
+    // needs `duration: Some(UntilEndOfTurn)` to prune on decline (see the
+    // `consuming_vapors_rebound` suite). A rebounding SORCERY recast at upkeep
+    // therefore still passes through the lingering path; whether it hits the
+    // sorcery-speed gate is tracked separately. Routing Rebound through
+    // `DuringResolution` would regress that durational-prune contract, so it is
+    // intentionally left on the permission path under the explicit `driver`
+    // signal rather than forced through during-resolution here.
+    //
+    // Nashi/Jeleva-style "you may cast [other] exiled cards" (target != source,
+    // `ExiledBySource` filter, or an `alt_ability_cost`) are also
+    // `LingeringPermission`: the controller casts them during the granting
+    // effect's own priority window.
+    let self_free_cast = driver.is_during_resolution()
+        && without_paying
+        && alt_ability_cost.is_none()
+        && target_ids.len() == 1
+        && target_ids[0] == ability.source_id;
+    if self_free_cast {
+        let card = target_ids[0];
+        // CR 601.2a: ensure the card is in exile before the cast (it already is
+        // for Suspend/Rebound; this mirrors the permission path's invariant).
+        if state.objects.get(&card).map(|o| o.zone) != Some(Zone::Exile) {
+            zones::move_to_zone(state, card, Zone::Exile, events);
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::CastFromZone,
+            source_id: ability.source_id,
+        });
+        // CR 702.62d / CR 601.2b: casting as an effect follows the alternative-
+        // cost rules. `initiate_cast_during_resolution` grants the zero-cost
+        // `ExileWithAltCost` permission, prepares the cast (the Suspend variant
+        // is detected by `prepare_spell_cast`'s effective-keyword scan), and
+        // continues it on `Auto` payment. The returned `WaitingFor` (target
+        // selection if the spell targets, else priority with the spell on the
+        // stack) becomes the resolution's pending prompt.
+        //
+        // CR 608.2g: the cast happens DURING resolution, so the sorcery-speed /
+        // empty-stack / active-player timing gates must NOT apply (Treasure
+        // Cruise is a sorcery cast at upkeep, with the trigger still on the
+        // stack). The during-resolution `ResolutionCastCleanup` marker keys that
+        // timing bypass in `restrictions::check_spell_timing`. There are no dig
+        // misses, and CR 702.62a's "if you don't, it remains exiled" disposition
+        // is `RemainExiled` (only reached if a future free-cast adds an MV gate;
+        // Suspend carries none).
+        let cleanup = crate::types::ability::ResolutionCastCleanup {
+            exiled_misses: Vec::new(),
+            reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+        };
+        state.waiting_for = crate::game::casting::initiate_cast_during_resolution(
+            state,
+            ability.controller,
+            card,
+            constraint.clone(),
+            cast_transformed,
+            cleanup,
+            events,
+        )
+        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
         return Ok(());
     }
 
@@ -180,6 +276,95 @@ mod tests {
         obj_id
     }
 
+    /// Issue #1520 — suspend last-time-counter free cast must actually CAST the
+    /// card as the trigger resolves (CR 702.62a), not merely grant a lingering
+    /// `ExileWithAltCost` permission that the player has to act on later. The
+    /// reported bug: removing the last time counter from a suspended Treasure
+    /// Cruise prompts "cast it?", but accepting does nothing — the spell is
+    /// never put on the stack because the resolver only stamped a permission.
+    ///
+    /// Discriminator: drive the synthesized last-counter `CastFromZone` body
+    /// (self-targeting, `without_paying_mana_cost`) on a suspended sorcery and
+    /// assert the spell lands on the stack at zero cost. Pre-fix the stack is
+    /// empty (the card sits in exile holding only a permission); post-fix the
+    /// cast-during-resolution path puts it on the stack.
+    #[test]
+    fn suspend_last_counter_free_cast_puts_spell_on_stack() {
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCost as MC;
+        use crate::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::Upkeep;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // A suspended sorcery owned/controlled by PlayerId(0) — Treasure Cruise
+        // is a sorcery with no targets ("Draw three cards"). It sits in exile
+        // with the Suspend keyword; its last time counter has just been removed.
+        let suspended = create_object(
+            &mut state,
+            CardId(7001),
+            PlayerId(0),
+            "Treasure Cruise".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&suspended).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = MC::generic(7);
+            obj.keywords.push(Keyword::Suspend {
+                count: 0,
+                cost: MC::zero(),
+            });
+            obj.base_keywords = obj.keywords.clone();
+        }
+
+        // The synthesized last-counter cast trigger body (CR 702.62a):
+        // `build_suspend_last_counter_cast_trigger` executes this exact effect
+        // when the final time counter is removed.
+        let cast_ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::SelfRef,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+            },
+            vec![TargetRef::Object(suspended)],
+            suspended,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &cast_ability, &mut events).unwrap();
+
+        // CR 702.62a: the player accepted the optional cast — the spell must be
+        // cast as the trigger resolves and placed on the stack. A bare
+        // permission grant (card still in exile, empty stack) is the bug.
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "suspend last-counter cast (CR 702.62a) must put the spell on the \
+             stack, not just grant a lingering ExileWithAltCost permission"
+        );
+        assert_eq!(
+            state.objects.get(&suspended).map(|o| o.zone),
+            Some(Zone::Stack),
+            "the suspended card must move to the stack when cast for free"
+        );
+        // CR 702.62a: cast WITHOUT paying its mana cost — no mana was spent.
+        assert!(
+            state.players.iter().all(|p| p.mana_pool.total() == 0),
+            "the free cast must not require or consume mana"
+        );
+    }
+
     #[test]
     fn grants_zero_cost_permission_on_exiled_card() {
         let mut state = make_test_state();
@@ -194,6 +379,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -229,6 +415,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -261,6 +448,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -329,6 +517,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![],
             source,
@@ -364,6 +553,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![],
             ObjectId(999),
@@ -401,6 +591,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: Some(constraint.clone()),
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),

@@ -127,6 +127,19 @@ pub enum GameEvent {
         controller: PlayerId,
         object_id: ObjectId, // CR 601.2a: The spell object on the stack
     },
+    /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
+    /// creature, forming a mutated permanent. Emitted by
+    /// `merge::merge_object_onto`. `merged_id` is the surviving permanent's
+    /// `ObjectId` (the target creature's, kept per CR 730.2c); `merging_id` is the
+    /// component card/token that merged onto it; `controller` is the merging
+    /// spell's controller. "Whenever this creature mutates" triggers (CR 702.140d)
+    /// listen here — downstream condition handling is deferred (no Phase-1 card
+    /// needs it), but the event is observable now.
+    Mutated {
+        merged_id: ObjectId,
+        merging_id: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
     /// cast, so this is a distinct event from `SpellCast` — copy-sensitive
     /// triggers (Magecraft, "whenever you copy a spell") fire on this, while
@@ -238,6 +251,11 @@ pub enum GameEvent {
     /// linked `TriggerMode::Exerted` "when you do" trigger (Combat Celebrant,
     /// Glory-Bound Initiate, ...).
     CreatureExerted {
+        object_id: ObjectId,
+    },
+    /// CR 702.143a: A player foretold a card from their hand.
+    Foretold {
+        player_id: PlayerId,
         object_id: ObjectId,
     },
     PlayerLost {

@@ -11,7 +11,8 @@ use crate::protocol::DraftLobbyMetadata;
 use crate::protocol::LobbyClientMessage;
 use crate::validation::{
     validate_create_game_settings_fields, validate_join_game_with_password_fields,
-    validate_lobby_message, CreateGameSettingsFields, JoinGameWithPasswordFields,
+    validate_lobby_message, validate_lookup_join_target_fields, CreateGameSettingsFields,
+    JoinGameWithPasswordFields, LookupJoinTargetFields,
 };
 use engine::starter_decks::DeckData;
 
@@ -87,8 +88,8 @@ pub struct CreateGameSettingsInbound<'a> {
 }
 
 /// Validate a settings-create frame without constructing the owned broker enum.
-pub fn guard_create_game_settings_inbound(
-    fields: CreateGameSettingsInbound<'_>,
+pub fn validate_create_game_settings_inbound_fields(
+    fields: &CreateGameSettingsInbound<'_>,
 ) -> Result<(), String> {
     validate_create_game_settings_fields(CreateGameSettingsFields {
         display_name: fields.display_name,
@@ -98,7 +99,14 @@ pub fn guard_create_game_settings_inbound(
         room_name: fields.room_name,
         host_peer_id: fields.host_peer_id,
         draft_metadata: fields.draft_metadata,
-    })?;
+    })
+}
+
+/// Validate a settings-create frame without constructing the owned broker enum.
+pub fn guard_create_game_settings_inbound(
+    fields: CreateGameSettingsInbound<'_>,
+) -> Result<(), String> {
+    validate_create_game_settings_inbound_fields(&fields)?;
     validate_deck_payload("deck", fields.deck)
 }
 
@@ -121,6 +129,13 @@ pub fn guard_join_game_with_password_inbound(
         reservation_token: fields.reservation_token,
     })?;
     validate_deck_payload("deck", fields.deck)
+}
+
+pub type LookupJoinTargetInbound<'a> = LookupJoinTargetFields<'a>;
+
+/// Validate a lookup frame without constructing the owned broker enum.
+pub fn guard_lookup_join_target_inbound(fields: LookupJoinTargetInbound<'_>) -> Result<(), String> {
+    validate_lookup_join_target_fields(fields)
 }
 
 /// Validate every inbound lobby message before handler dispatch. Applies the
@@ -236,6 +251,20 @@ mod tests {
             display_name: "Guest",
             password: None,
             reservation_token: None,
+        })
+        .unwrap_err();
+
+        assert!(err.contains("game_code"));
+    }
+
+    #[test]
+    fn borrowed_lookup_guard_rejects_oversized_lobby_field() {
+        let game_code = "G".repeat(crate::validation::MAX_GAME_CODE_LEN + 1);
+        let err = guard_lookup_join_target_inbound(LookupJoinTargetInbound {
+            game_code: &game_code,
+            password: None,
+            display_name: None,
+            release_reservation_token: None,
         })
         .unwrap_err();
 

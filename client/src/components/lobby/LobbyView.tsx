@@ -28,6 +28,8 @@ interface LobbyViewProps {
     format?: GameFormat,
     context?: LobbyGame,
   ) => void;
+  /** Watch a live server game or draft without joining as a player. */
+  onSpectate?: (code: string, context?: LobbyGame) => void;
   connectionMode?: "server" | "p2p";
   onServerOffline?: () => void;
 }
@@ -65,6 +67,7 @@ export function LobbyView({
   onHostP2P,
   onHostDraft,
   onJoinGame,
+  onSpectate,
   connectionMode,
   onServerOffline,
 }: LobbyViewProps) {
@@ -214,6 +217,17 @@ export function LobbyView({
     }
     onJoinGame(parsed.code);
   }, [joinCode, onJoinGame]);
+
+  const handleSpectateByCode = useCallback(() => {
+    const raw = joinCode.trim().toUpperCase();
+    if (!raw || !onSpectate) return;
+    const parsed = parseJoinCode(raw);
+    if (parsed.serverAddress) {
+      useMultiplayerStore.getState().setServerAddress(parsed.serverAddress);
+    }
+    const context = gamesRef.current.find((g) => g.game_code === parsed.code);
+    onSpectate(parsed.code, context);
+  }, [joinCode, onSpectate]);
 
   const handlePasswordSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
@@ -418,6 +432,20 @@ export function LobbyView({
         >
           {t("lobbyView.join")}
         </button>
+        {isServer && onSpectate && (
+          <button
+            type="button"
+            onClick={handleSpectateByCode}
+            disabled={!joinCode.trim()}
+            className={menuButtonClass({
+              tone: "neutral",
+              size: "sm",
+              disabled: !joinCode.trim(),
+            })}
+          >
+            {t("lobbyView.watch")}
+          </button>
+        )}
         </div>
       </div>
 

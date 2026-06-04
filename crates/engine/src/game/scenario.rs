@@ -1482,7 +1482,14 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Impending => {
                     "AlternativeCastChoice(Impending)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Prototype => {
+                    "AlternativeCastChoice(Prototype)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Mutate => {
+                    "AlternativeCastChoice(Mutate)"
+                }
             },
+            WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
             WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
