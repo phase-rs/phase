@@ -1285,7 +1285,19 @@ pub(crate) fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilt
             // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
         )),
-        _ => None,
+        // CR 305.7: "All <basic land type> are <type>" (Conversion, Glaciers:
+        // "All Mountains are Plains"). The subject is every permanent with the
+        // named basic land subtype; the SetBasicLandType predicate is applied by
+        // the caller. Composes over all five basic land types, not one card.
+        other => {
+            let type_word = opt(tag::<_, _, OracleError<'_>>("all "))
+                .parse(other)
+                .map(|(rest, _)| rest.trim())
+                .unwrap_or(other);
+            parse_basic_land_type_plural(type_word).map(|basic| {
+                TargetFilter::Typed(TypedFilter::land().subtype(basic.as_subtype_str().to_string()))
+            })
+        }
     }
 }
 

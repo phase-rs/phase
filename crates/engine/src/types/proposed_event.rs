@@ -2,11 +2,14 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, DisplaySource};
 
 use super::counter::CounterType;
 
-use super::ability::{Duration, FaceDownProfile, StaticDefinition, TargetRef};
+use super::ability::{
+    ContinuousModification, CopiableValues, Duration, FaceDownProfile, StaticDefinition, TargetRef,
+};
+use super::card::PrintedCardRef;
 use super::card_type::{CoreType, Supertype};
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
@@ -124,6 +127,29 @@ pub struct TokenSpec {
     /// each created token without re-reading ability.targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_to: Option<AttachTarget>,
+}
+
+/// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same
+/// `CreateToken` proposed event that ordinary token creation uses for
+/// replacement effects. `TokenSpec` remains the replacement-visible probe
+/// characteristics; this payload carries the full copiable values needed once
+/// the event is accepted, including display metadata that is not copiable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyTokenSpec {
+    pub values: Box<CopiableValues>,
+    pub display_source: DisplaySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_keywords: Vec<Keyword>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_modifications: Vec<ContinuousModification>,
+    pub tapped: bool,
+    pub enters_attacking: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sacrifice_at: Option<Duration>,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -256,6 +282,12 @@ pub enum ProposedEvent {
         /// Resolved token characteristics, keyed by replacement pipeline
         /// matchers on the apply path to reproduce the token faithfully.
         spec: Box<TokenSpec>,
+        /// CR 707.2: When present, the event creates tokens that are copies of
+        /// a permanent. Replacement matching still reads `spec`; the apply path
+        /// reads this payload so replacement-choice resume does not degrade to a
+        /// generic token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<Box<CopyTokenSpec>>,
         /// Explicit ETB tap-state override carried through the replacement pipeline.
         /// `Unspecified` preserves the token spec's authored `tapped` bit.
         #[serde(default)]
@@ -678,6 +710,7 @@ mod tests {
                     controller: PlayerId(0),
                     attach_to: None,
                 }),
+                copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: 1,
                 applied: HashSet::new(),

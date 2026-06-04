@@ -1483,10 +1483,114 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
             frequency,
             play_mode: CardPlayMode::Cast,
             cost,
+            // CR 113.6b: The "this turn" suffix scoped the pool to the per-turn
+            // rolling list; this Maralen-class permission has no turn-of-use
+            // restriction beyond its once-each-turn frequency.
+            pool: ExileCardPool::ThisTurn,
+            timing: ExileCastTiming::AnyTime,
         })
         .affected(filter)
         .description(text.to_string()),
     )
+}
+
+/// CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: Parse the persistent,
+/// name-anchored exile-play permission — "[During your turn, ]you may play
+/// lands and cast spells from among cards exiled with ~[.]" (The Matrix of
+/// Time) and the "you may look at cards exiled with ~, and you may play lands
+/// and cast spells from among those cards." variant (the Prosper/Tibalt
+/// impulse-commander class).
+///
+/// Distinguished from `try_parse_exile_cast_permission` (Maralen) by:
+/// - **No "this turn" pool bound** → `pool: ExileCardPool::Persistent` reads the
+///   lifetime `exile_links` set rather than the per-turn rolling list.
+/// - **`Unlimited` frequency** → no once-per-turn cast slot.
+/// - **`play_mode: Play`** → CR 305.1: "play lands and cast spells" collapses to
+///   `Play`, which covers both lands (played) and non-land cards (cast). The
+///   affected filter is `Any`; the persistent pool itself is the scope.
+///
+/// The optional leading "during your turn, " → `timing: YourTurnOnly`
+/// (CR 117.1c). The "you may look at …" preamble is purely informational
+/// (CR 601.3f: the controller must be able to look at the cards to cast them;
+/// for face-up impulse exile this is always satisfiable) and is consumed
+/// without affecting the emitted permission.
+pub(crate) fn try_parse_persistent_exile_play_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // Optional leading timing qualifier. CR 117.1c: "during your turn, " gates
+    // the permission to the source controller's turn.
+    let (rest, timing) = match nom_tag_lower(lower, lower, "during your turn, ") {
+        Some(r) => (r, ExileCastTiming::YourTurnOnly),
+        None => (lower, ExileCastTiming::AnyTime),
+    };
+
+    // Optional "you may look at cards exiled with <self>, and " preamble
+    // (CR 601.3f). When present, the play clause uses the "those cards" anaphor
+    // rather than re-naming the source; when absent, the play clause names the
+    // source directly via "from among cards exiled with <self>".
+    let after_look = strip_look_at_exiled_preamble(rest);
+    let uses_anaphor = after_look.is_some();
+    let rest = after_look.unwrap_or(rest);
+
+    // Core permission phrase. CR 305.1: "play lands and cast spells" → Play mode.
+    let rest = nom_tag_lower(rest, rest, "you may play lands and cast spells from among ")?;
+
+    // The play clause either names the source ("cards exiled with <self>") or
+    // refers back to the look-at preamble's set ("those cards").
+    let after_clause = if uses_anaphor {
+        nom_tag_lower(rest, rest, "those cards")?
+    } else {
+        let after_anchor = nom_tag_lower(rest, rest, "cards exiled with ")?;
+        strip_self_reference(after_anchor)?
+    };
+
+    // CR 113.6b: A trailing period is the only permitted remainder; any other
+    // tail is an unmodeled shape — decline so it surfaces as a coverage gap
+    // rather than a silent misparse.
+    let tail = after_clause.trim_start();
+    // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
+    let tail = tail.strip_prefix('.').unwrap_or(tail); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
+    if !tail.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::ExileCastPermission {
+            // CR 601.2a: No once-per-turn cap on this class.
+            frequency: CastFrequency::Unlimited,
+            // CR 305.1: Play covers lands (played) and non-land cards (cast).
+            play_mode: CardPlayMode::Play,
+            // CR 305.1 / CR 601.3: Cards are played/cast at their normal cost.
+            cost: ExileCastCost::PayNormalCost,
+            // CR 406.6: Lifetime per-source exile-link pool.
+            pool: ExileCardPool::Persistent,
+            timing,
+        })
+        // CR 305.1: The permission applies to every card in the source's exile
+        // pool; the pool itself is the scope, so no type/MV constraint.
+        .affected(TargetFilter::Any)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 601.3f + CR 113.6b: Strip the "you may look at cards exiled with
+/// <self>, and " informational preamble. Returns the remainder after the
+/// conjunction when present, else `None`.
+fn strip_look_at_exiled_preamble(lower: &str) -> Option<&str> {
+    let rest = std::iter::once("you may look at cards exiled with ")
+        .chain(std::iter::once("you may look at the cards exiled with "))
+        .find_map(|prefix| nom_tag_lower(lower, lower, prefix))?;
+    let rest = strip_self_reference(rest)?;
+    nom_tag_lower(rest, rest, ", and ")
+}
+
+/// CR 113.6b + CR 201.5: Strip a self-reference token (`~` normalized name, or
+/// any `SELF_REF_PARSE_ONLY_PHRASES` spelling like "this card") from the front.
+fn strip_self_reference(lower: &str) -> Option<&str> {
+    std::iter::once("~")
+        .chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied())
+        .find_map(|phrase| nom_tag_lower(lower, lower, phrase))
 }
 
 /// CR 401.5 + CR 118.9 + CR 601.2a: Parse "you may [play|cast] [filter] from

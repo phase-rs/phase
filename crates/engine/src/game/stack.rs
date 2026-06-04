@@ -4381,6 +4381,56 @@ mod tests {
             assert_eq!(token_ids(&state).len(), 10);
         }
 
+        // §3.4 + CR 614.1a + CR 707.2 (issue #1511): a mandatory token-count
+        // doubler applies to a `CopyTokenOf` swap collapsed into the copy-prefix
+        // batch — each of the 5 self-copy resolutions creates one copy doubled
+        // to two, for 10 copy tokens. Locks in that routing copy-token creation
+        // through the `CreateToken` replacement pipeline doubles uniformly on
+        // the batched copy path without double-counting.
+        #[test]
+        fn mandatory_token_doubling_batches_and_doubles_copy_prefix() {
+            let mut state = setup();
+            add_lands(&mut state, 6); // 6 lands ⇒ the copy-instead branch fires.
+            let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
+            let sub = copy_instead_sub(src, 6);
+
+            // Doubling Season: mandatory, controller-scoped token-count doubler.
+            let ds_id = create_object(
+                &mut state,
+                CardId(905),
+                PlayerId(0),
+                "Doubling Season".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&ds_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let repl = doubling_season_replacement();
+                Arc::make_mut(&mut obj.base_replacement_definitions).push(repl.clone());
+                obj.replacement_definitions.push(repl);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            push_token_triggers(
+                &mut state,
+                src,
+                insect_token_effect(),
+                Some(Box::new(sub)),
+                5,
+            );
+            resolve_to_empty_batched(&mut state);
+            // 5 copy resolutions × 2 (Doubling Season) = 10 "Scout" copy tokens.
+            let copies = state
+                .objects
+                .values()
+                .filter(|o| o.is_token && o.name == "Scout")
+                .count();
+            assert_eq!(
+                copies, 10,
+                "doubler must apply to each batched copy-token resolution (issue #1511)"
+            );
+        }
+
         /// Push `n` identical untargeted Token triggers from `source_id`, each
         /// carrying the given entry-level intervening-if `condition` (CR 603.4).
         fn push_token_triggers_with_condition(
