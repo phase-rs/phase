@@ -129,7 +129,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CardsDrawn { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
-        | GameEvent::CardsRevealed { .. } => LogCategory::Zone,
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::Foretold { .. } => LogCategory::Zone,
 
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
@@ -162,6 +163,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::VehicleCrewed { .. }
         | GameEvent::Stationed { .. }
         | GameEvent::Saddled { .. }
+        // CR 702.140c + CR 730.2: a mutating creature spell merged with a permanent.
+        | GameEvent::Mutated { .. }
         | GameEvent::BecomesPlotted { .. } => LogCategory::State,
 
         GameEvent::SpeedChanged { .. } => LogCategory::Special,
@@ -655,6 +658,17 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             ]
         }
 
+        // CR 702.140c + CR 730.2: a mutating creature spell merged with a permanent.
+        GameEvent::Mutated {
+            merged_id,
+            merging_id,
+            ..
+        } => vec![
+            card_seg(state, *merging_id),
+            text(" mutates onto "),
+            card_seg(state, *merged_id),
+        ],
+
         GameEvent::TurnedFaceUp { object_id } => {
             vec![card_seg(state, *object_id), text(" is turned face up")]
         }
@@ -1075,6 +1089,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *host),
             text(" revoked debug actions from "),
             player_seg(state, *player_id),
+        ],
+        GameEvent::Foretold {
+            player_id,
+            object_id,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" foretold "),
+            card_seg(state, *object_id),
         ],
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already

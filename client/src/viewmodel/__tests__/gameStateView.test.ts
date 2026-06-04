@@ -4,6 +4,7 @@ import type { GameState, PlayerId } from "../../adapter/types";
 import {
   getOpponentIds,
   getSeatCount,
+  getWaitingForObjectChoiceIds,
   isOneOnOne,
 } from "../gameStateView";
 
@@ -73,6 +74,17 @@ describe("isOneOnOne", () => {
 
   it("returns false for a null state", () => {
     expect(isOneOnOne(null)).toBe(false);
+  });
+});
+
+describe("getWaitingForObjectChoiceIds", () => {
+  it("returns valid_tokens for PopulateChoice", () => {
+    expect(
+      getWaitingForObjectChoiceIds({
+        type: "PopulateChoice",
+        data: { player: 0, source_id: 1, valid_tokens: [10, 11] },
+      }),
+    ).toEqual([10, 11]);
   });
 });
 

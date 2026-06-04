@@ -240,6 +240,15 @@ pub fn resolve_all(
         .collect();
 
     for &obj_id in &matching {
+        // CR 122.1c: "If this permanent would be destroyed as the result of an
+        // effect, instead remove a shield counter from it." A mass-destruction
+        // effect (Wrath of God / `Effect::DestroyAll`) is an effect, so the
+        // shield replacement applies here exactly as in the single-target
+        // `destroy_single_object` guard — consume one counter and skip.
+        if replacement::consume_shield_counter(state, obj_id, events) {
+            continue;
+        }
+
         let proposed = ProposedEvent::Destroy {
             object_id: obj_id,
             source: Some(ability.source_id),
@@ -283,8 +292,11 @@ pub fn resolve_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{
+        AbilityCondition, PtValue, QuantityExpr, SubAbilityLink, TargetFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -313,6 +325,65 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(!state.battlefield.contains(&obj_id));
+        assert!(state.players[0].graveyard.contains(&obj_id));
+    }
+
+    /// CR 122.1c: a permanent with shield counters is not destroyed by a
+    /// destruction effect; one shield counter is removed instead, per use.
+    #[test]
+    fn shield_counter_prevents_destruction_and_is_consumed_per_use() {
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        // CR 122.1c: one or more shield counters share a single replacement.
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        // First destruction: prevented, one shield counter removed (2 -> 1).
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            state.battlefield.contains(&obj_id),
+            "shield counter must prevent destruction"
+        );
+        assert_eq!(
+            state.objects[&obj_id].counters.get(&CounterType::Shield),
+            Some(&1)
+        );
+
+        // Second destruction: removes the last counter (1 -> 0); still alive.
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(state.battlefield.contains(&obj_id));
+        assert_eq!(
+            state.objects[&obj_id].counters.get(&CounterType::Shield),
+            None
+        );
+
+        // Third destruction: no shield left -> destroyed.
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(
+            !state.battlefield.contains(&obj_id),
+            "with no shield counter, the permanent is destroyed"
+        );
         assert!(state.players[0].graveyard.contains(&obj_id));
     }
 
@@ -374,6 +445,101 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.battlefield.contains(&obj_id));
+    }
+
+    fn make_if_you_do_token_rider(source_id: ObjectId) -> ResolvedAbility {
+        let mut rider = ResolvedAbility::new(
+            Effect::Token {
+                name: "Destroy Rider Token".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string()],
+                colors: Vec::new(),
+                keywords: Vec::new(),
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: Vec::new(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+            },
+            Vec::new(),
+            source_id,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::effect_performed());
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+        rider
+    }
+
+    fn destroy_with_if_you_do_rider(target: ObjectId) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(make_if_you_do_token_rider(ObjectId(100))));
+        ability
+    }
+
+    /// CR 608.2c + CR 701.8a: a mandatory destroy instruction that actually
+    /// moves the target satisfies its following "if you do" rider.
+    #[test]
+    fn mandatory_destroy_if_you_do_rider_fires_when_destroyed() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mortal Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = destroy_with_if_you_do_rider(obj_id);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(!state.battlefield.contains(&obj_id));
+        assert!(state
+            .objects
+            .values()
+            .any(|obj| obj.is_token && obj.name == "Destroy Rider Token"));
+    }
+
+    /// CR 608.2c + CR 702.12b: a skipped destroy instruction did not happen,
+    /// so it must not satisfy a following "if you do" rider.
+    #[test]
+    fn mandatory_destroy_if_you_do_rider_skips_when_indestructible() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Indestructible Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Indestructible);
+        let ability = destroy_with_if_you_do_rider(obj_id);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state.battlefield.contains(&obj_id));
+        assert!(!state
+            .objects
+            .values()
+            .any(|obj| obj.is_token && obj.name == "Destroy Rider Token"));
     }
 
     #[test]
@@ -463,6 +629,68 @@ mod tests {
         assert!(!state.battlefield.contains(&bear2));
         // Land survives
         assert_eq!(state.battlefield.len(), 1);
+    }
+
+    /// CR 122.1c: a shield counter replaces destruction from a mass-destruction
+    /// effect (board wipe), not just single-target destruction. The shielded
+    /// creature survives (one counter removed); an unshielded creature dies.
+    #[test]
+    fn shield_counter_prevents_destroy_all_and_is_consumed() {
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(42);
+
+        let shielded = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&shielded).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Shield, 1);
+        }
+
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::None,
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolve_all(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(
+            state.battlefield.contains(&shielded),
+            "shield counter must save the creature from a board wipe"
+        );
+        assert_eq!(
+            state.objects[&shielded].counters.get(&CounterType::Shield),
+            None,
+            "the shield counter is consumed"
+        );
+        assert!(
+            !state.battlefield.contains(&plain),
+            "unshielded creature is destroyed by the board wipe"
+        );
     }
 
     #[test]
@@ -747,8 +975,7 @@ mod tests {
     // `QuantityRef::TrackedSetSize` resolve against the correct count.
     // ---------------------------------------------------------------------
 
-    use crate::game::effects::resolve_ability_chain;
-    use crate::types::ability::{QuantityExpr, QuantityRef, TypeFilter, TypedFilter};
+    use crate::types::ability::{QuantityRef, TypeFilter, TypedFilter};
 
     /// Builds the Fumigate-shape chain: `DestroyAll(creatures)` followed by
     /// `GainLife(amount = TrackedSetSize, player = Controller)`.

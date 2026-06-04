@@ -271,9 +271,11 @@ export function GameSetupPage() {
         {/* `grid-cols-1` (= minmax(0,1fr)) is REQUIRED at mobile: without an
             explicit base template the grid falls back to an auto column that
             sizes to the deck grid's min-content (~628px) and overflows the
-            viewport (clipped by the scene's overflow-hidden). The lg template
-            takes over for the deck-grid + sidebar split. */}
-        <div className="grid w-full grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
+            viewport (clipped by the scene's overflow-hidden). The md template
+            takes over for the deck-grid + sidebar split — splitting at md
+            (768px) rather than lg keeps tablets on the compact 280px sidebar
+            instead of ballooning the deck-preview art into a full-width hero. */}
+        <div className="grid w-full grid-cols-1 gap-6 md:grid-cols-[minmax(0,1fr)_280px]">
           {/* Deck grid */}
           <MyDecks
             mode="select"
@@ -287,7 +289,7 @@ export function GameSetupPage() {
           />
 
           {/* Sidebar */}
-          <div className="order-first lg:sticky lg:top-8 lg:order-last lg:self-start">
+          <div className="order-first md:sticky md:top-8 md:order-last md:self-start">
             <MenuPanel className="flex flex-col gap-4 px-4 py-4">
               {/* Deck preview */}
               {activeDeckName ? (

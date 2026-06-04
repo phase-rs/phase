@@ -10,15 +10,15 @@ use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient,
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
-    CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, FilterProp,
-    ManaContribution, ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition,
-    TargetFilter, TypedFilter,
+    ChosenSubtypeKind, CommanderOwnership, ContinuousModification, CopiableValues, Duration,
+    Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope, QuantityExpr,
+    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::{has_positive_counters, CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -38,7 +38,11 @@ struct ActiveCombatAssignmentRuleEffect {
 }
 
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
-fn subtype_matches_core_types(
+/// CR 205.1a: Whether a subtype correlates to at least one of the given core
+/// types — i.e. whether it survives a card-type replacement. Shared with the
+/// token-copy "stamp at creation" path so both the layered and baked
+/// applications of `SetCardTypes` drop the same uncorrelated subtypes.
+pub(crate) fn subtype_matches_core_types(
     subtype: &str,
     core_types: &[CoreType],
     all_creature_types: &[String],
@@ -1280,6 +1284,7 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
 
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, bf_ids.iter().copied());
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
         }
         if matches!(*layer, Layer::Control | Layer::Type) {
@@ -1722,7 +1727,7 @@ fn entered_object_blocks_incremental(
     //     genuine new entry are sourced by statics already covered by (1)/(2).
     //     A controller differing from the base controller indicates a Layer-2
     //     override the incremental path does not reset for the rest of the board.
-    if !obj.counters.is_empty() {
+    if has_positive_counters(&obj.counters) {
         return true;
     }
     if obj.attached_to.is_some() || !obj.attachments.is_empty() {
@@ -1822,6 +1827,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             apply_pt_counter_modifications(state, entered_ids.iter().copied());
         }
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, entered_ids.iter().copied());
             let entered_vec: Vec<ObjectId> = entered_ids.iter().copied().collect();
             apply_intrinsic_basic_land_mana_abilities(state, &entered_vec);
         }
@@ -1894,6 +1900,25 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .collect()
 }
 
+/// CR 718.3b: A prototyped spell and the permanent it becomes have only their
+/// alternative mana cost and P/T characteristics. If that mana cost contains
+/// colored mana symbols, the spell/permanent is those colors. Reapply this after
+/// layer reset so the prototype marker survives normal layer recomputation.
+fn apply_prototype_characteristics(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
+    for id in ids {
+        let Some(obj) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        let Some(form) = obj.prototype_form.clone() else {
+            continue;
+        };
+        obj.mana_cost = form.mana_cost;
+        obj.power = Some(form.power);
+        obj.toughness = Some(form.toughness);
+        obj.color = form.colors;
+    }
+}
+
 /// CR 613.4c: Fold each permanent's power/toughness counters into its P/T in
 /// layer 7c. Counters are object state rather than continuous effects, so this
 /// runs at the `Layer::CounterPT` step of the layer loop — after the 7c `+N/+N`
@@ -1903,7 +1928,7 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
 fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
     for id in ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            if obj.counters.is_empty() {
+            if !has_positive_counters(&obj.counters) {
                 continue;
             }
 
@@ -2677,6 +2702,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddAllLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType
     );
 
     if b_changes_types && filter_references_type(&a.affected_filter) {
@@ -2990,6 +3016,7 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. } => None,
@@ -3050,16 +3077,22 @@ fn apply_continuous_effect_filtered(
 
     record_attribution(state, effect, &affected_ids);
 
-    // Pre-read chosen subtype from source (avoids borrow conflict in the loop)
-    let chosen_subtype =
-        if let ContinuousModification::AddChosenSubtype { ref kind } = effect.modification {
-            state
-                .objects
-                .get(&effect.source_id)
-                .and_then(|src| src.chosen_subtype_str(kind))
-        } else {
-            None
-        };
+    // Pre-read chosen subtype from source (avoids borrow conflict in the loop).
+    // Populated for `AddChosenSubtype { kind }` (additive — creature type or
+    // basic land type) AND for `SetChosenBasicLandType` (CR 305.7 replacement
+    // of a land's subtype with the source's chosen basic land type). The latter
+    // is implicitly `ChosenSubtypeKind::BasicLandType`.
+    let chosen_subtype_kind = match effect.modification {
+        ContinuousModification::AddChosenSubtype { ref kind } => Some(kind),
+        ContinuousModification::SetChosenBasicLandType => Some(&ChosenSubtypeKind::BasicLandType),
+        _ => None,
+    };
+    let chosen_subtype = chosen_subtype_kind.and_then(|kind| {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.chosen_subtype_str(kind))
+    });
 
     // Pre-read chosen color from source (avoids borrow conflict in the loop).
     // Used by `AddChosenColor` (CR 105.3) AND by `AddKeyword` when the keyword
@@ -3618,15 +3651,21 @@ fn apply_continuous_effect_filtered(
             // Abilities granted by other effects are re-added in Layer 6.
             // Intrinsic mana abilities are derived from subtypes in mana_sources.rs.
             ContinuousModification::SetBasicLandType { land_type } => {
-                obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
-                obj.card_types
-                    .subtypes
-                    .push(land_type.as_subtype_str().to_string());
-                Arc::make_mut(&mut obj.abilities).clear();
-                obj.trigger_definitions.clear();
-                obj.replacement_definitions.clear();
-                obj.static_definitions.clear();
-                obj.keywords.clear();
+                set_land_subtype_replacing(obj, land_type.as_subtype_str().to_string());
+            }
+            // CR 305.7 + CR 305.6: Set the land's subtype to the basic land type
+            // chosen by the granting source (Phantasmal Terrain, Convincing
+            // Mirage). Identical replacement semantics to `SetBasicLandType` —
+            // remove old land subtypes (CR 205.3i), clear abilities/triggers/
+            // replacements/statics/keywords generated from rules text — except
+            // the concrete subtype is the source's pre-read `chosen_subtype`
+            // (read above for `BasicLandType`). The intrinsic mana ability is
+            // derived from the subtype in `mana_sources.rs` (CR 305.6). If no
+            // choice was recorded, this is a no-op.
+            ContinuousModification::SetChosenBasicLandType => {
+                if let Some(ref subtype) = chosen_subtype {
+                    set_land_subtype_replacing(obj, subtype.clone());
+                }
             }
             // CR 707.9a: Retain the source's printed trigger on the copy.
             // After `CopyValues` overwrote `obj.trigger_definitions` with the
@@ -3642,6 +3681,18 @@ fn apply_continuous_effect_filtered(
             }
         }
     }
+}
+
+// CR 305.7: Setting a land subtype replaces old land subtypes and removes the
+// land's rules-text abilities; layer 6 reapplies abilities from other effects.
+fn set_land_subtype_replacing(obj: &mut crate::game::game_object::GameObject, subtype: String) {
+    obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
+    obj.card_types.subtypes.push(subtype);
+    Arc::make_mut(&mut obj.abilities).clear();
+    obj.trigger_definitions.clear();
+    obj.replacement_definitions.clear();
+    obj.static_definitions.clear();
+    obj.keywords.clear();
 }
 
 /// CR 305.6: After layer 4 establishes final land types, derive each land's
@@ -3891,6 +3942,71 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    #[test]
+    fn prototyped_permanent_keeps_secondary_characteristics_after_type_change() {
+        let mut state = setup();
+        let prototype = make_creature(&mut state, "Combat Thresher", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&prototype).unwrap();
+            obj.card_types.core_types.insert(0, CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.base_color.clear();
+            obj.color.clear();
+            obj.prototype_form = Some(crate::game::game_object::PrototypeFormState {
+                mana_cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 2,
+                },
+                power: 1,
+                toughness: 1,
+                colors: vec![ManaColor::White],
+            });
+        }
+
+        evaluate_layers(&mut state);
+        let as_creature = state.objects.get(&prototype).unwrap();
+        assert_eq!(as_creature.mana_cost.mana_value(), 3);
+        assert_eq!(as_creature.power, Some(1));
+        assert_eq!(as_creature.toughness, Some(1));
+        assert_eq!(as_creature.color, vec![ManaColor::White]);
+
+        let type_changer = create_object(
+            &mut state,
+            CardId(161),
+            PlayerId(0),
+            "Prototype Shell".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&type_changer).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: prototype })
+                    .modifications(vec![ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Artifact],
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+        let noncreature = state.objects.get(&prototype).unwrap();
+        assert_eq!(noncreature.mana_cost.mana_value(), 3);
+        assert_eq!(noncreature.power, Some(1));
+        assert_eq!(noncreature.toughness, Some(1));
+        assert_eq!(noncreature.color, vec![ManaColor::White]);
+        assert!(!noncreature
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
     }
 
     /// Places a battlefield commander object with the given owner/controller.
@@ -7539,6 +7655,99 @@ mod tests {
         assert!(
             !land.card_types.subtypes.contains(&"Desert".to_string()),
             "CR 305.7: Old land subtypes should be removed"
+        );
+    }
+
+    #[test]
+    fn set_chosen_basic_land_type_reads_source_choice() {
+        // CR 305.7 + CR 305.6: Phantasmal Terrain / Convincing Mirage. The Aura
+        // (source) recorded a chosen basic land type as it entered; its
+        // SetChosenBasicLandType static must set the ENCHANTED land's subtype to
+        // that chosen type with full replacement semantics — old land subtype and
+        // rules-text abilities cleared, intrinsic mana ability for the new type
+        // derived (CR 305.6).
+        use crate::types::ability::{BasicLandType, ChosenAttribute};
+
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        // Enchanted land: starts as a Swamp with a rules-text ability.
+        let land_id = make_land(&mut state, "Test Swamp", p0);
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.subtypes.push("Swamp".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            Arc::make_mut(&mut obj.base_abilities).push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+            obj.abilities = Arc::new((*obj.base_abilities).clone());
+        }
+
+        // Source Aura: chose Island as it entered, carries the chosen-type static
+        // anchored to its enchanted land.
+        let aura_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Convincing Mirage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.attached_to = Some(land_id.into());
+            obj.chosen_attributes
+                .push(ChosenAttribute::BasicLandType(BasicLandType::Island));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![ContinuousModification::SetChosenBasicLandType]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .attachments
+            .push(aura_id);
+
+        evaluate_layers(&mut state);
+
+        let land = state.objects.get(&land_id).unwrap();
+        assert!(
+            land.card_types.subtypes.contains(&"Island".to_string()),
+            "CR 305.7: enchanted land should gain the source's chosen Island subtype"
+        );
+        assert!(
+            !land.card_types.subtypes.contains(&"Swamp".to_string()),
+            "CR 305.7: old land subtype should be removed"
+        );
+        assert!(
+            !land
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::GainLife { .. })),
+            "CR 305.7: rules-text abilities should be removed"
+        );
+        assert_eq!(
+            count_mana_abilities(land, ManaColor::Blue),
+            1,
+            "CR 305.6: chosen Island should grant the intrinsic blue mana ability"
+        );
+        assert_eq!(
+            count_mana_abilities(land, ManaColor::Black),
+            0,
+            "CR 305.7: old Swamp mana ability should be gone"
         );
     }
 

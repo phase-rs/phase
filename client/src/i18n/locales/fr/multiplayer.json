@@ -156,7 +156,8 @@
     "hostGame": "Héberger une partie",
     "hostP2PGame": "Héberger une partie P2P",
     "passwordRequired": "Mot de passe requis",
-    "passwordPlaceholder": "Saisissez le mot de passe"
+    "passwordPlaceholder": "Saisissez le mot de passe",
+    "watch": "Watch"
   },
   "hostSetup": {
     "hostDirectMatch": "Héberger un match direct",

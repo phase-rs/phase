@@ -456,6 +456,7 @@ fn can_pay_resolution_ability_cost(
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice { .. }
         | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }

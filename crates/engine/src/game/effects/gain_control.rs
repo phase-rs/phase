@@ -534,6 +534,7 @@ mod tests {
         .sub_ability(give_control);
         let ability = ResolvedAbility::new(
             Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
                 sides: 4,
                 results: vec![],
                 modifier: None,
