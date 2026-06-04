@@ -1438,7 +1438,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // applied before trigger conditions like "if you have the city's blessing"
                 // are evaluated (Twilight Prophet #1375).
                 super::sba::check_state_based_actions(state, events);
-                if !matches!(state.waiting_for, WaitingFor::None) {
+                if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                     return state.waiting_for.clone();
                 }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
