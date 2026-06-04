@@ -842,14 +842,8 @@ pub enum Keyword {
     /// (combat-damage-this-turn predicate) is not yet wired.
     Freerunning(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (spell-cast trigger not wired).
-    /// CR 702.191a: Increment — triggered ability. "Whenever you cast a
-    /// spell, if this permanent is a creature and the amount of mana
-    /// spent to cast that spell is greater than this creature's power
-    /// or this creature's toughness, put a +1/+1 counter on this
-    /// creature." Bare keyword; ETB / spell-cast trigger is not yet
-    /// wired.
+    /// CR 702.191a: Increment — spell-cast trigger synthesized in
+    /// `database::synthesis::synthesize_increment`.
     Increment,
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
@@ -865,15 +859,13 @@ pub enum Keyword {
     /// drops its `Vec<Level>` payload).
     Specialize(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (cost-reduction + cast-as-instant hooks not wired).
-    /// CR 702.48a: "[Quality] offering" — additional-cost-on-cast that
-    /// sacrifices a permanent matching `Quality`. "If you chose to pay
-    /// the additional cost, this spell's total cost is reduced by the
-    /// sacrificed permanent's mana cost, and you may cast this spell any
-    /// time you could cast an instant." Carries the canonical subtype
-    /// string (e.g. "Spirit", "Dragon"); cost-reduction and cast-as-
-    /// instant runtime hooks are not yet wired.
+    /// CR 702.48a: "[Quality] offering" — as an additional cost to cast this
+    /// spell, you may sacrifice a [Quality] permanent. If you do, this spell's
+    /// total cost is reduced by the sacrificed permanent's mana cost (CR 702.48c),
+    /// and you may cast this spell any time you could cast an instant. Carries
+    /// the canonical subtype string (e.g. "Spirit", "Dragon"). Runtime behavior
+    /// is fully wired: timing unlock, sacrifice selection, and cost reduction in
+    /// `casting_costs.rs`.
     Offering(String),
 
     /// Fallback for unrecognized keywords.
@@ -1125,7 +1117,9 @@ impl Keyword {
     ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
     ///   loops in `game/triggers.rs`.
     /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
-    ///   triggers separately) / Exalted (CR 702.83a: a triggered ability;
+    ///   triggers separately) / Increment (CR 702.191a: a triggered ability;
+    ///   CR 702.191b: each instance triggers separately) / Exalted (CR 702.83a:
+    ///   a triggered ability;
     ///   per-instance multiplicity grounded in the general CR 113.2c rule, since
     ///   CR 702.83 has no card-specific multiplicity clause) — one trigger is
     ///   installed per face `Keyword` instance by
@@ -1143,6 +1137,7 @@ impl Keyword {
             Keyword::Cascade
                 | Keyword::Storm
                 | Keyword::Myriad
+                | Keyword::Increment
                 | Keyword::Exalted
                 | Keyword::DoubleTeam
         )
@@ -1313,7 +1308,8 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 /// into a `TypeFilter::Subtype` (the bug fixed by issue #537).
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     use crate::parser::oracle_nom::enchant::{
-        parse_enchant_controller_suffix, parse_enchant_player_base, parse_enchant_type_leg,
+        parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
+        parse_enchant_player_base, parse_enchant_type_leg,
     };
     use crate::parser::oracle_nom::error::OracleResult;
     use crate::parser::oracle_nom::filter::parse_zone_filter;
@@ -1386,21 +1382,33 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     let (rest, _card_word) = opt(parse_card_word).parse(rest).ok()?;
     let (rest, zone) = opt(parse_leading_zone).parse(rest).ok()?;
     let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
+    // CR 303.4 + CR 702.5a: Optional trailing attachment qualifier — "with
+    // another Aura attached to it" (Daybreak Coronet) narrows the legal target
+    // set to objects that already carry an attachment of the named kind.
+    let (rest, attachment) = opt(parse_enchant_attachment_qualifier).parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
     // Reject fully empty input — every other degenerate variant lacks a type
     // word AND a zone word AND a controller, so it cannot be a meaningful
-    // enchant clause.
+    // enchant clause. (An attachment qualifier cannot stand alone: its leading
+    // space requires a preceding type leg, so it never reaches this guard.)
     if type_filter.is_none() && zone.is_none() && controller.is_none() {
         return None;
     }
 
     // CR 303.4a: When the type leg is absent (Don't Worry About It), the
     // class is "any card", encoded as `TypeFilter::Card`.
-    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    let mut props = Vec::new();
     if let Some(z) = zone {
-        filter = filter.properties(vec![FilterProp::InZone { zone: z }]);
+        props.push(FilterProp::InZone { zone: z });
+    }
+    if let Some(prop) = attachment {
+        props.push(prop);
+    }
+    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    if !props.is_empty() {
+        filter = filter.properties(props);
     }
     if let Some(c) = controller {
         filter = filter.controller(c);
@@ -1865,6 +1873,7 @@ impl FromStr for Keyword {
             "totemarmor" => Ok(Keyword::TotemArmor),
             "evolve" => Ok(Keyword::Evolve),
             "extort" => Ok(Keyword::Extort),
+            "increment" => Ok(Keyword::Increment),
             "exploit" => Ok(Keyword::Exploit),
             "explore" => Ok(Keyword::Explore),
             "ascend" => Ok(Keyword::Ascend),
@@ -2146,6 +2155,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Flanking" => Ok(Keyword::Flanking),
         "Evolve" => Ok(Keyword::Evolve),
         "Extort" => Ok(Keyword::Extort),
+        "Increment" => Ok(Keyword::Increment),
         "Exploit" => Ok(Keyword::Exploit),
         "Explore" => Ok(Keyword::Explore),
         "Ascend" => Ok(Keyword::Ascend),
@@ -2935,6 +2945,53 @@ mod tests {
         }
     }
 
+    /// CR 303.4 + CR 702.5a: Daybreak Coronet — "Enchant creature with another
+    /// Aura attached to it" narrows the legal host set to creatures that already
+    /// carry another Aura. The qualifier folds onto the typed filter as
+    /// `FilterProp::HasAttachment { Aura, exclude_source: true }` so SBA
+    /// legality cannot let Daybreak Coronet count itself after it resolves.
+    #[test]
+    fn parse_enchant_creature_with_another_aura_attached() {
+        use super::super::ability::{AttachmentKind, TypeFilter};
+        let enchant =
+            Keyword::from_str("Enchant:creature with another aura attached to it").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+            panic!("expected Typed; got {enchant:?}")
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.contains(&FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: None,
+                exclude_source: true,
+            }),
+            "expected FilterProp::HasAttachment {{ Aura, exclude_source }}; got {:?}",
+            tf.properties
+        );
+    }
+
+    /// Regression guard: a plain "Enchant creature" must NOT acquire an
+    /// attachment predicate — only the explicit qualifier adds `HasAttachment`.
+    #[test]
+    fn parse_enchant_plain_creature_has_no_attachment_predicate() {
+        use super::super::ability::AttachmentKind;
+        let enchant = Keyword::from_str("Enchant:creature").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+            panic!("expected Typed; got {enchant:?}")
+        };
+        assert!(
+            !tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    ..
+                }
+            )),
+            "plain Enchant creature must carry no HasAttachment prop; got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn parse_enchant_with_controller_restriction() {
         let enchant = Keyword::from_str("Enchant:creature you control").unwrap();
@@ -3146,6 +3203,15 @@ mod tests {
         ));
     }
 
+    /// CR 702.191: MTGJSON keyword ingestion must parse Increment, not Unknown.
+    #[test]
+    fn increment_from_str_and_keyword_from_tagged() {
+        assert_eq!(Keyword::from_str("Increment").unwrap(), Keyword::Increment);
+        assert_eq!(Keyword::from_str("increment").unwrap(), Keyword::Increment);
+        let kw = keyword_from_tagged("Increment", &serde_json::Value::Null).unwrap();
+        assert_eq!(kw, Keyword::Increment);
+    }
+
     #[test]
     fn parse_hexproof_from_keywords() {
         // CR 702.11d: "hexproof from [quality]" variants
@@ -3293,6 +3359,7 @@ mod tests {
             "Totem Armor",
             "Evolve",
             "Extort",
+            "Increment",
             "Exploit",
             "Explore",
             "Ascend",

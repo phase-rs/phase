@@ -33,7 +33,7 @@ import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.t
 import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
-import { CardPreview } from "../components/card/CardPreview.tsx";
+import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
@@ -107,7 +107,6 @@ import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
-import { usePreviewDismiss } from "../hooks/usePreviewDismiss.ts";
 import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
@@ -120,12 +119,13 @@ import {
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
+import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
+import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
 import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
-import { cardImageLookup } from "../services/cardImageLookup.ts";
 
 type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
@@ -204,18 +204,22 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" =
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" | "playtest" =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
         ? "p2p-join"
         : rawMode === "draft-match"
           ? "draft-match"
-          : rawMode === "host" || rawMode === "join"
-            ? "online"
-            : rawMode === "ai"
-              ? "ai"
-              : "local";
+          : rawMode === "spectate"
+            ? "spectate"
+            : rawMode === "playtest"
+              ? "playtest"
+              : rawMode === "host" || rawMode === "join"
+                ? "online"
+                : rawMode === "ai"
+                  ? "ai"
+                  : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -376,7 +380,11 @@ export function GamePage() {
         // Store-level side effects (isSpectator, toast) already handled in ws-adapter
         break;
       case "spectatorJoined":
-        // Could show a toast, but not critical — no UI for this yet
+        useMultiplayerStore.setState((s) => ({
+          spectators: s.spectators.includes(event.name)
+            ? s.spectators
+            : [...s.spectators, event.name],
+        }));
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
@@ -585,12 +593,12 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       draftId={draftIdParam}
-      onWsEvent={mode === "online" ? handleWsEvent : undefined}
+      onWsEvent={mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
       }
       onReady={
-        mode === "online" || mode === "p2p-host" || mode === "p2p-join"
+        mode === "online" || mode === "spectate" || mode === "p2p-host" || mode === "p2p-join"
           ? handleReady
           : undefined
       }
@@ -601,7 +609,7 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
-        isOnlineMode={mode === "online"}
+        isOnlineMode={mode === "online" || mode === "spectate"}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}
@@ -696,7 +704,6 @@ function GamePageContent({
   const dispatch = useGameDispatch();
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
-  const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = useGameStore((s) => s.gameState?.objects);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const players = useGameStore((s) => s.gameState?.players);
@@ -745,6 +752,7 @@ function GamePageContent({
 
   const playerId = usePlayerId();
   const perspectivePlayerId = usePerspectivePlayerId();
+  const isSpectatorMode = useSpectatorMode();
   const canActForWaitingState = useCanActForWaitingState();
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
@@ -761,6 +769,31 @@ function GamePageContent({
   }, [eliminatedPlayers, perspectivePlayerId, players, seatOrder]);
   const activeOpponentId =
     focusedOpponent ?? opponents[0] ?? (perspectivePlayerId === 0 ? 1 : 0);
+
+  // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
+  // React.memo, which shallow-compares props; without stable element
+  // references these inline JSX nodes would be new on every GamePageContent
+  // render, defeating the memo. Stable refs let GameBoard skip re-rendering
+  // when GamePageContent re-renders for reasons that don't touch these props.
+  const oppHud = useMemo(
+    () => (
+      <OpponentHud
+        opponentName={isOnlineMode ? opponentDisplayName : undefined}
+        onKickPlayer={
+          isP2PHost
+            ? (pid) => {
+                const adapter = useGameStore.getState().adapter as
+                  | { kickPlayer?: (pid: number) => Promise<void> }
+                  | null;
+                void adapter?.kickPlayer?.(pid);
+              }
+            : undefined
+        }
+      />
+    ),
+    [isOnlineMode, opponentDisplayName, isP2PHost],
+  );
+  const playerHud = useMemo(() => <PlayerHud />, []);
 
   useAudioContext("battlefield");
 
@@ -808,35 +841,7 @@ function GamePageContent({
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
-  const isDragging = useUiStore((s) => s.isDragging);
-  const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
-  // Card-preview behavior preference (item: hover preview side/Shift). In
-  // "shift" mode the preview only renders while Shift is held; in "side" mode
-  // it docks to the screen edge instead of following the cursor.
-  const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
-  const shiftHeld = useUiStore((s) => s.shiftHeld);
-  const previewSuppressed = cardPreviewMode === "shift" && !shiftHeld;
-  const inspectedObj =
-    !isDragging && inspectedObjectId != null && objects
-      ? (objects[inspectedObjectId] ?? null)
-      : null;
-  // Scryfall lookups must use the front-face name (scryfall-data.json indexes
-  // only front faces). When a permanent has transformed, the engine swaps
-  // obj.name to the back-face name — cardImageLookup recovers the front name
-  // from obj.back_face. See services/cardImageLookup.ts (issue #90).
-  const inspectedLookup = inspectedObj ? cardImageLookup(inspectedObj) : null;
-  const inspectedCardName = inspectedObj && !inspectedObj.face_down
-    ? inspectedFaceIndex === 1 && inspectedObj.back_face
-      ? inspectedObj.back_face.name
-      : inspectedLookup?.name ?? inspectedObj.name
-    : null;
-  // The "other" face: when viewing front, this is back_face; when viewing back, this is the front
-  const inspectedOtherFaceName = inspectedObj?.back_face && !inspectedObj.face_down
-    ? inspectedFaceIndex === 1 ? inspectedObj.name : inspectedObj.back_face.name
-    : null;
-
   useKeyboardShortcuts();
-  usePreviewDismiss();
 
   // Toggle debug layout bounds with Ctrl+Shift+D
   useEffect(() => {
@@ -1021,6 +1026,7 @@ function GamePageContent({
         setBoardContextMenu({ x: e.clientX, y: e.clientY });
       }}
     >
+      <SpectatorChrome />
       <BattlefieldBackground />
       <StackDisplay />
 
@@ -1101,24 +1107,7 @@ function GamePageContent({
 
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
-          <GameBoard
-            oppHud={
-              <OpponentHud
-                opponentName={isOnlineMode ? opponentDisplayName : undefined}
-                onKickPlayer={
-                  isP2PHost
-                    ? (pid) => {
-                        const adapter = useGameStore.getState().adapter as
-                          | { kickPlayer?: (pid: number) => Promise<void> }
-                          | null;
-                        void adapter?.kickPlayer?.(pid);
-                      }
-                    : undefined
-                }
-              />
-            }
-            playerHud={<PlayerHud />}
-          />
+          <GameBoard oppHud={oppHud} playerHud={playerHud} />
         </div>
 
         {/* Row 3: Player hand + zones */}
@@ -1166,11 +1155,15 @@ function GamePageContent({
         {showFlowHelpNudge && <FlowHelpNudge />}
         {showSandboxToolsNudge && <SandboxToolsNudge />}
         <CombatPhaseIndicator />
-        <div className="flex items-center gap-1.5">
-          <HandBadge />
-          <FullControlToggle />
-        </div>
-        <ActionButton />
+        {!isSpectatorMode && (
+          <>
+            <div className="flex items-center gap-1.5">
+              <HandBadge />
+              <FullControlToggle />
+            </div>
+            <ActionButton />
+          </>
+        )}
       </div>
 
       <GameLogPanel />
@@ -1363,12 +1356,9 @@ function GamePageContent({
           to attackers that carry a minimum-blocker requirement. */}
       <BlockRequirementBadges />
 
-      {/* Card preview overlay */}
-      <CardPreview
-        cardName={previewSuppressed ? null : inspectedCardName}
-        backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
-        dockSide={cardPreviewMode === "side"}
-      />
+      {/* Card preview overlay. Owns its own inspect-state subscriptions so a
+          hover doesn't re-render GamePageContent (and the whole battlefield). */}
+      <GameCardPreview />
 
       {/* WaitingFor-driven prompt overlays (only for human player).
           Wrapped in DialogHost so any active dialog can be peeked away to
@@ -1573,10 +1563,12 @@ function GamePageContent({
             onConfirm={handleConcede}
             onCancel={onHideConcedeDialog}
           />
-          <EmoteOverlay
-            onSendEmote={handleSendEmote}
-            receivedEmote={receivedEmote}
-          />
+          {!isSpectatorMode && (
+            <EmoteOverlay
+              onSendEmote={handleSendEmote}
+              receivedEmote={receivedEmote}
+            />
+          )}
           {/* Per-player timer display */}
           {Object.entries(timerRemaining).map(([pid, secs]) =>
             secs > 0 ? (

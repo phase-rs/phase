@@ -2078,8 +2078,11 @@ pub enum FilterProp {
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
     /// (which are source-relative — match when THIS source is attached to the object),
-    /// this predicate is non-source-relative: it matches any object with a qualifying
-    /// attachment. `controller = None` means "any controller".
+    /// this predicate is non-source-relative by default: it matches any object with a
+    /// qualifying attachment. `exclude_source` preserves "another Aura/Equipment"
+    /// semantics for Aura legality so the source attachment cannot satisfy its own
+    /// "another" restriction after it becomes attached. `controller = None` means
+    /// "any controller".
     ///
     /// Covers:
     /// - "enchanted creature" when the ability source is not the Aura itself
@@ -2090,6 +2093,8 @@ pub enum FilterProp {
         kind: AttachmentKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        exclude_source: bool,
     },
     /// CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches objects that
     /// have at least one attachment whose subtype is in `kinds` and whose controller
@@ -4503,6 +4508,10 @@ pub enum CastTimingPermission {
     /// The spell was cast using an effect that allowed it to be cast as though
     /// it had flash.
     AsThoughHadFlash,
+    /// CR 702.48a: The spell was cast at instant speed by paying an Offering
+    /// additional cost. When this permission is set, the Offering sacrifice is
+    /// required (the player used the offering to unlock instant-speed timing).
+    Offering,
 }
 
 impl From<NinjutsuVariant> for CastVariantPaid {
@@ -10040,7 +10049,7 @@ pub enum TriggerCondition {
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
-    /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
+    /// CR 508.1a + CR 603.2c: "Whenever ~ and at least N other creatures attack".
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
     MinCoAttackers { minimum: u32 },
@@ -10273,8 +10282,20 @@ pub enum TriggerCondition {
     ///     CR 506.2), so counting "≠ trigger controller" is equivalent to counting the
     ///     triggering player's creatures.
     ///
+    /// `filter` is the condition-level type axis (CR 508.1): when `Some(f)`,
+    /// only attackers whose object matches `f` are counted, so "you attack with
+    /// two or more Dinosaurs" fires only on ≥2 Dinosaurs — not on one Dinosaur
+    /// plus an unrelated attacker. When `None`, every attacker in the scoped
+    /// batch is counted (the untyped "attack with two or more creatures"
+    /// behavior, preserved byte-for-byte).
+    ///
     /// True when the count meets or exceeds `minimum`.
-    AttackersDeclaredMin { scope: ControllerRef, minimum: u32 },
+    AttackersDeclaredMin {
+        scope: ControllerRef,
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 506.2 + CR 603.4: Intervening-if "if none of those creatures attacked you".
     /// Reads the triggering `AttackersDeclared` event's per-attacker `AttackTarget` tuples
     /// (CR 508.1b) and returns true iff no attacker in the batch targeted the trigger's
@@ -11702,6 +11723,18 @@ pub enum ContinuousModification {
     SetBasicLandType {
         land_type: BasicLandType,
     },
+    /// CR 305.7 + CR 305.6: Sets a land's subtype to the basic land type CHOSEN
+    /// by the granting source (e.g. Phantasmal Terrain, Convincing Mirage:
+    /// "As this Aura enters, choose a basic land type." + "Enchanted land is the
+    /// chosen type."). Mirrors `SetBasicLandType`'s replacement semantics —
+    /// removes the land's old land subtypes and clears the abilities generated
+    /// from its rules text — but reads the concrete subtype from the source
+    /// object's `chosen_attributes` (`ChosenSubtypeKind::BasicLandType`) at layer
+    /// evaluation time rather than carrying a fixed type. Unit variant: the kind
+    /// is implicitly `BasicLandType`. The intrinsic mana ability for the new type
+    /// is derived from the subtype in `mana_sources.rs` (CR 305.6), so no explicit
+    /// mana grant is needed here.
+    SetChosenBasicLandType,
     /// CR 707.9a: Retain a printed triggered ability from the source object's
     /// printed trigger list at the given index. Used by "becomes a copy of <X>,
     /// except it has this ability" patterns (Irma Part-Time Mutant, Cryptoplasm,
@@ -12612,6 +12645,7 @@ mod tests {
                     FilterProp::HasAttachment {
                         kind: AttachmentKind::Aura,
                         controller: None,
+                        exclude_source: false,
                     },
                 ])),
                 TargetFilter::Typed(TypedFilter::creature()),
@@ -12627,6 +12661,7 @@ mod tests {
                 properties: vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 }],
             })
         );

@@ -2745,6 +2745,16 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
+        // Digital-only Specialize: "specialize {cost}" — MTGJSON may omit the keyword
+        // when it appears as a standalone rules line; intercept before dispatch fallback.
+        if lower_starts_with(&lower, "specialize ") {
+            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                result.extracted_keywords.push(kw);
+                i += 1;
+                continue;
+            }
+        }
+
         // Harmonize {cost} — parse mana cost from Oracle text.
         // Must run before the spell imperative catch-all (priority 9) so the line
         // is intercepted as a keyword, not parsed as an effect.

@@ -10,14 +10,15 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
-    CardPlayMode, CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    CardPlayMode, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -231,10 +232,17 @@ impl KeywordTriggerInstaller {
             // static-on-battlefield ability that fires from the granted-from
             // moment on.
             Keyword::Graft(_) => vec![build_graft_enters_trigger()],
+            // CR 702.45a: Bushido N — fires on both "blocks" and "becomes
+            // blocked". CR 702.45b: each instance separately; one trigger per event.
+            Keyword::Bushido(n) => vec![
+                build_bushido_trigger(TriggerMode::Blocks, *n),
+                build_bushido_trigger(TriggerMode::BecomesBlocked, *n),
+            ],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
+            Keyword::Increment => vec![build_increment_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
             Keyword::DoubleTeam => vec![build_double_team_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
@@ -270,10 +278,12 @@ impl KeywordTriggerInstaller {
             // strips the Graft enters-trigger when the granted keyword is
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
+            Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
+            Keyword::Increment => is_increment_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
             Keyword::DoubleTeam => is_double_team_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
@@ -2627,11 +2637,43 @@ pub fn synthesize_exalted(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Exalted));
 }
 
+/// CR 702.45a: Bushido N — "Whenever this creature blocks or becomes blocked, it
+/// gets +N/+N until end of turn." Two self-triggers (blocks + becomes-blocked),
+/// since there is no combined block trigger mode. CR 702.45b: each instance
+/// triggers separately, so one pair is synthesized per `Keyword::Bushido`.
+pub fn synthesize_bushido(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Bushido(_)));
+}
+
 /// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
 /// each opponent for 1 life. CR 702.101b: each instance triggers separately,
 /// so one trigger is synthesized per `Keyword::Extort` instance.
 pub fn synthesize_extort(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Extort));
+}
+
+/// CR 702.191a: Increment — spell-cast trigger that puts a +1/+1 counter on this
+/// creature when mana spent to cast the spell exceeds its power or toughness.
+/// CR 702.191b: each instance triggers separately.
+pub fn synthesize_increment(face: &mut CardFace) {
+    // `install_matching` dedupes exact synthesized trigger values. Increment can
+    // also arrive from parsed reminder text, whose trigger is semantically the
+    // same but not necessarily structurally identical, so count by Increment
+    // identity instead.
+    let desired = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Increment))
+        .count();
+    let existing = face
+        .triggers
+        .iter()
+        .filter(|t| is_increment_trigger(t))
+        .count();
+
+    for _ in existing..desired {
+        face.triggers.push(build_increment_trigger());
+    }
 }
 
 /// CR 702.105a: Dethrone — an attack trigger that fires whenever this creature
@@ -3126,6 +3168,54 @@ fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
         )
 }
 
+/// CR 702.45a: Build one Bushido self-trigger for the given block event
+/// (`Blocks` or `BecomesBlocked`): "this creature gets +N/+N until end of turn."
+/// Scoped to the source creature via `valid_card` (the field block matchers read)
+/// and pumps `SelfRef`, mirroring self-trigger handling in `build_dethrone_trigger`.
+fn build_bushido_trigger(mode: TriggerMode, n: u32) -> TriggerDefinition {
+    // CR 702.45a: "it gets +N/+N" — the Bushido creature itself. Target `SelfRef`,
+    // NOT `TriggeringSource`: for a `BecomesBlocked` event the triggering source
+    // resolves to the *blocker* (ambiguous/None with multiple blockers), so
+    // `TriggeringSource` would pump the wrong creature. The pending trigger's
+    // own source is this creature, so `SelfRef` is correct on both the blocks
+    // and becomes-blocked halves. Mirrors the self-trigger Dethrone, not Exalted
+    // (which watches other attacking creatures).
+    let pump = Effect::Pump {
+        power: PtValue::Fixed(n as i32),
+        toughness: PtValue::Fixed(n as i32),
+        target: TargetFilter::SelfRef,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(format!(
+        "CR 702.45a: Bushido {n} — +{n}/+{n} until end of turn"
+    ));
+    TriggerDefinition::new(mode)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.45a: Bushido {n} — whenever this creature blocks or becomes \
+             blocked, it gets +{n}/+{n} until end of turn."
+        ))
+}
+
+/// CR 702.45a: A Bushido `n` trigger — a self-scoped (`valid_card: SelfRef`)
+/// block / becomes-blocked trigger that pumps the source creature +n/+n. Used
+/// by `RemoveKeyword` symmetric removal so a granted-then-removed `Bushido(n)`
+/// strips exactly its own triggers — parameterized by `n` (and asserting
+/// `valid_card`) so it never matches a different Bushido level or a coincidental
+/// printed block-pump on the same face.
+fn is_bushido_trigger(t: &TriggerDefinition, n: u32) -> bool {
+    matches!(t.mode, TriggerMode::Blocks | TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Fixed(p),
+                toughness: PtValue::Fixed(tough),
+                target: TargetFilter::SelfRef,
+            }) if *p == n as i32 && *tough == n as i32
+        )
+}
+
 fn build_exalted_trigger() -> TriggerDefinition {
     let pump_effect = Effect::Pump {
         power: PtValue::Fixed(1),
@@ -3228,6 +3318,88 @@ fn is_extort_trigger(t: &TriggerDefinition) -> bool {
         && t.execute
             .as_deref()
             .is_some_and(|a| a.optional && a.cost.is_some())
+}
+
+/// CR 702.191a: Intervening-if — this permanent is a creature and mana spent to
+/// cast the spell exceeds its power or toughness.
+fn increment_mana_spent_exceeds_self_pt_condition() -> TriggerCondition {
+    TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::SourceMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            TriggerCondition::Or {
+                conditions: vec![
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: CastManaSpentMetric::Total,
+                            },
+                        },
+                        comparator: Comparator::GT,
+                        rhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: CastManaSpentMetric::Total,
+                            },
+                        },
+                        comparator: Comparator::GT,
+                        rhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+/// CR 702.191a: Synthesized Increment spell-cast trigger identity.
+fn is_increment_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_target, Some(TargetFilter::Controller))
+        && t.condition.as_ref() == Some(&increment_mana_spent_exceeds_self_pt_condition())
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            })
+        )
+}
+
+/// CR 702.191a: Increment — whenever you cast a spell, if this permanent is a
+/// creature and mana spent to cast that spell exceeds its power or toughness,
+/// put a +1/+1 counter on this creature.
+fn build_increment_trigger() -> TriggerDefinition {
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("Put a +1/+1 counter on this creature".to_string());
+
+    TriggerDefinition::new(TriggerMode::SpellCast)
+        .valid_target(TargetFilter::Controller)
+        .condition(increment_mana_spent_exceeds_self_pt_condition())
+        .execute(execute)
+        .description(
+            "CR 702.191a: Increment — whenever you cast a spell, if mana spent to cast that spell is greater than this creature's power or toughness, put a +1/+1 counter on it.".to_string(),
+        )
 }
 
 fn build_extort_trigger() -> TriggerDefinition {
@@ -4978,6 +5150,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
     // each opponent for 1 life. CR 702.101b: each instance triggers separately.
     synthesize_extort(face);
+    // CR 702.191a: Increment — spell-cast trigger when mana spent exceeds P/T.
+    // CR 702.191b: each instance triggers separately.
+    synthesize_increment(face);
     // CR 702.105a: Dethrone — attack trigger that puts a +1/+1 counter on the
     // creature whenever it attacks the player with the most life or tied for
     // most life. CR 702.105b: each instance triggers separately.
@@ -4994,6 +5169,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // Double team is an Arena/Alchemy attack trigger creating one tapped
     // attacking copy. Each instance triggers separately.
     synthesize_double_team(face);
+    // CR 702.45a: Bushido N — self blocks / becomes-blocked triggers that pump
+    // the creature +N/+N until end of turn.
+    synthesize_bushido(face);
     // CR 702.95a: Soulbond — two optional ETB triggers that create pair
     // relationships under the resolution checks in CR 702.95c-d.
     synthesize_soulbond(face);
@@ -8135,6 +8313,69 @@ mod exalted_synthesis_tests {
 }
 
 #[cfg(test)]
+mod bushido_synthesis_tests {
+    //! CR 702.45a shape tests: two self-scoped triggers (Blocks +
+    //! BecomesBlocked), each an `Effect::Pump` on `SelfRef` of +N/+N.
+    use super::*;
+
+    #[test]
+    fn synthesize_bushido_adds_block_and_becomes_blocked_triggers() {
+        // CR 702.45a: Bushido N installs two self-triggers (blocks + becomes
+        // blocked), each pumping the source +N/+N until end of turn.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bushido(2));
+        synthesize_bushido(&mut face);
+
+        let bushido: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| is_bushido_trigger(t, 2))
+            .collect();
+        assert_eq!(bushido.len(), 2, "blocks + becomes-blocked");
+        assert!(bushido
+            .iter()
+            .any(|t| matches!(t.mode, TriggerMode::Blocks)));
+        assert!(bushido
+            .iter()
+            .any(|t| matches!(t.mode, TriggerMode::BecomesBlocked)));
+        for t in &bushido {
+            assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+            let Some(Effect::Pump {
+                power,
+                toughness,
+                target,
+            }) = t.execute.as_deref().map(|a| &*a.effect)
+            else {
+                panic!("bushido execute must be Effect::Pump");
+            };
+            assert!(matches!(power, PtValue::Fixed(2)));
+            assert!(matches!(toughness, PtValue::Fixed(2)));
+            assert!(matches!(target, TargetFilter::SelfRef));
+        }
+    }
+
+    #[test]
+    fn synthesize_bushido_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bushido(1));
+        synthesize_bushido(&mut face);
+        synthesize_bushido(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_bushido_trigger(t, 1))
+                .count(),
+            2,
+            "two triggers (blocks + becomes-blocked), deduped across passes"
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_bushido(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_bushido_trigger(t, 1)));
+    }
+}
+
+#[cfg(test)]
 mod extort_synthesis_tests {
     //! CR 702.101a + CR 702.101b shape tests: the synthesized Extort trigger
     //! is a `SpellCast` trigger with `valid_target = Controller` whose execute
@@ -8273,6 +8514,169 @@ mod extort_synthesis_tests {
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.players[1].life, 19);
         assert_eq!(state.players[2].life, 19);
+    }
+}
+
+#[cfg(test)]
+mod increment_synthesis_tests {
+    use super::*;
+
+    fn increment_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Increment);
+        face
+    }
+
+    fn increment_atomic_card(text: &str) -> AtomicCard {
+        AtomicCard {
+            name: "Topiary Lecturer".to_string(),
+            mana_cost: Some("{2}{G}".to_string()),
+            colors: vec!["G".to_string()],
+            color_identity: vec!["G".to_string()],
+            text: Some(text.to_string()),
+            power: Some("2".to_string()),
+            toughness: Some("3".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Plant Employee".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Plant".to_string(), "Employee".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Increment".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 3.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_oracle_id: Some("increment-dedupe-test".to_string()),
+                scryfall_id: Some("increment-dedupe-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn synthesize_increment_adds_spell_cast_trigger_with_intervening_if() {
+        let mut face = increment_face();
+        synthesize_increment(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_increment_trigger(t))
+            .expect("increment should add a SpellCast trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::SpellCast));
+        assert!(matches!(
+            trigger.valid_target,
+            Some(TargetFilter::Controller)
+        ));
+        assert!(
+            matches!(trigger.condition, Some(TriggerCondition::And { .. })),
+            "increment must gate on creature check and mana spent vs source P/T"
+        );
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        assert!(matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn synthesize_increment_is_idempotent() {
+        let mut face = increment_face();
+        synthesize_increment(&mut face);
+        synthesize_increment(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_increment_trigger(t))
+            .count();
+        assert_eq!(count, 1, "increment trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_increment_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Increment);
+        face.keywords.push(Keyword::Increment);
+        synthesize_increment(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_increment_trigger(t))
+            .count();
+        assert_eq!(count, 2, "CR 702.191b: each instance triggers separately");
+    }
+
+    #[test]
+    fn build_oracle_face_dedupes_increment_keyword_and_reminder_body() {
+        let mtgjson = increment_atomic_card(
+            "Increment (Whenever you cast a spell, if the amount of mana you spent is greater than this creature's power or toughness, put a +1/+1 counter on this creature.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert!(face
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Increment)));
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_increment_trigger(trigger))
+                .count(),
+            1,
+            "Increment keyword synthesis should recognize the parsed reminder trigger"
+        );
+        assert_eq!(
+            face.triggers.len(),
+            1,
+            "Increment reminder parsing and keyword synthesis should not create duplicate triggers"
+        );
+    }
+
+    #[test]
+    fn build_oracle_face_preserves_repeated_increment_instances_from_oracle_text() {
+        let mtgjson = increment_atomic_card(
+            "Increment, increment (Whenever you cast a spell, if the amount of mana you spent is greater than this creature's power or toughness, put a +1/+1 counter on this creature.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|keyword| matches!(keyword, Keyword::Increment))
+                .count(),
+            2,
+            "Oracle text must recover repeated Increment instances that MTGJSON dedupes"
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_increment_trigger(trigger))
+                .count(),
+            2,
+            "CR 702.191b: each recovered Increment instance triggers separately"
+        );
+        assert_eq!(
+            face.triggers.len(),
+            2,
+            "repeated Increment should produce exactly one trigger per printed instance"
+        );
     }
 }
 

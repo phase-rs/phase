@@ -1569,6 +1569,83 @@ mod tests {
         assert!(state.players[0].graveyard.contains(&aura_id));
     }
 
+    /// CR 303.4c + CR 702.5a: "Enchant creature with another Aura attached to
+    /// it" is rechecked after the Aura resolves. The Aura itself cannot satisfy
+    /// "another" once it is attached to the host.
+    #[test]
+    fn sba_another_aura_enchant_filter_excludes_source_attachment() {
+        use crate::types::ability::{AttachmentKind, FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let host = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+
+        let first_aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rancor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura = state.objects.get_mut(&first_aura).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.attached_to = Some(host.into());
+        }
+
+        let daybreak = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Daybreak Coronet".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura = state.objects.get_mut(&daybreak).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: true,
+                }]),
+            )));
+            aura.attached_to = Some(host.into());
+        }
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .attachments
+            .extend([first_aura, daybreak]);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&daybreak),
+            "Daybreak-style Aura should remain legal while another Aura is attached"
+        );
+
+        state.objects.get_mut(&first_aura).unwrap().attached_to = None;
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .attachments
+            .retain(|id| *id != first_aura);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&daybreak),
+            "Daybreak-style Aura must not count itself as the required other Aura"
+        );
+        assert!(state.players[0].graveyard.contains(&daybreak));
+    }
+
     /// Issue #537 SBA SHAPE test (5d) — **explicitly labeled SHAPE**: this
     /// test constructs the post-resolution state by hand (Aura on battlefield
     /// attached to a graveyard creature) and asserts the SBA helper accepts

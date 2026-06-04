@@ -990,6 +990,11 @@ pub struct PendingCast {
     /// kicker costs and multikicker loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost_flow: Option<AdditionalCost>,
+    /// CR 601.2b + CR 702.48c: Source of the currently pending additional-cost
+    /// component. This disambiguates same-shaped costs when a later object
+    /// selection resumes payment.
+    #[serde(default)]
+    pub additional_cost_source: SpellCostSource,
     /// CR 601.2b + CR 700.2a: Modal spells with kicker-dependent mode caps
     /// announce kicker intent before choosing modes, but pay those costs later
     /// in the normal cost-payment step.
@@ -1072,6 +1077,7 @@ impl PendingCast {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -1750,10 +1756,26 @@ pub enum CostResume {
         #[serde(rename = "Spell")]
         spell: Box<PendingCast>,
     },
+    SpellCost {
+        #[serde(rename = "Spell")]
+        spell: Box<PendingCast>,
+        cost: Box<AbilityCost>,
+        source: SpellCostSource,
+    },
     ManaAbility {
         #[serde(rename = "ManaAbility")]
         mana_ability: Box<PendingManaAbility>,
     },
+}
+
+/// CR 601.2h + CR 702.48c: Identifies which spell-cost component a
+/// `WaitingFor::PayCost` choice is paying when the same `AbilityCost` shape can
+/// come from different rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpellCostSource {
+    #[default]
+    Other,
+    Offering,
 }
 
 /// The specific kind of cast offer being presented to the player.
@@ -3370,6 +3392,10 @@ impl WaitingFor {
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
+                }
+                | CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. } => None,
             },
@@ -3396,6 +3422,10 @@ impl WaitingFor {
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
+                }
+                | CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. } => None,
             },
@@ -5085,7 +5115,6 @@ pub struct GameState {
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
-
     /// CR 510.2 + CR 615.7: Transient per-shield combat-damage prevention tally.
     /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
     /// simultaneous combat-damage batch. While `Some`, the `Prevention::All`
@@ -5949,6 +5978,7 @@ mod tests {
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
+                additional_cost_source: SpellCostSource::Other,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
                 chosen_modes: Vec::new(),
@@ -6274,6 +6304,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),

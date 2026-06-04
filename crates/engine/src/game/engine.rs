@@ -1837,7 +1837,21 @@ fn apply_action(
         ) => match resume {
             CostResume::Spell {
                 spell: pending_cast,
-            } => match kind {
+            }
+            | CostResume::SpellCost {
+                spell: pending_cast,
+                ..
+            } => {
+                let paid_cost = match resume {
+                    CostResume::SpellCost { cost, source, .. } => {
+                        Some(casting_costs::SpellCostPayment {
+                            cost: cost.as_ref(),
+                            source: *source,
+                        })
+                    }
+                    _ => None,
+                };
+                match kind {
                 PayCostKind::Discard => engine_casting::handle_discard_for_cost(
                     state,
                     *player,
@@ -1847,15 +1861,19 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
-                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    (*min_count, *count),
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
+	                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
+	                    state,
+	                    *player,
+	                    *pending_cast.clone(),
+	                    paid_cost,
+	                    casting_costs::CostSelection {
+	                        min_count: *min_count,
+	                        count: *count,
+	                        legal_permanents: choices,
+	                        chosen: &chosen,
+	                    },
+	                    &mut events,
+	                )?,
                 PayCostKind::ReturnToHand => engine_casting::handle_return_to_hand_for_cost(
                     state,
                     *player,
@@ -1927,7 +1945,8 @@ fn apply_action(
                         "ExileFromManaZone cost cannot resume a spell cast".into(),
                     ));
                 }
-            },
+                }
+            }
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
             } => match kind {
@@ -1989,6 +2008,10 @@ fn apply_action(
                 resume:
                     CostResume::Spell {
                         spell: pending_cast,
+                    }
+                    | CostResume::SpellCost {
+                        spell: pending_cast,
+                        ..
                     },
                 ..
             },
@@ -10567,6 +10590,7 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -10948,6 +10972,7 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),

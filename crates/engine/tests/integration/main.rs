@@ -46,6 +46,7 @@ mod dredgers_insight_mill_from_among;
 mod elemental_spectacle_regression;
 mod elusive_otter_repro;
 mod emissary_green;
+mod emrakul_control_turn_crash;
 #[cfg(feature = "proptest")]
 mod engine_invariants;
 mod enlightened_tutor_regression;
@@ -92,6 +93,7 @@ mod mana_drain_refund;
 mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
 mod militant_angel_attacked_opponents;
+mod mogg_war_marshal_echo_dies_trigger;
 mod morophon_chosen_type_1653;
 mod multi_upkeep_triggers_suspend;
 mod mycoloth_upkeep_trigger;

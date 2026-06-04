@@ -815,6 +815,13 @@ pub(crate) fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreT
     let (input, is_plural) = alt((
         value(false, alt((tag("it's still "), tag("that's still ")))),
         value(true, tag("they're still ")),
+        // CR 205.1b: relative-clause retention attached to a plural/singular
+        // subject — "[plural] that are still lands", "[singular] that is still
+        // a land". Distinct from the standalone-sentence forms above so the
+        // animation building block can keep land/artifact types when the
+        // retention rides on the same clause rather than a new sentence.
+        value(true, tag("that are still ")),
+        value(false, tag("that is still ")),
     ))
     .parse(input)?;
 
@@ -1035,8 +1042,21 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
         let cost_text = text[..colon_pos].trim();
         let effect_text = text[colon_pos + 1..].trim();
         let cost = parse_oracle_cost(cost_text);
-        let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
+        // CR 602.5c: When an object acquires an activated ability with a
+        // use restriction (e.g. "Activate only as a sorcery", "Activate only
+        // once each turn") from another object, that restriction applies to
+        // the acquired ability. The restriction lives inside the granted
+        // quoted text, so strip it with the single authority used by
+        // standalone activated abilities (CR 602.5d/602.5e timing rules)
+        // instead of leaving it as an unparsed trailing sentence.
+        let (effect_text, constraints) =
+            crate::parser::oracle::strip_activated_constraints(effect_text);
+        let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
         def.cost = Some(cost);
+        if constraints.sorcery_speed() {
+            def.sorcery_speed = true;
+        }
+        def.activation_restrictions.extend(constraints.restrictions);
         def.description = Some(text.to_string());
         def
     } else {

@@ -505,6 +505,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
         | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
