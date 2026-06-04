@@ -89,7 +89,7 @@ fn score_reveal_hand_player_target(ctx: &PolicyContext<'_>, target_player: Playe
         return 0.0;
     }
 
-    if target_player == ctx.ai_player {
+    if !players::opponents(ctx.state, ctx.ai_player).contains(&target_player) {
         return -6.0;
     }
 
@@ -102,14 +102,14 @@ fn score_reveal_hand_player_target(ctx: &PolicyContext<'_>, target_player: Playe
         return 0.0;
     };
 
-    let hand_size = player_state.hand.len() as f64;
     let unrevealed = player_state
         .hand
         .iter()
         .filter(|card| !ctx.state.revealed_cards.contains(card))
         .count() as f64;
+    let revealed = player_state.hand.len() as f64 - unrevealed;
 
-    1.25 + (hand_size * 0.08) + (unrevealed * 0.12)
+    1.25 + (unrevealed * 0.20) + (revealed * 0.02)
 }
 
 fn reveal_hand_uses_chosen_player_target(effect: &&Effect) -> bool {
@@ -120,10 +120,11 @@ fn reveal_hand_uses_chosen_player_target(effect: &&Effect) -> bool {
 }
 
 fn target_filter_can_select_player(target: &TargetFilter) -> bool {
-    matches!(
-        target,
-        TargetFilter::Any | TargetFilter::Player | TargetFilter::Typed(_)
-    )
+    match target {
+        TargetFilter::Any | TargetFilter::Player => true,
+        TargetFilter::Typed(filter) => filter.type_filters.is_empty(),
+        _ => false,
+    }
 }
 
 pub(crate) fn disruption_window_score(
@@ -256,6 +257,7 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
         TypeFilter, TypedFilter,
     };
+    use engine::types::format::FormatConfig;
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
@@ -490,5 +492,120 @@ mod tests {
                 > score_for_target(TargetRef::Player(PlayerId(0))),
             "registered AI scoring should prefer the opponent target"
         );
+    }
+
+    #[test]
+    fn reveal_hand_target_selection_prefers_unrevealed_opponent_cards() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.phase = engine::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+
+        let peek = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Peek".to_string(),
+            Zone::Hand,
+        );
+        let revealed_a = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "Revealed A".to_string(),
+            Zone::Hand,
+        );
+        let revealed_b = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Revealed B".to_string(),
+            Zone::Hand,
+        );
+        let revealed_c = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Revealed C".to_string(),
+            Zone::Hand,
+        );
+        let _unrevealed = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(2),
+            "Unrevealed".to_string(),
+            Zone::Hand,
+        );
+        state.revealed_cards.insert(revealed_a);
+        state.revealed_cards.insert(revealed_b);
+        state.revealed_cards.insert(revealed_c);
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Player,
+                card_filter: TargetFilter::Any,
+                count: None,
+                random: false,
+                choice_optional: false,
+            },
+            Vec::new(),
+            peek,
+            PlayerId(0),
+        );
+        let pending_cast = PendingCast::new(peek, CardId(10), ability, ManaCost::zero());
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(pending_cast),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![
+                        TargetRef::Player(PlayerId(1)),
+                        TargetRef::Player(PlayerId(2)),
+                    ],
+                    optional: false,
+                }],
+                mode_labels: Vec::new(),
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let target_score = |target| {
+            let candidate = CandidateAction {
+                action: GameAction::ChooseTarget {
+                    target: Some(target),
+                },
+                metadata: ActionMetadata {
+                    actor: Some(PlayerId(0)),
+                    tactical_class: TacticalClass::Target,
+                },
+            };
+            let ctx = PolicyContext {
+                state: &state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: PlayerId(0),
+                config: &config,
+                context: &context,
+                cast_facts: None,
+            };
+            HandDisruptionPolicy.score(&ctx)
+        };
+
+        assert!(
+            target_score(TargetRef::Player(PlayerId(2)))
+                > target_score(TargetRef::Player(PlayerId(1))),
+            "one unrevealed card should beat a larger already revealed hand"
+        );
+    }
+
+    #[test]
+    fn typed_filters_only_select_players_when_type_filters_are_empty() {
+        assert!(target_filter_can_select_player(&TargetFilter::Typed(
+            TypedFilter::default().controller(engine::types::ability::ControllerRef::Opponent)
+        )));
+        assert!(!target_filter_can_select_player(&TargetFilter::Typed(
+            TypedFilter::creature()
+        )));
     }
 }
