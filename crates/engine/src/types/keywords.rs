@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, Comparator, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, Comparator, CostObjectCount, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -602,7 +603,19 @@ pub enum Keyword {
         toughness: Option<i32>,
     },
     Plot(ManaCost),
-    Craft(ManaCost),
+    /// CR 702.167a/b: Craft with [materials] [cost] — an activated ability
+    /// "[Cost], Exile this permanent, Exile [materials] from among permanents
+    /// you control and/or cards in your graveyard: Return this card to the
+    /// battlefield transformed under its owner's control. Activate only as a
+    /// sorcery." `materials` is the typed object class to exile (CR 702.167b:
+    /// a bare type/subtype matches permanents on the battlefield OR cards in a
+    /// graveyard); `count` is the exact/minimum material-count requirement.
+    Craft {
+        cost: ManaCost,
+        materials: TargetFilter,
+        #[serde(default)]
+        count: CostObjectCount,
+    },
     Offspring(ManaCost),
     /// CR 702.176a: Impending N—{cost} — alternative cast that enters with
     /// `counters` time counters and is not a creature until the last is removed.
@@ -728,7 +741,12 @@ pub enum Keyword {
     /// CR 702.166a: Bargain — you may sacrifice an artifact, enchantment, or token
     /// as an additional cost to cast this spell.
     Bargain,
-    /// CR 702.43a: Sunburst — enters with a counter for each color of mana spent to cast it.
+    /// CR 702.44a: Sunburst — as an object enters the battlefield as a resolving
+    /// spell, it enters with a +1/+1 counter (if entering as a creature) or a
+    /// charge counter (otherwise) for each color of mana spent to cast it. Wired
+    /// at runtime by `synthesize_sunburst` as an ETB-counter replacement whose
+    /// count is the distinct-colors-spent metric. Per CR 702.44d each instance
+    /// works separately.
     Sunburst,
     /// CR 702.72a: Champion a [type] — exile a creature of the specified type you control
     /// when this enters; return it when this leaves.
@@ -782,16 +800,18 @@ pub enum Keyword {
     /// the generic activated-ability dispatch.
     Station,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (no copy-on-cast hook reads it).
+    /// RUNTIME: `database::synthesis::synthesize_replicate` — repeatable
+    /// optional additional cost (`AdditionalCost::Optional { repeatable: true }`)
+    /// plus a `SpellCast` trigger whose execute is
+    /// `replicate_copy_ability_definition()` (a `CopySpell` with
+    /// `repeat_for = AdditionalCostPaymentCount`).
     /// CR 702.56a: Replicate {cost} — additional-cost-on-cast copy
     /// mechanic. "As an additional cost to cast this spell, you may pay
     /// [cost] any number of times" + "When you cast this spell, if a
     /// replicate cost was paid for it, copy it for each time its
     /// replicate cost was paid. If the spell has any targets, you may
     /// choose new targets for any of the copies." Carries the per-copy
-    /// mana cost; runtime semantics are not yet implemented (no
-    /// copy-on-cast hook reads this keyword).
+    /// mana cost.
     Replicate(ManaCost),
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
@@ -829,14 +849,8 @@ pub enum Keyword {
     /// (combat-damage-this-turn predicate) is not yet wired.
     Freerunning(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (spell-cast trigger not wired).
-    /// CR 702.191a: Increment — triggered ability. "Whenever you cast a
-    /// spell, if this permanent is a creature and the amount of mana
-    /// spent to cast that spell is greater than this creature's power
-    /// or this creature's toughness, put a +1/+1 counter on this
-    /// creature." Bare keyword; ETB / spell-cast trigger is not yet
-    /// wired.
+    /// CR 702.191a: Increment — spell-cast trigger synthesized in
+    /// `database::synthesis::synthesize_increment`.
     Increment,
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
@@ -852,15 +866,13 @@ pub enum Keyword {
     /// drops its `Vec<Level>` payload).
     Specialize(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (cost-reduction + cast-as-instant hooks not wired).
-    /// CR 702.48a: "[Quality] offering" — additional-cost-on-cast that
-    /// sacrifices a permanent matching `Quality`. "If you chose to pay
-    /// the additional cost, this spell's total cost is reduced by the
-    /// sacrificed permanent's mana cost, and you may cast this spell any
-    /// time you could cast an instant." Carries the canonical subtype
-    /// string (e.g. "Spirit", "Dragon"); cost-reduction and cast-as-
-    /// instant runtime hooks are not yet wired.
+    /// CR 702.48a: "[Quality] offering" — as an additional cost to cast this
+    /// spell, you may sacrifice a [Quality] permanent. If you do, this spell's
+    /// total cost is reduced by the sacrificed permanent's mana cost (CR 702.48c),
+    /// and you may cast this spell any time you could cast an instant. Carries
+    /// the canonical subtype string (e.g. "Spirit", "Dragon"). Runtime behavior
+    /// is fully wired: timing unlock, sacrifice selection, and cost reduction in
+    /// `casting_costs.rs`.
     Offering(String),
 
     /// Fallback for unrecognized keywords.
@@ -1112,16 +1124,20 @@ impl Keyword {
     ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
     ///   loops in `game/triggers.rs`.
     /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
-    ///   triggers separately) / Exalted (CR 702.83a: a triggered ability;
+    ///   triggers separately) / Increment (CR 702.191a: a triggered ability;
+    ///   CR 702.191b: each instance triggers separately) / Exalted (CR 702.83a:
+    ///   a triggered ability;
     ///   per-instance multiplicity grounded in the general CR 113.2c rule, since
     ///   CR 702.83 has no card-specific multiplicity clause) — one trigger is
     ///   installed per face `Keyword` instance by
     ///   `KeywordTriggerInstaller::install_matching`, invoked from `synthesize_all`.
     ///
     /// Returns `false` for everything else, including:
-    /// - CR 702.44d Sunburst — also "works separately" per instance, but is a
-    ///   STATIC ability never printed as a repeated bare word and not
-    ///   instance-counted, so it is out of this class.
+    /// - CR 702.44d Sunburst — also "works separately" per instance, but it is
+    ///   an as-enters STATIC ability, so its per-instance multiplicity is
+    ///   realized by `synthesize_sunburst` (one ETB-counter replacement per
+    ///   `Keyword::Sunburst`), not by the runtime trigger installer this
+    ///   predicate gates. Out of this class for that reason.
     /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
     ///   instances would be inert (separate deeper bug, not addressed here).
     pub fn instances_function_separately(&self) -> bool {
@@ -1130,6 +1146,7 @@ impl Keyword {
             Keyword::Cascade
                 | Keyword::Storm
                 | Keyword::Myriad
+                | Keyword::Increment
                 | Keyword::Exalted
                 | Keyword::DoubleTeam
         )
@@ -1191,6 +1208,15 @@ fn extract_companion_subtypes(text: &str) -> Vec<String> {
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// CR 702.167b: Public re-export of the default craft materials filter (the
+/// creature class) so external crates (the dormant `mtgish-import` converter)
+/// and the keyword deserializers can request it without reaching into the
+/// `pub(crate)` parser module. The single authority remains
+/// `parser::oracle_keyword::craft_materials_filter`.
+pub fn craft_materials_default() -> TargetFilter {
+    crate::parser::oracle_keyword::craft_materials_default()
 }
 
 /// Parse a mana cost string into ManaCost. Supports both MTGJSON format ({1}{W})
@@ -1291,7 +1317,8 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 /// into a `TypeFilter::Subtype` (the bug fixed by issue #537).
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     use crate::parser::oracle_nom::enchant::{
-        parse_enchant_controller_suffix, parse_enchant_player_base, parse_enchant_type_leg,
+        parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
+        parse_enchant_player_base, parse_enchant_type_leg,
     };
     use crate::parser::oracle_nom::error::OracleResult;
     use crate::parser::oracle_nom::filter::parse_zone_filter;
@@ -1364,21 +1391,33 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     let (rest, _card_word) = opt(parse_card_word).parse(rest).ok()?;
     let (rest, zone) = opt(parse_leading_zone).parse(rest).ok()?;
     let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
+    // CR 303.4 + CR 702.5a: Optional trailing attachment qualifier — "with
+    // another Aura attached to it" (Daybreak Coronet) narrows the legal target
+    // set to objects that already carry an attachment of the named kind.
+    let (rest, attachment) = opt(parse_enchant_attachment_qualifier).parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
     // Reject fully empty input — every other degenerate variant lacks a type
     // word AND a zone word AND a controller, so it cannot be a meaningful
-    // enchant clause.
+    // enchant clause. (An attachment qualifier cannot stand alone: its leading
+    // space requires a preceding type leg, so it never reaches this guard.)
     if type_filter.is_none() && zone.is_none() && controller.is_none() {
         return None;
     }
 
     // CR 303.4a: When the type leg is absent (Don't Worry About It), the
     // class is "any card", encoded as `TypeFilter::Card`.
-    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    let mut props = Vec::new();
     if let Some(z) = zone {
-        filter = filter.properties(vec![FilterProp::InZone { zone: z }]);
+        props.push(FilterProp::InZone { zone: z });
+    }
+    if let Some(prop) = attachment {
+        props.push(prop);
+    }
+    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    if !props.is_empty() {
+        filter = filter.properties(props);
     }
     if let Some(c) = controller {
         filter = filter.controller(c);
@@ -1655,7 +1694,19 @@ impl FromStr for Keyword {
                     });
                 }
                 "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
-                "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
+                // CR 702.167a/b: The MTGJSON keyword list carries only "Craft"
+                // and the activation cost; the materials class is supplied by
+                // the Oracle-line parser (`parse_craft_keyword_line`). This
+                // bare-keyword path defaults to the most common materials class
+                // (creature) so a card whose Oracle line is unavailable still
+                // synthesizes a usable craft ability.
+                "craft" => {
+                    return Ok(Keyword::Craft {
+                        cost: parse_keyword_mana_cost(p),
+                        materials: craft_materials_default(),
+                        count: CostObjectCount::exactly(1),
+                    })
+                }
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
                 "impending" => {
                     // CR 702.176a: "Impending N—{cost}" — extract N before the em-dash,
@@ -1695,6 +1746,9 @@ impl FromStr for Keyword {
                 "backup" => return Ok(Keyword::Backup(p.parse().unwrap_or(1))),
                 // CR 702.157
                 "squad" => return Ok(Keyword::Squad(parse_keyword_mana_cost(p))),
+                // CR 702.56a: Replicate {cost} — repeatable optional additional
+                // cost paid at cast; copy the spell once per payment.
+                "replicate" => return Ok(Keyword::Replicate(parse_keyword_mana_cost(p))),
                 // CR 702.29: Typecycling — "typecycling:{subtype}:{cost}"
                 "typecycling" => {
                     if let Some(colon_pos) = p.find(':') {
@@ -1831,6 +1885,7 @@ impl FromStr for Keyword {
             "totemarmor" => Ok(Keyword::TotemArmor),
             "evolve" => Ok(Keyword::Evolve),
             "extort" => Ok(Keyword::Extort),
+            "increment" => Ok(Keyword::Increment),
             "exploit" => Ok(Keyword::Exploit),
             "explore" => Ok(Keyword::Explore),
             "ascend" => Ok(Keyword::Ascend),
@@ -2112,6 +2167,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Flanking" => Ok(Keyword::Flanking),
         "Evolve" => Ok(Keyword::Evolve),
         "Extort" => Ok(Keyword::Extort),
+        "Increment" => Ok(Keyword::Increment),
         "Exploit" => Ok(Keyword::Exploit),
         "Explore" => Ok(Keyword::Explore),
         "Ascend" => Ok(Keyword::Ascend),
@@ -2347,7 +2403,45 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             }
         }
         "Plot" => Ok(Keyword::Plot(mana(data)?)),
-        "Craft" => Ok(Keyword::Craft(mana(data)?)),
+        // CR 702.167a/b: New struct format
+        // `{"Craft": {"cost": {...}, "materials": {...}, "count": N}}`.
+        // Legacy format `{"Craft": {mana_cost}}` (and the bare-mana fallback)
+        // defaults materials to the creature class and count to 1.
+        "Craft" => {
+            if let Some(cost_val) = data.get("cost") {
+                let materials = data
+                    .get("materials")
+                    .map(|m| {
+                        serde_json::from_value::<TargetFilter>(m.clone())
+                            .map_err(|e| format!("Craft materials: {e}"))
+                    })
+                    .transpose()?
+                    .unwrap_or_else(craft_materials_default);
+                let count = data
+                    .get("count")
+                    .and_then(|value| {
+                        serde_json::from_value::<CostObjectCount>(value.clone())
+                            .ok()
+                            .or_else(|| {
+                                value
+                                    .as_u64()
+                                    .map(|count| CostObjectCount::exactly(count as u32))
+                            })
+                    })
+                    .unwrap_or_default();
+                Ok(Keyword::Craft {
+                    cost: mana(cost_val)?,
+                    materials,
+                    count,
+                })
+            } else {
+                Ok(Keyword::Craft {
+                    cost: mana(data)?,
+                    materials: craft_materials_default(),
+                    count: CostObjectCount::exactly(1),
+                })
+            }
+        }
         "Offspring" => Ok(Keyword::Offspring(mana(data)?)),
         "Impending" => {
             // New format: {"Impending": {"cost": {...}, "counters": N}}
@@ -2425,6 +2519,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         }
         // CR 702.157
         "Squad" => Ok(Keyword::Squad(mana(data)?)),
+        // CR 702.56a: Replicate {cost}
+        "Replicate" => Ok(Keyword::Replicate(mana(data)?)),
         // CR 702.29
         "Typecycling" => {
             let obj = data.as_object().ok_or("Typecycling: expected object")?;
@@ -2863,6 +2959,53 @@ mod tests {
         }
     }
 
+    /// CR 303.4 + CR 702.5a: Daybreak Coronet — "Enchant creature with another
+    /// Aura attached to it" narrows the legal host set to creatures that already
+    /// carry another Aura. The qualifier folds onto the typed filter as
+    /// `FilterProp::HasAttachment { Aura, exclude_source: true }` so SBA
+    /// legality cannot let Daybreak Coronet count itself after it resolves.
+    #[test]
+    fn parse_enchant_creature_with_another_aura_attached() {
+        use super::super::ability::{AttachmentKind, TypeFilter};
+        let enchant =
+            Keyword::from_str("Enchant:creature with another aura attached to it").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+            panic!("expected Typed; got {enchant:?}")
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.contains(&FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: None,
+                exclude_source: true,
+            }),
+            "expected FilterProp::HasAttachment {{ Aura, exclude_source }}; got {:?}",
+            tf.properties
+        );
+    }
+
+    /// Regression guard: a plain "Enchant creature" must NOT acquire an
+    /// attachment predicate — only the explicit qualifier adds `HasAttachment`.
+    #[test]
+    fn parse_enchant_plain_creature_has_no_attachment_predicate() {
+        use super::super::ability::AttachmentKind;
+        let enchant = Keyword::from_str("Enchant:creature").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+            panic!("expected Typed; got {enchant:?}")
+        };
+        assert!(
+            !tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    ..
+                }
+            )),
+            "plain Enchant creature must carry no HasAttachment prop; got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn parse_enchant_with_controller_restriction() {
         let enchant = Keyword::from_str("Enchant:creature you control").unwrap();
@@ -3074,6 +3217,15 @@ mod tests {
         ));
     }
 
+    /// CR 702.191: MTGJSON keyword ingestion must parse Increment, not Unknown.
+    #[test]
+    fn increment_from_str_and_keyword_from_tagged() {
+        assert_eq!(Keyword::from_str("Increment").unwrap(), Keyword::Increment);
+        assert_eq!(Keyword::from_str("increment").unwrap(), Keyword::Increment);
+        let kw = keyword_from_tagged("Increment", &serde_json::Value::Null).unwrap();
+        assert_eq!(kw, Keyword::Increment);
+    }
+
     #[test]
     fn parse_hexproof_from_keywords() {
         // CR 702.11d: "hexproof from [quality]" variants
@@ -3221,6 +3373,7 @@ mod tests {
             "Totem Armor",
             "Evolve",
             "Extort",
+            "Increment",
             "Exploit",
             "Explore",
             "Ascend",

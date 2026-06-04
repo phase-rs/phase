@@ -292,8 +292,11 @@ pub fn resolve_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{
+        AbilityCondition, PtValue, QuantityExpr, SubAbilityLink, TargetFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -442,6 +445,101 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.battlefield.contains(&obj_id));
+    }
+
+    fn make_if_you_do_token_rider(source_id: ObjectId) -> ResolvedAbility {
+        let mut rider = ResolvedAbility::new(
+            Effect::Token {
+                name: "Destroy Rider Token".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string()],
+                colors: Vec::new(),
+                keywords: Vec::new(),
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: Vec::new(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+            },
+            Vec::new(),
+            source_id,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::effect_performed());
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+        rider
+    }
+
+    fn destroy_with_if_you_do_rider(target: ObjectId) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(make_if_you_do_token_rider(ObjectId(100))));
+        ability
+    }
+
+    /// CR 608.2c + CR 701.8a: a mandatory destroy instruction that actually
+    /// moves the target satisfies its following "if you do" rider.
+    #[test]
+    fn mandatory_destroy_if_you_do_rider_fires_when_destroyed() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mortal Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = destroy_with_if_you_do_rider(obj_id);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(!state.battlefield.contains(&obj_id));
+        assert!(state
+            .objects
+            .values()
+            .any(|obj| obj.is_token && obj.name == "Destroy Rider Token"));
+    }
+
+    /// CR 608.2c + CR 702.12b: a skipped destroy instruction did not happen,
+    /// so it must not satisfy a following "if you do" rider.
+    #[test]
+    fn mandatory_destroy_if_you_do_rider_skips_when_indestructible() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Indestructible Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Indestructible);
+        let ability = destroy_with_if_you_do_rider(obj_id);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state.battlefield.contains(&obj_id));
+        assert!(!state
+            .objects
+            .values()
+            .any(|obj| obj.is_token && obj.name == "Destroy Rider Token"));
     }
 
     #[test]
@@ -877,8 +975,7 @@ mod tests {
     // `QuantityRef::TrackedSetSize` resolve against the correct count.
     // ---------------------------------------------------------------------
 
-    use crate::game::effects::resolve_ability_chain;
-    use crate::types::ability::{QuantityExpr, QuantityRef, TypeFilter, TypedFilter};
+    use crate::types::ability::{QuantityRef, TypeFilter, TypedFilter};
 
     /// Builds the Fumigate-shape chain: `DestroyAll(creatures)` followed by
     /// `GainLife(amount = TrackedSetSize, player = Controller)`.

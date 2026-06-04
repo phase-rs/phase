@@ -240,6 +240,11 @@ pub enum GameEvent {
     CreatureExerted {
         object_id: ObjectId,
     },
+    /// CR 702.143a: A player foretold a card from their hand.
+    Foretold {
+        player_id: PlayerId,
+        object_id: ObjectId,
+    },
     PlayerLost {
         player_id: PlayerId,
     },

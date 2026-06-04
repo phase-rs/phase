@@ -80,6 +80,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
+            // CR 301.5 + CR 303.4 + CR 701.3a: AttachmentRestriction carries the
+            // `TargetFilter` of legal hosts (Strata Scythe, Konda's Banner).
+            // Enforced via active static definitions in effects/attach.rs::attachment_illegality.
+            | StaticMode::AttachmentRestriction { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
@@ -485,14 +489,22 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
             FilterProp::Unpaired => parts.push("unpaired".into()),
-            FilterProp::HasAttachment { kind, controller } => {
+            FilterProp::HasAttachment {
+                kind,
+                controller,
+                exclude_source,
+            } => {
                 let kind_s = match kind {
                     crate::types::ability::AttachmentKind::Aura => "aura",
                     crate::types::ability::AttachmentKind::Equipment => "equipment",
                 };
+                let qualifier = if *exclude_source { " another" } else { "" };
                 match controller {
-                    None => parts.push(format!("attached by {kind_s}")),
-                    Some(c) => parts.push(format!("attached by {kind_s} ({})", fmt_controller(c))),
+                    None => parts.push(format!("attached by{qualifier} {kind_s}")),
+                    Some(c) => parts.push(format!(
+                        "attached by{qualifier} {kind_s} ({})",
+                        fmt_controller(c)
+                    )),
                 }
             }
             FilterProp::HasAnyAttachmentOf { kinds, controller } => {
@@ -2025,10 +2037,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
         }
         Effect::RollDie {
+            count,
             sides,
             results,
             modifier,
         } => {
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
+            }
             d.push(("sides".into(), sides.to_string()));
             if !results.is_empty() {
                 d.push(("branches".into(), results.len().to_string()));
@@ -2395,8 +2411,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
-        | Effect::LoseTheGame
-        | Effect::WinTheGame
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
         | Effect::RingTemptsYou
         | Effect::GrantCastingPermission { .. }
         | Effect::Manifest { .. }
@@ -2590,6 +2606,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::SetBasicLandType { land_type } => {
             format!("set land type {}", land_type.as_subtype_str())
         }
+        ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
@@ -6649,6 +6666,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 301.5 + CR 303.4: positive "can be attached only to {filter}"
+            // restriction. Anchor on the verb phrase; the filter half is the
+            // reused TargetFilter and is validated by parser tests.
+            StaticMode::AttachmentRestriction { .. } => {
+                effective_lower.contains("can be attached only to")
+            }
             StaticMode::StepEndUnspentMana { action, .. } => match action {
                 crate::types::mana::StepEndManaAction::Retain => {
                     effective_lower.contains("don't lose unspent")
@@ -6743,7 +6766,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         || effective_lower.contains("gift wasn't promised")
                 }
                 Effect::GenericEffect { .. } => false,
-                Effect::LoseTheGame => {
+                Effect::LoseTheGame { .. } => {
                     // "You don't lose the game for ..." parsed as LoseTheGame prevention
                     effective_lower.contains("don't lose the game")
                         || effective_lower.contains("can't lose the game")
@@ -7862,6 +7885,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "investigate",
         "food ",
         "squad ",
+        "replicate ",
         "backup ",
         "devour ",
         "modular ",

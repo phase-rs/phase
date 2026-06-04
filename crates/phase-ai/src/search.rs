@@ -905,7 +905,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PayCost {
-            resume: CostResume::Spell { .. },
+            resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
             ..
         }
         | WaitingFor::BlightChoice { .. }
@@ -2445,6 +2445,7 @@ mod tests {
                 defending_player: PlayerId(0),
                 attack_target: AttackTarget::Player(PlayerId(0)),
                 blocked: false,
+                band_id: None,
             }],
             blocker_assignments: HashMap::new(),
             blocker_to_attacker: HashMap::new(),

@@ -143,7 +143,7 @@ export class WebSocketAdapter implements EngineAdapter {
 
   constructor(
     private readonly serverUrl: string,
-    private readonly mode: "host" | "join",
+    private readonly mode: "host" | "join" | "spectate",
     private readonly deckData: DeckData,
     private readonly joinGameCode?: string,
     private readonly joinPassword?: string,
@@ -203,16 +203,18 @@ export class WebSocketAdapter implements EngineAdapter {
       const setupFrame =
         this.mode === "host"
           ? { type: "CreateGame", data: { deck: this.deckData } }
-          : {
-              type: "JoinGameWithPassword",
-              data: {
-                game_code: this.joinGameCode!,
-                deck: this.deckData,
-                display_name: this.displayName,
-                password: this.joinPassword ?? null,
-                reservation_token: this.reservationToken ?? null,
-              },
-            };
+          : this.mode === "spectate"
+            ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
+            : {
+                type: "JoinGameWithPassword",
+                data: {
+                  game_code: this.joinGameCode!,
+                  deck: this.deckData,
+                  display_name: this.displayName,
+                  password: this.joinPassword ?? null,
+                  reservation_token: this.reservationToken ?? null,
+                },
+              };
 
       this.attachSocket(setupFrame).catch(() => {
         // `attachSocket` emits reject via initReject; swallow the
@@ -596,10 +598,10 @@ export class WebSocketAdapter implements EngineAdapter {
         };
         // Joiners receive their player_token here (hosts get it via GameCreated).
         // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
+        if (!this._gameCode && this.joinGameCode) {
+          this._gameCode = this.joinGameCode;
+        }
         if (data.player_token) {
-          if (!this._gameCode && this.joinGameCode) {
-            this._gameCode = this.joinGameCode;
-          }
           this.playerToken = data.player_token;
           this.emit({ type: "sessionChanged", session: this.currentSession() });
         }

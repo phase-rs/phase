@@ -9,6 +9,7 @@ import { shouldAutoPass } from "../autoPass";
  */
 function createState(overrides: {
   phase?: Phase;
+  priority_player?: number;
   stack?: unknown[];
   objects?: Record<string, unknown>;
   players?: unknown[];
@@ -19,6 +20,7 @@ function createState(overrides: {
     stack: overrides.stack ?? [],
     objects: overrides.objects ?? { 1: { id: 1 } },
     players: overrides.players ?? [{ id: 0 }, { id: 1 }],
+    priority_player: overrides.priority_player ?? 0,
     phase_stops: overrides.phase_stops,
   } as unknown as GameState;
 }
@@ -52,7 +54,21 @@ describe("shouldAutoPass", () => {
   });
 
   it("does not auto-pass when it is not the local player's priority", () => {
-    expect(shouldAutoPass(createState(), priority(1), false, true)).toBe(false);
+    expect(shouldAutoPass(createState({ priority_player: 1 }), priority(1), false, true)).toBe(
+      false,
+    );
+  });
+
+  it("auto-passes when the local player controls another player's turn", () => {
+    expect(shouldAutoPass(createState({ priority_player: 0 }), priority(1), false, true)).toBe(
+      true,
+    );
+  });
+
+  it("does not auto-pass when another player controls the local player's turn", () => {
+    expect(shouldAutoPass(createState({ priority_player: 1 }), priority(0), false, true)).toBe(
+      false,
+    );
   });
 
   // Phase stops — only apply to initial priority (empty stack)

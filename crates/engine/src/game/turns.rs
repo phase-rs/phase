@@ -569,6 +569,12 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.zone_changes_this_turn.clear();
     state.battlefield_entries_this_turn.clear();
     state.damage_dealt_this_turn.clear();
+    // CR 702.173a + CR 514: Clear the Freerunning eligibility ledger at
+    // cleanup. CR 702.173a's "was dealt combat damage this turn" predicate
+    // is turn-scoped, so the ledger must reset on the turn boundary.
+    state
+        .assassin_or_commander_dealt_combat_damage_this_turn
+        .clear();
     // CR 500.8: Clear any leftover extra phases from the previous turn.
     state.extra_phases.clear();
     // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.

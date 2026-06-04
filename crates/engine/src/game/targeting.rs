@@ -1404,16 +1404,20 @@ pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     }
 }
 
-/// Extract all explicit `InZone` zones from a target filter, recursing through combinators.
+/// Extract all explicit zone restrictions from a target filter, recursing through combinators.
 fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
     match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
-            .iter()
-            .filter_map(|p| match p {
-                FilterProp::InZone { zone } => Some(*zone),
-                _ => None,
-            })
-            .collect(),
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            let mut explicit_zones = Vec::new();
+            for property in properties {
+                match property {
+                    FilterProp::InZone { zone } => explicit_zones.push(*zone),
+                    FilterProp::InAnyZone { zones } => explicit_zones.extend(zones.iter().copied()),
+                    _ => {}
+                }
+            }
+            explicit_zones
+        }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().flat_map(extract_explicit_zones).collect()
         }
@@ -2097,6 +2101,66 @@ mod tests {
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert_eq!(targets.len(), 1);
+    }
+
+    #[test]
+    fn find_legal_targets_honors_in_any_zone() {
+        let mut state = GameState::new_two_player(42);
+        let hand_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Hand Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&hand_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let graveyard_card = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&graveyard_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let battlefield_card = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Battlefield Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battlefield_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Hand, Zone::Graveyard],
+                }]),
+        );
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert!(targets.contains(&TargetRef::Object(hand_card)));
+        assert!(targets.contains(&TargetRef::Object(graveyard_card)));
+        assert!(!targets.contains(&TargetRef::Object(battlefield_card)));
+        assert_eq!(targets.len(), 2);
     }
 
     #[test]

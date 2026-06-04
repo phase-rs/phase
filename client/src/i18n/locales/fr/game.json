@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Choisissez une nouvelle cible pour la copie",
     "chooseTargetForCopy": "Choisissez la cible de la copie",
     "chooseCreatureToExplore": "Choisissez quelle créature explore ensuite",
+    "chooseCreatureTokenToPopulate": "Choisissez un jeton de créature à peupler",
     "chooseReturnAsAuraTarget": "Choisissez un permanent à enchanter",
     "tapUntappedCreatures_one": "Engagez {{count}} créature dégagée",
     "tapUntappedCreatures_other": "Engagez {{count}} créatures dégagées",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} a révélé son compagnon : {{cardName}}",
     "companionMovedToHand": "{{player}} a mis le compagnon {{cardName}} dans sa main",
     "powerToughnessChanged": "L'objet {{objectId}} est maintenant {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Événement : {{type}}"
+    "genericEvent": "Événement : {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Outils du moteur",
@@ -1019,6 +1039,12 @@
       "subtitle_one": "Exilez {{count}} carte depuis {{source}}",
       "subtitle_other": "Exilez {{count}} cartes depuis {{source}}"
     },
+    "craft": {
+      "title": "Façonner",
+      "subtitle_one": "Exilez {{count}} matériau pour façonner",
+      "subtitle_other": "Exilez {{count}} matériaux pour façonner",
+      "subtitleRange": "Exilez de {{min}} à {{count}} matériaux pour façonner"
+    },
     "behold": {
       "title": "Contempler",
       "subtitleExile": "Exilez un permanent ou une carte correspondant",
@@ -1483,5 +1509,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }
