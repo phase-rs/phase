@@ -3033,11 +3033,10 @@ pub(crate) fn parse_mana_value_suffix(
         let resolved = parse_value(raw_phrase)
             .map(|value| (value, after_punct))
             .or_else(|| {
-                let offset = (0..=raw_phrase.len()).find(|&offset| {
-                    (offset == 0 || raw_phrase.as_bytes().get(offset - 1) == Some(&b' '))
-                        && parse_zone_suffix(&raw_phrase[offset..]).is_some()
-                })?;
-                parse_value(&raw_phrase[..offset]).map(|value| (value, &after_equal_to[offset..]))
+                let (phrase, zone_tail) =
+                    nom_primitives::scan_split_at_phrase(raw_phrase, parse_zone_suffix_nom)?;
+                let offset = raw_phrase.len() - zone_tail.len();
+                parse_value(phrase).map(|value| (value, &after_equal_to[offset..]))
             });
         if let Some((value, after)) = resolved {
             return Some((
