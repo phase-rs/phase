@@ -90,7 +90,11 @@
       "turn": "Turno {{n}}",
       "yourTurn": "Sua vez",
       "opponentTurn": "Vez do oponente",
-      "yourLife": "Você {{life}}"
+      "yourLife": "Você {{life}}",
+      "history": "Match History",
+      "historyEmpty": "No games recorded yet.",
+      "historyGames": "{{count}} games",
+      "historyMore": "+{{count}} more"
     }
   },
   "loadState": {

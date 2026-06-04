@@ -90,7 +90,11 @@
       "turn": "Tura {{n}}",
       "yourTurn": "Twoja tura",
       "opponentTurn": "Tura przeciwnika",
-      "yourLife": "Ty {{life}}"
+      "yourLife": "Ty {{life}}",
+      "history": "Match History",
+      "historyEmpty": "No games recorded yet.",
+      "historyGames": "{{count}} games",
+      "historyMore": "+{{count}} more"
     }
   },
   "loadState": {

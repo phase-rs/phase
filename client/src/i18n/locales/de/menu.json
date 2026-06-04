@@ -90,7 +90,11 @@
       "turn": "Zug {{n}}",
       "yourTurn": "Du bist dran",
       "opponentTurn": "Gegner ist dran",
-      "yourLife": "Du {{life}}"
+      "yourLife": "Du {{life}}",
+      "history": "Match History",
+      "historyEmpty": "No games recorded yet.",
+      "historyGames": "{{count}} games",
+      "historyMore": "+{{count}} more"
     }
   },
   "loadState": {

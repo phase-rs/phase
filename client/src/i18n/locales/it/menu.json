@@ -90,7 +90,11 @@
       "turn": "Turno {{n}}",
       "yourTurn": "Il tuo turno",
       "opponentTurn": "Turno avversario",
-      "yourLife": "Tu {{life}}"
+      "yourLife": "Tu {{life}}",
+      "history": "Match History",
+      "historyEmpty": "No games recorded yet.",
+      "historyGames": "{{count}} games",
+      "historyMore": "+{{count}} more"
     }
   },
   "loadState": {
