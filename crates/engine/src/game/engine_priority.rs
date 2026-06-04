@@ -13,6 +13,19 @@ pub(super) fn run_post_action_pipeline(
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
 ) -> Result<WaitingFor, EngineError> {
+    run_post_action_pipeline_from(state, events, 0, default_wf, skip_trigger_scan)
+}
+
+/// Run the normal post-action settlement while scanning only events produced at
+/// or after `event_start`. Use for nested resume paths that carry earlier
+/// payment/choice events in the same output buffer.
+pub(super) fn run_post_action_pipeline_from(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    default_wf: &WaitingFor,
+    skip_trigger_scan: bool,
+) -> Result<WaitingFor, EngineError> {
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
     let stack_before = state.stack.len();
@@ -29,7 +42,7 @@ pub(super) fn run_post_action_pipeline(
     // events that should be deferred have already been moved into
     // `state.deferred_entry_events` for replay by `handle_copy_target_choice`.
     if !skip_trigger_scan {
-        let filtered_events: Vec<_> = events
+        let filtered_events: Vec<_> = events[event_start..]
             .iter()
             .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
             .cloned()

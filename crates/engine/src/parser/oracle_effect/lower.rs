@@ -3270,13 +3270,18 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
 
 /// CR 601.2d: Cap "any number of" target selection to the distribution pool.
 /// Without this, the controller can select more permanents than counters or
-/// damage and the assign step deadlocks (each target must receive at least one).
+/// damage and the assign step deadlocks (each chosen target must receive at
+/// least one). Fixed positive distributions still require at least one target;
+/// "up to" and variable amounts can legally resolve to an empty pool.
 fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> MultiTargetSpec {
     let (inner, is_up_to) = distribution_amount.peel_up_to();
     let min = if is_up_to {
         QuantityExpr::Fixed { value: 0 }
     } else {
-        QuantityExpr::Fixed { value: 1 }
+        match inner {
+            QuantityExpr::Fixed { value } if *value > 0 => QuantityExpr::Fixed { value: 1 },
+            _ => QuantityExpr::Fixed { value: 0 },
+        }
     };
     MultiTargetSpec::bounded_expr(min, inner.clone())
 }
@@ -4276,6 +4281,14 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if let Some(expr) = parse_cda_quantity(where_x_expression) {
         return Some(expr);
     }
+    // CR 107.3i + CR 115.1: Some where-X definitions spell the count as
+    // "the number of <for-each clause>" where the clause itself may need a
+    // target player ("Islands target opponent controls"). Keep that grammar in
+    // the shared where-X interpreter so every effect family gets the same
+    // `ControllerRef::TargetPlayer` quantity binding.
+    if let Some(expr) = parse_where_x_number_of_for_each_clause(expression_lower.as_str()) {
+        return Some(expr);
+    }
     // CR 706.2 + CR 706.4: "where X is the result" of a die roll / coin flip
     // binds X to the rolled value via the shared `EventContextAmount` channel
     // (the same one inline "you gain life equal to the result" cards use). This
@@ -4285,6 +4298,13 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // `None` for the bare die-result phrase (see `cda_quantity_returns_none_for_the_result`),
     // so this fallback is what binds Ancient Bronze Dragon's "where X is the result".
     crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
+}
+
+fn parse_where_x_number_of_for_each_clause(expression_lower: &str) -> Option<QuantityExpr> {
+    let (clause, _) = tag::<_, _, OracleError<'_>>("the number of ")
+        .parse(expression_lower)
+        .ok()?;
+    parse_for_each_clause_expr(clause)
 }
 
 fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Option<QuantityExpr> {
@@ -4788,7 +4808,9 @@ mod tests {
 #[cfg(test)]
 mod where_x_tests {
     use super::parse_where_x_quantity_expression;
-    use crate::types::ability::{QuantityExpr, QuantityRef};
+    use crate::types::ability::{
+        ControllerRef, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+    };
 
     /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
     /// binds X to the rolled value via `EventContextAmount` — the same channel
@@ -4832,6 +4854,32 @@ mod where_x_tests {
             }),
             "the number-of phrase must route through parse_cda_quantity, not the \
              event-context delegation"
+        );
+    }
+
+    /// CR 107.3i + CR 115.1: a where-X count may depend on objects controlled
+    /// by a target player. The shared where-X parser owns that count grammar;
+    /// effect-specific parsers only surface the companion target slot.
+    #[test]
+    fn where_x_number_of_target_player_controlled_type_binds_target_player_count() {
+        let parsed =
+            parse_where_x_quantity_expression("the number of Islands target opponent controls");
+        let Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        }) = parsed
+        else {
+            panic!("expected target-player object count, got {parsed:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed object count filter, got {filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+        assert!(
+            typed
+                .type_filters
+                .contains(&TypeFilter::Subtype("Island".to_string())),
+            "expected Island subtype in object-count filter, got {:?}",
+            typed.type_filters
         );
     }
 

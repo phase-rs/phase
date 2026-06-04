@@ -107,9 +107,9 @@ fn bolas_citadel_static_carries_library_alt_cost() {
 }
 
 /// Issue #946 sibling: with Citadel in play, a bolt on top of library must be
-/// castable with life only — prepared mana cost is zeroed.
+/// castable with life only — prepared mana payment is skipped.
 #[test]
-fn bolas_citadel_library_top_zeros_mana_and_surfaces_cast() {
+fn bolas_citadel_library_top_skips_mana_and_surfaces_cast() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let _citadel = scenario
@@ -129,15 +129,13 @@ fn bolas_citadel_library_top_zeros_mana_and_surfaces_cast() {
 
     let runner = scenario.build();
     let effective = effective_spell_cost(runner.state(), P0, bolt_id).expect("effective cost");
-    assert_eq!(
-        effective,
-        ManaCost::zero(),
-        "library cast via Citadel must zero the mana cost"
+    assert!(
+        effective.is_without_paying_mana(),
+        "library cast via Citadel must skip mana payment"
     );
     let display = display_spell_cost(runner.state(), P0, bolt_id).expect("display cost");
-    assert_eq!(
-        display,
-        ManaCost::zero(),
+    assert!(
+        display.is_without_paying_mana(),
         "UI cost display must not show the printed mana cost for Citadel casts"
     );
 

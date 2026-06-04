@@ -1988,6 +1988,14 @@ fn detect_duration_this_turn(
         // in unrelated positions (e.g. a description string).
         "\"PerTurnCastLimit\":{",
         "\"PerTurnDrawLimit\":{",
+        // CR 604.1 + CR 601.2a + CR 113.6b: `ExileCastPermission` is a static
+        // ability (CR 604.1) that is itself the per-turn permission window
+        // (`frequency: OncePerTurn` slot reset at turn cleanup, plus the per-turn
+        // rolling `cards_exiled_with_source_this_turn` pool keyed by source). The
+        // "this turn" / "once each turn" wording is intrinsic to the variant — not
+        // a separate `duration` slot. Mirrors PerTurnCastLimit / PerTurnDrawLimit
+        // above.
+        "\"ExileCastPermission\":{",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -2260,6 +2268,7 @@ fn effect_name(effect: &Effect) -> &str {
 mod tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::statics::StaticMode;
 
     fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
         parse_named(text, "Test Card", types)
@@ -2351,6 +2360,34 @@ mod tests {
             &["Land"],
         );
 
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn duration_this_turn_accepts_exile_cast_permission_scope() {
+        // CR 601.2a + CR 113.6b: Maralen, Fae Ascendant — the "this turn"
+        // wording on the cast-permission line is intrinsic to
+        // `ExileCastPermission { frequency: OncePerTurn, ... }` (the per-turn
+        // rolling pool keyed by source), not a separate duration slot.
+        let parsed = parse_named(
+            "Flying\n\
+             Whenever ~ or another Elf or Faerie you control enters, exile the top two cards of target opponent's library.\n\
+             Once each turn, you may cast a spell with mana value less than or equal to the number of Elves and Faeries you control from among cards exiled with ~ this turn without paying its mana cost.",
+            "Maralen, Fae Ascendant",
+            &["Creature"],
+        );
+
+        // Guard against the silent-regression case: the negative assertion below
+        // would also pass if the `ExileCastPermission` static simply stopped
+        // parsing (no marker emitted, no other "this turn" AST). Pin that the
+        // structural variant the exemption keys on is actually present.
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::ExileCastPermission { .. })),
+            "expected an ExileCastPermission static to parse for Maralen"
+        );
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
 

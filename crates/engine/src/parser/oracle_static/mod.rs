@@ -80,6 +80,8 @@ mod shared;
 mod static_helpers;
 mod type_change;
 
+pub(crate) use shared::parse_commander_subject_filter_prefix;
+
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
 

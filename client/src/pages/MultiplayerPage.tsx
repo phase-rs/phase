@@ -26,7 +26,7 @@ import { expandParsedDeck } from "../services/deckParser";
 import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
-import { useMultiplayerStore } from "../stores/multiplayerStore";
+import { findLobbyGameByCode, useMultiplayerStore } from "../stores/multiplayerStore";
 import {
   useMultiplayerDraftStore,
   type MultiplayerDraftPhase,
@@ -535,6 +535,33 @@ export function MultiplayerPage() {
     [joinDraft, showToast, t],
   );
 
+  const handleSpectate = useCallback(
+    async (code: string, context?: LobbyGame) => {
+      const resolved = context ?? findLobbyGameByCode(code);
+      if (resolved?.draft_metadata) {
+        navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
+        return;
+      }
+      // Typed codes skip lobby-row context; drafts not in the public lobby
+      // still resolve via SpectateDraft when lookup reports not_found.
+      if (!resolved?.draft_metadata && connectionMode === "server") {
+        const lookup = await lookupJoinTargetFromStore(code);
+        if (!lookup.ok && lookup.reason === "not_found") {
+          navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
+          return;
+        }
+        if (!lookup.ok) {
+          showToast(lookup.message);
+          return;
+        }
+      }
+      const gameId = crypto.randomUUID();
+      useGameStore.setState({ gameId });
+      navigate(`/game/${gameId}?mode=spectate&code=${encodeURIComponent(code)}`);
+    },
+    [navigate, connectionMode, lookupJoinTargetFromStore, showToast],
+  );
+
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
     async (
@@ -779,6 +806,7 @@ export function MultiplayerPage() {
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
             onHostDraft={handleHostDraft}
             onJoinGame={handleJoinGame}
+            onSpectate={connectionMode === "server" ? handleSpectate : undefined}
             connectionMode={connectionMode}
             onServerOffline={() => {
               // Only prompt when we're actually trying to use the server; if

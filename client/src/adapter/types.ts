@@ -294,6 +294,10 @@ export type PayCostKind =
   | { type: "Sacrifice" }
   | { type: "ReturnToHand" }
   | { type: "ExileFromZone"; zone: ExileCostSourceZone }
+  // CR 702.167a/b: Craft materials exile across the battlefield/graveyard union.
+  // `materials` is the engine-side `TargetFilter` the choices were drawn from;
+  // the modal only renders `choices`, so it is opaque pass-through here.
+  | { type: "ExileMaterials"; materials: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
   | { type: "RemoveCounter"; counter_type: CounterMatch }
   | { type: "TapCreatures" }
@@ -1093,7 +1097,10 @@ export type WaitingFor =
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Mutate" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
+  // target — controller chooses to put it on top of or under the target creature.
+  | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
   | { type: "CastingVariantChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; options: CastingVariantChoiceOption[] } }
   | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; payment_mode?: CastPaymentMode; available_slots: CoreType[] } }
   | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
@@ -1301,10 +1308,23 @@ export type RetargetScope =
 
 // ── Log Types ────────────────────────────────────────────────────────────
 
-export type LogCategory =
-  | "Game" | "Turn" | "Stack" | "Combat" | "Zone" | "Life"
-  | "Mana" | "State" | "Token" | "Trigger" | "Special" | "Destroy"
-  | "Debug";
+export const LOG_CATEGORIES = [
+  "Game",
+  "Turn",
+  "Stack",
+  "Combat",
+  "Zone",
+  "Life",
+  "Mana",
+  "State",
+  "Token",
+  "Trigger",
+  "Special",
+  "Destroy",
+  "Debug",
+] as const;
+
+export type LogCategory = (typeof LOG_CATEGORIES)[number];
 
 export type LogSegment =
   | { type: "Text"; value: string }
@@ -1368,11 +1388,14 @@ export type DebugAction =
         owner: PlayerId;
         zone: Zone;
         attach_to?: AttachTarget;
+        run_etb: boolean;
       };
     }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
+  | { type: "Sacrifice"; data: { object_id: ObjectId } }
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
+  | { type: "Reveal"; data: { player_id: PlayerId; count: number } }
   | { type: "ShuffleLibrary"; data: { player_id: PlayerId } }
   | { type: "Proliferate"; data: { player_id: PlayerId } }
   | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }
@@ -1396,6 +1419,7 @@ export type DebugAction =
       type: "CreateToken";
       data: {
         request: DebugTokenRequest;
+        run_etb: boolean;
       };
     }
   | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };
@@ -1480,6 +1504,8 @@ export type GameAction =
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
+  // CR 702.140c + CR 730.2a: answer to MutateMergeChoice — top or bottom.
+  | { type: "ChooseMutateMergeSide"; data: { side: "Top" | "Bottom" } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }

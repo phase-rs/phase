@@ -1150,32 +1150,9 @@ pub fn parse_target_with_syntax<'a>(
         }
     }
 
-    // CR 903.3: Possessive commander reference ("your commander" /
-    // "their commander" / "your commanders"). The commander is identified by
-    // the IsCommander flag, not by a creature subtype. Effects like Command
-    // Beacon's "Put your commander into your hand from the command zone" need
-    // a typed target carrying IsCommander + the controller scope so the
-    // resolver can locate the right card.
-    if let Some((_poss, rest)) = strip_possessive(&lower) {
-        for word in &["commanders", "commander"] {
-            if let Ok((after, _)) = tag::<_, _, OracleError<'_>>(*word).parse(rest) {
-                let consumed = lower.len() - after.len();
-                return (
-                    TargetFilter::Typed(TypedFilter {
-                        controller: Some(ControllerRef::You),
-                        properties: vec![FilterProp::IsCommander],
-                        ..Default::default()
-                    }),
-                    &text[consumed..],
-                    syntax,
-                );
-            }
-        }
-    }
-
     // Bare type phrase fallback: try parse_type_phrase before giving up.
     // Handles "commander[s] you own / they control" (non-possessive — the
-    // possessive form is matched above), bare "commander" (Witch's Clinic
+    // possessive form is matched inside the typed-phrase grammar), bare "commander" (Witch's Clinic
     // class), and combinations like "commander creature you control"
     // (Drillworks Mole class). The commander recognition itself lives in
     // `parse_type_phrase_with_ctx` so it composes with the full suffix grammar
@@ -1423,6 +1400,22 @@ pub fn parse_type_phrase_with_ctx<'a>(
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Historic);
             pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // CR 903.3 + CR 109.5: "your commander" is owner-scoped, not merely
+    // controller-scoped. Consume only the possessive determiner here; the
+    // commander atom below still supplies `IsCommander` and leaves suffix
+    // parsing centralized for zones, counters, and control clauses.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("your ").parse(&lower[pos..]) {
+        if alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander")))
+            .parse(rest)
+            .is_ok()
+        {
+            properties.push(FilterProp::Owned {
+                controller: ControllerRef::You,
+            });
+            pos += "your ".len();
         }
     }
 
@@ -1945,7 +1938,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // and "each card" forms are handled at the top of `parse_target` since
     // they bypass type-phrase parsing entirely.
     //
-    // Two grammars share the same lowering:
+    // These grammars share the same lowering:
     //   * `exiled with this <type>` / `exiled with ~` — explicit-source linkage
     //     (CR 406.6). The trailing type word is informational and consumed as
     //     a single non-space run via `take_till1` so it doesn't leak.
@@ -1954,6 +1947,12 @@ pub fn parse_type_phrase_with_ctx<'a>(
     //     exile instruction within the same effect; the resolver maps it to
     //     the same `ExiledBySource` predicate, since the link is established
     //     by the linked-exile bookkeeping at exile time.
+    //   * bare `exiled this way` — the same CR 607.2a linkage as a reduced
+    //     past-participle adjective with no relative pronoun (Espers to
+    //     Magicite: "choose up to one target creature card exiled this way").
+    //     Without this arm the qualifier is dropped and the target degrades to
+    //     a battlefield "creature card", which resolves against on-battlefield
+    //     creatures instead of the cards this spell exiled.
     let mut exiled_by_source = false;
     let remaining_exiled = lower[pos..].trim_start();
     let exiled_offset = lower[pos..].len() - remaining_exiled.len();
@@ -1973,6 +1972,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     } else if let Ok((rest, _)) = alt((
         tag::<_, _, OracleError<'_>>("that were exiled this way"),
         tag::<_, _, OracleError<'_>>("that was exiled this way"),
+        tag::<_, _, OracleError<'_>>("exiled this way"),
     ))
     .parse(remaining_exiled)
     {
@@ -3006,15 +3006,46 @@ pub(crate) fn parse_mana_value_suffix(
     // ("that damage"), and game-state counts ("the number of lands you
     // control") share the same quantity grammar as CDA/static parsing.
     if let Ok((after_equal_to, _)) = tag::<_, _, OracleError<'_>>("equal to ").parse(rest) {
-        let (after, phrase) = take_till::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.')
-            .parse(after_equal_to)
-            .ok()?;
-        let phrase = phrase.trim();
-        let value = crate::parser::oracle_quantity::parse_cda_quantity(phrase).or_else(|| {
-            parse_mana_value_reference_expr(phrase)
-                .and_then(|(value, after)| after.trim().is_empty().then_some(value))
-        });
-        if let Some(value) = value {
+        let (after_punct, raw_phrase) =
+            take_till::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.')
+                .parse(after_equal_to)
+                .ok()?;
+        let parse_value = |phrase: &str| -> Option<QuantityExpr> {
+            let phrase = phrase.trim();
+            crate::parser::oracle_quantity::parse_cda_quantity(phrase).or_else(|| {
+                parse_mana_value_reference_expr(phrase)
+                    .and_then(|(value, after)| after.trim().is_empty().then_some(value))
+            })
+        };
+        // CR 119.3 + CR 400.1 + CR 108.3: Resolve the dynamic quantity, preferring
+        // the FULL phrase first. A quantity whose own grammar already includes a
+        // zone clause ("the number of cards in your graveyard" → GraveyardSize;
+        // "the total power of creatures in your graveyard") must parse whole so it
+        // keeps the zone scope that belongs to the *quantity* — pre-cutting at the
+        // first zone clause would strip that scope and silently drop the bound.
+        //
+        // Only when the full phrase is NOT a recognized quantity is a trailing
+        // zone clause a separable, owner/controller-scoped clause on the *target*
+        // (per-player zones are CR 400.1, keyed by owner CR 108.3). Aether Vial's
+        // "the number of charge counters on ~ from your hand" parses only after
+        // the "from your hand" tail is cut, leaving it for the caller's
+        // `parse_zone_suffix` pass (see `parse_type_phrase_with_ctx`) to attach as
+        // `InZone { Hand }` + controller; without the cut the whole tail parsed as
+        // one quantity, failed, and dropped the zone scope entirely — letting the
+        // resolver collect cards from every player's hand (issue #1980). Cutting
+        // only on full-parse failure mirrors the `try_dynamic` branch above, which
+        // lets the quantity grammar decide consumption before treating the
+        // remainder as a zone suffix. The cut point is the first word-boundary
+        // zone clause recognized by the `parse_zone_suffix` building block.
+        let resolved = parse_value(raw_phrase)
+            .map(|value| (value, after_punct))
+            .or_else(|| {
+                let (phrase, zone_tail) =
+                    nom_primitives::scan_split_at_phrase(raw_phrase, parse_zone_suffix_nom)?;
+                let offset = raw_phrase.len() - zone_tail.len();
+                parse_value(phrase).map(|value| (value, &after_equal_to[offset..]))
+            });
+        if let Some((value, after)) = resolved {
             return Some((
                 FilterProp::Cmc {
                     comparator: Comparator::EQ,
@@ -3661,6 +3692,18 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
         }
     }
 
+    // CR 702.140: Mutate is a parameterized keyword (`Mutate(ManaCost)`), so the
+    // `Keyword::from_str` fallback below would yield `Concrete(Keyword::Mutate(cost))`
+    // and force an exact-cost match. Text like "creature card with mutate" refers to the
+    // keyword class regardless of cost, so map it to the discriminant-level `Kind`.
+    if let Ok((rest, kind)) =
+        value(KeywordKind::Mutate, tag::<_, _, OracleError<'_>>("mutate")).parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
     if matches!(
         text,
         "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
@@ -3909,6 +3952,7 @@ pub(crate) fn attachment_kinds_filter_prop(
         [kind] => FilterProp::HasAttachment {
             kind: kind.clone(),
             controller,
+            exclude_source: false,
         },
         _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
     }
@@ -5072,6 +5116,66 @@ mod tests {
         );
         assert_eq!(rest, "");
 
+        // "Your commander" is owner-scoped. This matters for trigger subjects
+        // like Tome of Legends; a stolen opponent's commander must not satisfy
+        // the phrase just because its current controller is you.
+        let (f, rest) = parse_type_phrase("your commander enters or attacks");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::IsCommander,
+                ],
+                ..Default::default()
+            }),
+            "'your commander' must be owned-by-you and IsCommander, not controller-scoped"
+        );
+        assert_eq!(rest, "enters or attacks");
+
+        let (f, rest) = parse_type_phrase("your commanders attack");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::IsCommander,
+                ],
+                ..Default::default()
+            }),
+            "'your commanders' must use the same owned commander filter as the singular phrase"
+        );
+        assert_eq!(rest, "attack");
+
+        // Command Beacon class — the target parser should now reach the same
+        // typed-phrase commander grammar instead of owning a separate
+        // possessive-commander shortcut.
+        let (f, rest) = parse_target("your commander from the command zone");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::IsCommander,
+                    FilterProp::InZone {
+                        zone: Zone::Command,
+                    },
+                ],
+                ..Default::default()
+            }),
+            "'your commander from the command zone' must compose ownership, commander identity, and zone"
+        );
+        assert_eq!(rest, "");
+
         // Witch's Clinic — bare "target commander" with no zone suffix. No
         // explicit zone is consumed, so (like every bare type phrase, e.g.
         // "target creature") no `InZone` property is attached.
@@ -5927,6 +6031,79 @@ mod tests {
         );
     }
 
+    /// CR 400.1 + CR 108.3 — Aether Vial class: a dynamic
+    /// "with mana value equal to <quantity>" suffix must NOT swallow a trailing
+    /// "from your hand" zone clause into the quantity phrase. The zone clause
+    /// carries the controller scope; dropping it lets the resolver collect
+    /// hand cards from every player (issue #1980). `parse_mana_value_suffix`
+    /// must cut the quantity at the zone-clause boundary so the caller's
+    /// `parse_zone_suffix` pass attaches `InZone { Hand }` + `controller: You`.
+    #[test]
+    fn dynamic_mana_value_suffix_leaves_trailing_zone_clause() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the number of charge counters on ~ from your hand",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected typed filter, got {f:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::You),
+            "\"from your hand\" must scope to the controller's hand, got {:?}",
+            typed.controller
+        );
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+            "filter must carry an InZone{{Hand}} property, got {:?}",
+            typed.properties
+        );
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    ..
+                }
+            )),
+            "the dynamic mana-value bound must still be parsed, got {:?}",
+            typed.properties
+        );
+    }
+
+    /// CR 119.3 + CR 400.1 — Regression guard (companion to
+    /// `dynamic_mana_value_suffix_leaves_trailing_zone_clause`): when the
+    /// quantity's OWN grammar already includes the zone clause — "the number of
+    /// cards in your graveyard" canonicalizes to `GraveyardSize { Controller }`
+    /// — the "in your graveyard" tail must stay attached to the *quantity*, not
+    /// be cut off as a target-zone suffix. `parse_mana_value_suffix` must try the
+    /// full phrase first and only cut on full-parse failure; pre-cutting left
+    /// `parse_cda_quantity("the number of cards")` (which is `None`) and silently
+    /// dropped the mana-value bound entirely for this whole class.
+    #[test]
+    fn dynamic_mana_value_suffix_keeps_zone_bearing_quantity_whole() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the number of cards in your graveyard",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::GraveyardSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            }])),
+            "the graveyard count must parse whole and stay on the quantity, not \
+             leak its zone onto the target",
+        );
+    }
+
     #[test]
     fn card_with_mana_value_equal_to_offset_event_source() {
         let (f, rest) = parse_type_phrase(
@@ -6371,6 +6548,52 @@ mod tests {
                 },])
             )
         );
+    }
+
+    #[test]
+    fn card_with_mutate_uses_keyword_kind_filter() {
+        // CR 702.140: "creature card with mutate" refers to the keyword class regardless
+        // of its mana-cost parameter, so it must lower to a discriminant-level keyword-kind
+        // filter rather than a concrete `Keyword::Mutate(cost)` exact match.
+        let (f, _) = parse_type_phrase("creature card with mutate");
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) = f
+        else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert!(properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Mutate,
+        }));
+    }
+
+    #[test]
+    fn otrimi_trigger_returns_mutate_creature_card_to_hand() {
+        // CR 702.140: Otrimi's reflexive trigger returns "target creature card with mutate
+        // from your graveyard to your hand" — a graveyard->hand bounce (destination None),
+        // NOT a battlefield bounce. The target must be a creature card you own in your
+        // graveyard that has the Mutate keyword kind.
+        let (f, _) = parse_target("target creature card with mutate from your graveyard");
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+            ..
+        }) = f
+        else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Mutate,
+        }));
+        assert!(properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
     }
 
     #[test]
@@ -7004,6 +7227,37 @@ mod tests {
         let (f, rest) = parse_target("cards they own exiled with it");
         assert_eq!(f, TargetFilter::ExiledBySource);
         assert_eq!(rest, "");
+    }
+
+    /// Issue #547 — Espers to Magicite: "choose up to one target creature card
+    /// exiled this way". The bare past-participle "exiled this way" (no relative
+    /// "that was/were") must still compose the `ExiledBySource` linkage onto the
+    /// typed filter, or the target degrades to a battlefield creature.
+    #[test]
+    fn singular_creature_card_exiled_this_way_composes_exiled_by_source() {
+        let (f, rest) = parse_target("target creature card exiled this way");
+        assert_eq!(rest, "");
+        assert!(
+            f.references_exiled_by_source(),
+            "bare \"exiled this way\" must attach ExiledBySource, got {f:?}"
+        );
+        match f {
+            TargetFilter::And { filters } => {
+                assert!(
+                    filters.contains(&TargetFilter::ExiledBySource),
+                    "And must include ExiledBySource, got {filters:?}"
+                );
+                assert!(
+                    filters.iter().any(|inner| matches!(
+                        inner,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                    )),
+                    "And must include a Typed creature filter, got {filters:?}"
+                );
+            }
+            other => panic!("expected And {{ Typed, ExiledBySource }}, got {other:?}"),
+        }
     }
 
     #[test]
@@ -8755,6 +9009,7 @@ mod tests {
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: None,
+                ..
             }
         ));
     }
@@ -8769,6 +9024,7 @@ mod tests {
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Equipment,
                 controller: None,
+                ..
             }
         ));
     }
