@@ -12292,7 +12292,27 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
             || tag::<_, _, OracleError<'_>>("play ").parse(lower).is_ok()
             || tag::<_, _, OracleError<'_>>("cast ").parse(lower).is_ok());
 
-    battlefield_recall || hand_recall || copy_token_recall || play_from_exile_grant
+    // CR 603.7 + CR 400.7h + CR 118.9: cross-clause "you may play/cast that card
+    // without paying its mana cost [until end of turn / this turn]" — the "that
+    // card" anaphor refers to the card the preceding exile published into the
+    // tracked set (Urza, Lord High Artificer's {5}; the "shuffle ..., then exile
+    // the top card, you may play it for free until end of turn" class). Distinct
+    // from the `play_from_exile_grant` "remains exiled" impulse grant (which is
+    // PAID and permanent-duration); this is the FREE-cast, turn-scoped
+    // fingerprint. Only consulted after a prior clause publishes a tracked set,
+    // and triply scoped: anaphor (play/cast that card) + free-cast marker
+    // (without paying) + turn duration (until end of turn / this turn).
+    let free_cast_that_card_grant = (scan_contains_phrase(lower, "play that card")
+        || scan_contains_phrase(lower, "cast that card"))
+        && scan_contains_phrase(lower, "without paying")
+        && (scan_contains_phrase(lower, "until end of turn")
+            || scan_contains_phrase(lower, "this turn"));
+
+    battlefield_recall
+        || hand_recall
+        || copy_token_recall
+        || play_from_exile_grant
+        || free_cast_that_card_grant
 }
 
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
@@ -24325,6 +24345,92 @@ mod tests {
                 }
             ),
             "Expected PlayFromExile grant bound to the tracked exiled card, got {:?}",
+            grant.effect
+        );
+    }
+
+    /// CR 603.7 + CR 400.7h + CR 118.9: The free-cast cross-clause grant —
+    /// "exile the top card. Until end of turn, you may play that card without
+    /// paying its mana cost." (Urza, Lord High Artificer's {5}) — must rebind
+    /// the cast clause's `ParentTarget` to the tracked set the exile published.
+    /// This proves `contains_implicit_tracked_set_pronoun`'s free-cast
+    /// recognizer fired: without it the `CastFromZone` target stays
+    /// `ParentTarget` (binds to nothing) and the parse is a no-op at runtime.
+    #[test]
+    fn exile_top_then_free_play_that_card_binds_cast_to_tracked_set() {
+        let def = parse_effect_chain(
+            "Exile the top card. Until end of turn, you may play that card without paying its mana cost.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected a controller ExileTop head, got {:?}",
+            def.effect
+        );
+        let cast = def
+            .sub_ability
+            .as_ref()
+            .expect("the free-cast grant must chain after the exile");
+        assert!(
+            matches!(
+                &*cast.effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Play,
+                    ..
+                }
+            ),
+            "expected CastFromZone bound to the tracked exiled card (free, Play), got {:?}",
+            cast.effect
+        );
+    }
+
+    /// Regression: Abbot of Keral Keep's "exile the top card of your library"
+    /// with a paid impulse grant ("Until end of turn, you may play that card")
+    /// must be untouched by the free-cast detector. It is a PAID play (no
+    /// "without paying"), so it stays a `GrantCastingPermission(PlayFromExile)`
+    /// — the free-cast `CastFromZone` rebinding must not fire here.
+    #[test]
+    fn abbot_of_keral_keep_paid_impulse_grant_unchanged() {
+        let def = parse_effect_chain(
+            "Exile the top card of your library. Until end of turn, you may play that card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected a controller ExileTop head, got {:?}",
+            def.effect
+        );
+        let grant = def
+            .sub_ability
+            .as_ref()
+            .expect("the paid impulse grant must chain after the exile");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile { .. },
+                    ..
+                }
+            ),
+            "expected a paid PlayFromExile grant (not a free CastFromZone), got {:?}",
             grant.effect
         );
     }
