@@ -497,7 +497,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 valid_attacker_ids,
                 ..
             },
-            GameAction::DeclareAttackers { attacks },
+            GameAction::DeclareAttackers { attacks, .. },
         ) => {
             *player != acting_player
                 || attacks.iter().any(|(attacker, _)| {

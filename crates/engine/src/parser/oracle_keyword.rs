@@ -867,6 +867,49 @@ fn parse_craft_material_count(input: &str) -> Option<(&str, CostObjectCount)> {
     Some((input, CostObjectCount::exactly(1)))
 }
 
+/// CR 702.18a / 702.11a: the CR keyword that a descriptive "can't be the target
+/// [of ...]" prohibition corresponds to. These phrasings ARE Shroud / Hexproof
+/// (CR 702.18a: "Shroud" means "can't be the target of spells or abilities";
+/// CR 702.11a: Hexproof restricts only opponents' spells/abilities), so callers
+/// map them onto the existing keyword targeting checks rather than a bespoke rule
+/// static, getting the correct controller scope for free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CantBeTargetedScope {
+    /// CR 702.18a: blanket — can't be targeted by ANY player (Shroud).
+    AnyPlayer,
+    /// CR 702.11a: only spells/abilities an opponent controls (Hexproof).
+    OpponentsOnly,
+}
+
+/// Classify a predicate carrying a "can't be the target[ed]" prohibition.
+///
+/// Returns `None` when no such prohibition is present, or when its scope is one
+/// this parser does not yet model precisely (e.g. a specific spell type), so a
+/// caller never collapses an unrecognized scope into a blanket restriction.
+pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeTargetedScope> {
+    let is_prohibition = scan_contains(predicate_lower, "can't be the target")
+        || scan_contains(predicate_lower, "cannot be the target")
+        || scan_contains(predicate_lower, "can't be targeted")
+        || scan_contains(predicate_lower, "cannot be targeted");
+    if !is_prohibition {
+        return None;
+    }
+    // CR 702.11a: an opponent-controlled qualifier makes this Hexproof, not Shroud.
+    if scan_contains(predicate_lower, "your opponents control")
+        || scan_contains(predicate_lower, "an opponent controls")
+    {
+        return Some(CantBeTargetedScope::OpponentsOnly);
+    }
+    // CR 702.18a: the bare form ("~ can't be targeted") or the unqualified
+    // "spells or abilities" scope is blanket Shroud. Any other qualifier is left
+    // unclassified so it is not mistreated as a blanket restriction.
+    let bare = !scan_contains(predicate_lower, " of ");
+    let unqualified_scope = scan_contains(predicate_lower, "spells or abilities")
+        || scan_contains(predicate_lower, "spell or ability")
+        || scan_contains(predicate_lower, "spells and abilities");
+    (bare || unqualified_scope).then_some(CantBeTargetedScope::AnyPlayer)
+}
+
 ///
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
 /// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,

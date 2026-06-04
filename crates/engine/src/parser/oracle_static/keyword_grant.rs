@@ -635,6 +635,21 @@ pub(crate) fn push_grant_clause_modifications(
         return;
     }
 
+    // CR 702.18a / 702.11a: a descriptive "can't be the target [of ...]" grant is
+    // Shroud (blanket) or Hexproof (opponents only). Emit the keyword so the
+    // existing targeting checks apply the correct controller scope, rather than a
+    // scope-less rule static.
+    if let Some(scope) =
+        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str())
+    {
+        let keyword = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
+        };
+        modifications.push(ContinuousModification::AddKeyword { keyword });
+        return;
+    }
+
     if let Some(modes) = parse_restriction_modes(part_lower.as_str()) {
         for mode in modes {
             if static_mode_needs_grant_propagation(&mode) {

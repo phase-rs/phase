@@ -1362,6 +1362,19 @@ fn can_target(
     if is_protected_from(obj, source_id, state) {
         return false;
     }
+    // CR 702.18a: A static "can't be the target of spells or abilities" is the
+    // descriptive (non-keyworded) form of Shroud — the permanent can't be the
+    // target of any spell or ability, regardless of controller. It is modeled as
+    // `StaticMode::CantBeTargeted`, living on the object's own static definitions
+    // (a self-referential static, or propagated onto a subject via `AddStaticMode`
+    // — see `static_mode_needs_grant_propagation`). The opponent-scoped variant
+    // ("... your opponents control") is parsed as `Keyword::Hexproof` instead, so
+    // it is handled by the Hexproof branch above rather than here.
+    if super::functioning_abilities::active_static_definitions(state, obj)
+        .any(|def| matches!(def.mode, crate::types::statics::StaticMode::CantBeTargeted))
+    {
+        return false;
+    }
     // CR 702.21a: Ward is a triggered ability, not a targeting restriction.
     // Targeting is legal; the ward trigger fires via process_triggers() and
     // counters the spell/ability unless the opponent pays the ward cost.
@@ -1826,6 +1839,34 @@ mod tests {
         let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
         assert!(!targets_p0.contains(&TargetRef::Object(c1)));
         assert!(!targets_p1.contains(&TargetRef::Object(c1)));
+    }
+
+    /// CR 702.18a: A `StaticMode::CantBeTargeted` static (the descriptive Shroud
+    /// form, "~ can't be the target of spells or abilities") makes the permanent
+    /// untargetable by EVERY player, including its own controller — distinguishing
+    /// it from Hexproof, which only blocks opponents.
+    #[test]
+    fn cant_be_targeted_static_blocks_all_players() {
+        let (mut state, _c0, c1) = setup_with_creatures();
+        // c1 is controlled by P1. Grant it the blanket static directly, mirroring
+        // a self-referential static / the `AddStaticMode` propagation onto a subject.
+        state.objects.get_mut(&c1).unwrap().static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::CantBeTargeted,
+            )
+            .affected(crate::types::ability::TargetFilter::SelfRef),
+        );
+
+        let targets_p0 = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
+        assert!(
+            !targets_p0.contains(&TargetRef::Object(c1)),
+            "opponent cannot target a CantBeTargeted permanent"
+        );
+        assert!(
+            !targets_p1.contains(&TargetRef::Object(c1)),
+            "the controller cannot target it either (Shroud semantics, not Hexproof)"
+        );
     }
 
     #[test]

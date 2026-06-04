@@ -138,6 +138,12 @@ pub enum GameAction {
     },
     DeclareAttackers {
         attacks: Vec<(ObjectId, AttackTarget)>,
+        /// CR 702.22c: As a player declares attackers, they may declare that one
+        /// or more attacking creatures with banding (or one with banding and any
+        /// number of others) form an attacking band. Each inner `Vec` is one band
+        /// of attacker `ObjectId`s. Empty (the default) means no bands declared.
+        #[serde(default)]
+        bands: Vec<Vec<ObjectId>>,
     },
     DeclareBlockers {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -538,6 +544,16 @@ pub enum GameAction {
         /// CR 702.19c: Damage to PW controller when trample-over-PW spills past loyalty.
         #[serde(default)]
         controller_damage: u32,
+    },
+    /// CR 510.1d + CR 702.22k: Assign a blocking creature's combat damage,
+    /// divided as the active player chooses, among the creatures it is blocking.
+    /// Answers a `WaitingFor::AssignBlockerDamage` prompt. Each `(ObjectId, u32)`
+    /// is `(attacker_being_blocked, damage)`; the amounts must sum to the
+    /// blocker's combat power. Unlike `AssignCombatDamage`, there is no lethal,
+    /// trample, or planeswalker dimension — a blocker only ever assigns to the
+    /// attackers it blocks.
+    AssignBlockerDamage {
+        assignments: Vec<(ObjectId, u32)>,
     },
     /// CR 601.2d: Distribute N among targets at casting time.
     DistributeAmong {
@@ -1242,6 +1258,7 @@ impl GameAction {
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
             | GameAction::AssignCombatDamage { .. }
+            | GameAction::AssignBlockerDamage { .. }
             | GameAction::DistributeAmong { .. }
             | GameAction::ChooseCounterMoveDistribution { .. }
             | GameAction::SubmitPayAmount { .. }
@@ -1325,6 +1342,7 @@ mod tests {
                 (ObjectId(1), AttackTarget::Player(PlayerId(1))),
                 (ObjectId(2), AttackTarget::Planeswalker(ObjectId(99))),
             ],
+            bands: vec![],
         };
         let serialized = serde_json::to_string(&action).unwrap();
         let deserialized: GameAction = serde_json::from_str(&serialized).unwrap();
@@ -1351,6 +1369,7 @@ mod tests {
     fn declare_attackers_empty_attacks_roundtrips() {
         let action = GameAction::DeclareAttackers {
             attacks: Vec::new(),
+            bands: vec![],
         };
         let serialized = serde_json::to_string(&action).unwrap();
         let deserialized: GameAction = serde_json::from_str(&serialized).unwrap();

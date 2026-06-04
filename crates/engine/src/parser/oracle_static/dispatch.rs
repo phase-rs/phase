@@ -1288,14 +1288,27 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "~ can't be the target" or "~ can't be targeted" ---
-    if nom_primitives::scan_contains(tp.lower, "can't be the target")
-        || nom_primitives::scan_contains(tp.lower, "can't be targeted")
-    {
-        return Some(
-            StaticDefinition::new(StaticMode::CantBeTargeted)
-                .affected(TargetFilter::SelfRef)
-                .description(text.to_string()),
-        );
+    // CR 702.18a / 702.11a: these descriptive phrasings ARE Shroud / Hexproof.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
+        return Some(match scope {
+            // CR 702.11a: "... your opponents control" — grant Hexproof so the
+            // permanent's own controller can still target it.
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Hexproof,
+                    }])
+                    .description(text.to_string())
+            }
+            // CR 702.18a: blanket — can't be targeted by any player. Enforced in
+            // `targeting.rs::can_target` via the object's active static definitions.
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                StaticDefinition::new(StaticMode::CantBeTargeted)
+                    .affected(TargetFilter::SelfRef)
+                    .description(text.to_string())
+            }
+        });
     }
 
     // --- "~ can't be sacrificed" (CR 701.21) ---

@@ -153,6 +153,7 @@ fn equipment_trample_present_through_combat_until_damage() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declare attackers");
     if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {

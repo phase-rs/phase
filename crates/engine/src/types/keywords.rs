@@ -752,8 +752,10 @@ pub enum Keyword {
     /// count is the distinct-colors-spent metric. Per CR 702.44d each instance
     /// works separately.
     Sunburst,
-    /// CR 702.72a: Champion a [type] — exile a creature of the specified type you control
-    /// when this enters; return it when this leaves.
+    /// CR 702.72a: Champion a [type] — exile another object of the specified
+    /// type you control or sacrifice this permanent when it enters; return the
+    /// exiled card when this leaves. Wired at build time by
+    /// `synthesize_champion`; CR 702.72b makes the two abilities linked.
     Champion(String),
     /// CR 702.149a: Training — whenever this creature attacks with another creature
     /// with greater power, put a +1/+1 counter on this creature.

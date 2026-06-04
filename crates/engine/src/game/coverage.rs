@@ -4143,26 +4143,36 @@ fn check_resolver_features(face: &CardFace, missing: &mut Vec<String>) {
     }
 }
 
-/// Parser warning diagnostics indicate degraded or silently incomplete behavior.
-/// Cards with these diagnostics must not count as coverage-supported unless the
-/// warning is informational only.
-fn check_parse_warnings(
-    warnings: &[crate::parser::oracle_ir::diagnostic::OracleDiagnostic],
-    missing: &mut Vec<String>,
-) {
+/// Parse warnings indicate Oracle text the parser accepted but did not faithfully
+/// represent, so the card has silently incorrect behavior at runtime:
+///
+/// - `TargetFallback` — degraded targeting (`TargetFilter::Any` instead of a
+///   specific filter).
+/// - `SwallowedClause` — a load-bearing clause (condition, duration, optional,
+///   activation limit, dynamic quantity, replacement, APNAP ordering) was
+///   dropped from the AST while the surrounding ability still parsed. The
+///   swallow-check detectors fire only when the marker phrase is present AND
+///   the AST has no representation for it, so a fired warning is an unrepresented
+///   clause, not detector noise. Folding these into the supported predicate
+///   stops coverage from marking such cards green (umbrella issue #2243; per
+///   detector: #2229–#2241).
+/// - `CascadeLoss` — a cascade slot was populated but did not land on the final
+///   ability definition, so the parsed card is missing load-bearing behavior.
+///
+/// `IgnoredRemainder` stays informational because it can be parser-internal
+/// trivia rather than a demonstrated missing semantic clause.
+fn check_parse_warnings(warnings: &[OracleDiagnostic], missing: &mut Vec<String>) {
     for warning in warnings {
-        if let Some(label) = parse_warning_gap_label(warning) {
-            if !missing.contains(&label) {
-                missing.push(label);
-            }
+        let Some(label) = parse_warning_gap_label(warning) else {
+            continue;
+        };
+        if !missing.contains(&label) {
+            missing.push(label);
         }
     }
 }
 
-fn parse_warning_gap_label(
-    warning: &crate::parser::oracle_ir::diagnostic::OracleDiagnostic,
-) -> Option<String> {
-    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+fn parse_warning_gap_label(warning: &OracleDiagnostic) -> Option<String> {
     match warning {
         OracleDiagnostic::TargetFallback { context, .. } => {
             if context.contains("trigger subject") {
@@ -4171,9 +4181,7 @@ fn parse_warning_gap_label(
                 Some("ParseWarning:target-fallback".to_string())
             }
         }
-        OracleDiagnostic::SwallowedClause { detector, .. } => {
-            Some(format!("ParseWarning:swallowed-clause:{detector}"))
-        }
+        OracleDiagnostic::SwallowedClause { detector, .. } => Some(format!("Swallow:{detector}")),
         OracleDiagnostic::CascadeLoss { slot, .. } => {
             Some(format!("ParseWarning:cascade-loss:{slot:?}"))
         }
@@ -8307,6 +8315,7 @@ mod tests {
 
     use super::*;
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
+    use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
         AbilityKind, CounterTransferMode, Effect, PreventionAmount, PreventionScope,
         ReplacementCondition, TargetFilter,
@@ -8339,7 +8348,7 @@ mod tests {
         ];
         let mut missing = Vec::new();
         check_parse_warnings(&warnings, &mut missing);
-        assert_eq!(missing, vec!["ParseWarning:swallowed-clause:Condition_If"]);
+        assert_eq!(missing, vec!["Swallow:Condition_If"]);
     }
 
     #[test]
@@ -8429,6 +8438,57 @@ mod tests {
         check_subtype_lexicon(&face, &valid, &mut missing);
 
         assert!(missing.is_empty());
+    }
+
+    /// A fired `SwallowedClause` diagnostic must demote the card from
+    /// "supported" via a `Swallow:{detector}` gap label (issue #2230 / #2243).
+    /// The label format is a contract: parser tests in `oracle.rs` grep for
+    /// exactly `"Swallow:{detector}"`, so this locks it.
+    #[test]
+    fn check_parse_warnings_flags_swallowed_clause() {
+        let warnings = vec![OracleDiagnostic::SwallowedClause {
+            detector: "Condition_If".into(),
+            description: "if you control a creature, …".into(),
+            line_index: 0,
+        }];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:Condition_If".to_string()]);
+    }
+
+    /// Multiple swallowed clauses sharing a detector collapse to one gap label,
+    /// matching the dedupe semantics of the existing `ParseWarning:*` arms.
+    #[test]
+    fn check_parse_warnings_dedupes_same_detector() {
+        let warnings = vec![
+            OracleDiagnostic::SwallowedClause {
+                detector: "DynamicQty".into(),
+                description: "equal to the number of charge counters".into(),
+                line_index: 0,
+            },
+            OracleDiagnostic::SwallowedClause {
+                detector: "DynamicQty".into(),
+                description: "equal to that card's mana value".into(),
+                line_index: 1,
+            },
+        ];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:DynamicQty".to_string()]);
+    }
+
+    /// `CascadeLoss` means a cascade slot was parsed but did not land on the
+    /// final ability definition, so it must demote coverage.
+    #[test]
+    fn check_parse_warnings_flags_cascade_loss() {
+        let warnings = vec![OracleDiagnostic::CascadeLoss {
+            slot: CascadeSlot::Condition,
+            effect_name: "DrawCards".into(),
+            line_index: 0,
+        }];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["ParseWarning:cascade-loss:Condition"]);
     }
 
     #[test]
@@ -8695,6 +8755,66 @@ mod tests {
         assert!(!beta.supported);
         assert_eq!(beta.gap_count, 1);
         assert_eq!(beta.gap_details[0].handler, "Effect:beta_gap");
+    }
+
+    #[test]
+    fn analyze_coverage_surfaces_swallowed_clause_gap_details() {
+        let export = serde_json::json!({
+            "alpha": {
+                "name": "Alpha",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": "If you control a creature, draw a card.",
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "parse_warnings": [{
+                    "type": "SwallowedClause",
+                    "detector": "Condition_If",
+                    "description": "if you control a creature",
+                    "line_index": 0
+                }]
+            }
+        })
+        .to_string();
+
+        let db = CardDatabase::from_json_str(&export).expect("test export should deserialize");
+        let summary = analyze_coverage(&db);
+        let card = summary
+            .cards
+            .iter()
+            .find(|card| card.card_name == "Alpha")
+            .unwrap();
+
+        assert!(!card.supported);
+        assert_eq!(card.gap_count, 1);
+        assert_eq!(card.gap_details[0].handler, "Swallow:Condition_If");
+        let top_gap = summary
+            .top_gaps
+            .iter()
+            .find(|gap| gap.handler == "Swallow:Condition_If")
+            .unwrap();
+        assert_eq!(top_gap.total_count, 1);
+        assert_eq!(top_gap.single_gap_cards, 1);
+        assert!(top_gap.single_gap_by_format.is_empty());
+        assert_eq!(top_gap.oracle_patterns.len(), 1);
+        assert_eq!(top_gap.oracle_patterns[0].count, 1);
+        assert_eq!(
+            top_gap.oracle_patterns[0].example_cards,
+            vec!["Alpha".to_string()]
+        );
+        assert!(top_gap.independence_ratio.is_none());
+        assert!(top_gap.co_occurrences.is_empty());
     }
 
     #[test]

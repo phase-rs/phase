@@ -2804,10 +2804,31 @@ fn static_lands_you_control_have() {
 
 #[test]
 fn static_cant_be_the_target() {
+    // CR 702.11a: "can't be the target of spells or abilities your opponents
+    // control" (Sphinx of the Final Word) IS Hexproof — the permanent's controller
+    // can still target it — so it is modeled as a Hexproof keyword grant (which the
+    // targeting check already enforces with the correct controller scope) rather
+    // than a scope-less blanket static.
     let def = parse_static_line(
             "Sphinx of the Final Word can't be the target of spells or abilities your opponents control.",
         )
         .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof,
+        }));
+}
+
+#[test]
+fn static_cant_be_targeted_blanket_is_shroud_static() {
+    // CR 702.18a: the unqualified "can't be the target of spells or abilities"
+    // (no controller qualifier) is blanket Shroud — untargetable by any player,
+    // including the controller — modeled as the CantBeTargeted static and enforced
+    // in `targeting.rs::can_target`.
+    let def =
+        parse_static_line("Guardian Idol can't be the target of spells or abilities.").unwrap();
     assert_eq!(def.mode, StaticMode::CantBeTargeted);
 }
 
