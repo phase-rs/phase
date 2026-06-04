@@ -15,6 +15,7 @@ mod aura_on_player;
 mod awaken_runtime;
 mod balance_equalization;
 mod baleful_mastery_regression;
+mod banding_combat;
 mod batched_trigger_subject_count;
 mod belbe_thornbow_life_loss;
 mod betor_lifelink_counters_repro;

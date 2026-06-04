@@ -10,7 +10,8 @@ use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_counter_added_record,
     matches_target_filter_on_damage_record_source, matches_target_filter_on_zone_change_record,
-    player_matches_target_filter, spell_record_matches_filter, type_filter_matches, FilterContext,
+    player_matches_target_filter_in_state, spell_record_matches_filter, type_filter_matches,
+    FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
@@ -2444,9 +2445,12 @@ fn damage_record_target_matches(
                 live_target_filter.as_ref().unwrap_or(filter);
             matches_target_filter(state, object_id, live_target_filter_ref, filter_ctx)
         }
-        TargetRef::Player(player_id) => {
-            player_matches_target_filter(filter, player_id, filter_ctx.source_controller)
-        }
+        TargetRef::Player(player_id) => player_matches_target_filter_in_state(
+            state,
+            filter,
+            player_id,
+            filter_ctx.source_controller,
+        ),
     }
 }
 
@@ -3340,10 +3344,11 @@ pub(crate) fn resolve_player_count(
                             .iter()
                             .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
                         PlayerFilter::PerformedActionThisWay { relation, action } => {
-                            crate::game::players::matches_relation(p.id, controller, *relation)
-                                && crate::game::players::performed_action_this_way(
-                                    state, p.id, *action,
-                                )
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && crate::game::players::performed_action_this_way(
+                                state, p.id, *action,
+                            )
                         }
                         PlayerFilter::OwnersOfCardsExiledBySource => {
                             crate::game::players::owns_card_exiled_by_source(state, p.id, source_id)
@@ -3358,7 +3363,7 @@ pub(crate) fn resolve_player_count(
                         // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
                         // Falls back to plain Opponent semantics when no trigger event is in scope.
                         PlayerFilter::OpponentOtherThanTriggering => {
-                            if p.id == controller {
+                            if !crate::game::players::is_opponent(state, controller, p.id) {
                                 false
                             } else {
                                 let triggering =
@@ -3392,15 +3397,16 @@ pub(crate) fn resolve_player_count(
                             count,
                         } => {
                             let threshold = resolve_quantity(state, count, controller, source_id);
-                            crate::game::players::matches_relation(p.id, controller, *relation)
-                                && crate::game::effects::player_control_count_compares(
-                                    state,
-                                    p.id,
-                                    filter,
-                                    *comparator,
-                                    threshold,
-                                    source_id,
-                                )
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && crate::game::effects::player_control_count_compares(
+                                state,
+                                p.id,
+                                filter,
+                                *comparator,
+                                threshold,
+                                source_id,
+                            )
                         }
                         // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
                         // whose [scalar attr] [comparator] [value]" — count
@@ -3416,9 +3422,10 @@ pub(crate) fn resolve_player_count(
                             value,
                         } => {
                             let threshold = resolve_quantity(state, value, controller, source_id);
-                            crate::game::players::matches_relation(p.id, controller, *relation)
-                                && crate::game::effects::candidate_player_scalar(p, attr)
-                                    .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                            crate::game::players::matches_relation(
+                                state, p.id, controller, *relation,
+                            ) && crate::game::effects::candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                         }
                     }
             })

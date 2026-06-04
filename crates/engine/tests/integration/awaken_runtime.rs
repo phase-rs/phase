@@ -303,7 +303,10 @@ fn e2_awaken_animation_persists_across_turns() {
             break;
         }
         let action = match runner.state().waiting_for {
-            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers { attacks: vec![] },
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
             WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
                 assignments: vec![],
             },

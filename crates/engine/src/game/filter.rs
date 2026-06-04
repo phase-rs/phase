@@ -2373,9 +2373,12 @@ fn aura_can_enchant_referenced_target(
             source.ability,
             source.recipient_id,
         ),
-        TargetRef::Player(player_id) => {
-            player_matches_target_filter(enchant_filter, *player_id, Some(aura.controller))
-        }
+        TargetRef::Player(player_id) => player_matches_target_filter_in_state(
+            state,
+            enchant_filter,
+            *player_id,
+            Some(aura.controller),
+        ),
     }
 }
 
@@ -3820,6 +3823,38 @@ pub fn player_matches_target_filter(
     player_id: PlayerId,
     source_controller: Option<PlayerId>,
 ) -> bool {
+    player_matches_target_filter_with(
+        filter,
+        player_id,
+        source_controller,
+        &|controller, player| controller != player,
+    )
+}
+
+/// Check if a player target matches a TargetFilter constraint using team-aware
+/// opponent semantics from the game state.
+/// CR 102.2 / CR 102.3 / CR 115.9c: Opponent-scoped player targets exclude
+/// teammates in team multiplayer.
+pub fn player_matches_target_filter_in_state(
+    state: &GameState,
+    filter: &TargetFilter,
+    player_id: PlayerId,
+    source_controller: Option<PlayerId>,
+) -> bool {
+    player_matches_target_filter_with(
+        filter,
+        player_id,
+        source_controller,
+        &|controller, player| crate::game::players::is_opponent(state, controller, player),
+    )
+}
+
+fn player_matches_target_filter_with(
+    filter: &TargetFilter,
+    player_id: PlayerId,
+    source_controller: Option<PlayerId>,
+    is_opponent: &impl Fn(PlayerId, PlayerId) -> bool,
+) -> bool {
     match filter {
         TargetFilter::Any | TargetFilter::Player => true,
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
@@ -3830,7 +3865,9 @@ pub fn player_matches_target_filter(
         TargetFilter::ScopedPlayer => false,
         TargetFilter::Typed(ref tf) if tf.type_filters.is_empty() => match &tf.controller {
             Some(ControllerRef::You) => source_controller == Some(player_id),
-            Some(ControllerRef::Opponent) => source_controller.is_some_and(|c| c != player_id),
+            Some(ControllerRef::Opponent) => {
+                source_controller.is_some_and(|controller| is_opponent(controller, player_id))
+            }
             Some(ControllerRef::ScopedPlayer) => false,
             // CR 109.4: TargetPlayer has no meaning when matching a player against
             // a filter without ability context. Fail closed (mirrors the pattern
@@ -3851,12 +3888,12 @@ pub fn player_matches_target_filter(
         },
         // Typed filters with type_filters don't match players
         TargetFilter::Typed(_) => false,
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|f| player_matches_target_filter(f, player_id, source_controller)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|f| player_matches_target_filter(f, player_id, source_controller)),
+        TargetFilter::Or { filters } => filters.iter().any(|f| {
+            player_matches_target_filter_with(f, player_id, source_controller, is_opponent)
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|f| {
+            player_matches_target_filter_with(f, player_id, source_controller, is_opponent)
+        }),
         // CR 102.1 + CR 103.1: seating-neighbor resolution requires
         // `state.seat_order`, which is not available in this stateless matcher.
         // The recipient is resolved upstream at the GainControl recipient path
@@ -3879,6 +3916,7 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
+    use crate::types::format::FormatConfig;
     use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
@@ -3954,6 +3992,26 @@ mod tests {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         assert!(!matches_target_filter(&state, id, &TargetFilter::None, id));
+    }
+
+    #[test]
+    fn player_filter_in_state_excludes_two_headed_giant_teammate_for_opponent_scope() {
+        let state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let opponent_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        assert!(!player_matches_target_filter_in_state(
+            &state,
+            &opponent_filter,
+            PlayerId(1),
+            Some(PlayerId(0))
+        ));
+        assert!(player_matches_target_filter_in_state(
+            &state,
+            &opponent_filter,
+            PlayerId(2),
+            Some(PlayerId(0))
+        ));
     }
 
     /// CR 702.26b: `matches_target_filter_including_phased_out` evaluates the

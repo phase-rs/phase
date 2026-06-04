@@ -266,7 +266,7 @@ pub(crate) fn matches_player_scope(
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
                     PlayerFilter::PerformedActionThisWay { relation, action } => {
-                        crate::game::players::matches_relation(p.id, controller, *relation)
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
                             && crate::game::players::performed_action_this_way(state, p.id, *action)
                     }
                     PlayerFilter::OwnersOfCardsExiledBySource => {
@@ -282,7 +282,7 @@ pub(crate) fn matches_player_scope(
                     // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
                     // Falls back to plain Opponent semantics when no trigger event is in scope.
                     PlayerFilter::OpponentOtherThanTriggering => {
-                        if p.id == controller {
+                        if !crate::game::players::is_opponent(state, controller, p.id) {
                             return false;
                         }
                         let triggering = state.current_trigger_event.as_ref().and_then(|e| {
@@ -310,7 +310,7 @@ pub(crate) fn matches_player_scope(
                         let threshold = crate::game::quantity::resolve_quantity(
                             state, count, controller, source_id,
                         );
-                        crate::game::players::matches_relation(p.id, controller, *relation)
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
                             && player_control_count_compares(
                                 state,
                                 p.id,
@@ -334,7 +334,7 @@ pub(crate) fn matches_player_scope(
                         let threshold = crate::game::quantity::resolve_quantity(
                             state, value, controller, source_id,
                         );
-                        crate::game::players::matches_relation(p.id, controller, *relation)
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
                             && candidate_player_scalar(p, attr)
                                 .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }

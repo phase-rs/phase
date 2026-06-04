@@ -45,6 +45,9 @@ use server_core::draft_wire_guard::{
 use server_core::emote_guard::guard_emote;
 use server_core::game_action_payload_guard::guard_game_action_payload;
 use server_core::game_reconnect_guard::guard_game_reconnect;
+use server_core::game_state_snapshot_wire_guard::{
+    guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,
+};
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
@@ -284,7 +287,10 @@ fn build_game_started_messages(session: &mut GameSession) -> Vec<(PlayerId, Serv
         .collect()
 }
 
-fn build_state_update_message(result: &ActionResult, player: PlayerId) -> ServerMessage {
+fn build_state_update_message(
+    result: &ActionResult,
+    player: PlayerId,
+) -> Result<ServerMessage, String> {
     let (
         raw_state,
         events,
@@ -294,11 +300,19 @@ fn build_state_update_message(result: &ActionResult, player: PlayerId) -> Server
         spell_costs,
         legal_actions_by_object,
     ) = result;
+    guard_state_snapshot_broadcast(StateSnapshotParts {
+        state: raw_state,
+        events,
+        log_entries,
+        legal_actions,
+        legal_actions_by_object,
+        spell_costs,
+    })?;
     let is_actor = raw_state.waiting_for.acting_players().contains(&player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
     let derived = derive_views(&filtered, Some(player));
 
-    ServerMessage::StateUpdate {
+    Ok(ServerMessage::StateUpdate {
         state: filtered,
         events: events.clone(),
         legal_actions: if is_actor {
@@ -320,18 +334,19 @@ fn build_state_update_message(result: &ActionResult, player: PlayerId) -> Server
             HashMap::new()
         },
         derived,
-    }
+    })
 }
 
 /// Build the public spectator view for an in-progress game.
 ///
 /// Spectators are modeled as a non-seat viewer (`PlayerId(u8::MAX)`), which
 /// keeps all seat-private data redacted and guarantees no legal-action payload.
-fn build_spectator_game_started_message(session: &GameSession) -> ServerMessage {
+fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerMessage, String> {
+    guard_game_state_for_broadcast(&session.state)?;
     let filtered = server_core::filter_state_for_player(&session.state, SPECTATOR_PLAYER_ID);
     let derived = derive_views(&filtered, None);
 
-    ServerMessage::GameStarted {
+    Ok(ServerMessage::GameStarted {
         state: filtered,
         your_player: SPECTATOR_PLAYER_ID,
         opponent_name: None,
@@ -343,19 +358,27 @@ fn build_spectator_game_started_message(session: &GameSession) -> ServerMessage 
         derived,
         player_token: None,
         events: Vec::new(),
-    }
+    })
 }
 
 fn build_spectator_state_update_message(
     raw_state: &GameState,
     events: &[GameEvent],
     log_entries: &[GameLogEntry],
-) -> ServerMessage {
+) -> Result<ServerMessage, String> {
+    guard_state_snapshot_broadcast(StateSnapshotParts {
+        state: raw_state,
+        events,
+        log_entries,
+        legal_actions: &[],
+        legal_actions_by_object: &HashMap::new(),
+        spell_costs: &HashMap::new(),
+    })?;
     let filtered = server_core::filter_state_for_player(raw_state, SPECTATOR_PLAYER_ID);
     let derived = derive_views(&filtered, None);
     let eliminated_players = raw_state.eliminated_players.clone();
 
-    ServerMessage::StateUpdate {
+    Ok(ServerMessage::StateUpdate {
         state: filtered,
         events: events.to_vec(),
         legal_actions: Vec::new(),
@@ -365,7 +388,7 @@ fn build_spectator_state_update_message(
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
-    }
+    })
 }
 
 /// Server's advertised role, selected at startup via `--lobby-only`. Copied
@@ -2305,6 +2328,14 @@ async fn broadcast_game_started(
         }
     }
 
+    let spectator_msg = match spectator_msg {
+        Ok(msg) => msg,
+        Err(reason) => {
+            warn!(game = %game_code, %reason, "skipping spectator GameStarted: snapshot too large");
+            return;
+        }
+    };
+
     let mut specs = game_spectators.lock().await;
     if let Some(spectators) = specs.get_mut(game_code) {
         spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
@@ -2763,6 +2794,22 @@ async fn handle_client_message(
                                 ranked_result_for_duel(game_db, &game_code, &players, winner)
                             });
 
+                    if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
+                        state: &raw_state,
+                        events: &events,
+                        log_entries: &log_entries,
+                        legal_actions: &legal_actions,
+                        legal_actions_by_object: &legal_actions_by_object,
+                        spell_costs: &spell_costs,
+                    }) {
+                        warn!(game = %game_code, %reason, "action snapshot too large to broadcast");
+                        let msg = ServerMessage::Error { message: reason };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+
                     // Filter state per-player outside the lock
                     let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
                         .map(|i| {
@@ -2827,9 +2874,9 @@ async fn handle_client_message(
                             }
                         }
                     }
+                    if let Ok(spectator_msg) =
+                        build_spectator_state_update_message(&raw_state, &events, &log_entries)
                     {
-                        let spectator_msg =
-                            build_spectator_state_update_message(&raw_state, &events, &log_entries);
                         let mut specs = game_spectators.lock().await;
                         if let Some(spectators) = specs.get_mut(&game_code) {
                             spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
@@ -2851,6 +2898,18 @@ async fn handle_client_message(
                             ai_spell_costs,
                             ai_by_object,
                         ) = result;
+                        if guard_state_snapshot_broadcast(StateSnapshotParts {
+                            state: ai_raw_state,
+                            events: ai_events,
+                            log_entries: ai_log_entries,
+                            legal_actions: ai_legal,
+                            legal_actions_by_object: ai_by_object,
+                            spell_costs: ai_spell_costs,
+                        })
+                        .is_err()
+                        {
+                            continue;
+                        }
                         let is_last = i == ai_results.len() - 1;
 
                         // Filter AI state per-player outside the lock
@@ -2902,16 +2961,18 @@ async fn handle_client_message(
                             }
                         }
                         let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
-                        let spectator_msg = build_spectator_state_update_message(
+                        if let Ok(spectator_msg) = build_spectator_state_update_message(
                             ai_raw_state,
                             ai_events,
                             ai_log_entries,
-                        );
-                        let mut specs = game_spectators.lock().await;
-                        if let Some(spectators) = specs.get_mut(&game_code) {
-                            spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
-                            if spectators.is_empty() {
-                                specs.remove(&game_code);
+                        ) {
+                            let mut specs = game_spectators.lock().await;
+                            if let Some(spectators) = specs.get_mut(&game_code) {
+                                spectators
+                                    .retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+                                if spectators.is_empty() {
+                                    specs.remove(&game_code);
+                                }
                             }
                         }
                     }
@@ -3073,7 +3134,9 @@ async fn handle_client_message(
                         if let Some(game_conns) = conns.get(&game_code) {
                             for (&pid, sender) in game_conns.iter() {
                                 if pid != player {
-                                    let _ = sender.send(build_state_update_message(&result, pid));
+                                    if let Ok(msg) = build_state_update_message(&result, pid) {
+                                        let _ = sender.send(msg);
+                                    }
                                 }
                             }
                         }
@@ -4311,7 +4374,7 @@ async fn handle_client_message(
                 let mgr = state.lock().await;
                 match mgr.sessions.get(&game_code) {
                     Some(session) if session.game_started => {
-                        Ok(build_spectator_game_started_message(session))
+                        build_spectator_game_started_message(session)
                     }
                     Some(_) => Err("Game has not started yet".to_string()),
                     None => Err(format!("Game not found: {game_code}")),
@@ -5243,7 +5306,7 @@ mod live_spectator_tests {
         let mut state = GameState::new_two_player(42);
         state.eliminated_players.push(PlayerId(1));
 
-        let msg = build_spectator_state_update_message(&state, &[], &[]);
+        let msg = build_spectator_state_update_message(&state, &[], &[]).expect("fixture snapshot");
 
         match msg {
             ServerMessage::StateUpdate {

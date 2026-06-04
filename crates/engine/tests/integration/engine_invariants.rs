@@ -50,6 +50,7 @@ fn declare_blockers_state() -> GameState {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declare attackers should succeed");
     runner.pass_both_players();
@@ -75,6 +76,7 @@ fn assign_combat_damage_state() -> GameState {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declare attackers should succeed");
     runner.pass_both_players();

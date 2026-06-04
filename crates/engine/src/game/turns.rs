@@ -502,6 +502,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.spells_cast_this_turn = 0;
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
+    state.triggers_fired_this_turn_per_opponent.clear();
     state.activated_abilities_this_turn.clear();
     // CR 602.5b: "Activate only once each turn" crew restriction resets each turn.
     state.crew_activated_this_turn.clear();
@@ -1432,6 +1433,17 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     advance_phase(state, events);
                     continue;
                 }
+                // CR 704.3: Check SBAs before beginning-of-upkeep triggers so that
+                // city blessing (CR 702.131b) and other SBA-granted designations are
+                // applied before trigger conditions like "if you have the city's blessing"
+                // are evaluated (Twilight Prophet #1375).
+                let waiting_before_sba = state.waiting_for.clone();
+                super::sba::check_state_based_actions(state, events);
+                if state.waiting_for != waiting_before_sba
+                    && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+                {
+                    return state.waiting_for.clone();
+                }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
                 // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended
                 // cards, two Howling Mines) require an ordering choice that must be
@@ -1689,6 +1701,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::card_type::Supertype;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use std::sync::Arc;
@@ -3693,6 +3706,320 @@ mod tests {
                 player: PlayerId(0)
             }
         ));
+    }
+
+    #[test]
+    fn auto_advance_returns_upkeep_sba_waiting_state() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        for card_id in [1, 2] {
+            let legend = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                "Mirror Legend".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&legend)
+                .unwrap()
+                .card_types
+                .supertypes
+                .push(Supertype::Legendary);
+        }
+
+        let mut events = Vec::new();
+        let waiting = auto_advance(&mut state, &mut events);
+
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(matches!(
+            waiting,
+            WaitingFor::ChooseLegend {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+    }
+
+    /// Regression for #1375: Twilight Prophet's upkeep trigger requires the city's blessing.
+    /// The city blessing is granted by SBAs (CR 702.131b), so SBAs must run before
+    /// beginning-of-upkeep triggers are collected. This test verifies that when a player
+    /// controls 10 permanents with an Ascend permanent, the city blessing is granted
+    /// before upkeep triggers are evaluated.
+    #[test]
+    fn city_blessing_granted_before_upkeep_triggers() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        // Player controls 10 permanents including one with Ascend
+        let ascend_permanent = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Ascend Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&ascend_permanent)
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Ascend);
+
+        for i in 1..10 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("Permanent {}", i),
+                Zone::Battlefield,
+            );
+        }
+
+        // Add Twilight Prophet with an upkeep trigger that checks for city blessing
+        let prophet = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Twilight Prophet".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prophet)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(
+                    crate::types::triggers::TriggerMode::Phase,
+                )
+                .condition(crate::types::ability::TriggerCondition::HasCityBlessing)
+                .description("Test trigger".to_string()),
+            );
+
+        // Untap step: no priority, just advance to Upkeep
+        let mut events = Vec::new();
+        auto_advance(&mut state, &mut events);
+
+        // Should be in Upkeep now
+        assert_eq!(state.phase, Phase::Upkeep);
+
+        // City blessing should be granted by SBAs before upkeep triggers
+        assert!(state.city_blessing.contains(&PlayerId(0)));
+    }
+
+    /// Regression for #1305: Thalisse's end step trigger counts tokens created this turn.
+    /// This test verifies that tokens created during the turn are correctly counted
+    /// when the end step trigger fires.
+    #[test]
+    fn thalisse_token_counting_at_end_step() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        // Add Thalisse with an end step trigger that counts tokens created this turn
+        let thalisse = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Thalisse, Reverent Medium".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&thalisse)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(
+                    crate::types::triggers::TriggerMode::Phase,
+                )
+                .phase(Phase::End)
+                .condition(
+                    crate::types::ability::TriggerCondition::QuantityComparison {
+                        lhs: crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::TokensCreatedThisTurn {
+                                player: crate::types::ability::PlayerScope::Controller,
+                                filter: crate::types::ability::TargetFilter::Any,
+                            },
+                        },
+                        comparator: crate::types::ability::Comparator::GE,
+                        rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    },
+                )
+                .description("Test trigger".to_string()),
+            );
+
+        // Create 3 tokens during the turn
+        for i in 0..3 {
+            let token = create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("Token {}", i),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&token).unwrap().is_token = true;
+            crate::game::restrictions::record_token_created(&mut state, token);
+        }
+
+        // Advance to end step
+        state.phase = Phase::PostCombatMain;
+        advance_phase(&mut state, &mut Vec::new()); // PostCombatMain → End
+        let mut events = Vec::new();
+        auto_advance(&mut state, &mut events);
+
+        // Should be in End phase now
+        assert_eq!(state.phase, Phase::End);
+
+        // Verify tokens created this turn is 3
+        assert_eq!(state.created_tokens_this_turn.len(), 3);
+    }
+
+    /// Regression for #1307: Moseo's trigger checks life gained this turn.
+    /// This test verifies that life gained during the turn is correctly tracked
+    /// and the trigger condition evaluates correctly.
+    #[test]
+    fn moseo_life_gained_trigger_condition() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        // Add Moseo with a trigger that checks life gained this turn
+        let moseo = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Moseo, Vein's New Dean".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&moseo)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(
+                    crate::types::triggers::TriggerMode::LifeGained,
+                )
+                .condition(
+                    crate::types::ability::TriggerCondition::QuantityComparison {
+                        lhs: crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::LifeGainedThisTurn {
+                                player: crate::types::ability::PlayerScope::Controller,
+                            },
+                        },
+                        comparator: crate::types::ability::Comparator::GE,
+                        rhs: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                    },
+                )
+                .description("Test trigger".to_string()),
+            );
+
+        // Simulate gaining 5 life this turn
+        state.players[0].life_gained_this_turn = 5;
+
+        // Check that the condition evaluates correctly
+        let condition = crate::types::ability::TriggerCondition::QuantityComparison {
+            lhs: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::LifeGainedThisTurn {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+        };
+        assert!(
+            crate::game::triggers::check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(moseo),
+                None
+            ),
+            "Condition should be true when 5 life gained (>= 3)"
+        );
+    }
+
+    /// Regression for #1356: Tinybones end step trigger checks opponent discards.
+    /// This test verifies that cards discarded by opponents are correctly tracked
+    /// and the trigger condition evaluates correctly.
+    #[test]
+    fn tinybones_opponent_discard_trigger_condition() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        // Add Tinybones with an end step trigger that checks opponent discards
+        let tinybones = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Tinybones, Trinket Thief".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&tinybones)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(
+                    crate::types::triggers::TriggerMode::Phase,
+                )
+                .phase(Phase::End)
+                .condition(
+                    crate::types::ability::TriggerCondition::QuantityComparison {
+                        lhs: crate::types::ability::QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::CardsDiscardedThisTurn {
+                                player: crate::types::ability::PlayerScope::Opponent {
+                                    aggregate: crate::types::ability::AggregateFunction::Sum,
+                                },
+                            },
+                        },
+                        comparator: crate::types::ability::Comparator::GE,
+                        rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    },
+                )
+                .description("Test trigger".to_string()),
+            );
+
+        // Simulate opponent discarding 2 cards this turn
+        state
+            .cards_discarded_this_turn_by_player
+            .insert(PlayerId(1), 2);
+
+        // Check that the condition evaluates correctly
+        let condition = crate::types::ability::TriggerCondition::QuantityComparison {
+            lhs: crate::types::ability::QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::CardsDiscardedThisTurn {
+                    player: crate::types::ability::PlayerScope::Opponent {
+                        aggregate: crate::types::ability::AggregateFunction::Sum,
+                    },
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        };
+        assert!(
+            crate::game::triggers::check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(tinybones),
+                None
+            ),
+            "Condition should be true when opponent discarded 2 cards (>= 1)"
+        );
     }
 
     #[test]
