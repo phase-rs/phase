@@ -4143,8 +4143,24 @@ fn check_resolver_features(face: &CardFace, missing: &mut Vec<String>) {
     }
 }
 
-/// Target-fallback warnings indicate degraded targeting (TargetFilter::Any instead of a
-/// specific filter). Cards with these have silently incorrect behavior at runtime.
+/// Parse warnings indicate Oracle text the parser accepted but did not faithfully
+/// represent, so the card has silently incorrect behavior at runtime:
+///
+/// - `TargetFallback` — degraded targeting (`TargetFilter::Any` instead of a
+///   specific filter).
+/// - `SwallowedClause` — a load-bearing clause (condition, duration, optional,
+///   activation limit, dynamic quantity, replacement, APNAP ordering) was
+///   dropped from the AST while the surrounding ability still parsed. The
+///   swallow-check detectors fire only when the marker phrase is present AND
+///   the AST has no representation for it, so a fired warning is an unrepresented
+///   clause, not detector noise. Folding these into the supported predicate
+///   stops coverage from marking such cards green (umbrella issue #2243; per
+///   detector: #2229–#2241).
+///
+/// `CascadeLoss` and `IgnoredRemainder` are intentionally left on the
+/// `_ => continue` arm: they signal parser-internal defects tracked separately,
+/// not unrepresented Oracle clauses, and folding them in here is out of scope
+/// for the swallowed-clause demotion.
 fn check_parse_warnings(
     warnings: &[crate::parser::oracle_ir::diagnostic::OracleDiagnostic],
     missing: &mut Vec<String>,
@@ -4158,6 +4174,9 @@ fn check_parse_warnings(
                 } else {
                     "ParseWarning:target-fallback".to_string()
                 }
+            }
+            OracleDiagnostic::SwallowedClause { detector, .. } => {
+                format!("Swallow:{detector}")
             }
             _ => continue,
         };
@@ -8366,6 +8385,60 @@ mod tests {
         let mut missing = Vec::new();
         check_subtype_lexicon(&face, &valid, &mut missing);
 
+        assert!(missing.is_empty());
+    }
+
+    /// A fired `SwallowedClause` diagnostic must demote the card from
+    /// "supported" via a `Swallow:{detector}` gap label (issue #2230 / #2243).
+    /// The label format is a contract: parser tests in `oracle.rs` grep for
+    /// exactly `"Swallow:{detector}"`, so this locks it.
+    #[test]
+    fn check_parse_warnings_flags_swallowed_clause() {
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+        let warnings = vec![OracleDiagnostic::SwallowedClause {
+            detector: "Condition_If".into(),
+            description: "if you control a creature, …".into(),
+            line_index: 0,
+        }];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:Condition_If".to_string()]);
+    }
+
+    /// Multiple swallowed clauses sharing a detector collapse to one gap label,
+    /// matching the dedupe semantics of the existing `ParseWarning:*` arms.
+    #[test]
+    fn check_parse_warnings_dedupes_same_detector() {
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+        let warnings = vec![
+            OracleDiagnostic::SwallowedClause {
+                detector: "DynamicQty".into(),
+                description: "equal to the number of charge counters".into(),
+                line_index: 0,
+            },
+            OracleDiagnostic::SwallowedClause {
+                detector: "DynamicQty".into(),
+                description: "equal to that card's mana value".into(),
+                line_index: 1,
+            },
+        ];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:DynamicQty".to_string()]);
+    }
+
+    /// `CascadeLoss` is a parser-internal defect signal, not an unrepresented
+    /// Oracle clause — it must NOT demote the card here.
+    #[test]
+    fn check_parse_warnings_ignores_cascade_loss() {
+        use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
+        let warnings = vec![OracleDiagnostic::CascadeLoss {
+            slot: CascadeSlot::Condition,
+            effect_name: "DrawCards".into(),
+            line_index: 0,
+        }];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
         assert!(missing.is_empty());
     }
 
