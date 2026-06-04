@@ -9412,6 +9412,7 @@ pub mod tests {
                 FilterProp::HasAttachment {
                     kind: crate::types::ability::AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 },
             ])),
         };

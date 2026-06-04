@@ -485,14 +485,22 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
             FilterProp::Unpaired => parts.push("unpaired".into()),
-            FilterProp::HasAttachment { kind, controller } => {
+            FilterProp::HasAttachment {
+                kind,
+                controller,
+                exclude_source,
+            } => {
                 let kind_s = match kind {
                     crate::types::ability::AttachmentKind::Aura => "aura",
                     crate::types::ability::AttachmentKind::Equipment => "equipment",
                 };
+                let qualifier = if *exclude_source { " another" } else { "" };
                 match controller {
-                    None => parts.push(format!("attached by {kind_s}")),
-                    Some(c) => parts.push(format!("attached by {kind_s} ({})", fmt_controller(c))),
+                    None => parts.push(format!("attached by{qualifier} {kind_s}")),
+                    Some(c) => parts.push(format!(
+                        "attached by{qualifier} {kind_s} ({})",
+                        fmt_controller(c)
+                    )),
                 }
             }
             FilterProp::HasAnyAttachmentOf { kinds, controller } => {

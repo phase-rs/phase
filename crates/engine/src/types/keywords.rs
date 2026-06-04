@@ -1311,7 +1311,8 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 /// into a `TypeFilter::Subtype` (the bug fixed by issue #537).
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     use crate::parser::oracle_nom::enchant::{
-        parse_enchant_controller_suffix, parse_enchant_player_base, parse_enchant_type_leg,
+        parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
+        parse_enchant_player_base, parse_enchant_type_leg,
     };
     use crate::parser::oracle_nom::error::OracleResult;
     use crate::parser::oracle_nom::filter::parse_zone_filter;
@@ -1384,21 +1385,33 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     let (rest, _card_word) = opt(parse_card_word).parse(rest).ok()?;
     let (rest, zone) = opt(parse_leading_zone).parse(rest).ok()?;
     let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
+    // CR 303.4 + CR 702.5a: Optional trailing attachment qualifier — "with
+    // another Aura attached to it" (Daybreak Coronet) narrows the legal target
+    // set to objects that already carry an attachment of the named kind.
+    let (rest, attachment) = opt(parse_enchant_attachment_qualifier).parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
     // Reject fully empty input — every other degenerate variant lacks a type
     // word AND a zone word AND a controller, so it cannot be a meaningful
-    // enchant clause.
+    // enchant clause. (An attachment qualifier cannot stand alone: its leading
+    // space requires a preceding type leg, so it never reaches this guard.)
     if type_filter.is_none() && zone.is_none() && controller.is_none() {
         return None;
     }
 
     // CR 303.4a: When the type leg is absent (Don't Worry About It), the
     // class is "any card", encoded as `TypeFilter::Card`.
-    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    let mut props = Vec::new();
     if let Some(z) = zone {
-        filter = filter.properties(vec![FilterProp::InZone { zone: z }]);
+        props.push(FilterProp::InZone { zone: z });
+    }
+    if let Some(prop) = attachment {
+        props.push(prop);
+    }
+    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    if !props.is_empty() {
+        filter = filter.properties(props);
     }
     if let Some(c) = controller {
         filter = filter.controller(c);
@@ -2931,6 +2944,53 @@ mod tests {
                 Some(super::super::ability::TypeFilter::Creature)
             ));
         }
+    }
+
+    /// CR 303.4 + CR 702.5a: Daybreak Coronet — "Enchant creature with another
+    /// Aura attached to it" narrows the legal host set to creatures that already
+    /// carry another Aura. The qualifier folds onto the typed filter as
+    /// `FilterProp::HasAttachment { Aura, exclude_source: true }` so SBA
+    /// legality cannot let Daybreak Coronet count itself after it resolves.
+    #[test]
+    fn parse_enchant_creature_with_another_aura_attached() {
+        use super::super::ability::{AttachmentKind, TypeFilter};
+        let enchant =
+            Keyword::from_str("Enchant:creature with another aura attached to it").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+            panic!("expected Typed; got {enchant:?}")
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.contains(&FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: None,
+                exclude_source: true,
+            }),
+            "expected FilterProp::HasAttachment {{ Aura, exclude_source }}; got {:?}",
+            tf.properties
+        );
+    }
+
+    /// Regression guard: a plain "Enchant creature" must NOT acquire an
+    /// attachment predicate — only the explicit qualifier adds `HasAttachment`.
+    #[test]
+    fn parse_enchant_plain_creature_has_no_attachment_predicate() {
+        use super::super::ability::AttachmentKind;
+        let enchant = Keyword::from_str("Enchant:creature").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = enchant else {
+            panic!("expected Typed; got {enchant:?}")
+        };
+        assert!(
+            !tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    ..
+                }
+            )),
+            "plain Enchant creature must carry no HasAttachment prop; got {:?}",
+            tf.properties
+        );
     }
 
     #[test]

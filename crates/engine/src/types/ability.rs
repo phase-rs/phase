@@ -2078,8 +2078,11 @@ pub enum FilterProp {
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
     /// (which are source-relative — match when THIS source is attached to the object),
-    /// this predicate is non-source-relative: it matches any object with a qualifying
-    /// attachment. `controller = None` means "any controller".
+    /// this predicate is non-source-relative by default: it matches any object with a
+    /// qualifying attachment. `exclude_source` preserves "another Aura/Equipment"
+    /// semantics for Aura legality so the source attachment cannot satisfy its own
+    /// "another" restriction after it becomes attached. `controller = None` means
+    /// "any controller".
     ///
     /// Covers:
     /// - "enchanted creature" when the ability source is not the Aura itself
@@ -2090,6 +2093,8 @@ pub enum FilterProp {
         kind: AttachmentKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        exclude_source: bool,
     },
     /// CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches objects that
     /// have at least one attachment whose subtype is in `kinds` and whose controller
@@ -12628,6 +12633,7 @@ mod tests {
                     FilterProp::HasAttachment {
                         kind: AttachmentKind::Aura,
                         controller: None,
+                        exclude_source: false,
                     },
                 ])),
                 TargetFilter::Typed(TypedFilter::creature()),
@@ -12643,6 +12649,7 @@ mod tests {
                 properties: vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 }],
             })
         );
