@@ -18,6 +18,7 @@ pub(super) fn handle_declare_attackers(
     state: &mut GameState,
     player: PlayerId,
     attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if state.active_player != player {
@@ -37,11 +38,20 @@ pub(super) fn handle_declare_attackers(
             per_creature,
             pending: CombatTaxPending::Attack {
                 attacks: attacks.to_vec(),
+                // CR 702.22c + CR 702.22h: preserve band declarations across the
+                // tax-payment pause so the resume path re-runs
+                // `declare_attackers_with_bands` and the band is grouped for
+                // blocking rather than being silently dropped.
+                bands: bands.to_vec(),
             },
         });
     }
     let declaration_start = events.len();
-    super::combat::declare_attackers(state, attacks, events).map_err(EngineError::InvalidAction)?;
+    // CR 702.22c: declare attackers together with any banding declarations so
+    // `band_id` is stamped on the attacking-band members before block
+    // propagation (CR 702.22h) and damage assignment (CR 702.22j/k).
+    super::combat::declare_attackers_with_bands(state, attacks, bands, events)
+        .map_err(EngineError::InvalidAction)?;
 
     // CR 508.1g + CR 701.43d: before attack triggers are put on the stack, the
     // active player pays any optional "exert this creature as it attacks" costs.
@@ -245,8 +255,8 @@ pub(super) fn handle_pay_combat_tax(
             total_mana_value: total_cost.mana_value(),
         });
         match pending {
-            CombatTaxPending::Attack { attacks } => {
-                return resume_declare_attackers(state, &attacks, events);
+            CombatTaxPending::Attack { attacks, bands } => {
+                return resume_declare_attackers(state, &attacks, &bands, events);
             }
             CombatTaxPending::Block { assignments } => {
                 return resume_declare_blockers(state, player, &assignments, events);
@@ -258,16 +268,34 @@ pub(super) fn handle_pay_combat_tax(
     let taxed: std::collections::HashSet<ObjectId> =
         per_creature.iter().map(|(id, _)| *id).collect();
     match pending {
-        CombatTaxPending::Attack { attacks } => {
+        CombatTaxPending::Attack { attacks, bands } => {
             let filtered: Vec<(ObjectId, AttackTarget)> = attacks
                 .into_iter()
                 .filter(|(id, _)| !taxed.contains(id))
+                .collect();
+            // CR 702.22f: a creature dropped from the attack (because its tax was
+            // declined) is also removed from its band. Filter the taxed members
+            // out of every band. CR 702.22c: a band must still contain at least
+            // one creature with banding to remain a band — drop any band that no
+            // longer does (this also discards bands left empty). Survivors of a
+            // dissolved band stay in `filtered` as ungrouped individual attackers.
+            let filtered_bands: Vec<Vec<ObjectId>> = bands
+                .into_iter()
+                .map(|band| {
+                    band.into_iter()
+                        .filter(|id| !taxed.contains(id))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|band| {
+                    band.iter()
+                        .any(|&id| crate::game::combat::has_banding(state, id))
+                })
                 .collect();
             events.push(GameEvent::CombatTaxDeclined {
                 player,
                 dropped: taxed.iter().copied().collect(),
             });
-            resume_declare_attackers(state, &filtered, events)
+            resume_declare_attackers(state, &filtered, &filtered_bands, events)
         }
         CombatTaxPending::Block { assignments } => {
             let filtered: Vec<(ObjectId, ObjectId)> = assignments
@@ -287,13 +315,19 @@ pub(super) fn handle_pay_combat_tax(
 fn resume_declare_attackers(
     state: &mut GameState,
     attacks: &[(ObjectId, AttackTarget)],
+    bands: &[Vec<ObjectId>],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if attacks.is_empty() {
         // CR 508.8: No creatures declared as attackers — skip to end of combat.
         return handle_empty_attackers(state, events);
     }
-    super::combat::declare_attackers(state, attacks, events).map_err(EngineError::InvalidAction)?;
+    // CR 702.22c + CR 702.22h: re-run the band-aware declaration so `band_id` is
+    // stamped on the attacking-band members and block propagation groups them
+    // (this resume path previously dropped bands, leaving members individually
+    // blockable behind a combat-tax static like Ghostly Prison).
+    super::combat::declare_attackers_with_bands(state, attacks, bands, events)
+        .map_err(EngineError::InvalidAction)?;
 
     triggers::process_triggers(state, events);
     // CR 603.3b (#531): process_triggers may have paused on OrderTriggers
@@ -540,6 +574,78 @@ pub(super) fn handle_assign_combat_damage(
 
     priority::reset_priority(state);
     Ok(WaitingFor::Priority { player })
+}
+
+/// CR 510.1d + CR 702.22k: Record the active player's division of a banded
+/// blocker's combat damage among the attackers it's blocking, then re-enter the
+/// combat-damage resolver.
+///
+/// Validation (CR 510.1e — the total assignment is checked, not individual
+/// assignments): the submitted amounts must sum to the blocker's combat power,
+/// and every target must be an attacker the blocker is actually blocking. There
+/// is NO lethal requirement — a blocker divides its damage freely (CR 510.1d).
+///
+/// The server bypasses its legality-enumeration gate for this state
+/// (`accepts_freeform_blocker_damage_assignment`), so this handler is the real
+/// validation boundary.
+pub(super) fn handle_assign_blocker_damage(
+    state: &mut GameState,
+    _player: PlayerId,
+    blocker_id: ObjectId,
+    total_damage: u32,
+    attackers: &[ObjectId],
+    assignments: &[(ObjectId, u32)],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 510.1e: the total damage assigned must equal the blocker's combat power.
+    let assigned_total: u32 = assignments.iter().map(|(_, amount)| *amount).sum();
+    if assigned_total != total_damage {
+        return Err(EngineError::InvalidAction(format!(
+            "Blocker {:?} damage assignment total {} != combat power {}",
+            blocker_id, assigned_total, total_damage
+        )));
+    }
+
+    // CR 510.1d: every target must be an attacker this blocker is blocking.
+    for (attacker_id, _) in assignments {
+        if !attackers.contains(attacker_id) {
+            return Err(EngineError::InvalidAction(format!(
+                "{:?} is not an attacker blocked by {:?}",
+                attacker_id, blocker_id
+            )));
+        }
+    }
+
+    if let Some(combat) = &mut state.combat {
+        // Record into the per-sub-step resume-skip key so the re-entered blocker
+        // loop in `collect_damage_assignments` skips this blocker. A non-empty
+        // entry is what the skip check keys on; mirror the auto-split bookkeeping.
+        let mut recorded: Vec<DamageAssignment> = Vec::new();
+        for (attacker_id, amount) in assignments {
+            if *amount > 0 {
+                let da = DamageAssignment {
+                    target: DamageTarget::Object(*attacker_id),
+                    amount: *amount,
+                };
+                combat.pending_damage.push((blocker_id, da.clone()));
+                recorded.push(da);
+            }
+        }
+        // Guard against an all-zero division (would otherwise leave the skip key
+        // empty and re-prompt forever); total_damage > 0 is guaranteed by the
+        // power==0 skip in `collect_damage_assignments`, and the total-equality
+        // check above ensures `recorded` is non-empty here.
+        combat.damage_assignments.insert(blocker_id, recorded);
+    }
+
+    if let Some(waiting_for) = super::combat_damage::resolve_combat_damage(state, events) {
+        return Ok(waiting_for);
+    }
+
+    priority::reset_priority(state);
+    Ok(WaitingFor::Priority {
+        player: state.active_player,
+    })
 }
 
 /// CR 508.8: If no creatures are declared as attackers, skip declare blockers and combat damage steps.
@@ -1017,7 +1123,7 @@ mod tests {
 
         // Step 1: declare-attackers must pause for the tax (no deadlock).
         let mut events = Vec::new();
-        let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &mut events)
+        let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &[], &mut events)
             .expect("declare-attackers must yield WaitingFor::CombatTaxPayment, not error");
         let WaitingFor::CombatTaxPayment {
             player,
@@ -1089,7 +1195,7 @@ mod tests {
 
         let attacks = vec![(a1, AttackTarget::Player(PlayerId(1)))];
         let mut events = Vec::new();
-        let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &mut events)
+        let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &[], &mut events)
             .expect("declare-attackers must yield CombatTaxPayment");
         assert!(matches!(waiting, WaitingFor::CombatTaxPayment { .. }));
 

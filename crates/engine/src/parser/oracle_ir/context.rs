@@ -81,6 +81,17 @@ pub(crate) struct ParseContext {
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
     /// inventing a parent target.
     pub parent_target_available: bool,
+    /// CR 608.2c + CR 601.2a: The chain's prior referent is an explicit target
+    /// SELECTION (`Effect::TargetOnly`, e.g. Emry's "Choose target artifact
+    /// card in your graveyard"), as distinct from an exile/impulse publisher
+    /// (`ExileTop`, `ExileFromTopUntil`, …) whose "that card" anaphor is a
+    /// tracked exile set. Only a chosen-target referent reroutes a "you may
+    /// cast/play that card this turn" grant to `CastFromZone { ParentTarget }`;
+    /// impulse publishers keep their `PlayFromExile { TrackedSet }` grant. This
+    /// is a strict subset of `parent_target_available` — it stays false for the
+    /// `ExileFromTopUntil` referent (Territorial Bruntar) that
+    /// `parent_target_available` would otherwise include.
+    pub parent_target_is_chosen: bool,
 }
 
 impl ParseContext {

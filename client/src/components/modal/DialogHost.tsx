@@ -12,11 +12,18 @@ import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 // `WaitingFor` variants that do NOT render a centered dialog/overlay.
 // Board-level interactions (Priority, combat declarations) and pre-game
 // flows render inline on the board rather than as a centered modal.
+//
+// NOTE: combat damage *assignment* (`AssignCombatDamage` / `AssignBlockerDamage`)
+// is deliberately ABSENT — unlike attacker/blocker declaration, it renders a
+// centered `ChoiceOverlay` modal (via `CardChoiceModal` → `DamageAssignmentModal`).
+// Listing it here would leave the host un-anchored (`className=""`), so the
+// modal's `fixed inset-0 z-50` would be trapped inside framer-motion's
+// transform stacking context and paint BELOW the board/HUD/hand (see the
+// anchoring contract on lines 114-123). Centered modals must stay out of this set.
 const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<WaitingFor["type"]>([
   "Priority",
   "DeclareAttackers",
   "DeclareBlockers",
-  "AssignCombatDamage",
   "MulliganDecision",
   "MulliganBottomCards",
   "OpeningHandBottomCards",

@@ -230,6 +230,7 @@ fn test_smoke_game_combat_damage() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(bears_id, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .unwrap();
 

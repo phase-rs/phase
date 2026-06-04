@@ -1179,6 +1179,30 @@ pub(crate) fn parse_static_line_inner(
 
     // --- "~ can't attack" ---
     if nom_primitives::scan_contains(tp.lower, "can't attack") {
+        // CR 508.1d: Subject-led lines ("Each creature ... can't attack you") must not
+        // collapse to SelfRef — `parse_subject_combat_rule_static` handles them above.
+        if let Some((subject_lower, _, rest)) =
+            nom_primitives::scan_preceded(tp.lower, parse_cant_attack_rule_static_predicate_nom)
+        {
+            let rest = match opt(tag::<_, _, OracleError<'_>>(".")).parse(rest) {
+                Ok((r, _)) => r,
+                Err(_) => rest,
+            };
+            // Only defer when the line is a fully consumed scoped cant-attack
+            // (Eriette). Trailing "unless"/"if" clauses must still use SelfRef.
+            if rest.trim().is_empty() {
+                let subject = tp.original[..subject_lower.len()].trim();
+                let subject_lower = subject.to_lowercase();
+                if !subject.is_empty()
+                    && subject_lower != "~"
+                    && subject_lower != "it"
+                    && subject_lower != "this"
+                    && !SELF_REF_PARSE_ONLY_PHRASES.contains(&subject_lower.as_str())
+                {
+                    return None;
+                }
+            }
+        }
         let mode = if nom_primitives::scan_contains(tp.lower, "can't attack or block") {
             StaticMode::CantAttackOrBlock
         } else {
@@ -1288,14 +1312,27 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "~ can't be the target" or "~ can't be targeted" ---
-    if nom_primitives::scan_contains(tp.lower, "can't be the target")
-        || nom_primitives::scan_contains(tp.lower, "can't be targeted")
-    {
-        return Some(
-            StaticDefinition::new(StaticMode::CantBeTargeted)
-                .affected(TargetFilter::SelfRef)
-                .description(text.to_string()),
-        );
+    // CR 702.18a / 702.11a: these descriptive phrasings ARE Shroud / Hexproof.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
+        return Some(match scope {
+            // CR 702.11a: "... your opponents control" — grant Hexproof so the
+            // permanent's own controller can still target it.
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Hexproof,
+                    }])
+                    .description(text.to_string())
+            }
+            // CR 702.18a: blanket — can't be targeted by any player. Enforced in
+            // `targeting.rs::can_target` via the object's active static definitions.
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                StaticDefinition::new(StaticMode::CantBeTargeted)
+                    .affected(TargetFilter::SelfRef)
+                    .description(text.to_string())
+            }
+        });
     }
 
     // --- "~ can't be sacrificed" (CR 701.21) ---

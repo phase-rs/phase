@@ -48,6 +48,8 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         }
         // CR 702.62a + CR 702.63a: Time counters live only in the counter map
         // (read by the suspend upkeep / vanishing triggers) — no derived field.
+        // CR 702.32a: Fade counters likewise live only in the counter map (read
+        // by the Fading upkeep removal / sacrifice triggers) — no derived field.
         // CR 702.24a: Age counters likewise live only in the counter map (read
         // by the cumulative-upkeep trigger to scale the cost) — no derived field.
         CounterType::Plus1Plus1
@@ -56,6 +58,7 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         | CounterType::Stun
         | CounterType::Lore
         | CounterType::Time
+        | CounterType::Fade
         | CounterType::Age
         | CounterType::Shield
         | CounterType::Keyword(_)

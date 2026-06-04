@@ -458,6 +458,14 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         objects.extend(permission_ids);
     }
 
+    // CR 601.2a + CR 611.2a: Graveyard objects with a timed `ExileWithAltCost`
+    // grant from `CastFromZone` (Emry class).
+    objects.extend(player_data.graveyard.iter().copied().filter(|&obj_id| {
+        state.objects.get(&obj_id).is_some_and(|obj| {
+            obj.owner == player && has_graveyard_timed_alt_cost_permission(state, obj, player)
+        })
+    }));
+
     // CR 601.2a + CR 113.6b + CR 118.9: Cards in exile castable via a
     // `StaticMode::ExileCastPermission` static from a battlefield permanent
     // (Maralen, Fae Ascendant). Restricted to cards exiled "with" the source
@@ -1296,6 +1304,19 @@ fn has_alt_cost_permission_for(
     obj.casting_permissions.iter().any(|permission| {
         exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
     })
+}
+
+/// CR 601.2a: Object-level timed alt-cost grants that allow casting from the
+/// graveyard without exiling first (Emry, Lurker in the Loch).
+fn has_graveyard_timed_alt_cost_permission(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    obj.zone == Zone::Graveyard
+        && obj.casting_permissions.iter().any(|permission| {
+            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        })
 }
 
 /// CR 604.3 + CR 601.2a: Find graveyard objects castable via static permission
@@ -2365,6 +2386,9 @@ fn casting_variant_candidates(
                 graveyard_destination_replacement: source.graveyard_destination_replacement,
             });
         }
+        if has_graveyard_timed_alt_cost_permission(state, obj, player) {
+            candidates.push(CastingVariant::Normal);
+        }
     }
 
     if obj.zone == Zone::Exile {
@@ -2473,6 +2497,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         None
     };
     let has_graveyard_permission = graveyard_permission_src.is_some();
+    let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
 
     // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static permission
     // (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card must be the
@@ -2509,6 +2534,7 @@ fn prepare_spell_cast_with_variant_override_inner(
                 || has_madness
                 || has_graveyard_cast_keyword
                 || has_graveyard_permission
+                || has_graveyard_alt_cost
                 || has_top_of_library_permission));
     if !castable_zone {
         return Err(EngineError::InvalidAction(
@@ -2583,7 +2609,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     // (ExileWithAltAbilityCost) zeroes the mana cost — its `AbilityCost` is
     // routed through `pay_additional_cost` in `check_additional_cost_or_pay`
     // (CR 118.9 + CR 119.4).
-    let alt_cost_from_exile = if obj.zone == Zone::Exile {
+    let alt_cost_from_exile = if obj.zone == Zone::Exile || has_graveyard_alt_cost {
         // CR 611.2a: When a permission carries `granted_to: Some(p)`, only
         // player `p` may consume its cost override. Skip alt-cost permissions
         // bound to a different player so a non-grantee casting from the same
@@ -3598,9 +3624,12 @@ fn target_ref_matches_cost_filter(
             );
             super::filter::matches_target_filter(state, *object_id, filter, &ctx)
         }
-        TargetRef::Player(player_id) => {
-            super::filter::player_matches_target_filter(filter, *player_id, Some(source_controller))
-        }
+        TargetRef::Player(player_id) => super::filter::player_matches_target_filter_in_state(
+            state,
+            filter,
+            *player_id,
+            Some(source_controller),
+        ),
     }
 }
 
@@ -9966,6 +9995,7 @@ fn quantity_expr_is_board_state_relative(expr: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => quantity_ref_is_board_state_relative(qty),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_is_board_state_relative(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().all(quantity_expr_is_board_state_relative),
         _ => false,
@@ -12096,6 +12126,7 @@ mod tests {
                 active_zones: vec![],
                 characteristic_defining: false,
                 description: Some("Assassin spells you cast have freerunning {B}{B}.".to_string()),
+                attack_defended: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -15959,8 +15990,14 @@ mod tests {
                         .expect("priority pass to advance the turn");
                 }
                 WaitingFor::DeclareAttackers { .. } => {
-                    apply_as_current(&mut state, GameAction::DeclareAttackers { attacks: vec![] })
-                        .expect("declare no attackers");
+                    apply_as_current(
+                        &mut state,
+                        GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        },
+                    )
+                    .expect("declare no attackers");
                 }
                 WaitingFor::DeclareBlockers { .. } => {
                     apply_as_current(
@@ -16128,8 +16165,14 @@ mod tests {
                         .expect("priority pass to advance the turn");
                 }
                 WaitingFor::DeclareAttackers { .. } => {
-                    apply_as_current(&mut state, GameAction::DeclareAttackers { attacks: vec![] })
-                        .expect("declare no attackers");
+                    apply_as_current(
+                        &mut state,
+                        GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        },
+                    )
+                    .expect("declare no attackers");
                 }
                 WaitingFor::DeclareBlockers { .. } => {
                     apply_as_current(
@@ -17279,6 +17322,7 @@ mod tests {
                     active_zones: vec![],
                     characteristic_defining: false,
                     description: None,
+                    attack_defended: None,
                 }]
                 .into();
             }
@@ -19344,6 +19388,7 @@ mod tests {
                 description: Some(
                     "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
                 ),
+                attack_defended: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -20015,6 +20060,50 @@ mod tests {
             obj_id,
             &state.objects[&obj_id].mana_cost
         ));
+    }
+
+    /// Issue #2027 — Emry, Lurker in the Loch: targeted graveyard artifact may
+    /// be cast this turn via `CastFromZone` without exiling first.
+    #[test]
+    fn graveyard_timed_alt_cost_grant_is_castable_in_place() {
+        use crate::game::effects::cast_from_zone;
+        use crate::types::ability::{CardPlayMode, Effect, ResolvedAbility, TargetRef};
+
+        let mut state = setup_game_at_main_phase();
+        let bauble = create_object(
+            &mut state,
+            CardId(2027),
+            PlayerId(0),
+            "Mishra's Bauble".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&bauble).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::zero();
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: false,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: Some(Duration::UntilEndOfTurn),
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            },
+            vec![TargetRef::Object(bauble)],
+            ObjectId(9001),
+            PlayerId(0),
+        );
+        cast_from_zone::resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert_eq!(state.objects[&bauble].zone, Zone::Graveyard);
+        assert!(spell_objects_available_to_cast(&state, PlayerId(0)).contains(&bauble));
+        prepare_spell_cast(&state, PlayerId(0), bauble)
+            .expect("bauble must be castable from graveyard");
     }
 
     fn add_borrowed_exile_sorcery_with_mana_value(

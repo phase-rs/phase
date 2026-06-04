@@ -95,7 +95,10 @@ pub enum PolicyId {
     SpellskitePriority,
     LandSequencing,
     ConditionGatedActivation,
+    ControlChangeAwareness,
     XValue,
+    LandAnimation,
+    MillTargeting,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -225,6 +228,9 @@ impl Default for PolicyRegistry {
             Box::new(super::land_sequencing::LandSequencingPolicy),
             Box::new(super::condition_gated_activation::ConditionGatedActivationPolicy),
             Box::new(XValuePolicy),
+            Box::new(super::control_change_awareness::ControlChangeAwarenessPolicy),
+            Box::new(super::land_animation::LandAnimationPolicy),
+            Box::new(super::mill_targeting::MillTargetingPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

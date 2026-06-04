@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::space1;
-use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
+use nom::character::complete::{one_of, space1};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -712,6 +712,7 @@ fn extract_object_count_filter(expr: &QuantityExpr) -> Option<TargetFilter> {
         } => Some(filter.clone()),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. } => extract_object_count_filter(inner),
         _ => None,
     }
@@ -4376,6 +4377,54 @@ pub(super) fn parse_exile_ast(
                 });
             }
         }
+
+        // CR 701.13: Exile — "exile the top card[s]" with NO "of <player>'s
+        // library" qualifier is an implicit-controller top-of-library exile
+        // (Urza, Lord High Artificer's {5}; Bloodsoaked Insight; the
+        // "shuffle ..., then exile the top card" class). The twelve qualified
+        // suffix patterns above run FIRST so a real "of <player>'s library"
+        // continuation is never shadowed by this fallback.
+        // CR 701.24: Shuffle — after a shuffle the library order is RANDOM, so
+        // the exiled top card is determined by post-shuffle order; the player
+        // makes NO selection. This deterministic top-of-library ExileTop is the
+        // rules-correct shape — NOT a library-wide ChangeZone (which would offer
+        // a tutor prompt). The ABSENCE of a selection prompt is correct.
+        let head = remainder.trim_start();
+        if let Ok((after_noun, _)) = alt((
+            tag::<_, _, OracleError<'_>>("cards"),
+            tag::<_, _, OracleError<'_>>("card"),
+        ))
+        .parse(head)
+        {
+            // Require this is a clause boundary, NOT a qualified continuation
+            // (" of <player>'s library", already handled above). `not(tag(" of "))`
+            // rejects the qualified form on the raw tail; the boundary check
+            // accepts EOF or a sentence/clause terminator (after an optional
+            // single separator space).
+            let not_qualified = not(tag::<_, _, OracleError<'_>>(" of "))
+                .parse(after_noun)
+                .is_ok();
+            let boundary = after_noun.strip_prefix(' ').unwrap_or(after_noun); // allow-noncombinator: trim one optional separator before nom boundary peek
+            let at_boundary = alt((
+                value((), eof::<_, OracleError<'_>>),
+                value((), peek(one_of(".,"))),
+            ))
+            .parse(boundary)
+            .is_ok();
+            if not_qualified && at_boundary {
+                // CR 406.3: honor a trailing "face down" suffix exactly as the
+                // twelve qualified patterns do.
+                let (after_lib, face_down) = strip_exile_top_face_down(after_noun);
+                // CR 107.3c: honor a trailing ", where x is <expr>" binding —
+                // the text defines X, so the controller doesn't choose it.
+                let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
+                return Some(ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Controller,
+                    count,
+                    face_down,
+                });
+            }
+        }
     }
 
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
@@ -4694,8 +4743,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 /// accidental alpha-suffix matches (e.g., `"x lifelink"`).
 fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
     use crate::parser::oracle_nom::error::OracleResult;
-    use nom::character::complete::one_of;
-    use nom::combinator::{eof, peek, recognize};
+    use nom::combinator::recognize;
     use nom::sequence::terminated;
 
     // Shared word-boundary guard: the token just consumed must be followed by
@@ -6729,6 +6777,10 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
             inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
             offset,
         },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+            minimum,
+        },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
             factor,
             inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
@@ -7265,6 +7317,28 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
     } else {
         (trimmed, Duration::UntilEndOfTurn)
     };
+
+    // CR 702.18a / 702.11a: "can't be the target [of ...]" granted to the target
+    // for a duration is a Shroud / Hexproof keyword grant (Vines of Vastwood). Map
+    // it to the keyword so the targeting check applies the correct controller scope
+    // (Hexproof leaves the controller able to target), reusing the enforced keyword
+    // path rather than a scope-less rule static.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(clean) {
+        let keyword = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                crate::types::keywords::Keyword::Shroud
+            }
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                crate::types::keywords::Keyword::Hexproof
+            }
+        };
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
+            duration: Some(duration),
+            target: None,
+        }));
+    }
 
     let modes = parse_restriction_modes(clean)?;
     let statics: Vec<StaticDefinition> = modes
@@ -8749,9 +8823,12 @@ mod tests {
     /// value"` is an instruction-order referent: it points at the object
     /// introduced by an earlier `RevealTop` / `Mill` / `ChangeZone`
     /// instruction in the same ability. `classify_possessive_referent`
-    /// therefore emits `ObjectScope::Anaphoric`, whose runtime resolver reads
-    /// `effect_context_object` first (the revealed card) and only then falls
-    /// back to the trigger source and the cost-paid object.
+    /// therefore emits `ObjectScope::Demonstrative` (the noun-phrase
+    /// back-reference, distinct from the pronoun "its"), whose runtime resolver
+    /// reads `effect_context_object` first (the revealed card) and only then
+    /// falls back to the trigger source and the cost-paid object. The dedicated
+    /// variant keeps the subject-injection rewrite from rebinding this fixed
+    /// antecedent.
     #[test]
     fn parse_lose_life_equal_to_mana_value() {
         let text = "loses life equal to that card's mana value";
@@ -8765,11 +8842,11 @@ mod tests {
                         amount,
                         QuantityExpr::Ref {
                             qty: QuantityRef::ObjectManaValue {
-                                scope: crate::types::ability::ObjectScope::Anaphoric
+                                scope: crate::types::ability::ObjectScope::Demonstrative
                             }
                         }
                     ),
-                    "Expected ObjectManaValue {{ Anaphoric }}, got {amount:?}"
+                    "Expected ObjectManaValue {{ Demonstrative }}, got {amount:?}"
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
@@ -11141,6 +11218,106 @@ mod tests {
         assert_eq!(
             super::try_parse_die_result_line("20 | Win the game."),
             Some((20, 20, "Win the game."))
+        );
+    }
+
+    /// CR 701.13 + CR 701.24: A suffix-less "exile the top card[s]" (no "of
+    /// <player>'s library" qualifier) is an implicit-controller, deterministic
+    /// top-of-library exile — the "shuffle ..., then exile the top card" class
+    /// (Urza, Lord High Artificer's {5}). It must NOT fall through to the
+    /// generic `tag("exile ")` path (which produces a library-wide tutor).
+    /// Covers period-terminated, plural-count, and EOF-terminated forms.
+    #[test]
+    fn exile_the_top_card_no_qualifier_parses_controller_exile_top() {
+        let mut ctx = ParseContext::default();
+
+        let singular = parse_exile_ast("exile the top card.", "exile the top card.", &mut ctx)
+            .expect("'exile the top card.' should parse as ExileTop");
+        assert!(
+            matches!(
+                singular,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected ExileTop(Controller, 1), got {singular:?}"
+        );
+
+        let plural = parse_exile_ast(
+            "exile the top two cards.",
+            "exile the top two cards.",
+            &mut ctx,
+        )
+        .expect("'exile the top two cards.' should parse as ExileTop");
+        assert!(
+            matches!(
+                plural,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    face_down: false,
+                }
+            ),
+            "expected ExileTop(Controller, 2), got {plural:?}"
+        );
+
+        let eof = parse_exile_ast("exile the top card", "exile the top card", &mut ctx)
+            .expect("'exile the top card' (no period) should parse as ExileTop");
+        assert!(
+            matches!(
+                eof,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected ExileTop(Controller, 1) at EOF, got {eof:?}"
+        );
+    }
+
+    /// Regression: the suffix-less branch must NOT shadow the qualified "of
+    /// <player>'s library" patterns, which run first and take precedence.
+    /// "of target opponent's library" → opponent filter; "of each player's
+    /// library" → ScopedPlayer. Both must survive the new fallback.
+    #[test]
+    fn exile_the_top_qualified_library_patterns_take_precedence() {
+        let mut ctx = ParseContext::default();
+
+        let opponent = parse_exile_ast(
+            "exile the top card of target opponent's library.",
+            "exile the top card of target opponent's library.",
+            &mut ctx,
+        )
+        .expect("qualified opponent-library phrase should parse");
+        assert!(
+            matches!(
+                opponent,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "expected opponent-typed ExileTop, got {opponent:?}"
+        );
+
+        let each = parse_exile_ast(
+            "exile the top card of each player's library.",
+            "exile the top card of each player's library.",
+            &mut ctx,
+        )
+        .expect("qualified each-player-library phrase should parse");
+        assert!(
+            matches!(
+                each,
+                ZoneCounterImperativeAst::ExileTop {
+                    player: TargetFilter::ScopedPlayer,
+                    ..
+                }
+            ),
+            "expected ScopedPlayer ExileTop, got {each:?}"
         );
     }
 }

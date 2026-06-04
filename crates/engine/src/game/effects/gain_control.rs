@@ -141,7 +141,8 @@ fn unique_recipient_from_filter(
         .iter()
         .filter(|p| {
             !p.is_eliminated
-                && crate::game::filter::player_matches_target_filter(
+                && crate::game::filter::player_matches_target_filter_in_state(
+                    state,
                     filter,
                     p.id,
                     Some(source_controller),

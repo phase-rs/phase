@@ -62,22 +62,14 @@ fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
-        // CR 508.6: each opponent this player attacked this turn.
-        PlayerFilter::OpponentAttackedThisTurn => state
-            .players
-            .iter()
-            .filter(|player| !player.is_eliminated)
-            .filter(|player| player.id != controller && state.has_attacked(controller, player.id))
-            .map(|player| player.id)
-            .collect(),
-        // CR 508.6: each opponent this source creature attacked this turn.
-        PlayerFilter::OpponentAttackedBySourceThisTurn => state
+        // CR 508.6: each opponent the subject attacked within scope.
+        PlayerFilter::OpponentAttacked { subject, scope } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
                 player.id != controller
-                    && state.creature_attacked_player_this_turn(source_id, player.id)
+                    && state.opponent_attacked(*subject, *scope, controller, source_id, player.id)
             })
             .map(|player| player.id)
             .collect(),
@@ -124,7 +116,7 @@ fn players_for_filter(
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
-                crate::game::players::matches_relation(player.id, controller, *relation)
+                crate::game::players::matches_relation(state, player.id, controller, *relation)
                     && crate::game::players::performed_action_this_way(state, player.id, *action)
             })
             .map(|player| player.id)
@@ -154,7 +146,10 @@ fn players_for_filter(
             state
                 .players
                 .iter()
-                .filter(|player| !player.is_eliminated && player.id != controller)
+                .filter(|player| {
+                    !player.is_eliminated
+                        && crate::game::players::is_opponent(state, controller, player.id)
+                })
                 .filter(|player| triggering.is_none_or(|pid| pid != player.id))
                 .map(|player| player.id)
                 .collect()
@@ -204,7 +199,7 @@ fn players_for_filter(
                 .iter()
                 .filter(|player| !player.is_eliminated)
                 .filter(|player| {
-                    crate::game::players::matches_relation(player.id, controller, *relation)
+                    crate::game::players::matches_relation(state, player.id, controller, *relation)
                         && crate::game::effects::player_control_count_compares(
                             state,
                             player.id,
@@ -235,7 +230,7 @@ fn players_for_filter(
                 .iter()
                 .filter(|player| !player.is_eliminated)
                 .filter(|player| {
-                    crate::game::players::matches_relation(player.id, controller, *relation)
+                    crate::game::players::matches_relation(state, player.id, controller, *relation)
                         && crate::game::effects::candidate_player_scalar(player, attr)
                             .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                 })

@@ -136,7 +136,7 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
     let mut rng = SmallRng::seed_from_u64(14);
     let action = choose_action(runner.state(), P0, &config, &mut rng);
 
-    let Some(engine::types::actions::GameAction::DeclareAttackers { attacks }) = action else {
+    let Some(engine::types::actions::GameAction::DeclareAttackers { attacks, .. }) = action else {
         panic!("expected declare attackers action");
     };
     assert_eq!(attacks.len(), 2);
