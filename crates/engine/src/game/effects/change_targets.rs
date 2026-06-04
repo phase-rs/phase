@@ -46,9 +46,14 @@ pub fn resolve(
         })?;
 
     if let Some(filter) = forced_to {
-        // CR 115.7: Forced retarget — resolve the new target from the filter and apply directly.
+        // CR 115.7: Forced retarget — resolve the new target from the filter,
+        // but only apply it if the targeted stack entry could legally target it.
+        let legal_new_targets = legal_new_targets_for_stack_entry(state, stack_entry_index);
         let new_targets = find_legal_targets(state, filter, ability.controller, ability.source_id);
-        if let Some(new_target) = new_targets.into_iter().next() {
+        if let Some(new_target) = new_targets
+            .into_iter()
+            .find(|target| legal_new_targets.contains(target))
+        {
             if let Some(stack_ability) = state.stack[stack_entry_index].ability_mut() {
                 stack_ability.targets = vec![new_target];
             }
@@ -81,18 +86,7 @@ pub fn resolve(
     // Enumerate Aura hosts from the source's `Keyword::Enchant(filter)` instead,
     // mirroring the Aura branch of `casting::spell_has_legal_targets`. Non-Aura
     // spells/abilities fall back to the effect's declared target filter.
-    let retarget_filter = aura_enchant_filter(state, stack_ability.source_id)
-        .or_else(|| extract_target_filter(&stack_ability.effect).cloned());
-    let legal_new_targets = retarget_filter
-        .map(|filter| {
-            find_legal_targets(
-                state,
-                &filter,
-                stack_ability.controller,
-                stack_ability.source_id,
-            )
-        })
-        .unwrap_or_else(|| current_targets.clone());
+    let legal_new_targets = legal_new_targets_for_stack_ability(state, &stack_ability);
 
     state.waiting_for = WaitingFor::RetargetChoice {
         player: ability.controller,
@@ -109,6 +103,42 @@ pub fn resolve(
 /// Used to compute legal alternative targets for retargeting (CR 115.7).
 fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     effect.target_filter()
+}
+
+/// CR 115.7: Enumerate the legal replacement targets for a spell or ability on
+/// the stack by re-evaluating that stack entry's own target restriction against
+/// current game state. Shared by interactive retargets, forced retargets, and AI
+/// policy scoring so they cannot disagree about what can be changed to what.
+pub fn legal_new_targets_for_stack_entry(
+    state: &GameState,
+    stack_entry_index: usize,
+) -> Vec<TargetRef> {
+    state
+        .stack
+        .get(stack_entry_index)
+        .and_then(|entry| entry.ability())
+        .map(|ability| legal_new_targets_for_stack_ability(state, ability))
+        .unwrap_or_default()
+}
+
+fn legal_new_targets_for_stack_ability(
+    state: &GameState,
+    stack_ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    // CR 303.4a: An Aura spell's target is defined by its enchant ability, not
+    // by the placeholder effect synthesized for the spell on the stack.
+    let retarget_filter = aura_enchant_filter(state, stack_ability.source_id)
+        .or_else(|| extract_target_filter(&stack_ability.effect).cloned());
+    retarget_filter
+        .map(|filter| {
+            find_legal_targets(
+                state,
+                &filter,
+                stack_ability.controller,
+                stack_ability.source_id,
+            )
+        })
+        .unwrap_or_else(|| stack_ability.targets.clone())
 }
 
 /// CR 303.4a: An Aura spell's legal targets are defined by its enchant ability —
@@ -131,7 +161,7 @@ fn aura_enchant_filter(state: &GameState, source_id: ObjectId) -> Option<TargetF
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TypedFilter;
+    use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{CastingVariant, RetargetScope, StackEntry, StackEntryKind};
@@ -412,5 +442,89 @@ mod tests {
             "ChooseTarget board-click must retarget the Aura to the chosen host"
         );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// CR 115.7b: "Change a target ... to this permanent" still has to obey
+    /// the targeted spell's own target restriction. Spellskite cannot become
+    /// the target of "destroy target nonartifact creature" because it is an
+    /// artifact creature.
+    #[test]
+    fn forced_retarget_ignores_illegal_self_target() {
+        let mut state = GameState::new_two_player(42);
+
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&bear).unwrap().card_types.core_types = vec![CoreType::Creature];
+
+        let spellskite = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spellskite".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&spellskite)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Artifact, CoreType::Creature];
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Test Doom Blade".into(),
+            Zone::Stack,
+        );
+        let nonartifact_creature = TargetFilter::Typed(
+            TypedFilter::creature().with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact))),
+        );
+        let destroy_ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: nonartifact_creature,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(bear)],
+            spell_id,
+            PlayerId(1),
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(3),
+                ability: Some(destroy_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let spellskite_ability = ResolvedAbility::new(
+            Effect::ChangeTargets {
+                target: TargetFilter::Any,
+                scope: RetargetScope::Single,
+                forced_to: Some(TargetFilter::SelfRef),
+            },
+            vec![TargetRef::Object(spell_id)],
+            spellskite,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &spellskite_ability, &mut events).unwrap();
+
+        let targets = state
+            .stack
+            .front()
+            .and_then(|entry| entry.ability())
+            .map(|ability| ability.targets.clone())
+            .expect("targeted spell remains on stack");
+        assert_eq!(targets, vec![TargetRef::Object(bear)]);
     }
 }

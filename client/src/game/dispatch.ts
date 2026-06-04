@@ -2,6 +2,7 @@ import type { BatchResolveResult, GameAction, GameEvent, GameState, LegalActions
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
+import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { getPlayerId } from "../hooks/usePlayerId";
 import type { AnimationStep } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
@@ -400,6 +401,11 @@ export async function dispatchAction(
   action: GameAction,
   actor: number = getPlayerId(),
 ): Promise<void> {
+  const { gameMode } = useGameStore.getState();
+  if (gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return;
+  }
+
   const submittedAction = actor === getPlayerId() ? applySpellPaymentPreference(action) : action;
   // Snapshot the prompt object that caused this action. The same action from
   // the same actor is a duplicate only while it answers the same prompt.

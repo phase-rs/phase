@@ -140,10 +140,11 @@ fn find_legal_targets_with_context(
                 ) {
                     continue;
                 }
-                let is_opponent = player.id != source_controller;
                 let include = match controller {
-                    Some(ControllerRef::Opponent) => is_opponent,
-                    Some(ControllerRef::You) => !is_opponent,
+                    Some(ControllerRef::Opponent) => {
+                        super::players::is_opponent(state, source_controller, player.id)
+                    }
+                    Some(ControllerRef::You) => player.id == source_controller,
                     // CR 109.4: TargetPlayer is nonsensical when enumerating target
                     // candidates (the "target player" is what's being chosen here).
                     // Fail closed.
@@ -1126,7 +1127,8 @@ fn stack_spell_entry_matches_filter(
                 TargetRef::Object(id) => {
                     super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
                 }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+                    state,
                     constraint,
                     *pid,
                     source_controller_opt,
@@ -1144,7 +1146,8 @@ fn stack_spell_entry_matches_filter(
                 TargetRef::Object(id) => {
                     super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
                 }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+                    state,
                     constraint,
                     *pid,
                     source_controller_opt,
@@ -1404,16 +1407,20 @@ pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     }
 }
 
-/// Extract all explicit `InZone` zones from a target filter, recursing through combinators.
+/// Extract all explicit zone restrictions from a target filter, recursing through combinators.
 fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
     match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
-            .iter()
-            .filter_map(|p| match p {
-                FilterProp::InZone { zone } => Some(*zone),
-                _ => None,
-            })
-            .collect(),
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            let mut explicit_zones = Vec::new();
+            for property in properties {
+                match property {
+                    FilterProp::InZone { zone } => explicit_zones.push(*zone),
+                    FilterProp::InAnyZone { zones } => explicit_zones.extend(zones.iter().copied()),
+                    _ => {}
+                }
+            }
+            explicit_zones
+        }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().flat_map(extract_explicit_zones).collect()
         }
@@ -2097,6 +2104,66 @@ mod tests {
         let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
         assert!(targets.contains(&TargetRef::Object(c1)));
         assert_eq!(targets.len(), 1);
+    }
+
+    #[test]
+    fn find_legal_targets_honors_in_any_zone() {
+        let mut state = GameState::new_two_player(42);
+        let hand_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Hand Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&hand_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let graveyard_card = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&graveyard_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let battlefield_card = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Battlefield Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battlefield_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::Opponent)
+                .properties(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Hand, Zone::Graveyard],
+                }]),
+        );
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), ObjectId(99));
+        assert!(targets.contains(&TargetRef::Object(hand_card)));
+        assert!(targets.contains(&TargetRef::Object(graveyard_card)));
+        assert!(!targets.contains(&TargetRef::Object(battlefield_card)));
+        assert_eq!(targets.len(), 2);
     }
 
     #[test]
@@ -3117,6 +3184,34 @@ mod tests {
             "protected opponent must not be a legal target, got {:?}",
             targets
         );
+    }
+
+    /// CR 102.3 + CR 115.9c: In team multiplayer, "target opponent" excludes
+    /// teammates and includes opposing-team players.
+    #[test]
+    fn find_legal_targets_typed_opponent_excludes_two_headed_giant_teammate() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source);
+        assert!(
+            !targets.contains(&TargetRef::Player(PlayerId(1))),
+            "teammate must not be a legal target opponent, got {:?}",
+            targets
+        );
+        assert!(targets.contains(&TargetRef::Player(PlayerId(2))));
+        assert!(targets.contains(&TargetRef::Player(PlayerId(3))));
     }
 
     fn make_resolved_with_targets(

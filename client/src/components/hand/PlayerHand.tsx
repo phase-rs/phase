@@ -218,14 +218,21 @@ export function PlayerHand() {
 
   const handleContainerClick = useCallback(
     (e: React.MouseEvent) => {
-      // Only handle clicks directly on the container (not bubbled from cards)
+      // On mobile the fanned cards are `pointer-events-none` (the drawer is the
+      // interaction surface), so every tap in the hand area falls through to this
+      // container — or to the inner lift wrapper, which bubbles here. Any such tap
+      // opens the full-hand drawer. This MUST run before the target===currentTarget
+      // guard below: the lift wrapper makes `e.target` the wrapper rather than the
+      // container, so the guard alone would swallow taps that land over a card.
+      if (isMobile) {
+        setMobileHandOpen(true);
+        return;
+      }
+      // Desktop: only a click on the empty container area (card clicks stop
+      // propagation) toggles the hand lift.
       if (e.target === e.currentTarget) {
-        if (isMobile) {
-          setMobileHandOpen(true);
-        } else {
-          setSelectedCardId(null);
-          setExpanded((prev) => !prev);
-        }
+        setSelectedCardId(null);
+        setExpanded((prev) => !prev);
       }
     },
     [isMobile, setMobileHandOpen],
@@ -255,8 +262,19 @@ export function PlayerHand() {
         setSelectedCardId(null);
       }}
     >
-      <AnimatePresence>
-        {handObjects.map((obj, i) => {
+      {/* The whole hand lifts as one unit on hover. Keeping this uniform -50px
+          lift on a container — rather than baking `expanded` into each card's
+          animate target — lets the memoized HandCards skip re-rendering when the
+          hand expands/collapses. The lift lives on an inner wrapper so the outer
+          container (which owns onMouseLeave) stays put and its collapse hit-area
+          doesn't move under the cursor. */}
+      <motion.div
+        className="flex items-end justify-center"
+        animate={{ y: expanded ? -50 : 0 }}
+        transition={{ duration: 0.25 }}
+      >
+        <AnimatePresence>
+          {handObjects.map((obj, i) => {
           const rotation = getCardRotation(i, handObjects.length);
           const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
 
@@ -270,7 +288,6 @@ export function PlayerHand() {
               index={i}
               handSize={handObjects.length}
               rotation={rotation}
-              expanded={expanded}
               isPlayable={isPlayable}
               isSelected={selectedCardId === obj.id}
               hasPriority={hasPriority}
@@ -287,7 +304,8 @@ export function PlayerHand() {
             />
           );
         })}
-      </AnimatePresence>
+        </AnimatePresence>
+      </motion.div>
     </div>
   );
 }
@@ -300,7 +318,6 @@ interface HandCardProps {
   index: number;
   handSize: number;
   rotation: number;
-  expanded: boolean;
   isPlayable: boolean;
   isSelected: boolean;
   isDragging: boolean;
@@ -324,7 +341,6 @@ const HandCard = memo(function HandCard({
   index,
   handSize,
   rotation,
-  expanded,
   isPlayable,
   isSelected,
   isDragging,
@@ -376,11 +392,11 @@ const HandCard = memo(function HandCard({
       initial={{ opacity: 0, y: 40 }}
       animate={{
         opacity: 1,
-        y: (expanded ? -20 : 30) + arcOffset,
+        y: 30 + arcOffset,
         rotate: rotation,
       }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: -30 + arcOffset, scale: 1.08, zIndex: 30 }}
+      whileHover={{ y: 20 + arcOffset, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 9999 }}
       transition={{
         delay: index * 0.03,

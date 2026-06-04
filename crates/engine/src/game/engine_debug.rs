@@ -440,6 +440,7 @@ pub fn apply_debug_action(
             let proposed = ProposedEvent::CreateToken {
                 owner,
                 spec: Box::new(spec),
+                copy: None,
                 enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                 count: 1,
                 applied: HashSet::new(),
@@ -618,6 +619,7 @@ pub fn route_debug_create_to_battlefield(
         enter_with_counters: vec![],
         controller_override: None,
         enter_transformed: false,
+        face_down_profile: None,
         applied: HashSet::new(),
     };
 

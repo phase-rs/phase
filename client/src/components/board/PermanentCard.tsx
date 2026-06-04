@@ -163,7 +163,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
   const {
     selectedObjectId, selectObject, hoverObject, inspectObject,
-    hoveredObjectId,
     debugHighlightedObjectId,
     combatMode, selectedAttackers, toggleAttacker,
     blockerAssignments, combatClickHandler, selectedCardIds, toggleSelectedCard,
@@ -172,7 +171,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     selectObject: s.selectObject,
     hoverObject: s.hoverObject,
     inspectObject: s.inspectObject,
-    hoveredObjectId: s.hoveredObjectId,
     debugHighlightedObjectId: s.debugHighlightedObjectId,
     combatMode: s.combatMode,
     selectedAttackers: s.selectedAttackers,
@@ -182,6 +180,18 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     selectedCardIds: s.selectedCardIds,
     toggleSelectedCard: s.toggleSelectedCard,
   })));
+  // Hover is read as derived booleans, NOT the raw hoveredObjectId, so hovering
+  // any permanent re-renders only the card whose hovered/lifted state actually
+  // flips — not every PermanentCard on the board. O(1) per hover, not O(N).
+  const isHovered = useUiStore((s) => s.hoveredObjectId === objectId);
+  // Lifting a host's attachments only applies to cards that HAVE attachments;
+  // for the common (unattached) card this selector is a constant `false`, so it
+  // never re-renders on hover. Attached cards re-render only when their lifted
+  // state changes. Mirrors the `obj.attachments.length > 0` gate below.
+  const hasAttachments = (obj?.attachments.length ?? 0) > 0;
+  const isInHoveredAttachmentTree = useUiStore((s) =>
+    hasAttachments ? attachmentTreeContains(gameObjects, objectId, s.hoveredObjectId) : false,
+  );
   // Debug-panel preview highlight: lights up only when the user is hovering
   // an ObjectSelect option (or otherwise dispatching `setDebugHighlightedObjectId`).
   // Deliberately distinct from the standard hover-lift so the debug signal
@@ -268,10 +278,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const isSelected = selectedObjectId === objectId;
   const attachmentsLifted =
     obj.attachments.length > 0
-    && (
-      attachmentsLiftedByAncestor
-      || attachmentTreeContains(gameObjects, objectId, hoveredObjectId)
-    );
+    && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
 
   // Combat state — check both UI selection and committed combat state
   const isSelectingAttacker =
@@ -471,7 +478,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
-        zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : hoveredObjectId === objectId ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
+        zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : isHovered ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:

@@ -328,6 +328,21 @@ pub fn move_to_zone(
         }
     }
 
+    // CR 730.3: When a merged permanent leaves the battlefield, each absorbed
+    // component is routed to its own owner's destination zone before the surviving
+    // object completes its move. No-op for non-merged objects. Done here (while
+    // the object is still on the battlefield with its `merged_components` intact,
+    // before `apply_zone_exit_cleanup` clears them).
+    {
+        let leaving_battlefield = state
+            .objects
+            .get(&object_id)
+            .is_some_and(|o| o.zone == Zone::Battlefield && !o.merged_components.is_empty());
+        if leaving_battlefield {
+            super::merge::split_merged_permanent_on_leave(state, object_id, to, events);
+        }
+    }
+
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;

@@ -1634,6 +1634,18 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                AlternativeCastKeyword::Mutate => {
+                    // CR 702.140a: Handle the mutate alternative cost choice.
+                    casting::handle_mutate_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
                 AlternativeCastKeyword::Cleave => {
                     casting::handle_cleave_cost_choice_with_payment_mode(
                         state,
@@ -1837,7 +1849,21 @@ fn apply_action(
         ) => match resume {
             CostResume::Spell {
                 spell: pending_cast,
-            } => match kind {
+            }
+            | CostResume::SpellCost {
+                spell: pending_cast,
+                ..
+            } => {
+                let paid_cost = match resume {
+                    CostResume::SpellCost { cost, source, .. } => {
+                        Some(casting_costs::SpellCostPayment {
+                            cost: cost.as_ref(),
+                            source: *source,
+                        })
+                    }
+                    _ => None,
+                };
+                match kind {
                 PayCostKind::Discard => engine_casting::handle_discard_for_cost(
                     state,
                     *player,
@@ -1847,15 +1873,19 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
-                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    (*min_count, *count),
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
+	                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
+	                    state,
+	                    *player,
+	                    *pending_cast.clone(),
+	                    paid_cost,
+	                    casting_costs::CostSelection {
+	                        min_count: *min_count,
+	                        count: *count,
+	                        legal_permanents: choices,
+	                        chosen: &chosen,
+	                    },
+	                    &mut events,
+	                )?,
                 PayCostKind::ReturnToHand => engine_casting::handle_return_to_hand_for_cost(
                     state,
                     *player,
@@ -1927,7 +1957,8 @@ fn apply_action(
                         "ExileFromManaZone cost cannot resume a spell cast".into(),
                     ));
                 }
-            },
+                }
+            }
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
             } => match kind {
@@ -1989,6 +2020,10 @@ fn apply_action(
                 resume:
                     CostResume::Spell {
                         spell: pending_cast,
+                    }
+                    | CostResume::SpellCost {
+                        spell: pending_cast,
+                        ..
                     },
                 ..
             },
@@ -10567,6 +10602,7 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -10948,6 +10984,7 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -12421,6 +12458,7 @@ mod trigger_target_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             Vec::new(),
             trigger_creature,
@@ -12535,6 +12573,7 @@ mod trigger_target_tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -13493,6 +13532,7 @@ mod exile_return_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(victim_id)],
             source_id,
@@ -14384,6 +14424,7 @@ mod phase_trigger_regression_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -17773,6 +17814,7 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             let reflexive = crate::types::ability::AbilityDefinition {
@@ -17963,6 +18005,7 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )
             };

@@ -33,6 +33,12 @@ export const PLAYER_ID = 0;
 /** Player ID for the AI opponent (always player 1 in WASM mode). */
 export const AI_PLAYER_ID = 1;
 
+/**
+ * Non-seat viewer id used by the multiplayer server for spectators
+ * (`SPECTATOR_PLAYER_ID` in `crates/phase-server/src/main.rs`).
+ */
+export const SPECTATOR_PLAYER_ID = 255;
+
 /** Brief visual beat between auto-passed phases in ms. */
 export const AUTO_PASS_BEAT_MS = 200;
 

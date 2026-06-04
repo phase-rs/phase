@@ -58,7 +58,7 @@ describe("UnhandledWaitingForModal (issue #311 safety net)", () => {
   it("renders nothing when the local player is not the actor", () => {
     // Opponent is acting — local player has nothing to do, no fallback needed.
     const orphan = {
-      type: "PopulateChoice",
+      type: "OrphanEngineChoice",
       data: { player: 1 },
     } as unknown as WaitingFor;
     const state = makeState(orphan);
@@ -73,8 +73,8 @@ describe("UnhandledWaitingForModal (issue #311 safety net)", () => {
   it("surfaces fail-loud diagnostic when local player is the actor on an unhandled type", () => {
     // Engine-only WaitingFor variant that the FE has no modal for.
     const orphan = {
-      type: "PopulateChoice",
-      data: { player: 0, source_id: 0, valid_tokens: [] },
+      type: "OrphanEngineChoice",
+      data: { player: 0 },
     } as unknown as WaitingFor;
     const state = makeState(orphan);
     useGameStore.setState({ gameMode: "ai", gameState: state, waitingFor: state.waiting_for });
@@ -84,14 +84,14 @@ describe("UnhandledWaitingForModal (issue #311 safety net)", () => {
     );
     expect(screen.getByText("Action required, but UI is missing")).toBeInTheDocument();
     // The missing type is named so the user can report it.
-    expect(screen.getByText("PopulateChoice")).toBeInTheDocument();
+    expect(screen.getByText("OrphanEngineChoice")).toBeInTheDocument();
     // Exit button is present and labeled per caller.
     expect(screen.getByRole("button", { name: "Return to menu" })).toBeInTheDocument();
   });
 
   it("invokes onExit when the exit button is clicked", () => {
     const orphan = {
-      type: "PopulateChoice",
+      type: "OrphanEngineChoice",
       data: { player: 0 },
     } as unknown as WaitingFor;
     const state = makeState(orphan);

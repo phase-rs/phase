@@ -283,9 +283,13 @@ pub(crate) fn record_first_draw_and_enqueue_miracle(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, StaticDefinition};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, StaticDefinition,
+        SubAbilityLink, TargetFilter,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::ProhibitionScope;
 
     fn make_ability(num_cards: u32) -> ResolvedAbility {
@@ -432,6 +436,79 @@ mod tests {
             !state.players[0].drew_from_empty_library,
             "Normal draw should not set flag"
         );
+    }
+
+    #[test]
+    fn teferi_ageless_insight_preserves_sub_ability_discard() {
+        // Regression test for issue #1964: Teferi's Ageless Insight replacement
+        // ("draw two cards instead") should not remove the discard sub_ability from
+        // Temmet, Naktamun's Will's attack trigger ("draw a card, then discard a card").
+        let mut state = GameState::new_two_player(42);
+
+        let teferi = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Teferi's Ageless Insight".to_string(),
+            Zone::Battlefield,
+        );
+        let teferi_obj = state.objects.get_mut(&teferi).unwrap();
+        teferi_obj.replacement_definitions = vec![ReplacementDefinition::new(
+            ReplacementEvent::Draw,
+        )
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        ))]
+        .into();
+
+        for card_id in 2..=4 {
+            create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                format!("Card {card_id}"),
+                Zone::Library,
+            );
+        }
+
+        let mut resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolved.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                filter: None,
+                random: true,
+                unless_filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        if let Some(ref mut sub) = resolved.sub_ability {
+            sub.sub_link = SubAbilityLink::ContinuationStep;
+        }
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "Should draw 2 then discard 1"
+        );
+        assert_eq!(state.players[0].graveyard.len(), 1, "Should discard 1 card");
     }
 
     #[test]
