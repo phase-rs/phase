@@ -780,9 +780,9 @@ fn gain_life_redundancy(
     Some((-0.5, KIND_GAIN_LIFE, life as i64))
 }
 
-/// Zero-quantity detector for damage/draw effects: the `QuantityExpr`
-/// resolves to 0 given the current state. Applies equally to `DealDamage`
-/// and `Draw` because both degenerate to no-ops at quantity 0.
+/// Zero-quantity detector for damage/draw/counter effects: the `QuantityExpr`
+/// resolves to 0 given the current state. Applies equally to `DealDamage`,
+/// `Draw`, and `AddCounter` because each degenerates to a no-op at quantity 0.
 fn zero_quantity_redundancy(
     state: &GameState,
     source_id: ObjectId,
