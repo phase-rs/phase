@@ -347,9 +347,10 @@ pub(crate) fn prohibition_scope_matches_player(
 /// triggered ability (including delayed triggers created during resolution).
 fn is_resolving_triggered_ability(state: &GameState) -> bool {
     use crate::types::game_state::StackEntryKind;
-    state.resolving_stack_entry.as_ref().is_some_and(|entry| {
-        matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
-    })
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
 }
 
 /// CR 603.2 + CR 609.3: Check whether a triggered ability controlled by
@@ -1975,10 +1976,10 @@ mod tests {
     #[test]
     fn triggered_sacrifice_or_exile_muzzle_blocks_creature_tokens() {
         use crate::types::ability::{Effect, FilterProp, ResolvedAbility, TypedFilter};
-        use crate::types::statics::ProhibitionScope;
         use crate::types::game_state::{StackEntry, StackEntryKind};
         use crate::types::identifiers::ObjectId;
         use crate::types::player::PlayerId;
+        use crate::types::statics::ProhibitionScope;
 
         let mut state = setup();
         let master = create_object(

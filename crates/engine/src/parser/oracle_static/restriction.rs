@@ -433,26 +433,21 @@ pub(crate) fn parse_cant_cause_sacrifice_or_exile(
         ))
         .parse(input)?;
         let (input, _) = tag::<_, _, OracleError<'_>>("cause you to ").parse(input)?;
-        let (input, _) = alt((
-            tag("sacrifice or exile "),
-            tag("exile or sacrifice "),
-        ))
-        .parse(input)?;
+        let (input, _) =
+            alt((tag("sacrifice or exile "), tag("exile or sacrifice "))).parse(input)?;
         Ok((input, ()))
     }
 
     let rest = nom_tag_tp(tp, "triggered abilities ")?;
     let (cause, predicate) = strip_controller_possessive_scope(rest.original)?;
     let predicate_lower = predicate.to_lowercase();
-    let scope = nom_on_lower(predicate, &predicate_lower, |i| {
+    nom_on_lower(predicate, &predicate_lower, |i| {
         let (i, _) = parse_sacrifice_or_exile_negation(i)?;
-        let (i, scope) = tag("creature tokens you control").parse(i)?;
+        let (i, _) = tag("creature tokens you control").parse(i)?;
         let (i, _) = opt(tag(".")).parse(i)?;
         let (i, _) = eof(i)?;
-        Ok((i, scope))
-    })
-    .ok()?;
-    let _ = scope;
+        Ok((i, ()))
+    })?;
     let affected = TargetFilter::Typed(
         TypedFilter::creature()
             .properties(vec![FilterProp::Token])

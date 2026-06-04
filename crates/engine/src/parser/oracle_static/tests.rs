@@ -3893,10 +3893,9 @@ fn static_legend_rule_routes_through_classifier() {
 #[test]
 fn static_legend_rule_creature_tokens_scope() {
     // CR 704.5j: The Master, Multiplied — "doesn't apply to creature tokens you control."
-    let def = parse_static_line(
-        "The \"legend rule\" doesn't apply to creature tokens you control.",
-    )
-    .unwrap();
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to creature tokens you control.")
+            .unwrap();
     assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
     assert!(matches!(
         def.affected,
