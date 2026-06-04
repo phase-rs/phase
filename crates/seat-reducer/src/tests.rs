@@ -11,7 +11,7 @@ impl DeckResolver for NoOpResolver {
             main_deck: vec![],
             sideboard: vec![],
             commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         })
     }
 }

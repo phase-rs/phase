@@ -112,6 +112,12 @@ const pendingJoinRpcAborts: Set<AbortController> = new Set();
 const lobbySubscribers: Set<(games: LobbyGame[]) => void> = new Set();
 /** Most recent `LobbyUpdate` snapshot, used to seed new subscribers. */
 let lobbySnapshot: LobbyGame[] | null = null;
+
+/** Lobby row for a game/draft code from the cached subscription snapshot. */
+export function findLobbyGameByCode(code: string): LobbyGame | undefined {
+  const normalized = code.trim().toUpperCase();
+  return lobbySnapshot?.find((g) => g.game_code.toUpperCase() === normalized);
+}
 /** Per-socket detach returned by `subscribeLobbyOver`. Re-bound on
  * reconnect; `null` when no socket is attached. */
 let lobbyAttachDetach: (() => void) | null = null;
@@ -129,6 +135,23 @@ export interface HostingDeck {
   commander: string[];
 }
 
+/** Persisted snapshot of the host-setup form so the lobby remembers the
+ *  player's last choices across sessions instead of resetting to defaults.
+ *  Deliberately excludes per-match / sensitive fields (room name, password):
+ *  those are re-entered each time the player hosts. */
+export interface RememberedHostConfig {
+  format: GameFormat;
+  formatConfig: FormatConfig;
+  playerCount: number;
+  matchType: MatchType;
+  isPublic: boolean;
+  startWhenFull: boolean;
+  ranked: boolean;
+  /** AI seat layout (seat index + difficulty). Deck choices are resolved fresh
+   *  from the catalog at host time, so only the picker-level config persists. */
+  aiSeats: AiSeatConfig[];
+}
+
 export interface HostingSettings {
   displayName: string;
   public: boolean;
@@ -141,6 +164,8 @@ export interface HostingSettings {
   /** Optional per-match label shown in the lobby, distinct from `displayName`
    * (the player's global identity). `null` means "use the player's name". */
   roomName: string | null;
+  /** Enable ranked rating updates for the room. */
+  ranked: boolean;
 }
 
 /** Snapshot of the host's session config, captured at startHosting time.
@@ -194,6 +219,9 @@ interface MultiplayerState {
    * so the UI renders them top-down in the order they were raised. */
   toasts: Map<string, Toast>;
   formatConfig: FormatConfig | null;
+  /** Last host-setup form choices, persisted across sessions. `null` until the
+   *  player has hosted at least once. See {@link RememberedHostConfig}. */
+  lastHostConfig: RememberedHostConfig | null;
   playerSlots: PlayerSlot[];
   spectators: string[];
   isSpectator: boolean;
@@ -248,6 +276,7 @@ interface MultiplayerActions {
    * keyed `clearToast()`. Retained for full-reset paths. */
   clearAllToasts: () => void;
   setFormatConfig: (config: FormatConfig | null) => void;
+  rememberHostConfig: (config: RememberedHostConfig) => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   setSpectators: (names: string[]) => void;
   setIsSpectator: (value: boolean) => void;
@@ -270,6 +299,10 @@ interface MultiplayerActions {
   ) => Promise<boolean>;
   getActiveP2PHost: () => { adapter: P2PHostAdapter; gameId: string } | null;
   seatMutate: (mutation: SeatMutation) => void;
+  /** Like `seatMutate` but awaits P2P work; server sends are still fire-and-forget. */
+  seatMutateAsync: (mutation: SeatMutation) => Promise<void>;
+  /** Remove open seats, then start — mutations run in order (fixes Start-now races). */
+  startLobbyWithCurrentPlayers: () => Promise<void>;
   /**
    * Lazily open the long-lived subscription socket and return the
    * `PhaseSocket`. Idempotent: a second call while an open is in flight
@@ -330,6 +363,59 @@ interface MultiplayerActions {
     serverUrl: string,
     settings: CreateDraftSettings,
   ) => Promise<void>;
+}
+
+function disposeActiveP2PHost(): void {
+  if (activeP2PHostAdapter) {
+    activeP2PHostAdapter.dispose();
+    activeP2PHostAdapter = null;
+    activeP2PHostGameId = null;
+  }
+}
+
+function closeHostWebSocket(): void {
+  if (hostReconnectTimer) {
+    clearTimeout(hostReconnectTimer);
+    hostReconnectTimer = null;
+  }
+  if (hostWs) {
+    hostWs.close();
+    hostWs = null;
+  }
+}
+
+function activeServerHostingSocket(get: () => MultiplayerState): WebSocket | null {
+  if (hostWs) {
+    if (hostWs.readyState !== WebSocket.OPEN) {
+      throw new Error("Host connection is not active.");
+    }
+    return hostWs;
+  }
+  if (
+    get().hostingStatus === "waiting" &&
+    get().hostGameCode != null &&
+    !activeP2PHostAdapter
+  ) {
+    throw new Error("Host connection is not active.");
+  }
+  return null;
+}
+
+async function runP2PSeatMutation(
+  mutation: SeatMutation,
+  set: (partial: Partial<MultiplayerState>) => void,
+): Promise<void> {
+  const adapter = activeP2PHostAdapter;
+  if (!adapter) {
+    throw new Error("P2P host is not active.");
+  }
+  if (mutation.type === "Start") {
+    adapter.startNow();
+    await startActiveP2PHostGame(set);
+  } else {
+    await adapter.applySeatMutation(mutation);
+    set({ playerSlots: adapter.getPlayerSlots() });
+  }
 }
 
 async function startActiveP2PHostGame(
@@ -422,6 +508,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       opponentDisplayName: null,
       toasts: new Map(),
       formatConfig: null,
+      lastHostConfig: null,
       playerSlots: [],
       spectators: [],
       isSpectator: false,
@@ -503,6 +590,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           state.toasts.size === 0 ? {} : { toasts: new Map() },
         ),
       setFormatConfig: (config) => set({ formatConfig: config }),
+      rememberHostConfig: (config) => set({ lastHostConfig: config }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),
       setIsSpectator: (value) => set({ isSpectator: value }),
@@ -522,14 +610,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       setLatency: (ms) => set({ latencyMs: ms }),
 
       startHosting: (settings, deck) => {
-        // Clean up any existing hosting session
-        if (hostWs) {
-          hostWs.close();
-          hostWs = null;
-        }
-        if (hostReconnectTimer) {
-          clearTimeout(hostReconnectTimer);
-          hostReconnectTimer = null;
+        // Clean up any existing hosting session (server or P2P).
+        closeHostWebSocket();
+        disposeActiveP2PHost();
+        if (activeBroker) {
+          if (activeBrokerGameCode) {
+            void activeBroker.unregister(activeBrokerGameCode).catch(() => {});
+          }
+          activeBroker.close();
+          activeBroker = null;
+          activeBrokerGameCode = null;
         }
         clearWsSession();
         gameStartedFired = false;
@@ -605,7 +695,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             const data = msg.data as { message: string };
             console.error("Host error:", data.message);
             get().showToast(data.message || "Failed to create game.");
-            get().cancelHosting();
+            // Keep the pregame lobby open for recoverable errors (failed
+            // Start, seat edits, bracket checks). Only tear down when we
+            // never reached a lobby or the connection itself failed.
+            if (get().hostingStatus !== "waiting") {
+              get().cancelHosting();
+            }
           }
         };
 
@@ -726,6 +821,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               ai_seats: settings.aiSeats,
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
+              ranked: settings.ranked,
             },
           }),
           attemptHostReconnect,
@@ -733,19 +829,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       cancelHosting: () => {
-        if (hostReconnectTimer) {
-          clearTimeout(hostReconnectTimer);
-          hostReconnectTimer = null;
-        }
-        if (hostWs) {
-          hostWs.close();
-          hostWs = null;
-        }
-        if (activeP2PHostAdapter) {
-          activeP2PHostAdapter.dispose();
-          activeP2PHostAdapter = null;
-          activeP2PHostGameId = null;
-        }
+        closeHostWebSocket();
+        disposeActiveP2PHost();
         if (activeBroker) {
           if (activeBrokerGameCode) {
             void activeBroker.unregister(activeBrokerGameCode).catch(() => {});
@@ -801,6 +886,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       startP2PHostingSession: async (settings, deck, opts) => {
+        closeHostWebSocket();
+        clearWsSession();
+        gameStartedFired = false;
+        hostReconnectAttempt = 0;
+
         const resetFailedHosting = () => {
           set({
             hostIsPublic: false,
@@ -857,6 +947,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               roomName: opts.roomName ?? null,
               draftMetadata: null,
               startWhenFull: settings.startWhenFull,
+              ranked: settings.ranked,
             });
             brokerGameCode = registered.gameCode;
             activeBroker = broker;
@@ -974,34 +1065,38 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         return null;
       },
 
+      seatMutateAsync: async (mutation) => {
+        const serverSocket = activeServerHostingSocket(get);
+        if (serverSocket) {
+          serverSocket.send(JSON.stringify({
+            type: "SeatMutate",
+            data: { mutation },
+          }));
+          return;
+        }
+        await runP2PSeatMutation(mutation, set);
+      },
+
       seatMutate: (mutation) => {
-        if (activeP2PHostAdapter) {
-          void (async () => {
-            if (mutation.type === "Start") {
-              await startActiveP2PHostGame(set);
-            } else {
-              await activeP2PHostAdapter.applySeatMutation(mutation);
-              set({ playerSlots: activeP2PHostAdapter.getPlayerSlots() });
-            }
-          })().catch((err) => {
-            // Surface the failure to BOTH the dev console and the in-app
-            // toaster. The toaster can be off-screen or hidden behind the
-            // lobby modal; without the console.error a silent rejection in
-            // startPregameGame / applySeatMutation looks like the button
-            // did nothing at all.
+        void get()
+          .seatMutateAsync(mutation)
+          .catch((err) => {
             console.error("[seatMutate]", mutation.type, err);
             get().showToast(err instanceof Error ? err.message : String(err));
           });
-          return;
+      },
+
+      startLobbyWithCurrentPlayers: async () => {
+        const waiting = get()
+          .playerSlots.filter((slot) => slot.kind.type === "WaitingHuman")
+          .sort((a, b) => b.playerId - a.playerId);
+        for (const slot of waiting) {
+          await get().seatMutateAsync({
+            type: "Remove",
+            data: { seatIndex: slot.playerId },
+          });
         }
-        if (!hostWs || hostWs.readyState !== WebSocket.OPEN) {
-          get().showToast("Host connection is not active.");
-          return;
-        }
-        hostWs.send(JSON.stringify({
-          type: "SeatMutate",
-          data: { mutation },
-        }));
+        await get().seatMutateAsync({ type: "Start" });
       },
 
       ensureSubscriptionSocket: async () => {
@@ -1122,6 +1217,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           return await resolveGuestOver(socket, code, password, {
             signal: ac.signal,
             reservationToken: opts?.reservationToken,
+            // The broker rejects a blank display_name on the resolve frame
+            // (required-label rule) and the worker shell drops it without a
+            // reply — the guest then times out at deck-select. Always carry
+            // the player's name so the frame validates.
+            displayName: get().displayName || "Player",
           });
         } finally {
           pendingJoinRpcAborts.delete(ac);
@@ -1221,6 +1321,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         playerId: state.playerId,
         displayName: state.displayName,
         serverAddress: state.serverAddress,
+        lastHostConfig: state.lastHostConfig,
       }),
     },
   ),

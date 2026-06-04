@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
@@ -9,16 +10,16 @@ use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient,
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
-    CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, ManaContribution,
-    ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter,
-    TypedFilter,
+    ChosenSubtypeKind, CommanderOwnership, ContinuousModification, CopiableValues, Duration,
+    Effect, FilterProp, ManaContribution, ManaProduction, PlayerScope, QuantityExpr,
+    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
-use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::game_state::{DayNight, GameState};
+use crate::types::counter::{has_positive_counters, CounterMatch, CounterType};
+use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
@@ -37,7 +38,11 @@ struct ActiveCombatAssignmentRuleEffect {
 }
 
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
-fn subtype_matches_core_types(
+/// CR 205.1a: Whether a subtype correlates to at least one of the given core
+/// types — i.e. whether it survives a card-type replacement. Shared with the
+/// token-copy "stamp at creation" path so both the layered and baked
+/// applications of `SetCardTypes` drop the same uncorrelated subtypes.
+pub(crate) fn subtype_matches_core_types(
     subtype: &str,
     core_types: &[CoreType],
     all_creature_types: &[String],
@@ -71,7 +76,7 @@ pub fn prune_end_of_turn_effects(state: &mut GameState) {
         .transient_continuous_effects
         .retain(|e| e.duration != Duration::UntilEndOfTurn);
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -83,7 +88,7 @@ pub fn prune_end_of_combat_effects(state: &mut GameState) {
         .transient_continuous_effects
         .retain(|e| e.duration != Duration::UntilEndOfCombat);
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -106,17 +111,22 @@ pub fn prune_until_next_end_step_effects(state: &mut GameState, active_player: P
         ) && e.controller == active_player)
     });
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
-/// CR 514.2 + CR 611.2a: Remove `PlayFromExile` casting permissions whose
+/// CR 514.2: Remove durational casting permissions whose
 /// `Duration::UntilEndOfTurn` expires at cleanup. Called from the cleanup step
 /// alongside `prune_end_of_turn_effects`.
+// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
+// (impulse-draw, Light Up the Stage class) and `ExileWithAltCost`
+// (Rebound, CR 702.88a).
 ///
-/// Only `PlayFromExile` is durational. Other casting-permission variants
-/// (`AdventureCreature`, `ExileWithAltCost`, `ExileWithEnergyCost`, `WarpExile`)
-/// persist until the object leaves exile (handled by `zones::apply_zone_exit_cleanup`).
+/// Variants without a `duration` field (`AdventureCreature`,
+/// `ExileWithEnergyCost`, `WarpExile`, `Plotted`, `Foretold`) and
+/// `ExileWithAltCost { duration: None }` (Airbending, Suspend, Discover,
+/// Cascade) persist until the object leaves exile (handled by
+/// `zones::apply_zone_exit_cleanup`).
 pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.casting_permissions.retain(|p| match p {
@@ -148,6 +158,33 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             // these are pruned by their own systems (zone-exit cleanup, condition
             // re-evaluation, untap step). Retain here — they are not end-of-turn.
             CastingPermission::PlayFromExile { .. } => true,
+            // CR 702.88a: Rebound's upkeep recast offer carries
+            // `duration: Some(UntilEndOfTurn)` so the granted "cast this
+            // card without paying its mana cost" permission expires at the
+            // end of the same turn if the controller declines or fails to
+            // cast it. Mirrors the PlayFromExile arms above so all
+            // durational casting permissions share the same pruning
+            // semantics.
+            CastingPermission::ExileWithAltCost {
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            } => false,
+            // CR 514.2: defensive — same handling as PlayFromExile.
+            CastingPermission::ExileWithAltCost {
+                duration: Some(Duration::UntilEndOfCombat),
+                ..
+            } => false,
+            // CR 513.1: end-step duration handled by
+            // `prune_end_step_casting_permissions`; retain here.
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::End, ..
+                    }),
+                ..
+            } => true,
+            // Other durational shapes (UntilNextTurnOf, Permanent, etc.)
+            // and the standing `duration: None` form persist here.
             CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
             | CastingPermission::ExileWithAltAbilityCost { .. }
@@ -163,12 +200,60 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
     }
 }
 
-/// CR 514.2 + CR 611.2a/b: Remove `PlayFromExile` permissions granted to
+/// CR 514.2: Remove durational casting permissions granted to
 /// `active_player` whose `Duration::UntilNextTurnOf { Controller }` expires
 /// at that player's untap step. Called from the untap step alongside
 /// `prune_until_next_turn_effects`.
+// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
+// (impulse-draw, Light Up the Stage class) and `ExileWithAltCost`
+// (Rebound, CR 702.88a).
 pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_player: PlayerId) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        // CR 514.2: arm "until the end of your next turn" play-permissions when
+        // the grantee's next turn begins — convert to `UntilEndOfTurn` so the
+        // cleanup-step prune (`prune_end_of_turn_casting_permissions`) ends them
+        // at this turn's cleanup, letting the cards be played throughout the
+        // grantee's next turn (Light Up the Stage class).
+        for p in obj.casting_permissions.iter_mut() {
+            if let CastingPermission::PlayFromExile {
+                duration,
+                granted_to,
+                ..
+            } = p
+            {
+                if *granted_to == active_player
+                    && matches!(
+                        duration,
+                        Duration::UntilEndOfNextTurnOf {
+                            player: PlayerScope::Controller
+                        }
+                    )
+                {
+                    *duration = Duration::UntilEndOfTurn;
+                }
+            }
+            // CR 514.2: same arming for durational `ExileWithAltCost`
+            // (Rebound-class). `granted_to` is `Option<PlayerId>`; only
+            // arm when set and matching the active player.
+            if let CastingPermission::ExileWithAltCost {
+                duration: Some(d),
+                granted_to: Some(g),
+                ..
+            } = p
+            {
+                if *g == active_player
+                    && matches!(
+                        d,
+                        Duration::UntilEndOfNextTurnOf {
+                            player: PlayerScope::Controller
+                        }
+                    )
+                {
+                    *d = Duration::UntilEndOfTurn;
+                }
+            }
+        }
+
         obj.casting_permissions.retain(|p| match p {
             CastingPermission::PlayFromExile {
                 duration:
@@ -188,6 +273,26 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
                     },
                 ..
             } => true,
+            // CR 514.2: durational `ExileWithAltCost` with
+            // `UntilNextTurnOf { Controller }` granted to the active
+            // player expires at their untap step (mirrors PlayFromExile).
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    }),
+                granted_to: Some(g),
+                ..
+            } => *g != active_player,
+            // CR 513.1: end-step duration is handled by
+            // `prune_end_step_casting_permissions`; retain here.
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::End, ..
+                    }),
+                ..
+            } => true,
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
@@ -202,10 +307,12 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
     }
 }
 
-/// CR 513.1 + CR 611.2a/b: Remove `PlayFromExile` permissions granted to
+/// CR 513.1: Remove durational casting permissions granted to
 /// `active_player` whose `Duration::UntilNextStepOf { step: End, player: Controller }`
 /// expires at that player's next end step. Called at the start of the
 /// End phase in `turns.rs::auto_advance`.
+// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
+// (Rocco, Street Chef class) and `ExileWithAltCost` (Rebound, CR 702.88a).
 ///
 /// CR 513.2 ordering: this prune runs BEFORE end-step triggers fire, so a
 /// new grant created by an end-step trigger (e.g., Rocco, Street Chef) is
@@ -229,6 +336,18 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
                 exiled_by_ability_controller,
                 ..
             } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
+            // CR 513.1: durational `ExileWithAltCost` with
+            // `UntilNextStepOf { End, Controller }` granted to the active
+            // player expires at their end step (mirrors PlayFromExile).
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::End,
+                        player: PlayerScope::Controller,
+                    }),
+                granted_to: Some(g),
+                ..
+            } => *g != active_player,
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
@@ -248,6 +367,24 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
 /// Also clears `goaded_by` entries for the active player on all battlefield objects,
 /// per CR 701.15a: goad expires at the beginning of the goading player's next turn.
 pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: PlayerId) {
+    // CR 514.2: "until the end of your next turn" effects are *armed* when the
+    // controller's next turn begins — convert them to `UntilEndOfTurn` so the
+    // cleanup-step prune (`prune_end_of_turn_effects`) ends them at THIS turn's
+    // cleanup, persisting through the whole turn. They survive the creation
+    // turn's own cleanup because that turn's untap step already passed before
+    // the effect was created, so this is the controller's *next* turn.
+    for e in state.transient_continuous_effects.iter_mut() {
+        if matches!(
+            e.duration,
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller
+            }
+        ) && e.controller == active_player
+        {
+            e.duration = Duration::UntilEndOfTurn;
+        }
+    }
+
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|e| {
         !(matches!(
@@ -258,7 +395,7 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
         ) && e.controller == active_player)
     });
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     // CR 701.15a: Goad expires at the goading player's next turn. Clear goaded_by entries
@@ -303,7 +440,7 @@ pub fn prune_controller_untap_step_effects(state: &mut GameState, active_player:
         }
     });
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -315,7 +452,7 @@ pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
         .transient_continuous_effects
         .retain(|e| !(e.duration == Duration::UntilHostLeavesPlay && e.source_id == departed_id));
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -326,7 +463,7 @@ pub fn prune_affected_object_left_effects(state: &mut GameState, departed_id: Ob
         !matches!(effect.affected, TargetFilter::SpecificObject { id } if id == departed_id)
     });
     if state.transient_continuous_effects.len() != before {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 }
 
@@ -377,6 +514,229 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::RecipientMatchesFilter { .. } => true,
         _ => false,
     }
+}
+
+/// True when a static ability's SOURCE-LEVEL enabling condition can be flipped
+/// by an object entering or leaving the battlefield — i.e. its truth value
+/// depends on battlefield population/composition. Such conditions gate the
+/// effect for the WHOLE recipient set (they are NOT recipient-local; see
+/// `condition_uses_recipient_context`), so when an entry flips the gate every
+/// pre-existing recipient changes. The incremental layer-flush fast path only
+/// re-derives the entered objects, leaving pre-existing recipients with stale
+/// derived state, so it must escalate to a full re-evaluation in that case.
+///
+/// CR 611.3a: a static ability's continuous effect isn't locked in — when its
+/// source-level enabling condition depends on board population, an object
+/// entering can flip the condition for the whole recipient set, changing
+/// PRE-EXISTING recipients. Escalate to a full rebuild.
+///
+/// EXHAUSTIVE, wildcard-free over `StaticCondition` so a future variant forces a
+/// compile-time classification. Threshold/comparison variants recurse their
+/// operand `QuantityExpr`s through the existing `quantity_expr_uses_object_count`
+/// (DRY — no hand-rolled population detection). When in doubt, conservatively
+/// `true`: over-escalation is merely a perf cost, under-escalation is a
+/// rules-correctness bug.
+fn static_condition_uses_object_population(condition: &StaticCondition) -> bool {
+    match condition {
+        // Threshold/comparison gates: board-population-dependent iff an operand
+        // reads object count. Reuses the shared QuantityExpr classifier.
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            crate::game::quantity::quantity_expr_uses_object_count(lhs)
+                || crate::game::quantity::quantity_expr_uses_object_count(rhs)
+        }
+        // Devotion is a sum of mana symbols across permanents you control — pure
+        // board composition.
+        StaticCondition::DevotionGE { .. } => true,
+        // "you control [filter]" / "a [filter] is on the battlefield" — membership
+        // is battlefield population. `IsPresent` has no zone field (always a
+        // battlefield-presence check), so it is unconditionally population
+        // dependent regardless of whether `filter` is `Some`/`None`.
+        StaticCondition::IsPresent { .. } => true,
+        // Per-player board-count gate (defending player controls a [filter]).
+        StaticCondition::DefendingPlayerControls { .. } => true,
+        // "you control a/your commander" — membership of a commander on the
+        // battlefield, board-population dependent.
+        StaticCondition::ControlsCommander { .. } => true,
+        // Recurse combinators.
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(static_condition_uses_object_population),
+        StaticCondition::Not { condition } => static_condition_uses_object_population(condition),
+        // Parse fallback — evaluated permissively (always true today), but its
+        // text is unknown; conservatively escalate so an unrecognized
+        // population-gated condition can never silently under-escalate.
+        StaticCondition::Unrecognized { .. } => true,
+        // Genuinely board-population-independent: source-local state, the
+        // source's chosen attributes, combat status, player-scoped flags/totals,
+        // turn/phase, recipient-context gates (handled by
+        // `condition_uses_recipient_context`), zone presence of the source, and
+        // cast-history. Enumerated explicitly (no wildcard) so a future variant
+        // is forced through this classification.
+        StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::None => false,
+    }
+}
+
+/// CR 611.3a: ENTRY-AWARE narrowing for a population-sensitive source-level
+/// enabling CONDITION. `static_condition_uses_object_population` proves a
+/// condition *can* gate on board population; this proves a SPECIFIC entering
+/// object can actually perturb that population input (so the gate might flip for
+/// the whole recipient set).
+///
+/// Monotonicity: reached only for battlefield ENTRIES. An entry only ADDS
+/// objects, so a count/devotion gate only flips by the entered object joining
+/// the population, and `IsPresent` only flips false→true via a matching member.
+/// `ctx` is built from the condition's SOURCE object (CR 109.5 controller
+/// rebinding) by the caller.
+///
+/// EXHAUSTIVE and wildcard-free, mirroring `static_condition_uses_object_population`:
+/// every `false` arm there is `false` here; every `true` arm there is narrowed
+/// to a membership / threshold-perturb test, with conservative `true` where a
+/// precise membership test is awkward (over-escalation is safe).
+fn entered_object_perturbs_static_condition(
+    state: &GameState,
+    entered_id: ObjectId,
+    ctx: &FilterContext<'_>,
+    condition: &StaticCondition,
+) -> bool {
+    match condition {
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            entered_perturbs_static_quantity(state, entered_id, ctx, lhs)
+                || entered_perturbs_static_quantity(state, entered_id, ctx, rhs)
+        }
+        // CR 700.5: devotion gate flips only if the entered object's mana cost
+        // contributes a symbol for one of the gate colors (mirrors the Devotion
+        // magnitude leaf). LOW-1: controller-blind.
+        StaticCondition::DevotionGE { colors, .. } => {
+            state.objects.get(&entered_id).is_some_and(|entered| {
+                crate::game::quantity::entered_object_perturbs_quantity_expr(
+                    state,
+                    entered,
+                    ctx,
+                    &QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Devotion {
+                            colors: crate::types::ability::DevotionColors::Fixed(colors.clone()),
+                        },
+                    },
+                )
+            })
+        }
+        // "you control [filter]" / "a [filter] is on the battlefield". A present
+        // filter flips only via a matching member; an absent filter is an
+        // unqualified presence check — conservatively perturb on any entry.
+        StaticCondition::IsPresent { filter } => match filter {
+            Some(f) => matches_target_filter(state, entered_id, f, ctx),
+            None => true,
+        },
+        // CR 509.1b: defending-player board-count gate — flips via a matching
+        // member entering. (ctx controller is the source's, not the defender's;
+        // membership over-approximates, which is safe.)
+        StaticCondition::DefendingPlayerControls { filter } => {
+            matches_target_filter(state, entered_id, filter, ctx)
+        }
+        // Commander presence — conservatively perturb (a commander entering can
+        // flip it; not worth a precise commander membership test here).
+        StaticCondition::ControlsCommander { .. } => true,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| entered_object_perturbs_static_condition(state, entered_id, ctx, c)),
+        StaticCondition::Not { condition } => {
+            entered_object_perturbs_static_condition(state, entered_id, ctx, condition)
+        }
+        // Unknown text — conservatively perturb so an unrecognized population gate
+        // can never silently under-escalate.
+        StaticCondition::Unrecognized { .. } => true,
+        // Identical enumeration to the `false` arm of
+        // `static_condition_uses_object_population`: source-local, chosen-
+        // attribute, combat, player-scoped, turn/phase, recipient-context, source
+        // zone, and cast-history gates — none read board population, so an entry
+        // cannot perturb them.
+        StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::None => false,
+    }
+}
+
+/// Bridge: route a condition operand `QuantityExpr` through the quantity
+/// module's entry-aware classifier (resolving the entered object).
+fn entered_perturbs_static_quantity(
+    state: &GameState,
+    entered_id: ObjectId,
+    ctx: &FilterContext<'_>,
+    expr: &QuantityExpr,
+) -> bool {
+    state.objects.get(&entered_id).is_some_and(|entered| {
+        crate::game::quantity::entered_object_perturbs_quantity_expr(state, entered, ctx, expr)
+    })
 }
 
 fn source_condition_gate_passes(
@@ -486,6 +846,12 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
             .unwrap_or(false),
+        // CR 702.176a + CR 611.3a: Persistent alternative-cost marker on the
+        // source permanent. This is intentionally not turn-scoped.
+        StaticCondition::CastVariantPaid { variant } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.cast_variant_paid.is_some_and(|(v, _)| v == *variant)),
         StaticCondition::RecipientHasCounters {
             counters,
             minimum,
@@ -739,7 +1105,53 @@ pub fn evaluate_condition_for_test(
 /// 5. Clear the layers_dirty flag.
 ///
 /// CR 613.1: Evaluate all continuous effects in layer order (1–7e).
+/// Test-only counter incremented at the TOP of every FULL `evaluate_layers`
+/// pass (NOT incremented by `apply_layers_incremental`). The discriminating
+/// performance test reads this to prove the incremental fast path engaged: full
+/// evaluations must be near-constant, not proportional to the resolved stack.
+#[cfg(test)]
+pub(crate) static FULL_EVALUATE_LAYERS_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+// Test-only placement toggle for the `StaticSourceIndex` rebuild, used to prove
+// the discriminating regression test goes RED on the (buggy) end-of-pass
+// placement and GREEN on the (correct) top-of-pass placement. Production code
+// ALWAYS rebuilds at the top of the pass (this toggle does not exist outside
+// `cfg(test)`). When `false`, the rebuild is deferred to the END of
+// `evaluate_layers` / `apply_layers_incremental` — which leaves the mid-pass
+// gathers reading the previous pass's stale index, exactly the GAP-1 bug.
+//
+// THREAD-LOCAL (not process-global): engine layer resolution is synchronous, so
+// the production code invoked by a test runs on that test's own thread. A
+// thread-local toggle lets the RED discriminating test flip the placement on its
+// OWN thread only — concurrently-scheduled tests (the GREEN counterpart and
+// every other parallel test) read their own default `true` and are unaffected.
+// A process-global `AtomicBool` here raced under cargo's default parallel runner.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static REBUILD_STATIC_INDEX_AT_TOP: core::cell::Cell<bool> =
+        const { core::cell::Cell::new(true) };
+}
+
+/// Whether to rebuild the static-source index at the TOP of the pass. Always
+/// `true` in production; togglable only under `cfg(test)` for red→green
+/// discrimination.
+#[cfg(test)]
+#[inline]
+fn rebuild_static_index_at_top() -> bool {
+    REBUILD_STATIC_INDEX_AT_TOP.with(core::cell::Cell::get)
+}
+
+/// Production variant: the rebuild is ALWAYS at the top of the pass.
+#[cfg(not(test))]
+#[inline]
+fn rebuild_static_index_at_top() -> bool {
+    true
+}
+
 pub fn evaluate_layers(state: &mut GameState) {
+    #[cfg(test)]
+    FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // CR 302.6 + CR 613.1b + CR 702.26c: Snapshot effective controllers for
     // phased-in permanents BEFORE the Step 1 reset below wipes them. The
     // post-pass diff at the end of this function compares against this
@@ -819,6 +1231,19 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
+    // CR 611.2 + CR 613.1: Rebuild the static-effect-source index from the
+    // just-reset base `static_definitions` so the Copy / main gathers below
+    // iterate the current pass's generator set. MUST run AFTER the Step-1 reset
+    // (so the predicate reads base, not stale post-layer, definitions) and
+    // BEFORE the first gather (so the mid-pass consults are fresh — unlike
+    // `TriggerIndex` this index is read INSIDE the pass, so its rebuild is
+    // top-of-pass, not end-of-pass). The `rebuild_static_index_at_top` guard is
+    // ALWAYS true in production; it is togglable only under `cfg(test)` for the
+    // red→green discriminating regression test.
+    if rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
     // Step 2: Apply copy effects first so copied static abilities exist before later layers.
     let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
     let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
@@ -831,8 +1256,8 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     // Step 4: Process each remaining layer in order
     for (layer, layer_bucket) in &effects_by_layer {
-        if matches!(*layer, Layer::Copy | Layer::CounterPT) {
-            // Copy handled above; Counter-based P/T handled separately below.
+        if *layer == Layer::Copy {
+            // Copy is handled above, before this loop.
             continue;
         }
 
@@ -850,7 +1275,16 @@ pub fn evaluate_layers(state: &mut GameState) {
             }
         }
 
+        // CR 613.4c: P/T counters modify power/toughness in layer 7c. Counters
+        // are object state, not continuous effects, so the `CounterPT` bucket is
+        // empty and the fold runs here — after the 7c `+N/+N` effects above and
+        // before the 7d `SwitchPT` (CR 613.4d) handled in a later iteration.
+        if *layer == Layer::CounterPT {
+            apply_pt_counter_modifications(state, bf_ids.iter().copied());
+        }
+
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, bf_ids.iter().copied());
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
         }
         if matches!(*layer, Layer::Control | Layer::Type) {
@@ -906,35 +1340,12 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
-    // CR 613.4c: Power/toughness counters modify P/T in layer 7c.
+    // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
+    // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
+    // (P/T counters are applied in-loop at Layer::CounterPT above, in layer 7c
+    // before the 7d switch.)
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            let (power_delta, toughness_delta) = obj.counters.iter().fold(
-                (0i32, 0i32),
-                |(power_total, toughness_total), (counter_type, count)| {
-                    let Some((power, toughness)) = counter_type.power_toughness_delta() else {
-                        return (power_total, toughness_total);
-                    };
-                    let count = crate::game::arithmetic::u32_to_i32_saturating(*count);
-                    (
-                        power_total.saturating_add(power.saturating_mul(count)),
-                        toughness_total.saturating_add(toughness.saturating_mul(count)),
-                    )
-                },
-            );
-            if power_delta != 0 {
-                if let Some(ref mut p) = obj.power {
-                    *p = saturating_pt_add(*p, power_delta);
-                }
-            }
-            if toughness_delta != 0 {
-                if let Some(ref mut t) = obj.toughness {
-                    *t = saturating_pt_add(*t, toughness_delta);
-                }
-            }
-
-            // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
-            // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
             }
@@ -972,6 +1383,13 @@ pub fn evaluate_layers(state: &mut GameState) {
         return;
     }
 
+    // CR 611.3a + CR 611.3b: refresh the source-level enabling-condition truth
+    // cache from this fully-derived board. Placed AFTER the ring-normalization
+    // recursion guard so the re-entrant pass writes the final fixpoint cache
+    // once, and BEFORE `layers_dirty = Clean` so a full eval always leaves a
+    // fresh cache for the next incremental flush's truth-delta consult.
+    refresh_static_gate_truth(state);
+
     // CR 603.6a + CR 611.2e: Layer evaluation just finalized post-layer
     // trigger sets on every battlefield permanent (granted triggers from
     // sliver lords, Changeling, Bramble Sovereign, suppress-triggers statics).
@@ -980,8 +1398,499 @@ pub fn evaluate_layers(state: &mut GameState) {
     // rebuild replaces both `by_key` and `unclassified` from scratch.
     crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
 
-    // Step 5: Clear dirty flag
-    state.layers_dirty = false;
+    // Test-only: the (buggy) end-of-pass placement of the static-source-index
+    // rebuild, exercised only when `rebuild_static_index_at_top()` is toggled
+    // off. Production always rebuilds at the top (above) and never reaches here.
+    if !rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
+    // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
+    // (Clean / EnteredObjects / Full).
+    state.layers_dirty = LayersDirty::Clean;
+}
+
+/// Mark the layer system as requiring a FULL battlefield re-evaluation. The
+/// conservative escalation used by every mutation other than a battlefield entry.
+pub fn mark_layers_full(state: &mut GameState) {
+    state.layers_dirty.mark_full();
+}
+
+/// Record that `id` entered the battlefield and is a candidate for incremental
+/// layer re-derivation. If the dirty lattice is already `Full`, this is a no-op
+/// (the full pass subsumes the entry).
+pub fn mark_layers_entered(state: &mut GameState, id: ObjectId) {
+    state.layers_dirty.mark_entered(id);
+}
+
+/// Single authority that flushes any pending layer re-evaluation and keeps the
+/// public-state dirty marks consistent with what was recomputed.
+///
+/// CR 613.1: continuous effects are evaluated in layer order over the whole
+/// board. The `Full` path always produces a correct board; the `EnteredObjects`
+/// path is an O(entered + active-effects) fast path taken only when a
+/// per-entered precondition scan AND a board-wide escalation scan prove that
+/// re-deriving just the entered objects yields a board identical to a full pass.
+pub fn flush_layers(state: &mut GameState) {
+    match std::mem::replace(&mut state.layers_dirty, LayersDirty::Clean) {
+        LayersDirty::Clean => {}
+        LayersDirty::Full => {
+            evaluate_layers(state);
+            super::public_state::mark_public_state_all_dirty(state);
+        }
+        LayersDirty::EnteredObjects(ids) => {
+            if ids.is_empty() {
+                return;
+            }
+            if incremental_flush_must_escalate(state, &ids) {
+                evaluate_layers(state);
+                super::public_state::mark_public_state_all_dirty(state);
+            } else {
+                apply_layers_incremental(state, &ids);
+                for id in &ids {
+                    super::public_state::mark_public_state_object_dirty(state, *id);
+                }
+                super::public_state::mark_battlefield_display_dirty(state);
+            }
+        }
+    }
+}
+
+/// Decide whether an `EnteredObjects` flush must conservatively escalate to a
+/// full re-evaluation.
+///
+/// Two axes, both required-clean for the fast path:
+///
+/// 1. Per-entered preconditions: the entered object must not itself be the
+///    source of a continuous effect, carry a CDA static, or carry a
+///    control-override / type-change / text-change / counter / attachment /
+///    transient effect (the entry enqueued none for a plain token).
+///
+/// 2. Board-wide escalation: no ACTIVE continuous effect may have a magnitude,
+///    affected set, or source-level enabling CONDITION that reads battlefield
+///    object population.
+///    CR 611.3a: a static-ability continuous effect isn't locked in; it applies
+///    at any moment to whatever its text indicates — so a board-population-
+///    dependent magnitude, affected set, or enabling condition re-evaluates when
+///    an object enters, changing PRE-EXISTING recipients. CR 613.7d: the entering
+///    object receives its timestamp on zone entry. CR 613.8a: dependency/timestamp
+///    ordering operates on the live set. This scan is O(active-effect-count), NOT
+///    O(battlefield).
+pub(crate) fn incremental_flush_must_escalate(
+    state: &GameState,
+    entered_ids: &HashSet<ObjectId>,
+) -> bool {
+    // Axis 1 — per-entered preconditions.
+    for &id in entered_ids {
+        let Some(obj) = state.objects.get(&id) else {
+            // The entered object already left (e.g. it was a token that died to
+            // an SBA before flush). A full pass is the safe handling.
+            return true;
+        };
+        if entered_object_blocks_incremental(state, obj) {
+            return true;
+        }
+    }
+
+    // Axis 2a — magnitude + affected-set over the EXISTING active effect set,
+    // NARROWED to entries that actually perturb the population input.
+    //
+    // Two-stage test per effect: the committed exhaustive classifier
+    // (`quantity_expr_uses_object_count` / `affected_filter_uses_object_population`)
+    // is the OUTER conjunct (compile-time tripwire — a future population-reading
+    // variant forces a classification). Then the entry-aware narrowing layer asks
+    // whether any ENTERED object can flip THIS effect's population input.
+    //
+    // CR 109.5: the filter's "you control" must resolve against the EFFECT
+    // SOURCE's controller, not the entered object's — so `ctx` is built per-effect
+    // from `e.source_id` + `e.controller`. Escalation is `classifier(e) &&
+    // any_entered_perturbs(e)`; both required.
+    if collect_shared_active_continuous_effects(state)
+        .iter()
+        .any(|e| {
+            let magnitude = modification_dynamic_quantity(&e.modification);
+            let magnitude_sensitive =
+                magnitude.is_some_and(crate::game::quantity::quantity_expr_uses_object_count);
+            let affected_sensitive =
+                crate::game::filter::affected_filter_uses_object_population(&e.affected_filter);
+            if !magnitude_sensitive && !affected_sensitive {
+                return false;
+            }
+            let ctx = FilterContext::from_source_with_controller(e.source_id, e.controller);
+            entered_ids.iter().any(|id| {
+                let Some(entered) = state.objects.get(id) else {
+                    return false;
+                };
+                (magnitude_sensitive
+                    && magnitude.is_some_and(|expr| {
+                        crate::game::quantity::entered_object_perturbs_quantity_expr(
+                            state, entered, &ctx, expr,
+                        )
+                    }))
+                    || (affected_sensitive
+                        && crate::game::filter::entered_object_perturbs_affected_filter(
+                            state,
+                            *id,
+                            &ctx,
+                            &e.affected_filter,
+                        ))
+            })
+        })
+    {
+        return true;
+    }
+
+    // Axis 2b — source-level enabling CONDITION over the EXISTING static-ability
+    // sources, NARROWED to entries that actually perturb the condition. The
+    // condition axis CANNOT be read off the collected `ActiveContinuousEffect`s:
+    // `active_continuous_effects_from_static_definitions` evaluates a
+    // non-recipient-context (source-level) condition as a gate at COLLECTION time
+    // and stores `condition: None` on the resulting effect (only recipient-context
+    // conditions are retained for per-recipient re-evaluation). So a board-
+    // population gate like "as long as you control N creatures" is already consumed
+    // and invisible on the active-effect set. We must inspect the intact
+    // `StaticDefinition.condition` on each live source instead.
+    //
+    // CR 611.3a + CR 611.3b: when such a source-level enabling condition depends
+    // on board population, an object entering can flip the condition for the
+    // WHOLE recipient set, changing PRE-EXISTING recipients — so escalate to a
+    // full rebuild. The entry-aware narrowing (built per-source from the visited
+    // object, CR 109.5) skips escalation when no entered object can perturb the
+    // gate; the truth-delta refinement (below) skips escalation even when an
+    // entry perturbs the gate INPUT but does not flip its truth value.
+    any_active_static_condition_perturbed_by_entry(state, entered_ids)
+}
+
+/// Scan every live static-ability source for a CONTINUOUS `StaticDefinition`
+/// whose enabling `condition` is board-population-dependent AND that one of the
+/// `entered_ids` actually perturbs. Walks the same source set as
+/// `collect_shared_active_continuous_effects` (`for_each_static_effect_source`)
+/// but reads the intact pre-collection `condition` field.
+/// O(active-source-count × entered-count); short-circuits on the first match.
+///
+/// Three-stage test:
+///  1. The committed exhaustive classifier
+///     (`static_condition_uses_object_population`, OUTER conjunct, compile-time
+///     tripwire) gates the entry-aware narrowing
+///     (`entered_object_perturbs_static_condition`). CR 109.5: `ctx` is built per
+///     SOURCE object so the condition's "you control" rebinds to the source's
+///     controller, not the entered object's.
+///  2. RECIPIENT-CONTEXT gates (CR 611.3b — the effect applies per recipient)
+///     escalate UNCONDITIONALLY when perturbed: their truth is per-recipient and
+///     cannot be summarized by a single board-level boolean
+///     (`source_condition_gate_passes` only over-approximates them). This
+///     preserves the d9a40be71 behavior for that class.
+///  3. SOURCE-LEVEL gates (CR 611.3a — a single on/off switch consumed at
+///     collection): apply the truth-delta short-circuit. The static's BEFORE
+///     truth was cached at the last full eval in `static_gate_truth`; recompute
+///     AFTER against the live post-entry board. Escalate iff `before != after`.
+///     Key absent (source not present / phased out at the last full eval) ->
+///     fail closed (escalate). Soundness rests on `after` being recomputed
+///     authoritatively from the live board, so the test errs only toward
+///     OVER-escalation, never under (safety theorem hypotheses: Continuous mode,
+///     `!condition_uses_recipient_context`, affected-set + magnitude
+///     population-independent — the latter two are escalated first by Axis 2a).
+///
+/// `def_index` indexes the LIVE post-layer `static_definitions` via
+/// `iter_all().enumerate()` — IDENTICAL indexing to `refresh_static_gate_truth`
+/// (invariant 5), so the cached BEFORE truth aligns with the consulted def.
+fn any_active_static_condition_perturbed_by_entry(
+    state: &GameState,
+    entered_ids: &HashSet<ObjectId>,
+) -> bool {
+    let mut found = false;
+    for_each_static_effect_source(state, |state, obj| {
+        if found {
+            return;
+        }
+        let ctx = FilterContext::from_source(state, obj.id);
+        if obj
+            .static_definitions
+            .iter_all()
+            .enumerate()
+            .any(|(def_index, def)| {
+                if def.mode != StaticMode::Continuous {
+                    return false;
+                }
+                let Some(condition) = def.condition.as_ref() else {
+                    return false;
+                };
+                if !static_condition_uses_object_population(condition) {
+                    return false;
+                }
+                // CR 611.3b: recipient-context gates re-evaluate per recipient —
+                // a single board-level boolean can't summarize them, so escalate
+                // unconditionally when perturbed (preserve d9a40be71).
+                if condition_uses_recipient_context(condition) {
+                    return entered_ids.iter().any(|id| {
+                        entered_object_perturbs_static_condition(state, *id, &ctx, condition)
+                    });
+                }
+                let perturbed = entered_ids.iter().any(|id| {
+                    entered_object_perturbs_static_condition(state, *id, &ctx, condition)
+                });
+                if !perturbed {
+                    return false;
+                }
+                // CR 611.3a source-level truth-delta. A multi-axis static (gate
+                // ON while magnitude/affected-set also population-sensitive) is
+                // already escalated by Axis 2a above, so reaching here means the
+                // condition is the only population-sensitive axis. Fail closed
+                // when the key is absent (invariant 1: source not present /
+                // phased out at the last full eval).
+                let before = match state.static_gate_truth.get(&StaticGateKey {
+                    source: obj.id,
+                    def_index,
+                }) {
+                    Some(&b) => b,
+                    None => return true,
+                };
+                let after = source_condition_gate_passes(state, condition, obj.controller, obj.id);
+                before != after
+            })
+        {
+            found = true;
+        }
+    });
+    found
+}
+
+/// CR 611.3a + CR 611.3b: rewrite the source-level enabling-condition truth
+/// cache from the FULLY-DERIVED board. Walks `for_each_static_effect_source`
+/// (which skips phased-out sources, CR 702.26e), and records the gate truth of
+/// every CONTINUOUS static carrying a NON-recipient-context `Some(condition)`,
+/// keyed by `(source, def_index)` on the LIVE post-layer `static_definitions`
+/// (`iter_all().enumerate()` — identical indexing to the consult; see invariant
+/// 5). Recipient-context conditions are EXCLUDED: their truth is per-recipient,
+/// re-evaluated per recipient via `evaluate_condition_with_recipient`, and
+/// `source_condition_gate_passes` is only an over-approximation for them — so
+/// they are never cached and always escalate.
+///
+/// CR 109.5: the gate's "you"/"your" resolves against the SOURCE's controller.
+/// Cleared and repopulated wholesale (keyset is authoritative only for sources
+/// present + non-phased at this full eval; absence at consult fails closed).
+fn refresh_static_gate_truth(state: &mut GameState) {
+    let mut next: std::collections::HashMap<StaticGateKey, bool> = std::collections::HashMap::new();
+    for_each_static_effect_source(state, |state, obj| {
+        for (def_index, def) in obj.static_definitions.iter_all().enumerate() {
+            if def.mode != StaticMode::Continuous {
+                continue;
+            }
+            let Some(condition) = def.condition.as_ref() else {
+                continue;
+            };
+            if condition_uses_recipient_context(condition) {
+                continue;
+            }
+            let truth = source_condition_gate_passes(state, condition, obj.controller, obj.id);
+            next.insert(
+                StaticGateKey {
+                    source: obj.id,
+                    def_index,
+                },
+                truth,
+            );
+        }
+    });
+    state.static_gate_truth = next;
+}
+
+/// CR 613.1: Continuous effects are applied in layers to determine object characteristics.
+/// CR 122.1: Counters can modify object characteristics.
+/// CR 301.5: Equipment attachments can affect equipped creatures.
+/// CR 303.4: Aura attachments can affect enchanted objects.
+/// True when the entered object cannot be handled by the incremental fast path
+/// and the flush must escalate to a full re-evaluation. Conservative: any entry
+/// kind whose layer contribution cannot be cheaply proven empty fails closed.
+fn entered_object_blocks_incremental(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    // (1) The entered object sources at least one continuous effect (anthem,
+    //     lord, type-changer, etc.): a full pass is required so its effect
+    //     reaches every pre-existing recipient.
+    if !active_continuous_effects_from_static_source(state, obj).is_empty() {
+        return true;
+    }
+    // (2) CDA static: a characteristic-defining static defines the object's own
+    //     P/T/color/type from game state and is not a plain entry.
+    if obj
+        .static_definitions
+        .iter_all()
+        .any(|s| s.characteristic_defining)
+    {
+        return true;
+    }
+    // (3) The entry carries no control-override / type-change / text-change /
+    //     counter / attachment / transient effect. Counters and attachments are
+    //     cheaply observable on the object; type/text/control overrides for a
+    //     genuine new entry are sourced by statics already covered by (1)/(2).
+    //     A controller differing from the base controller indicates a Layer-2
+    //     override the incremental path does not reset for the rest of the board.
+    if has_positive_counters(&obj.counters) {
+        return true;
+    }
+    if obj.attached_to.is_some() || !obj.attachments.is_empty() {
+        return true;
+    }
+    if obj
+        .base_controller
+        .is_some_and(|base| base != obj.controller)
+    {
+        return true;
+    }
+    false
+}
+
+/// Incremental layer re-derivation for a set of freshly-entered objects.
+///
+/// Mirrors the PER-OBJECT subset of `evaluate_layers` for `entered_ids` only:
+/// resets each entered object to its base characteristics, re-applies the
+/// EXISTING global continuous-effect set (restricted to the entered objects via
+/// `apply_continuous_effect_to`), runs the per-object counter / keyword-counter /
+/// P-T-counter / loyalty fixups and the combat-assignment-rule application, then
+/// rebuilds the TriggerIndex (CR 603.6a + CR 611.2e — granted-trigger
+/// visibility). It does NOT clear attribution globally or touch the rest of the
+/// battlefield: pre-existing objects keep their already-derived characteristics.
+///
+/// Caller (`flush_layers`) only reaches this path after
+/// `incremental_flush_must_escalate` returned false, which guarantees no active
+/// effect's magnitude or affected set reads board population — so re-deriving
+/// just the entered objects yields a board identical to a full pass (CR 613.1).
+fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectId>) {
+    // Step 1 (per-entered subset): reset computed characteristics to base.
+    for &id in entered_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.sync_missing_base_characteristics();
+            obj.name = obj.base_name.clone();
+            obj.power = obj.base_power;
+            obj.toughness = obj.base_toughness;
+            obj.loyalty = obj.base_loyalty;
+            obj.card_types = obj.base_card_types.clone();
+            obj.mana_cost = obj.base_mana_cost.clone();
+            obj.keywords = obj.base_keywords.clone();
+            obj.abilities = Arc::clone(&obj.base_abilities);
+            obj.trigger_definitions = Arc::clone(&obj.base_trigger_definitions).into();
+            obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
+            obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
+            obj.color = obj.base_color.clone();
+            obj.printed_ref = obj.base_printed_ref.clone();
+            obj.controller = obj.base_controller.unwrap_or(obj.owner);
+            obj.assigns_damage_from_toughness = false;
+            obj.assigns_damage_as_though_unblocked = false;
+            obj.assigns_no_combat_damage = false;
+        }
+    }
+
+    // CR 611.2 + CR 613.1: Rebuild the static-effect-source index before the
+    // incremental gathers. The incremental path only resets `entered_ids` to
+    // base; pre-existing generators keep their already-derived
+    // `static_definitions`, which for a generator still carries its continuous
+    // def — so a full-battlefield rebuild here lists every current generator
+    // (pre-existing + entered). An entered base generator never reaches this
+    // path (`entered_object_blocks_incremental` escalates it to a full eval), so
+    // this is purely a freshness guarantee for the incremental gather. The
+    // `rebuild_static_index_at_top` guard is ALWAYS true in production; togglable
+    // only under `cfg(test)`.
+    if rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
+    // Step 2: Copy effects first (Layer 1), restricted to entered objects.
+    let copy_effects = gather_active_effects_for_layer(state, Layer::Copy);
+    let ordered_copy = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
+    for effect in &ordered_copy {
+        apply_continuous_effect_to(state, effect, entered_ids);
+    }
+
+    // Step 3-4: Remaining layers in order, restricted to entered objects.
+    let effects_by_layer = gather_active_continuous_effects(state);
+    for (layer, layer_bucket) in &effects_by_layer {
+        if *layer == Layer::Copy {
+            continue;
+        }
+        if !layer_bucket.is_empty() {
+            let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
+            let ordered = if layer.has_dependency_ordering() {
+                order_with_dependencies(&layer_effects, state)
+            } else {
+                order_by_timestamp(&layer_effects)
+            };
+            for effect in &ordered {
+                apply_continuous_effect_to(state, effect, entered_ids);
+            }
+        }
+        // CR 613.4c: P/T counters modify power/toughness in layer 7c, before the
+        // 7d switch (CR 613.4d). The CounterPT bucket carries no continuous
+        // effects, so fold the on-object counters in here.
+        if *layer == Layer::CounterPT {
+            apply_pt_counter_modifications(state, entered_ids.iter().copied());
+        }
+        if *layer == Layer::Type {
+            apply_prototype_characteristics(state, entered_ids.iter().copied());
+            let entered_vec: Vec<ObjectId> = entered_ids.iter().copied().collect();
+            apply_intrinsic_basic_land_mana_abilities(state, &entered_vec);
+        }
+    }
+
+    // CR 702.73a: Changeling — entered object gains all creature types if it now
+    // has Changeling but no CDA covered it.
+    if !state.all_creature_types.is_empty() {
+        for &id in entered_ids {
+            let has_changeling = state
+                .objects
+                .get(&id)
+                .is_some_and(|o| o.has_keyword(&Keyword::Changeling));
+            if has_changeling {
+                let all_types = state.all_creature_types.clone();
+                if let Some(obj) = state.objects.get_mut(&id) {
+                    for subtype in &all_types {
+                        if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                            obj.card_types.subtypes.push(subtype.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // CR 122.1b + CR 613.1f: Keyword counters grant their keyword (Layer 6).
+    // CR 306.5c: loyalty re-derives from loyalty counters. Per-entered fixups
+    // only. (P/T counters are applied in-loop at Layer::CounterPT above, in
+    // layer 7c before the 7d switch — CR 613.4c/613.4d.)
+    for &id in entered_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            let granted: Vec<Keyword> = obj
+                .counters
+                .keys()
+                .filter_map(|ct| match ct {
+                    CounterType::Keyword(kind) => Keyword::promote_keyword_kind(*kind),
+                    _ => None,
+                })
+                .collect();
+            for keyword in granted {
+                if !obj.has_keyword(&keyword) {
+                    obj.keywords.push(keyword);
+                }
+            }
+
+            if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
+                obj.loyalty = Some(loyalty_counters);
+            }
+        }
+    }
+
+    // CR 613.11: Combat-assignment rule effects, restricted to entered objects.
+    apply_combat_assignment_rule_effects_filtered(state, Some(entered_ids));
+
+    // CR 603.6a + CR 611.2e: Rebuild the TriggerIndex so the next event scan
+    // sees the entered objects' (and any granted) trigger sets.
+    crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+
+    // Test-only buggy end-of-pass static-index placement (see `evaluate_layers`).
+    if !rebuild_static_index_at_top() {
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
 }
 
 fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<ActiveContinuousEffect> {
@@ -989,6 +1898,65 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .into_iter()
         .filter(|effect| effect.layer == layer)
         .collect()
+}
+
+/// CR 718.3b: A prototyped spell and the permanent it becomes have only their
+/// alternative mana cost and P/T characteristics. If that mana cost contains
+/// colored mana symbols, the spell/permanent is those colors. Reapply this after
+/// layer reset so the prototype marker survives normal layer recomputation.
+fn apply_prototype_characteristics(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
+    for id in ids {
+        let Some(obj) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        let Some(form) = obj.prototype_form.clone() else {
+            continue;
+        };
+        obj.mana_cost = form.mana_cost;
+        obj.power = Some(form.power);
+        obj.toughness = Some(form.toughness);
+        obj.color = form.colors;
+    }
+}
+
+/// CR 613.4c: Fold each permanent's power/toughness counters into its P/T in
+/// layer 7c. Counters are object state rather than continuous effects, so this
+/// runs at the `Layer::CounterPT` step of the layer loop — after the 7c `+N/+N`
+/// effects and before the 7d power/toughness switch (CR 613.4d). Applying it
+/// after the switch would transpose asymmetric P/T counters (e.g. `+0/+1`,
+/// `-1/-0`) onto the wrong axis.
+fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
+    for id in ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            if !has_positive_counters(&obj.counters) {
+                continue;
+            }
+
+            let (power_delta, toughness_delta) = obj.counters.iter().fold(
+                (0i32, 0i32),
+                |(power_total, toughness_total), (counter_type, count)| {
+                    let Some((power, toughness)) = counter_type.power_toughness_delta() else {
+                        return (power_total, toughness_total);
+                    };
+                    let count = crate::game::arithmetic::u32_to_i32_saturating(*count);
+                    (
+                        power_total.saturating_add(power.saturating_mul(count)),
+                        toughness_total.saturating_add(toughness.saturating_mul(count)),
+                    )
+                },
+            );
+            if power_delta != 0 {
+                if let Some(ref mut p) = obj.power {
+                    *p = saturating_pt_add(*p, power_delta);
+                }
+            }
+            if toughness_delta != 0 {
+                if let Some(ref mut t) = obj.toughness {
+                    *t = saturating_pt_add(*t, toughness_delta);
+                }
+            }
+        }
+    }
 }
 
 /// Collect all active continuous effects from permanents on the battlefield.
@@ -1061,30 +2029,74 @@ fn for_each_static_effect_source(
     state: &GameState,
     mut visit: impl FnMut(&GameState, &crate::game::game_object::GameObject),
 ) {
-    // CR 702.26e: Continuous effects generated by phased-out permanents don't
-    // include anything in their set of affected objects — effectively, a
-    // phased-out permanent contributes no continuous effects during layer
-    // evaluation. Skip phased-out sources here rather than filtering later.
-    for &id in &state.battlefield {
-        if state
-            .objects
-            .get(&id)
-            .is_some_and(|obj| obj.is_phased_out())
-        {
-            continue;
-        }
-        if let Some(obj) = state.objects.get(&id) {
-            visit(state, obj);
-        }
-    }
+    // CR 611.2 + CR 613.1: Iterate the static-effect-source index buckets
+    // instead of scanning the full battlefield / command zone. The index lists
+    // only objects that GENERATE ≥1 continuous effect (rebuilt at the top of
+    // every layer pass — see `static_source_index.rs`), so this loop is
+    // O(generators) rather than O(battlefield). The per-object gates below are
+    // retained verbatim; the index only narrows WHICH ids to look at.
+    //
+    // Defense-in-depth: a never-yet-evaluated `&GameState` (post-deserialize, or
+    // a hand-built test state that never ran a flush — e.g. an off-zone keyword
+    // query against a command-zone emblem before any layer pass) has an empty
+    // index but a non-empty battlefield and/or command zone.
+    // `for_each_static_effect_source` takes `&GameState` and cannot rebuild, so
+    // fall back to a direct battlefield + command scan when BOTH indexed buckets
+    // are empty AND either source zone is non-empty. (Gating only on the
+    // battlefield would miss a command-zone-only emblem board — see
+    // `command_zone_emblem_grants_keyword_to_non_battlefield_card`.)
+    let index = &state.static_source_index;
+    let use_fallback = index.battlefield_sources.is_empty()
+        && index.command_sources.is_empty()
+        && (!state.battlefield.is_empty() || !state.command_zone.is_empty());
 
-    // CR 114.3: Emblems in the command zone have static abilities that affect the game.
-    for &id in &state.command_zone {
-        let Some(obj) = state.objects.get(&id) else {
-            continue;
-        };
-        if obj.is_emblem {
+    if use_fallback {
+        // CR 702.26e: phased-out permanents contribute no continuous effects.
+        for &id in &state.battlefield {
+            if state
+                .objects
+                .get(&id)
+                .is_some_and(|obj| obj.is_phased_out())
+            {
+                continue;
+            }
+            if let Some(obj) = state.objects.get(&id) {
+                visit(state, obj);
+            }
+        }
+        // CR 114.3: command-zone emblems have static abilities that affect the game.
+        for &id in &state.command_zone {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            if obj.is_emblem {
+                visit(state, obj);
+            }
+        }
+    } else {
+        // CR 702.26e: Continuous effects generated by phased-out permanents don't
+        // include anything in their set of affected objects — skip phased-out
+        // sources here rather than filtering later. The index includes them
+        // (they're in `state.battlefield`); the skip below excludes them.
+        for &id in &index.battlefield_sources {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            if obj.is_phased_out() {
+                continue;
+            }
             visit(state, obj);
+        }
+        // CR 114.3: Emblems in the command zone have static abilities that affect
+        // the game. The index already filtered to `is_emblem` generators; the
+        // gate is re-asserted here for parity with the fallback path.
+        for &id in &index.command_sources {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            if obj.is_emblem {
+                visit(state, obj);
+            }
         }
     }
 
@@ -1404,6 +2416,15 @@ fn is_combat_assignment_rule_modification(modification: &ContinuousModification)
 }
 
 fn apply_combat_assignment_rule_effects(state: &mut GameState) {
+    apply_combat_assignment_rule_effects_filtered(state, None);
+}
+
+/// CR 613.11: Continuous effects that affect game rules are applied after
+/// object-affecting continuous effects.
+fn apply_combat_assignment_rule_effects_filtered(
+    state: &mut GameState,
+    restrict_to: Option<&HashSet<ObjectId>>,
+) {
     let mut effects = collect_active_combat_assignment_rule_effects(state);
     effects.sort_by_key(|effect| (effect.timestamp, effect.controller.0, effect.source_id.0));
 
@@ -1416,6 +2437,7 @@ fn apply_combat_assignment_rule_effects(state: &mut GameState) {
         let ctx = FilterContext::from_source(state, effect.source_id);
         let affected_ids: Vec<ObjectId> = scan_ids
             .iter()
+            .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
             .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
             .filter(|&&id| {
                 effect.condition.as_ref().is_none_or(|condition| {
@@ -1677,8 +2699,10 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::RemoveSupertype { .. }
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
+            | ContinuousModification::AddAllLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType
     );
 
     if b_changes_types && filter_references_type(&a.affected_filter) {
@@ -1701,6 +2725,25 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
+        return true;
+    }
+
+    // CR 613.8a: b modifies power/toughness and a's filter compares P/T.
+    let b_changes_pt = matches!(
+        &b.modification,
+        ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::AddDynamicPower { .. }
+            | ContinuousModification::AddDynamicToughness { .. }
+            | ContinuousModification::SetPower { .. }
+            | ContinuousModification::SetToughness { .. }
+            | ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. }
+            | ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetDynamicToughness { .. }
+    );
+
+    if b_changes_pt && filter_references_pt_stat(&a.affected_filter) {
         return true;
     }
 
@@ -1736,6 +2779,30 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_references_ability)
         }
         TargetFilter::Not { filter } => filter_references_ability(filter),
+        _ => false,
+    }
+}
+
+/// Check if a `TargetFilter` compares power or toughness (CR 613.8a dependency axis).
+fn filter_references_pt_stat(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            properties.iter().any(filter_prop_references_pt_stat)
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_pt_stat)
+        }
+        TargetFilter::Not { filter } => filter_references_pt_stat(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_references_pt_stat(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ToughnessGTPower => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_references_pt_stat),
         _ => false,
     }
 }
@@ -1888,7 +2955,99 @@ fn record_attribution(
     }
 }
 
+/// Single authority extracting the dynamic `QuantityExpr` magnitude carried by a
+/// `ContinuousModification`, if any. Both the dynamic-P/T apply site
+/// (`apply_continuous_effect`) and the incremental-flush escalation scan
+/// (`flush_layers`) call this so there is one place that decides which
+/// modifications carry a runtime-resolved magnitude.
+///
+/// EXHAUSTIVE and wildcard-free over `ContinuousModification` so a future
+/// variant that carries a `QuantityExpr` must be classified here at compile
+/// time rather than silently slipping past the escalation scan. `AddCounterOnEnter`
+/// also carries a `QuantityExpr` but is resolution-time-consumed by the
+/// BecomeCopy / CopyTokenOf resolvers and never reaches `apply_continuous_effect`
+/// (see its doc comment), so it is excluded.
+/// CR 613.1: Dynamic continuous modifications are evaluated while applying
+/// continuous effects through the layer system.
+fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&QuantityExpr> {
+    match m {
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
+        // Resolution-time-consumed; never an active continuous effect.
+        ContinuousModification::AddCounterOnEnter { .. } => None,
+        // Non-dynamic modifications carry plain i32 / enum payloads, no dynamic
+        // magnitude. Enumerated explicitly (no wildcard) so a future
+        // QuantityExpr-carrying variant forces a decision here.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. } => None,
+    }
+}
+
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
+    apply_continuous_effect_filtered(state, effect, None);
+}
+
+/// Apply a continuous effect's modification only to the subset of its affected
+/// objects that are in `restrict_to`. Used by the incremental layer-flush fast
+/// path so a pre-existing anthem/static re-applies to a freshly-entered object
+/// without re-applying to (and thus without needing to reset) the rest of the
+/// battlefield. Shares the entire apply body with `apply_continuous_effect` —
+/// no duplicated per-recipient logic.
+/// CR 613.1: Applies continuous effects through the layer system to the
+/// restricted recipient set.
+fn apply_continuous_effect_to(
+    state: &mut GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: &HashSet<ObjectId>,
+) {
+    apply_continuous_effect_filtered(state, effect, Some(restrict_to));
+}
+
+fn apply_continuous_effect_filtered(
+    state: &mut GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: Option<&HashSet<ObjectId>>,
+) {
     let scan_zone = effect
         .affected_filter
         .extract_in_zone()
@@ -1897,6 +3056,10 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     let ctx = FilterContext::from_source(state, effect.source_id);
     let affected_ids: Vec<ObjectId> = scan_ids
         .iter()
+        // Incremental fast path: re-apply only to the freshly-entered objects.
+        // The rest of the battlefield was not reset and keeps its prior derived
+        // values, so re-applying to it would double-apply.
+        .filter(|&&id| restrict_to.is_none_or(|ids| ids.contains(&id)))
         .filter(|&&id| matches_target_filter(state, id, &effect.affected_filter, &ctx))
         .filter(|&&id| {
             effect.condition.as_ref().is_none_or(|condition| {
@@ -1914,16 +3077,22 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
 
     record_attribution(state, effect, &affected_ids);
 
-    // Pre-read chosen subtype from source (avoids borrow conflict in the loop)
-    let chosen_subtype =
-        if let ContinuousModification::AddChosenSubtype { ref kind } = effect.modification {
-            state
-                .objects
-                .get(&effect.source_id)
-                .and_then(|src| src.chosen_subtype_str(kind))
-        } else {
-            None
-        };
+    // Pre-read chosen subtype from source (avoids borrow conflict in the loop).
+    // Populated for `AddChosenSubtype { kind }` (additive — creature type or
+    // basic land type) AND for `SetChosenBasicLandType` (CR 305.7 replacement
+    // of a land's subtype with the source's chosen basic land type). The latter
+    // is implicitly `ChosenSubtypeKind::BasicLandType`.
+    let chosen_subtype_kind = match effect.modification {
+        ContinuousModification::AddChosenSubtype { ref kind } => Some(kind),
+        ContinuousModification::SetChosenBasicLandType => Some(&ChosenSubtypeKind::BasicLandType),
+        _ => None,
+    };
+    let chosen_subtype = chosen_subtype_kind.and_then(|kind| {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.chosen_subtype_str(kind))
+    });
 
     // Pre-read chosen color from source (avoids borrow conflict in the loop).
     // Used by `AddChosenColor` (CR 105.3) AND by `AddKeyword` when the keyword
@@ -2025,16 +3194,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     // referent. Recipient-relative quantities ("attached to it", "other",
     // "shares a type with it") need the affected object bound before
     // resolution, so those defer into the per-recipient loop below.
-    let dynamic_pt_expr = match &effect.modification {
-        ContinuousModification::SetDynamicPower { value }
-        | ContinuousModification::SetDynamicToughness { value }
-        | ContinuousModification::SetPowerDynamic { value }
-        | ContinuousModification::SetToughnessDynamic { value }
-        | ContinuousModification::AddDynamicPower { value }
-        | ContinuousModification::AddDynamicToughness { value }
-        | ContinuousModification::AddDynamicKeyword { value, .. } => Some(value),
-        _ => None,
-    };
+    let dynamic_pt_expr = modification_dynamic_quantity(&effect.modification);
     let effect_controller = state
         .objects
         .get(&effect.source_id)
@@ -2335,6 +3495,18 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     }
                 }
             }
+            // CR 205.3i: every land type is one of the 17 land subtypes.
+            // CR 305.7: a land that gains land types in addition to its own
+            // keeps its types and gains the new land types and their mana
+            // abilities. The basic types among the 17 grant their mana ability
+            // automatically via `apply_intrinsic_basic_land_mana_abilities`.
+            ContinuousModification::AddAllLandTypes => {
+                for subtype in crate::types::card_type::LAND_SUBTYPES {
+                    if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                        obj.card_types.subtypes.push((*subtype).to_string());
+                    }
+                }
+            }
             ContinuousModification::AddChosenSubtype { .. } => {
                 if let Some(ref subtype) = chosen_subtype {
                     if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
@@ -2479,15 +3651,21 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             // Abilities granted by other effects are re-added in Layer 6.
             // Intrinsic mana abilities are derived from subtypes in mana_sources.rs.
             ContinuousModification::SetBasicLandType { land_type } => {
-                obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
-                obj.card_types
-                    .subtypes
-                    .push(land_type.as_subtype_str().to_string());
-                Arc::make_mut(&mut obj.abilities).clear();
-                obj.trigger_definitions.clear();
-                obj.replacement_definitions.clear();
-                obj.static_definitions.clear();
-                obj.keywords.clear();
+                set_land_subtype_replacing(obj, land_type.as_subtype_str().to_string());
+            }
+            // CR 305.7 + CR 305.6: Set the land's subtype to the basic land type
+            // chosen by the granting source (Phantasmal Terrain, Convincing
+            // Mirage). Identical replacement semantics to `SetBasicLandType` —
+            // remove old land subtypes (CR 205.3i), clear abilities/triggers/
+            // replacements/statics/keywords generated from rules text — except
+            // the concrete subtype is the source's pre-read `chosen_subtype`
+            // (read above for `BasicLandType`). The intrinsic mana ability is
+            // derived from the subtype in `mana_sources.rs` (CR 305.6). If no
+            // choice was recorded, this is a no-op.
+            ContinuousModification::SetChosenBasicLandType => {
+                if let Some(ref subtype) = chosen_subtype {
+                    set_land_subtype_replacing(obj, subtype.clone());
+                }
             }
             // CR 707.9a: Retain the source's printed trigger on the copy.
             // After `CopyValues` overwrote `obj.trigger_definitions` with the
@@ -2503,6 +3681,18 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
         }
     }
+}
+
+// CR 305.7: Setting a land subtype replaces old land subtypes and removes the
+// land's rules-text abilities; layer 6 reapplies abilities from other effects.
+fn set_land_subtype_replacing(obj: &mut crate::game::game_object::GameObject, subtype: String) {
+    obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
+    obj.card_types.subtypes.push(subtype);
+    Arc::make_mut(&mut obj.abilities).clear();
+    obj.trigger_definitions.clear();
+    obj.replacement_definitions.clear();
+    obj.static_definitions.clear();
+    obj.keywords.clear();
 }
 
 /// CR 305.6: After layer 4 establishes final land types, derive each land's
@@ -2673,13 +3863,15 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, CommanderOwnership,
-        ContinuousModification, ControllerRef, CountScope, Duration, Effect, FilterProp,
-        GainLifePlayer, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+        AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid, ChosenSubtypeKind,
+        CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
+        Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
-    use crate::types::game_state::TransientContinuousEffect;
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -2750,6 +3942,71 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    #[test]
+    fn prototyped_permanent_keeps_secondary_characteristics_after_type_change() {
+        let mut state = setup();
+        let prototype = make_creature(&mut state, "Combat Thresher", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&prototype).unwrap();
+            obj.card_types.core_types.insert(0, CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.base_color.clear();
+            obj.color.clear();
+            obj.prototype_form = Some(crate::game::game_object::PrototypeFormState {
+                mana_cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 2,
+                },
+                power: 1,
+                toughness: 1,
+                colors: vec![ManaColor::White],
+            });
+        }
+
+        evaluate_layers(&mut state);
+        let as_creature = state.objects.get(&prototype).unwrap();
+        assert_eq!(as_creature.mana_cost.mana_value(), 3);
+        assert_eq!(as_creature.power, Some(1));
+        assert_eq!(as_creature.toughness, Some(1));
+        assert_eq!(as_creature.color, vec![ManaColor::White]);
+
+        let type_changer = create_object(
+            &mut state,
+            CardId(161),
+            PlayerId(0),
+            "Prototype Shell".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&type_changer).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: prototype })
+                    .modifications(vec![ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Artifact],
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+        let noncreature = state.objects.get(&prototype).unwrap();
+        assert_eq!(noncreature.mana_cost.mana_value(), 3);
+        assert_eq!(noncreature.power, Some(1));
+        assert_eq!(noncreature.toughness, Some(1));
+        assert_eq!(noncreature.color, vec![ManaColor::White]);
+        assert!(!noncreature
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
     }
 
     /// Places a battlefield commander object with the given owner/controller.
@@ -2944,6 +4201,49 @@ mod tests {
         assert_eq!(obj.toughness, Some(2));
     }
 
+    /// CR 613.4c + CR 613.4d: P/T counters (layer 7c) must be applied BEFORE the
+    /// power/toughness switch (layer 7d). With an asymmetric counter the two
+    /// orders diverge — applying the counter after the switch transposes it onto
+    /// the wrong axis. Regression for the inversion that placed counters in a
+    /// fictional "layer 7e" after the switch (engine returned 2/3 instead of 3/2).
+    #[test]
+    fn pt_counters_apply_before_switch_in_layer_seven() {
+        let mut state = setup();
+        // Base 2/2 so the only P/T asymmetry comes from the counter.
+        let id = make_creature(&mut state, "Switch Host", 2, 2, PlayerId(0));
+
+        let switch = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::SwitchPowerToughness]);
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.counters.insert(
+                CounterType::PowerToughness {
+                    power: 0,
+                    toughness: 1,
+                },
+                1,
+            );
+            Arc::make_mut(&mut obj.base_static_definitions).push(switch.clone());
+            obj.static_definitions.push(switch);
+        }
+
+        evaluate_layers(&mut state);
+
+        // 7c counter first: 2/2 -> 2/3. Then 7d switch: 2/3 -> 3/2.
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.power,
+            Some(3),
+            "power must be the post-counter toughness"
+        );
+        assert_eq!(
+            obj.toughness,
+            Some(2),
+            "toughness must be the post-counter power"
+        );
+    }
+
     #[test]
     fn combat_assignment_rule_flags_are_post_layer_effects() {
         let mut state = setup();
@@ -3020,6 +4320,42 @@ mod tests {
         TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
     }
 
+    fn creatures_you_ctrl_with_power_ge(threshold: i32) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: threshold },
+                }]),
+        )
+    }
+
+    fn creatures_you_ctrl_with_power_or_toughness_le(threshold: i32) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: threshold },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: threshold },
+                        },
+                    ],
+                }]),
+        )
+    }
+
     fn add_lord_static(
         state: &mut GameState,
         lord_id: ObjectId,
@@ -3077,7 +4413,7 @@ mod tests {
         assert_eq!(state.objects[&bear].toughness, Some(2));
 
         state.players[0].life = 27;
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&bear].power, Some(4));
         assert_eq!(state.objects[&bear].toughness, Some(4));
@@ -3254,6 +4590,163 @@ mod tests {
     }
 
     #[test]
+    fn pt_dependency_detects_disjunctive_pt_filter_props() {
+        let filter = creatures_you_ctrl_with_power_or_toughness_le(2);
+
+        assert!(filter_references_pt_stat(&filter));
+    }
+
+    #[test]
+    fn set_pt_layer_orders_unconditional_setters_before_pt_threshold_filters() {
+        let mut state = setup();
+        let _bear = make_creature(&mut state, "Bear", 4, 4, PlayerId(0));
+
+        let shrink = make_creature(&mut state, "Shrink", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&shrink).unwrap();
+            obj.timestamp = 5;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creatures_you_ctrl_with_power_ge(5))
+                // One modification: re-filtering after SetPower would drop power
+                // below the threshold before a second clause could run (CR 613.7a).
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+            state
+                .objects
+                .get_mut(&shrink)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let setter = make_creature(&mut state, "Setter", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&setter).unwrap();
+            obj.timestamp = 10;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creature_you_ctrl())
+                .modifications(vec![ContinuousModification::SetPower { value: 6 }]);
+            state
+                .objects
+                .get_mut(&setter)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let set_pt_effects: Vec<ActiveContinuousEffect> =
+            collect_shared_active_continuous_effects(&state)
+                .into_iter()
+                .filter(|e| e.layer == Layer::SetPT)
+                .collect();
+        let ordered = order_active_continuous_effects(Layer::SetPT, &set_pt_effects, &state);
+
+        let shrink_set_power = ordered.iter().position(|e| {
+            e.source_id == shrink
+                && matches!(
+                    e.modification,
+                    ContinuousModification::SetPower { value: 1 }
+                )
+        });
+        let setter_set_power = ordered.iter().position(|e| {
+            e.source_id == setter
+                && matches!(
+                    e.modification,
+                    ContinuousModification::SetPower { value: 6 }
+                )
+        });
+        assert!(shrink_set_power.is_some() && setter_set_power.is_some());
+        assert!(
+            setter_set_power.unwrap() < shrink_set_power.unwrap(),
+            "unconditional setter must apply before threshold shrink: {ordered:?}"
+        );
+    }
+
+    /// CR 613.8a: A `SetPT` effect with a power threshold must apply after P/T
+    /// setters that change which creatures meet that threshold.
+    #[test]
+    fn pt_modification_dependency_overrides_timestamp_in_set_pt_layer() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 4, 4, PlayerId(0));
+
+        let shrink = make_creature(&mut state, "Shrink", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&shrink).unwrap();
+            obj.timestamp = 5;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creatures_you_ctrl_with_power_ge(5))
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+            state
+                .objects
+                .get_mut(&shrink)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let setter = make_creature(&mut state, "Setter", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&setter).unwrap();
+            obj.timestamp = 10;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creature_you_ctrl())
+                .modifications(vec![ContinuousModification::SetPower { value: 6 }]);
+            state
+                .objects
+                .get_mut(&setter)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(1));
+    }
+
+    /// CR 613.8a: A conditional `ModifyPT` lord must apply after unconditional
+    /// lords that raise creatures above the threshold.
+    #[test]
+    fn pt_modification_dependency_overrides_timestamp_in_modify_pt_layer() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 3, 3, PlayerId(0));
+
+        let conditional = make_creature(&mut state, "Conditional Lord", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&conditional).unwrap();
+            obj.timestamp = 5;
+        }
+        add_lord_static(
+            &mut state,
+            conditional,
+            creatures_you_ctrl_with_power_ge(4),
+            2,
+            0,
+        );
+
+        let unconditional = make_creature(&mut state, "Unconditional Lord", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&unconditional).unwrap();
+            obj.timestamp = 10;
+        }
+        add_lord_static(&mut state, unconditional, creature_you_ctrl(), 2, 0);
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(7));
+        assert_eq!(bear_obj.toughness, Some(3));
+    }
+
+    #[test]
     fn test_counter_pt_layer_7e() {
         let mut state = setup();
         let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
@@ -3275,11 +4768,11 @@ mod tests {
     #[test]
     fn test_layers_dirty_flag_cleared() {
         let mut state = setup();
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
 
         evaluate_layers(&mut state);
 
-        assert!(!state.layers_dirty);
+        assert!(!state.layers_dirty.is_dirty());
     }
 
     #[test]
@@ -3386,7 +4879,7 @@ mod tests {
             .attachments
             .push(equipment);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let equipped = state.objects.get(&bear).unwrap();
@@ -4243,7 +5736,7 @@ mod tests {
         state.battlefield.retain(|&id| id != lord);
 
         // Re-evaluate
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let bear_obj = state.objects.get(&bear).unwrap();
@@ -4265,7 +5758,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks)
@@ -4311,7 +5804,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks);
@@ -4343,7 +5836,7 @@ mod tests {
         // Real attach pipeline: sets `attached_to` + host `attachments`.
         attach_to(&mut state, mutation, bear);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&bear).unwrap();
@@ -4395,7 +5888,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks)
@@ -4416,7 +5909,7 @@ mod tests {
 
         evaluate_layers(&mut state);
         state.battlefield.retain(|&id| id != suppressor);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&target).unwrap();
@@ -4425,6 +5918,60 @@ mod tests {
         assert_eq!(obj.trigger_definitions.len(), 1);
         assert_eq!(obj.replacement_definitions.len(), 1);
         assert_eq!(obj.static_definitions.len(), 1);
+    }
+
+    #[test]
+    fn impending_not_creature_participates_in_layer_timestamp_ordering() {
+        let mut state = setup();
+        let impending = make_creature(&mut state, "Impending Permanent", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&impending).unwrap();
+            obj.timestamp = 5;
+            obj.cast_variant_paid = Some((CastVariantPaid::Impending, 1));
+            obj.counters.insert(CounterType::Time, 1);
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::CastVariantPaid {
+                                variant: CastVariantPaid::Impending,
+                            },
+                            StaticCondition::HasCounters {
+                                counters: CounterMatch::OfType(CounterType::Time),
+                                minimum: 1,
+                                maximum: None,
+                            },
+                        ],
+                    })
+                    .modifications(vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+
+        let animator = make_creature(&mut state, "Later Animator", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&animator).unwrap();
+            obj.timestamp = 10;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: impending })
+                    .modifications(vec![ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&impending]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "CR 613.1d + CR 613.7: a later Layer 4 AddType must apply after Impending's RemoveType"
+        );
     }
 
     #[test]
@@ -4470,7 +6017,7 @@ mod tests {
             .contains(&CoreType::Creature));
 
         state.battlefield.retain(|&id| id != animator);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&artifact).unwrap();
@@ -4501,7 +6048,7 @@ mod tests {
         assert_eq!(state.objects[&bear].color, vec![ManaColor::Blue]);
 
         state.battlefield.retain(|&id| id != painter);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         assert!(
@@ -4547,7 +6094,7 @@ mod tests {
             .static_definitions
             .push(cda);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&shapeshifter).unwrap();
@@ -4578,7 +6125,7 @@ mod tests {
             .static_definitions
             .push(def);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         // The bear should have all creature types via the post-fixup
@@ -4630,7 +6177,7 @@ mod tests {
         obj.static_definitions.push(cda);
         obj.static_definitions.push(non_cda);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&shapeshifter).unwrap();
@@ -4677,7 +6224,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&land).unwrap();
@@ -4715,7 +6262,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&land).unwrap();
@@ -4757,7 +6304,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&mimic).unwrap();
@@ -4814,7 +6361,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&target).unwrap();
@@ -4870,7 +6417,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&target).unwrap();
@@ -4920,7 +6467,7 @@ mod tests {
             );
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&target).unwrap();
@@ -4928,6 +6475,114 @@ mod tests {
             obj.keywords.contains(&Keyword::FirstStrike),
             "RemoveChosenKeyword with no stored choice should be a no-op"
         );
+    }
+
+    /// Issue #1593 — Abomination of Llanowar: end-to-end (real parser → layers).
+    /// "~'s power and toughness are each equal to the number of Elves you control
+    ///  plus the number of Elf cards in your graveyard." The graveyard term must
+    ///  be ADDED, not dropped (the reported "not adding from graveyard").
+    #[test]
+    fn issue_1593_abomination_of_llanowar_runtime_counts_elves_and_graveyard() {
+        let mut state = setup();
+
+        // Abomination of Llanowar is itself an Elf (Elf Horror), so it counts
+        // toward "Elves you control". Parse its CDA with the REAL parser so this
+        // test exercises the full parser→runtime pipeline.
+        let abomination = make_creature(&mut state, "Abomination of Llanowar", 0, 0, PlayerId(0));
+        {
+            let def = crate::parser::oracle_static::parse_static_line(
+                "Abomination of Llanowar's power and toughness are each equal to the number of Elves you control plus the number of Elf cards in your graveyard.",
+            )
+            .expect("CDA must parse");
+            let obj = state.objects.get_mut(&abomination).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(def);
+        }
+
+        // Baseline: only Abomination itself is an Elf you control, empty graveyard.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let obj = state.objects.get(&abomination).unwrap();
+        assert_eq!(
+            obj.power,
+            Some(1),
+            "1 Elf you control (itself), 0 graveyard"
+        );
+        assert_eq!(obj.toughness, Some(1));
+
+        // Add 2 more Elf creatures you control (total 3 Elves you control) and a
+        // non-Elf creature that must NOT be counted.
+        for _ in 0..2 {
+            let elf = make_creature(&mut state, "Llanowar Elves", 1, 1, PlayerId(0));
+            let o = state.objects.get_mut(&elf).unwrap();
+            o.card_types.subtypes.push("Elf".to_string());
+            o.base_card_types = o.card_types.clone();
+        }
+        let _bear = make_creature(&mut state, "Grizzly Bears", 2, 2, PlayerId(0));
+
+        // Add 4 Elf cards to YOUR graveyard, plus a non-Elf card and an Elf card
+        // in the OPPONENT's graveyard (neither must be counted). `create_object`
+        // already registers each object in the correct zone via `add_to_zone`,
+        // so we must NOT push to the graveyard list again (that would double-count).
+        // CR 404.2: Graveyard membership is player-scoped. Deliberately diverge
+        // owner/controller below so this test fails if graveyard counts use
+        // controller instead of owner.
+        for _ in 0..4 {
+            let id = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Dead Elf".to_string(),
+                Zone::Graveyard,
+            );
+            let o = state.objects.get_mut(&id).unwrap();
+            o.controller = PlayerId(1);
+            o.card_types.core_types.push(CoreType::Creature);
+            o.card_types.subtypes.push("Elf".to_string());
+            o.base_card_types = o.card_types.clone();
+        }
+        let non_elf = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Dead Bear".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&non_elf)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&non_elf).unwrap().controller = PlayerId(1);
+
+        let opp_elf = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Opp Dead Elf".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let o = state.objects.get_mut(&opp_elf).unwrap();
+            o.controller = PlayerId(0);
+            o.card_types.core_types.push(CoreType::Creature);
+            o.card_types.subtypes.push("Elf".to_string());
+            o.base_card_types = o.card_types.clone();
+        }
+
+        // Expected: 3 Elves you control + 4 Elf cards in YOUR graveyard = 7.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let obj = state.objects.get(&abomination).unwrap();
+        assert_eq!(
+            obj.power,
+            Some(7),
+            "3 Elves you control + 4 Elf cards in graveyard = 7"
+        );
+        assert_eq!(obj.toughness, Some(7));
     }
 
     #[test]
@@ -4971,7 +6626,7 @@ mod tests {
         }
 
         // Empty graveyards: 0 card types → P/T = 0/1
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         let obj = state.objects.get(&goyf).unwrap();
         assert_eq!(obj.power, Some(0), "No card types in graveyards → power 0");
@@ -4994,7 +6649,7 @@ mod tests {
             .push(CoreType::Creature);
         state.players[0].graveyard.push_back(gy_creature);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         let obj = state.objects.get(&goyf).unwrap();
         assert_eq!(obj.power, Some(1), "Creature in graveyard → power 1");
@@ -5021,7 +6676,7 @@ mod tests {
             .push(CoreType::Instant);
         state.players[1].graveyard.push_back(gy_instant);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         let obj = state.objects.get(&goyf).unwrap();
         assert_eq!(obj.power, Some(2), "Creature + Instant → power 2");
@@ -5042,7 +6697,7 @@ mod tests {
         }
         state.players[0].graveyard.push_back(gy_artcreature);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         let obj = state.objects.get(&goyf).unwrap();
         assert_eq!(
@@ -5324,7 +6979,7 @@ mod tests {
             .static_definitions
             .push(def);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&id).unwrap();
@@ -5399,7 +7054,7 @@ mod tests {
             .static_definitions
             .push(def);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&id).unwrap();
@@ -5473,7 +7128,7 @@ mod tests {
         .into();
 
         // Mark layers dirty and evaluate
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         // Player 0's Ninja should get +1/+1
@@ -5952,7 +7607,7 @@ mod tests {
                 AbilityKind::Activated,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
             obj.abilities = Arc::new((*obj.base_abilities).clone());
@@ -6000,6 +7655,99 @@ mod tests {
         assert!(
             !land.card_types.subtypes.contains(&"Desert".to_string()),
             "CR 305.7: Old land subtypes should be removed"
+        );
+    }
+
+    #[test]
+    fn set_chosen_basic_land_type_reads_source_choice() {
+        // CR 305.7 + CR 305.6: Phantasmal Terrain / Convincing Mirage. The Aura
+        // (source) recorded a chosen basic land type as it entered; its
+        // SetChosenBasicLandType static must set the ENCHANTED land's subtype to
+        // that chosen type with full replacement semantics — old land subtype and
+        // rules-text abilities cleared, intrinsic mana ability for the new type
+        // derived (CR 305.6).
+        use crate::types::ability::{BasicLandType, ChosenAttribute};
+
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        // Enchanted land: starts as a Swamp with a rules-text ability.
+        let land_id = make_land(&mut state, "Test Swamp", p0);
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.subtypes.push("Swamp".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            Arc::make_mut(&mut obj.base_abilities).push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+            obj.abilities = Arc::new((*obj.base_abilities).clone());
+        }
+
+        // Source Aura: chose Island as it entered, carries the chosen-type static
+        // anchored to its enchanted land.
+        let aura_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Convincing Mirage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.attached_to = Some(land_id.into());
+            obj.chosen_attributes
+                .push(ChosenAttribute::BasicLandType(BasicLandType::Island));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![ContinuousModification::SetChosenBasicLandType]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .attachments
+            .push(aura_id);
+
+        evaluate_layers(&mut state);
+
+        let land = state.objects.get(&land_id).unwrap();
+        assert!(
+            land.card_types.subtypes.contains(&"Island".to_string()),
+            "CR 305.7: enchanted land should gain the source's chosen Island subtype"
+        );
+        assert!(
+            !land.card_types.subtypes.contains(&"Swamp".to_string()),
+            "CR 305.7: old land subtype should be removed"
+        );
+        assert!(
+            !land
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::GainLife { .. })),
+            "CR 305.7: rules-text abilities should be removed"
+        );
+        assert_eq!(
+            count_mana_abilities(land, ManaColor::Blue),
+            1,
+            "CR 305.6: chosen Island should grant the intrinsic blue mana ability"
+        );
+        assert_eq!(
+            count_mana_abilities(land, ManaColor::Black),
+            0,
+            "CR 305.7: old Swamp mana ability should be gone"
         );
     }
 
@@ -6116,6 +7864,131 @@ mod tests {
                 "Missing basic land type: {name}"
             );
         }
+    }
+
+    #[test]
+    fn omo_everything_counter_grants_all_land_and_creature_types() {
+        // CR 205.3i + CR 305.7 + CR 122.1: Omo, Queen of Vesuva.
+        // "Each land with an everything counter on it is every land type in
+        //  addition to its other types."
+        // "Each nonland creature with an everything counter on it is every
+        //  creature type."
+        // A land and a nonland creature each carrying an `everything` counter
+        // gain all land types / all creature types respectively; the basic land
+        // types also grant their intrinsic mana ability (CR 305.7). A land and
+        // creature WITHOUT the counter gain nothing (FilterProp::Counters
+        // affected-set gating drives the layer).
+        let mut state = setup();
+        state.all_creature_types = vec!["Bear".to_string(), "Goblin".to_string()];
+        let p0 = PlayerId(0);
+
+        // Counter filter shared by both statics.
+        let counter_prop = FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Generic("everything".to_string())),
+            comparator: crate::types::ability::Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        };
+
+        // Land WITH an everything counter (gains all land types).
+        let land_with = make_land(&mut state, "Plain Land", p0);
+        state
+            .objects
+            .get_mut(&land_with)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("everything".to_string()), 1);
+        // Land WITHOUT the counter (mutation control — gains nothing).
+        let land_without = make_land(&mut state, "Bare Land", p0);
+
+        // Nonland creature WITH an everything counter (gains all creature types).
+        let creature_with = make_creature(&mut state, "Test Beast", 2, 2, p0);
+        state
+            .objects
+            .get_mut(&creature_with)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("everything".to_string()), 1);
+        // Nonland creature WITHOUT the counter (mutation control).
+        let creature_without = make_creature(&mut state, "Bare Beast", 2, 2, p0);
+
+        // Omo's two statics as a single source.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Omo, Queen of Vesuva".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::land().properties(vec![counter_prop.clone()]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddAllLandTypes]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                            .properties(vec![counter_prop.clone()]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddAllCreatureTypes]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        // Land with the counter has all 17 land subtypes (spot-check a spread).
+        let land = state.objects.get(&land_with).unwrap();
+        for name in ["Forest", "Island", "Desert", "Gate", "Locus"] {
+            assert!(
+                land.card_types.subtypes.contains(&name.to_string()),
+                "Counter land missing land type: {name}"
+            );
+        }
+        // CR 305.7: a basic land type among the 17 grants its intrinsic mana ability.
+        assert!(
+            has_basic_land_mana_ability(land, ManaColor::Green),
+            "Counter land should gain Forest's intrinsic {{T}}: Add {{G}} (CR 305.7)"
+        );
+
+        // Creature with the counter gains the global creature types.
+        let creature = state.objects.get(&creature_with).unwrap();
+        for name in &state.all_creature_types {
+            assert!(
+                creature.card_types.subtypes.contains(name),
+                "Counter creature missing creature type: {name}"
+            );
+        }
+
+        // Mutation check: objects WITHOUT the counter gain nothing.
+        let bare_land = state.objects.get(&land_without).unwrap();
+        assert!(
+            !bare_land
+                .card_types
+                .subtypes
+                .contains(&"Forest".to_string()),
+            "Land without the counter must NOT gain land types"
+        );
+        assert!(
+            !has_basic_land_mana_ability(bare_land, ManaColor::Green),
+            "Land without the counter must NOT gain a mana ability"
+        );
+        let bare_creature = state.objects.get(&creature_without).unwrap();
+        assert!(
+            !bare_creature
+                .card_types
+                .subtypes
+                .contains(&"Bear".to_string()),
+            "Creature without the counter must NOT gain creature types"
+        );
     }
 
     #[test]
@@ -6414,6 +8287,96 @@ mod tests {
             state.objects[&exiled].casting_permissions.len(),
             3,
             "non-UntilEndOfTurn permissions must survive cleanup"
+        );
+    }
+
+    #[test]
+    fn until_end_of_next_turn_permission_armed_at_untap_expires_at_cleanup() {
+        // CR 514.2: a "until the end of your next turn" play-permission (Light Up
+        // the Stage class) must SURVIVE the grantee's untap step — armed to
+        // UntilEndOfTurn — and expire only at that turn's cleanup, so the exiled
+        // cards are playable throughout the next turn. Contrast
+        // `until_your_next_turn_prune_expires_for_grantee_only`, where
+        // UntilNextTurnOf is removed outright at untap.
+        let mut state = setup();
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                granted_to: PlayerId(0),
+                frequency: crate::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+            });
+
+        // Untap step of the grantee's next turn: armed to UntilEndOfTurn, kept.
+        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        let perms = &state.objects[&exiled].casting_permissions;
+        assert_eq!(
+            perms.len(),
+            1,
+            "permission must survive the untap step (CR 514.2), not be pruned"
+        );
+        assert!(
+            matches!(
+                perms[0],
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    ..
+                }
+            ),
+            "permission must be armed to UntilEndOfTurn at untap, got {:?}",
+            perms[0]
+        );
+
+        // Cleanup of that turn: the armed permission now expires.
+        prune_end_of_turn_casting_permissions(&mut state);
+        assert!(
+            state.objects[&exiled].casting_permissions.is_empty(),
+            "armed permission expires at the cleanup of the grantee's next turn"
+        );
+    }
+
+    #[test]
+    fn until_end_of_next_turn_effect_armed_at_untap_expires_at_cleanup() {
+        // CR 514.2: a continuous effect granted "until the end of your next turn"
+        // (Slip Out the Back class) must persist through the controller's next
+        // turn — armed at untap, pruned at that turn's cleanup.
+        let mut state = setup();
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+
+        prune_until_next_turn_effects(&mut state, PlayerId(0));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "effect must survive the untap step (armed), not be pruned"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].duration,
+            Duration::UntilEndOfTurn,
+            "effect must be armed to UntilEndOfTurn at untap"
+        );
+
+        prune_end_of_turn_effects(&mut state);
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "armed effect expires at the cleanup of the controller's next turn"
         );
     }
 
@@ -6776,7 +8739,7 @@ mod tests {
         let urborg = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
         add_global_land_subtype_static(&mut state, urborg, "Swamp");
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let mountain_obj = state.objects.get(&mountain).unwrap();
@@ -6799,7 +8762,7 @@ mod tests {
         let yavimaya = make_land_with_mana(&mut state, "Yavimaya", PlayerId(0), ManaColor::Green);
         add_global_land_subtype_static(&mut state, yavimaya, "Forest");
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let plains_obj = state.objects.get(&plains).unwrap();
@@ -6818,7 +8781,7 @@ mod tests {
         let urborg2 = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
         add_global_land_subtype_static(&mut state, urborg2, "Swamp");
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let mountain_obj = state.objects.get(&mountain).unwrap();
@@ -6853,7 +8816,7 @@ mod tests {
         let urborg = make_land_with_mana(&mut state, "Urborg", PlayerId(0), ManaColor::Black);
         add_global_land_subtype_static(&mut state, urborg, "Swamp");
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let swamp_obj = state.objects.get(&basic_swamp).unwrap();
@@ -6885,7 +8848,7 @@ mod tests {
         // Silence host warning.
         let _ = host;
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let bear_obj = state.objects.get(&bear).unwrap();
@@ -6908,7 +8871,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         )
         .cost(AbilityCost::Composite {
@@ -6979,7 +8942,7 @@ mod tests {
             .static_definitions
             .push(static_def);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         for id in [artifact1, artifact2, artifact3] {
@@ -6992,7 +8955,7 @@ mod tests {
         }
 
         // Idempotency across layer passes: running layers twice must not stack.
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         for id in [artifact1, artifact2, artifact3] {
             assert_eq!(count_food_abilities(&state.objects[&id]), 1);
@@ -7016,7 +8979,7 @@ mod tests {
                 .push(static_def);
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         assert_eq!(
@@ -7114,7 +9077,7 @@ mod tests {
 
         // Effect expires — drop it from the transient list.
         state.transient_continuous_effects.retain(|e| e.id != eid);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         assert_eq!(
@@ -7175,7 +9138,7 @@ mod tests {
         // remove doesn't crash on a separate eval cycle.
         evaluate_layers(&mut state);
         state.objects.remove(&bear);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         // No panic; the diff loop's `get_mut(...).if let Some` swallows it.
         evaluate_layers(&mut state);
     }
@@ -7322,7 +9285,7 @@ mod tests {
         ));
 
         state.battlefield.retain(|&id| id != source);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&bear).unwrap();
@@ -7867,6 +9830,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: std::collections::HashMap::new(),
             },
         );
@@ -8219,7 +10183,7 @@ mod tests {
             .attachments
             .push(equipment);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         // (a) The recipient holds the inner static after layer evaluation.
@@ -8481,7 +10445,7 @@ mod tests {
             .attachments
             .push(aura);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let c = state.objects.get(&creature).unwrap();
@@ -8595,7 +10559,7 @@ mod tests {
             .attachments
             .push(aura);
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
 
         let c = state.objects.get(&creature).unwrap();
@@ -8607,5 +10571,195 @@ mod tests {
              leave the subtype list empty: {:?}",
             c.card_types.subtypes
         );
+    }
+
+    /// CR 113.6c + CR 611.3a: Grist's "as long as ~ isn't on the battlefield"
+    /// parses to `Not(SourceInZone { Battlefield })`. Its truth depends only on
+    /// the SOURCE's own zone, never on board population, so the escalation
+    /// classifier must report it population-INDEPENDENT — the load-bearing fact
+    /// that keeps a colorless-Insect entry off the full-eval path on the real
+    /// Scute board. (The parser side is covered in `oracle_nom::condition`; this
+    /// guards the classifier that consumes the parsed shape.)
+    #[test]
+    fn grist_source_zone_condition_is_not_population_dependent() {
+        let grist = StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceInZone {
+                zone: Zone::Battlefield,
+            }),
+        };
+        assert!(
+            !static_condition_uses_object_population(&grist),
+            "Not(SourceInZone) gates on the source's own zone, not board \
+             population — must not force escalation"
+        );
+        // And the bare affirmative reading is equally population-independent.
+        assert!(!static_condition_uses_object_population(
+            &StaticCondition::SourceInZone {
+                zone: Zone::Battlefield,
+            }
+        ));
+    }
+
+    /// Build an anthem-style "creatures you control get +1/+1" continuous-static
+    /// permanent (a generator) on the battlefield for `player`. Sets only
+    /// `static_definitions`; `sync_missing_base_characteristics` (run at the top
+    /// of the Step-1 reset) copies it into `base_static_definitions`, so the
+    /// generator survives the per-pass reset.
+    fn make_anthem(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = state.next_timestamp();
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        obj.static_definitions.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 },
+                ]),
+        );
+        id
+    }
+
+    /// GAP-1 / GAP-B discriminating regression test (FIX B): a SECOND anthem that
+    /// ENTERS the battlefield between layer evaluations must be picked up by the
+    /// static-source index for its own pass.
+    ///
+    /// A PRE-EXISTING generator (anthem A) is seeded so the index is genuinely
+    /// NON-EMPTY after the first `evaluate_layers` — this DISARMS the empty-index
+    /// direct-scan fallback in `for_each_static_effect_source`. A vanilla seed
+    /// would leave the index empty, the fallback would fire, and the entered
+    /// anthem would be seen even on the buggy end-of-pass placement, so the test
+    /// would NOT discriminate (this is exactly the FIX-B requirement).
+    ///
+    /// With the correct TOP-of-pass rebuild, the rebuild at the top of the
+    /// (escalated) full eval includes anthem B before the gather, so BOTH A's and
+    /// B's +1/+1 buffs apply → creature shows +2/+2. On the buggy end-of-pass
+    /// rebuild placement (toggled via `REBUILD_STATIC_INDEX_AT_TOP = false`), the
+    /// non-empty index from the previous pass is stale (missing B) during B's own
+    /// pass, so only A's buff applies → creature shows +1/+1 → the test FAILS.
+    #[test]
+    fn entered_second_anthem_applies_with_preexisting_generator() {
+        let mut state = setup();
+
+        // PRE-EXISTING generator (anthem A) + a creature for the anthems to buff.
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // First full eval: index becomes {A} — NON-EMPTY, fallback disarmed.
+        evaluate_layers(&mut state);
+        assert!(
+            !state.static_source_index.battlefield_sources.is_empty(),
+            "pre-existing anthem A must populate the index so the empty-index \
+             fallback is disarmed (FIX B)"
+        );
+        let after_a = state.objects.get(&creature).unwrap();
+        assert_eq!(after_a.power, Some(3), "anthem A alone gives +1/+1");
+        assert_eq!(after_a.toughness, Some(3));
+
+        // Enter a SECOND anthem B via the real entry path. B is itself a
+        // generator, so `entered_object_blocks_incremental` escalates the flush
+        // to a full `evaluate_layers`, whose top-of-pass rebuild must include B.
+        let b = make_anthem(&mut state, "Anthem B", PlayerId(0));
+        mark_layers_entered(&mut state, b);
+        flush_layers(&mut state);
+
+        // BOTH anthems' buffs must apply: 2/2 base + A(+1/+1) + B(+1/+1) = 4/4.
+        let after_b = state.objects.get(&creature).unwrap();
+        assert_eq!(
+            after_b.power,
+            Some(4),
+            "creature must receive BOTH anthem A's and the just-entered anthem \
+             B's +1/+1 (the entered generator must be in the index for its own \
+             pass — top-of-pass rebuild)"
+        );
+        assert_eq!(after_b.toughness, Some(4));
+    }
+
+    /// FIX-B counterpart: the SAME scenario under the buggy end-of-pass rebuild
+    /// placement MUST fail to apply anthem B's buff, proving the test above
+    /// genuinely discriminates the placement (red on end-of-pass).
+    #[test]
+    fn entered_second_anthem_is_dropped_on_end_of_pass_rebuild() {
+        // The toggle is THREAD-LOCAL, so flipping it affects only THIS test's
+        // thread — concurrently-scheduled parallel tests read their own default
+        // `true` and are unaffected. catch_unwind restores it for cleanliness in
+        // case this thread is reused by a later test on the same worker.
+        REBUILD_STATIC_INDEX_AT_TOP.with(|t| t.set(false));
+        let result = std::panic::catch_unwind(|| {
+            let mut state = setup();
+            make_anthem(&mut state, "Anthem A", PlayerId(0));
+            let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+            evaluate_layers(&mut state);
+            assert!(!state.static_source_index.battlefield_sources.is_empty());
+
+            let b = make_anthem(&mut state, "Anthem B", PlayerId(0));
+            mark_layers_entered(&mut state, b);
+            flush_layers(&mut state);
+            state.objects.get(&creature).unwrap().power
+        });
+        REBUILD_STATIC_INDEX_AT_TOP.with(|t| t.set(true));
+
+        let power = result.expect("scenario should not panic");
+        // On the buggy end-of-pass placement, the stale (non-empty) index is
+        // missing B during B's pass, so only A's +1/+1 applies → 3, NOT 4.
+        assert_eq!(
+            power,
+            Some(3),
+            "end-of-pass placement must DROP the entered anthem B's buff — this \
+             is the bug the top-of-pass rebuild fixes; if this is Some(4) the \
+             test no longer discriminates the placement"
+        );
+    }
+
+    /// Set + order identity: the index-driven gather must produce the same
+    /// `collect_shared_active_continuous_effects` vector (element-for-element) as
+    /// a full battlefield scan, including for a board with an unrelated vanilla
+    /// permanent that the index correctly excludes.
+    #[test]
+    fn index_gather_matches_full_scan_set_and_order() {
+        let mut state = setup();
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        // Unrelated vanilla permanent (NOT a generator) — must not appear as a
+        // source in either path.
+        make_creature(&mut state, "Vanilla", 1, 1, PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        // Index-driven gather (index is populated by the eval above).
+        let indexed = collect_shared_active_continuous_effects(&state);
+
+        // Force the empty-index direct-scan fallback by clearing the index, then
+        // gather again — this exercises the full battlefield + command scan path.
+        state.static_source_index = StaticSourceIndex::default();
+        let full_scan = collect_shared_active_continuous_effects(&state);
+
+        assert_eq!(
+            indexed.len(),
+            full_scan.len(),
+            "index-driven and full-scan gathers must produce the same number of \
+             effects"
+        );
+        for (i, (a, b)) in indexed.iter().zip(full_scan.iter()).enumerate() {
+            assert_eq!(
+                a.source_id, b.source_id,
+                "effect {i}: source_id must match between index and full-scan"
+            );
+            assert_eq!(
+                a.layer, b.layer,
+                "effect {i}: layer must match between index and full-scan"
+            );
+        }
     }
 }

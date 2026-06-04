@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    CastingPermission, ContinuousModification, Duration, EffectKind, KeywordAction,
+    CastingPermission, ContinuousModification, Duration, Effect, EffectKind, KeywordAction,
     ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
@@ -26,7 +26,7 @@ pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<
     state.stack.push_back(entry);
 }
 
-fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
+pub(crate) fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
         if let Some(normal_face) = obj.back_face.take() {
             let alternative_snapshot = super::printed_cards::snapshot_object_face(obj);
@@ -159,10 +159,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // `current_trigger_event` and cleared at every reset site below.
     if let StackEntryKind::TriggeredAbility {
         subject_match_count,
+        die_result,
         ..
     } = entry.kind
     {
         state.current_trigger_match_count = subject_match_count;
+        // CR 706.2 + CR 706.4 + CR 603.12: re-stamp the carried die-roll result
+        // into resolution scope so a reflexive "When you do … the result"
+        // sub-ability resolving on its own stack entry (a later apply(), after
+        // the original roll's resolution scope cleared) reads the rolled value
+        // via the `QuantityRef::EventContextAmount` cascade.
+        state.die_result_this_resolution = die_result;
     }
 
     // Extract the resolved ability from the stack entry. `KeywordAction` is
@@ -256,6 +263,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // optional copy decision is pending. Cleared at the start of the next
     // `resolve_top`.
     state.resolving_stack_entry = Some(entry.clone());
+    let resolution_start_phase = state.phase;
 
     // Only run targeting validation and effect execution when an ability exists.
     // Permanent spells with no spell ability (ability is None) skip straight to
@@ -281,10 +289,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         Zone::Graveyard
                     };
                     zones::move_to_zone(state, entry.id, dest, events);
-                    if matches!(
-                        casting_variant,
-                        CastingVariant::Adventure | CastingVariant::Omen
-                    ) {
+                    if casting_variant.restores_front_face_after_stack_exit() {
                         restore_alternative_spell_normal_face(state, entry.id);
                     }
                 }
@@ -294,6 +299,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.current_trigger_event = None;
                 state.current_trigger_events.clear();
                 state.current_trigger_match_count = None;
+                // CR 706.2 + CR 706.4: clear the carried die-roll result at the
+                // same cross-resolution boundary as the batched subject count.
+                state.die_result_this_resolution = None;
                 return;
             }
             execute_effect(state, &validated, events);
@@ -327,11 +335,53 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         false
     };
 
+    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
+    // non-permanent spell that carries `Keyword::Rebound`, was cast from
+    // its owner's hand, and is not a token, push the next-upkeep delayed
+    // triggered ability that offers an optional free recast and override
+    // the destination from graveyard to exile.
+    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
+    // CR 603.7a: delayed triggered abilities are created during resolution.
+    // CR 603.7d: source of the delayed trigger IS the resolving spell.
+    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
+    // CR 702.88c: multiple instances of rebound on the same spell are
+    // redundant — `has_keyword` returns true even if duplicates exist, so
+    // arming runs at most once per resolution.
+    let rebound_armed = if is_spell && !is_permanent_spell(state, entry.id) {
+        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
+        });
+        if has_rebound && super::casting::spell_cast_origin(state, entry.id) == Some(Zone::Hand) {
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
-        let dest = if paradigm_armed {
+        let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
+            matches!(ability.effect, Effect::EndTheTurn)
+                || (matches!(ability.effect, Effect::EndCombatPhase)
+                    && resolution_start_phase.is_combat())
+        });
+        let dest = if end_procedure_exiles_resolving_object {
+            // CR 724.1b / CR 724.2b: The "end the turn" and "end the combat
+            // phase" procedures exile every object on the stack, including the
+            // resolving object that `resolve_top` already popped before
+            // executing its effect.
+            Zone::Exile
+        } else if paradigm_armed {
             // CR 702.xxx: Paradigm-armed spell exiles instead of going to
             // graveyard. The ExileLink is already created by arm_paradigm.
+            Zone::Exile
+        } else if rebound_armed {
+            // CR 702.88a: Rebound-armed non-permanent spell exiles instead
+            // of going to graveyard — the delayed trigger is already
+            // queued by `arm_rebound`.
             Zone::Exile
         } else if casting_variant == CastingVariant::Adventure {
             // CR 715.3d: Adventure spell resolves → exile with casting permission.
@@ -449,6 +499,34 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.176a: Impending — seed the N time counters into the ZoneChange
+            // ProposedEvent BEFORE the replacement pipeline so Doubling Season and
+            // similar counter-doubling replacements (CR 614.1a) can modify them.
+            // N is read from the `Keyword::Impending { counters, .. }` on the still-
+            // stack-resident object; `cast_variant_paid = Impending` is already stamped
+            // by `finalize_cast_to_stack` in `casting_costs.rs`.
+            if casting_variant == CastingVariant::Impending {
+                let impending_counters = state.objects.get(&entry.id).and_then(|obj| {
+                    obj.keywords.iter().find_map(|k| match k {
+                        crate::types::keywords::Keyword::Impending { counters, .. } => {
+                            Some(*counters)
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some(n) = impending_counters {
+                    if n > 0 {
+                        if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                            enter_with_counters,
+                            ..
+                        } = &mut proposed
+                        {
+                            enter_with_counters.push((CounterType::Time, n));
+                        }
+                    }
+                }
+            }
+
             // CR 702.188a: Web-slinging is a casting alternative cost. Tag the
             // permanent BEFORE the ETB replacement pipeline runs so a
             // `ReplacementCondition::CastVariantPaid` gate (Scarlet Spider's
@@ -553,6 +631,29 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                             state, object_id, events,
                                         );
                                     }
+                                }
+                            }
+                            // CR 702.146b / CR 702.162a + CR 712.11a + CR
+                            // 712.13: Disturb and MTMTE put the spell on the
+                            // stack with its back face up. A resolving DFC
+                            // spell becomes a permanent with the same face up;
+                            // mark the battlefield object transformed without
+                            // swapping faces again.
+                            if matches!(
+                                casting_variant,
+                                CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
+                            ) && to == Zone::Battlefield
+                            {
+                                let mut marked = false;
+                                if let Some(obj) = state.objects.get_mut(&object_id) {
+                                    if obj.back_face.is_some() && !obj.transformed {
+                                        obj.transformed = true;
+                                        marked = true;
+                                    }
+                                }
+                                if marked {
+                                    crate::game::layers::mark_layers_full(state);
+                                    events.push(GameEvent::Transformed { object_id });
                                 }
                             }
                             // CR 614.1c: Apply pending ETB counters from delayed triggers
@@ -717,6 +818,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     state.current_trigger_event = None;
                     state.current_trigger_events.clear();
                     state.current_trigger_match_count = None;
+                    // CR 706.2 + CR 706.4: clear the carried die-roll result at
+                    // the same cross-resolution boundary as the batched subject
+                    // count.
+                    state.die_result_this_resolution = None;
                     return;
                 }
             }
@@ -734,12 +839,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        // CR 715.4 / CR 720.4: Outside the stack, Adventure-family cards have
-        // their normal characteristics.
-        if matches!(
-            casting_variant,
-            CastingVariant::Adventure | CastingVariant::Omen
-        ) {
+        // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
+        // face when leaving the stack unless they resolved as that face onto
+        // the battlefield.
+        if casting_variant.restores_front_face_after_stack_exit()
+            && !spell_in_zone(state, entry.id, Zone::Battlefield)
+        {
             restore_alternative_spell_normal_face(state, entry.id);
         }
 
@@ -885,6 +990,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.176a: Impending-cast permanent gets the `cast_variant_paid`
+            // tag re-applied after `reset_for_battlefield_entry` cleared it.
+            // The "not a creature" layer fixup and the end-step counter-removal
+            // trigger both gate on this marker being present.
+            if casting_variant == CastingVariant::Impending {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Impending,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             // CR 702.62a: Suspend-cast permanent gets the `cast_variant_paid`
             // tag for symmetry with Evoke / Sneak (no synthesized trigger reads
             // it today, but it preserves the audit trail). Additionally, when
@@ -938,6 +1056,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.current_trigger_event = None;
     state.current_trigger_events.clear();
     state.current_trigger_match_count = None;
+    // CR 706.2 + CR 706.4: clear the carried die-roll result at the same
+    // cross-resolution boundary as the batched subject count.
+    state.die_result_this_resolution = None;
 
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
@@ -1106,7 +1227,22 @@ pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                 // §2.2a/§2.3a/§3.4 gates internally.
                 let ability = state.stack.back().and_then(|e| e.ability()).cloned();
                 if let Some(ability) = ability {
-                    if let Some(plan) = effects::try_resolve_batch(state, &ability, run_len) {
+                    // Gather the run's per-entry source ids (top-down resolution
+                    // order) so the met-copy prefix path can read each entry's
+                    // `SelfRef` copy source. Only the top `run_len` contiguous
+                    // batch-key-equal entries form the run. This allocates only
+                    // on the batch-eligible path (run_len >= 2), never on the
+                    // single-resolution hot path.
+                    let run_source_ids: Vec<ObjectId> = state
+                        .stack
+                        .iter()
+                        .rev()
+                        .take(run_len as usize)
+                        .map(|e| e.source_id)
+                        .collect();
+                    if let Some(plan) =
+                        effects::try_resolve_batch(state, &ability, run_len, &run_source_ids)
+                    {
                         // Layer C: lazily refresh the index sentinel (mirrors the
                         // consult site at triggers.rs:790) before the read-only probe.
                         if state.trigger_index.by_key.is_empty()
@@ -1132,6 +1268,16 @@ pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
 /// checkpoint hoisted to once-after by the caller. Per-entry `StackResolved`
 /// events are emitted for every consumed entry (§5.4) so the frontend's
 /// per-entry fade still works. Returns the number of entries consumed.
+///
+/// `consumed` equals the full run length for the base-token path, but the
+/// copy-prefix path (CR 707.2) may consume a value-equal PREFIX shorter than
+/// the run — the divergent tail resolves in a subsequent `resolve_next` step.
+///
+/// CR 603.4: This path does NOT bump `ability_resolutions_this_turn`. A
+/// resolution-count-dependent intervening-if lives as an entry-level condition,
+/// and `batch_run_key` refuses any entry with `condition.is_some()`, so no
+/// batched run can carry a `NthResolutionThisTurn`-gated condition that the
+/// missing counter bump would desynchronize.
 fn resolve_batched(
     state: &mut GameState,
     plan: &effects::BatchPlan,
@@ -1162,12 +1308,17 @@ fn resolve_batched(
         if let crate::types::game_state::StackEntryKind::TriggeredAbility {
             trigger_event: Some(te),
             subject_match_count,
+            die_result,
             ..
         } = &top.kind
         {
             state.current_trigger_event = Some(te.clone());
             state.current_trigger_events = vec![te.clone()];
             state.current_trigger_match_count = *subject_match_count;
+            // CR 706.2 + CR 706.4 + CR 603.12: re-stamp the carried die-roll
+            // result into resolution scope for a reflexive "When you do … the
+            // result" sub-ability (see `resolve_top`).
+            state.die_result_this_resolution = *die_result;
         }
     }
 
@@ -1178,6 +1329,9 @@ fn resolve_batched(
     state.current_trigger_event = None;
     state.current_trigger_events.clear();
     state.current_trigger_match_count = None;
+    // CR 706.2 + CR 706.4: clear the carried die-roll result at the same
+    // cross-resolution boundary as the batched subject count.
+    state.die_result_this_resolution = None;
 
     // §5.4: one StackResolved per consumed entry.
     for entry in &popped {
@@ -1261,22 +1415,85 @@ fn zone_change_record_from_spec(
         linked_exile_snapshot: Vec::new(),
         is_token: true,
         combat_status: Default::default(),
+        co_departed: Vec::new(),
     }
+}
+
+/// CR 111.2 + CR 109.4: The run-identity axis along the source dimension. A
+/// base token's characteristics and controller are fixed at creation and do not
+/// read the creating source, so triggers from DISTINCT sources are
+/// resolution-identical and collapse under `SourceIndependent`. Any
+/// source-relative effect (a copy that reads its own `SelfRef` source, an
+/// attacking/attached token, a source-relative count) keeps a per-source
+/// boundary via `Source(id)` so two sources never collapse incorrectly.
+#[derive(PartialEq)]
+enum BatchSourceAxis {
+    SourceIndependent,
+    Source(ObjectId),
 }
 
 /// Resolution-grade run key (stricter than the display `StackGroupKey`, §4.1).
 /// Two adjacent entries join a run iff every field is equal AND the entry is an
-/// untargeted `TriggeredAbility` (Layer A). Keyed on `source_id` + deep-equal
+/// untargeted `TriggeredAbility` (Layer A). Keyed on `source_axis` + deep-equal
 /// `ResolvedAbility` (not display `source_name`), with the flattened target
 /// vector required empty (CR 608.2b).
-#[derive(PartialEq)]
 struct BatchRunKey<'a> {
     controller: PlayerId,
-    source_id: ObjectId,
+    source_axis: BatchSourceAxis,
     ability: &'a ResolvedAbility,
     description: Option<&'a str>,
     paid: Option<&'a StackPaidSnapshot>,
     trigger_event: Option<&'a GameEvent>,
+}
+
+/// CR 111.2 + CR 109.4: `ResolvedAbility` embeds `source_id` (and nested sub/
+/// else abilities embed their own), so a derived `PartialEq` would treat two
+/// otherwise-identical abilities from distinct sources as unequal — defeating
+/// the `SourceIndependent` collapse. When both keys are `SourceIndependent` the
+/// effect provably reads nothing from the source, so abilities are compared
+/// with `source_id` canonicalized away (recursively, on the chain). When either
+/// key is `Source(id)`, the per-source boundary already differs, so the regular
+/// deep equality (including `source_id`) applies.
+impl PartialEq for BatchRunKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.controller != other.controller
+            || self.source_axis != other.source_axis
+            || self.description != other.description
+            || self.paid != other.paid
+            || self.trigger_event != other.trigger_event
+        {
+            return false;
+        }
+        match (&self.source_axis, &other.source_axis) {
+            (BatchSourceAxis::SourceIndependent, BatchSourceAxis::SourceIndependent) => {
+                abilities_equal_ignoring_source(self.ability, other.ability)
+            }
+            _ => self.ability == other.ability,
+        }
+    }
+}
+
+/// Compare two resolved abilities for batch-run identity while ignoring the
+/// source-object id at every level of the sub/else chain. Cheap clone+normalize
+/// only runs on the batch-eligible path. The classifier guarantees the effect
+/// reads nothing else from the source, so source-id is the only field allowed
+/// to differ across a `SourceIndependent` run.
+fn abilities_equal_ignoring_source(a: &ResolvedAbility, b: &ResolvedAbility) -> bool {
+    normalize_ability_source(a) == normalize_ability_source(b)
+}
+
+/// Clone an ability with `source_id` (and nested sub/else `source_id`s)
+/// canonicalized to `ObjectId(0)`, so equality ignores the creating source.
+fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
+    let mut out = ability.clone();
+    out.source_id = ObjectId(0);
+    out.sub_ability = out
+        .sub_ability
+        .map(|sub| Box::new(normalize_ability_source(&sub)));
+    out.else_ability = out
+        .else_ability
+        .map(|alt| Box::new(normalize_ability_source(&alt)));
+    out
 }
 
 /// Build the run key for an entry, or `None` if the entry is not a candidate
@@ -1287,7 +1504,12 @@ struct BatchRunKey<'a> {
 /// destructured explicitly (no `..`) so each is consciously dispositioned —
 /// the same exhaustiveness the codebase mandates for match arms, applied to
 /// struct destructuring. Field-by-field audit:
-/// - `source_id`   — IN KEY (run-identity: only one source's run collapses).
+/// - `source_id`   — IN KEY via `source_axis` (CR 111.2 + CR 109.4). A base
+///   token reads nothing from its source, so `token_effect_is_source_independent`
+///   maps it to `SourceIndependent`, collapsing a run across DISTINCT sources
+///   (the Scute Swarm O(N²)→O(N) fix). Any source-relative effect maps to
+///   `Source(source_id)`, keeping the per-source boundary so two sources never
+///   collapse incorrectly.
 /// - `ability`     — IN KEY (deep-equal `ResolvedAbility`: identical effect).
 /// - `condition`   — RESOLUTION-RELEVANT, NOT in key. CR 603.4: the entry-level
 ///   intervening-if is rechecked per entry at resolution (`resolve_top`
@@ -1313,6 +1535,10 @@ struct BatchRunKey<'a> {
 ///   equal deep `ability` carry the same batched subject count. It is therefore
 ///   redundant to key on (would never break a run the other fields kept
 ///   together) and is correctly applied from the top entry in the batch path.
+/// - `die_result` — EXCLUDED for the same reason as `subject_match_count`: it
+///   is CR 706.2 resolution data (the carried die-roll result re-stamped from
+///   the run's top entry in `resolve_batched`), not run identity. Keying on it
+///   would needlessly split runs without changing correctness.
 fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<BatchRunKey<'a>> {
     let StackEntryKind::TriggeredAbility {
         source_id,
@@ -1322,6 +1548,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
         description,
         source_name: _,
         subject_match_count: _,
+        die_result: _,
     } = &entry.kind
     else {
         return None;
@@ -1338,9 +1565,18 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
     if condition.is_some() {
         return None;
     }
+    // CR 111.2 + CR 109.4: collapse the source dimension when the base effect
+    // reads nothing from the source (a base token's controller/characteristics
+    // are fixed at creation), so distinct sources join one run. Otherwise keep
+    // a per-source boundary.
+    let source_axis = if effects::token::token_effect_is_source_independent(ability) {
+        BatchSourceAxis::SourceIndependent
+    } else {
+        BatchSourceAxis::Source(*source_id)
+    };
     Some(BatchRunKey {
         controller: entry.controller,
-        source_id: *source_id,
+        source_axis,
         ability,
         description: description.as_deref(),
         paid: state.stack_paid_facts.get(&entry.id),
@@ -1805,6 +2041,41 @@ mod tests {
         );
     }
 
+    /// CR 724.1b: "end the turn" exiles every object on the stack, including
+    /// the resolving spell itself. Discriminating against routing the source
+    /// through the normal CR 608.2n instant/sorcery graveyard path.
+    #[test]
+    fn end_the_turn_spell_exiles_resolving_object() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(724),
+            PlayerId(0),
+            "Time Stop".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(Effect::EndTheTurn, vec![], spell_id, PlayerId(0));
+
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(724),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.objects[&spell_id].zone, Zone::Exile);
+        assert!(state.exile.contains(&spell_id));
+        assert!(!state.players[0].graveyard.contains(&spell_id));
+    }
+
     #[test]
     fn trigger_event_context_becomes_target_controller() {
         // Set up: triggered ability with BecomesTarget event in trigger_event.
@@ -1852,6 +2123,7 @@ mod tests {
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -2331,6 +2603,8 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: None,
+                    resolution_cleanup: None,
+                    duration: None,
                 });
         }
 
@@ -2613,6 +2887,7 @@ mod tests {
                     description: Some("landfall copy trigger".to_string()),
                     source_name: String::new(),
                     subject_match_count: None,
+                    die_result: None,
                 },
             });
         }
@@ -2663,6 +2938,7 @@ mod tests {
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         };
         state.stack.push_back(mk_entry(s1));
@@ -2715,6 +2991,7 @@ mod tests {
                 description: Some("target player loses 1 life".to_string()),
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         };
         state
@@ -2770,6 +3047,7 @@ mod tests {
                     description: Some("then target player loses 1 life".to_string()),
                     source_name: String::new(),
                     subject_match_count: None,
+                    die_result: None,
                 },
             }
         };
@@ -3244,6 +3522,182 @@ mod tests {
             id
         }
 
+        /// Create a plain creature permanent (no triggers/replacements) under
+        /// player 0 with the given P/T and a single subtype, and return its id.
+        /// Copy sources for the batch-copy path must be observer-free so the
+        /// copy token inherits no ETB-keyed trigger (§2.3a). `name` doubles as
+        /// the subtype so distinct names yield distinct copiable values.
+        fn add_plain_creature_source(
+            state: &mut GameState,
+            name: &str,
+            power: i32,
+            toughness: i32,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(910),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.base_power = Some(power);
+                obj.base_toughness = Some(toughness);
+                obj.power = Some(power);
+                obj.toughness = Some(toughness);
+                obj.base_card_types = crate::types::card_type::CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec![name.to_string()],
+                };
+                obj.card_types = obj.base_card_types.clone();
+                obj.base_name = name.to_string();
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+            id
+        }
+
+        /// Create a real Scute-Swarm-shape copy source: a Creature carrying a
+        /// landfall trigger ("Whenever a land enters under your control, ...")
+        /// registered under `EnterBattlefield(Some(Land))` in BOTH the base and
+        /// live trigger sets, so a CR 707.2 copy of it inherits the landfall
+        /// trigger. `name` doubles as the subtype so distinct names yield
+        /// distinct copiable values. Unlike `add_plain_creature_source`, the copy
+        /// token is NOT observer-free — but its Land-keyed trigger does not
+        /// observe its Creature siblings, so the refined §2.3a gate batches it.
+        fn add_landfall_creature_source(
+            state: &mut GameState,
+            name: &str,
+            power: i32,
+            toughness: i32,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(912),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.base_power = Some(power);
+                obj.base_toughness = Some(toughness);
+                obj.power = Some(power);
+                obj.toughness = Some(toughness);
+                obj.base_card_types = crate::types::card_type::CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec![name.to_string()],
+                };
+                obj.card_types = obj.base_card_types.clone();
+                obj.base_name = name.to_string();
+                // A landfall trigger keyed EnterBattlefield(Some(Land)) — the
+                // actual Scute Swarm shape. It must live in base_trigger_definitions
+                // so a copy (CR 707.2) inherits it.
+                let landfall = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Land],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(landfall.clone());
+                obj.trigger_definitions.push(landfall);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+            id
+        }
+
+        /// Create a copy source whose copied token would OBSERVE its in-batch
+        /// siblings: a Creature carrying a "whenever a creature you control
+        /// enters" trigger registered under `EnterBattlefield(Some(Creature))`.
+        /// A CR 707.2 copy inherits it, and the copy's Creature emission DOES
+        /// intersect the Creature ETB key, so the refined §2.3a gate must refuse.
+        fn add_creature_observer_source(
+            state: &mut GameState,
+            name: &str,
+            power: i32,
+            toughness: i32,
+        ) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(913),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.base_power = Some(power);
+                obj.base_toughness = Some(toughness);
+                obj.power = Some(power);
+                obj.toughness = Some(toughness);
+                obj.base_card_types = crate::types::card_type::CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec![name.to_string()],
+                };
+                obj.card_types = obj.base_card_types.clone();
+                obj.base_name = name.to_string();
+                let creature_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        ..Default::default()
+                    }))
+                    .execute(AbilityDefinition::new(
+                        crate::types::ability::AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ));
+                Arc::make_mut(&mut obj.base_trigger_definitions).push(creature_observer.clone());
+                obj.trigger_definitions.push(creature_observer);
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
+            id
+        }
+
+        /// Build a `ConditionInstead`-gated `CopyTokenOf { target: SelfRef }` sub
+        /// whose inner condition is "you control >= `threshold` Lands" — disjoint
+        /// from the produced Creature copy's core types, so it stays H1-invariant.
+        fn copy_instead_sub(src: ObjectId, threshold: i32) -> ResolvedAbility {
+            let copy_effect = Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            };
+            let mut sub = ResolvedAbility::new(copy_effect, vec![], src, PlayerId(0));
+            sub.condition = Some(AbilityCondition::ConditionInstead {
+                inner: Box::new(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Land],
+                                ..Default::default()
+                            }),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: threshold },
+                }),
+            });
+            sub
+        }
+
         /// Push `n` identical untargeted Token triggers from `source_id`.
         fn push_token_triggers(
             state: &mut GameState,
@@ -3270,9 +3724,32 @@ mod tests {
                         description: Some("Landfall".to_string()),
                         source_name: "Scute Swarm".to_string(),
                         subject_match_count: None,
+                        die_result: None,
                     },
                 });
             }
+        }
+
+        /// Push `n` identical untargeted Token triggers, EACH from a DISTINCT
+        /// source object (mirrors a Scute-Swarm board where many copies each
+        /// fire their own landfall trigger). Returns the created source ids in
+        /// push order. Each source is a plain creature carrying a landfall
+        /// trigger keyed on `EnterBattlefield(Some(Land))` — it never observes
+        /// the creature-token probe, exactly like the single-source helper's
+        /// `add_scute_source`.
+        fn push_token_triggers_from_distinct_sources(
+            state: &mut GameState,
+            effect: Effect,
+            sub_ability: Option<Box<ResolvedAbility>>,
+            n: usize,
+        ) -> Vec<ObjectId> {
+            let mut sources = Vec::with_capacity(n);
+            for _ in 0..n {
+                let src = add_scute_source(state);
+                push_token_triggers(state, src, effect.clone(), sub_ability.clone(), 1);
+                sources.push(src);
+            }
+            sources
         }
 
         /// Drive resolution to empty via the BATCH path (`resolve_next`), running
@@ -3305,6 +3782,24 @@ mod tests {
                 guard += 1;
                 assert!(guard < 10_000, "resolution did not terminate");
             }
+        }
+
+        /// Test shim: gather the top `run_len` run source ids and invoke the
+        /// real `effects::try_resolve_batch`. Mirrors the gather `resolve_next`
+        /// performs at the live call site so tests exercise the true signature.
+        fn try_batch(
+            state: &GameState,
+            ability: &ResolvedAbility,
+            run_len: u32,
+        ) -> Option<effects::BatchPlan> {
+            let run_source_ids: Vec<ObjectId> = state
+                .stack
+                .iter()
+                .rev()
+                .take(run_len as usize)
+                .map(|e| e.source_id)
+                .collect();
+            effects::try_resolve_batch(state, ability, run_len, &run_source_ids)
         }
 
         fn token_ids(state: &GameState) -> Vec<ObjectId> {
@@ -3355,7 +3850,7 @@ mod tests {
             let run_len = batch_run_len(&state).unwrap();
             assert_eq!(run_len, 5);
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            let plan = try_batch(&state, &ability, run_len).unwrap();
             assert!(observers_are_batch_safe(&state, &plan));
         }
 
@@ -3408,7 +3903,7 @@ mod tests {
             {
                 let run_len = batch_run_len(&state).unwrap();
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
-                let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+                let plan = try_batch(&state, &ability, run_len).unwrap();
                 assert!(
                     !observers_are_batch_safe(&state, &plan),
                     "creature-ETB observer must force refusal"
@@ -3509,7 +4004,7 @@ mod tests {
                 let run_len = batch_run_len(&state).unwrap();
                 let ability = state.stack.back().unwrap().ability().unwrap().clone();
                 assert!(
-                    effects::try_resolve_batch(&state, &ability, run_len).is_none(),
+                    try_batch(&state, &ability, run_len).is_none(),
                     "entering-counter spec must fail the §2.2a gate before Layer C"
                 );
             }
@@ -3563,7 +4058,7 @@ mod tests {
             push_token_triggers(&mut state, src, effect, None, 5);
             let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            assert!(effects::try_resolve_batch(&state, &ability, run_len).is_none());
+            assert!(try_batch(&state, &ability, run_len).is_none());
         }
 
         #[test]
@@ -3592,6 +4087,7 @@ mod tests {
                         description: None,
                         source_name: String::new(),
                         subject_match_count: None,
+                        die_result: None,
                     },
                 });
             }
@@ -3599,17 +4095,50 @@ mod tests {
             assert!(batch_run_len(&state).is_none());
         }
 
+        /// CR 111.2 + CR 109.4: distinct base-token sources now JOIN one run —
+        /// the source dimension collapses under `SourceIndependent` because a
+        /// base token reads nothing from its creating source. A source-relative
+        /// effect (e.g. enters-attacking) keeps a per-source boundary.
         #[test]
         fn mixed_sources_form_a_contiguity_boundary() {
+            // Base token: source-independent ⇒ distinct sources JOIN.
             let mut state = setup();
             add_lands(&mut state, 3);
             let src_a = add_scute_source(&mut state);
             let src_b = add_scute_source(&mut state);
-            // Bottom: one trigger from src_b; top: 3 from src_a.
+            // Bottom: one trigger from src_b; top: 3 from src_a — both base Insect.
             push_token_triggers(&mut state, src_b, insect_token_effect(), None, 1);
             push_token_triggers(&mut state, src_a, insect_token_effect(), None, 3);
-            // The contiguous run at the top is only the 3 src_a entries.
-            assert_eq!(batch_run_len(&state), Some(3));
+            // CR 111.2/109.4: all 4 distinct-source base-token entries form one run.
+            assert_eq!(
+                batch_run_len(&state),
+                Some(4),
+                "base tokens from distinct sources must collapse into one run"
+            );
+
+            // Source-relative token (enters_attacking) ⇒ Source(id) boundary.
+            let mut attacking_effect = insect_token_effect();
+            if let Effect::Token {
+                ref mut enters_attacking,
+                ..
+            } = attacking_effect
+            {
+                *enters_attacking = true;
+            }
+            let mut state2 = setup();
+            add_lands(&mut state2, 3);
+            let src_c = add_scute_source(&mut state2);
+            let src_d = add_scute_source(&mut state2);
+            // Bottom: one from src_d; top: 3 from src_c — source-relative.
+            push_token_triggers(&mut state2, src_d, attacking_effect.clone(), None, 1);
+            push_token_triggers(&mut state2, src_c, attacking_effect, None, 3);
+            // Source-relative effect keeps a per-source boundary: only the top
+            // 3 src_c entries form the run.
+            assert_eq!(
+                batch_run_len(&state2),
+                Some(3),
+                "source-relative tokens must keep a per-source boundary"
+            );
         }
 
         // §2.2a companion field exclusions.
@@ -3666,39 +4195,16 @@ mod tests {
             ));
         }
 
-        // §2.2 — ConditionInstead disjointness: a met copy-instead swap refuses.
+        // §2.2 + CR 707.2 — ConditionInstead MET copy branch: a single
+        // (identical-value) source's met copy-instead swap now BATCHES along the
+        // value-equal prefix (whole run), consuming `run_len` entries.
         #[test]
         fn condition_instead_met_copy_branch_refuses() {
             let mut state = setup();
             add_lands(&mut state, 6); // 6 lands → "if you control 6+ lands" is met.
-            let src = add_scute_source(&mut state);
-
-            // sub: CopyTokenOf gated by ConditionInstead(lands >= 6).
-            let copy_effect = Effect::CopyTokenOf {
-                target: TargetFilter::SelfRef,
-                owner: TargetFilter::Controller,
-                source_filter: None,
-                enters_attacking: false,
-                tapped: false,
-                count: QuantityExpr::Fixed { value: 1 },
-                extra_keywords: vec![],
-                additional_modifications: vec![],
-            };
-            let mut sub = ResolvedAbility::new(copy_effect, vec![], src, PlayerId(0));
-            sub.condition = Some(AbilityCondition::ConditionInstead {
-                inner: Box::new(AbilityCondition::QuantityCheck {
-                    lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount {
-                            filter: TargetFilter::Typed(TypedFilter {
-                                type_filters: vec![TypeFilter::Land],
-                                ..Default::default()
-                            }),
-                        },
-                    },
-                    comparator: Comparator::GE,
-                    rhs: QuantityExpr::Fixed { value: 6 },
-                }),
-            });
+                                      // Observer-free source so the copy token passes the §2.3a gate.
+            let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
+            let sub = copy_instead_sub(src, 6);
 
             push_token_triggers(
                 &mut state,
@@ -3709,8 +4215,16 @@ mod tests {
             );
             let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            // Condition met (6 lands) ⇒ swap to CopyTokenOf ⇒ not batchable in v1.
-            assert!(effects::try_resolve_batch(&state, &ability, run_len).is_none());
+            // Condition met (6 lands) ⇒ swap to CopyTokenOf. The single source's
+            // 5 entries share identical copiable values (CR 707.2), so the copy
+            // prefix collapses the whole run into one batch.
+            let plan = try_batch(&state, &ability, run_len)
+                .expect("met copy-instead with identical values must batch");
+            assert_eq!(
+                plan.consumed(),
+                run_len,
+                "identical-source copy prefix must consume the full run"
+            );
         }
 
         // §2.2 — ConditionInstead NOT met + disjoint type ⇒ base Insect batches.
@@ -3757,7 +4271,7 @@ mod tests {
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
             // Land count invariant (token is a Creature, condition counts Lands) ⇒
             // base branch is provably stable ⇒ batchable.
-            assert!(effects::try_resolve_batch(&state, &ability, run_len).is_some());
+            assert!(try_batch(&state, &ability, run_len).is_some());
         }
 
         // §3.4 — mandatory Doubling-Season-class replacement still batches and
@@ -3821,6 +4335,7 @@ mod tests {
                         description: Some("Landfall".to_string()),
                         source_name: "Scute Swarm".to_string(),
                         subject_match_count: None,
+                        die_result: None,
                     },
                 });
             }
@@ -3890,15 +4405,22 @@ mod tests {
         }
 
         // §9.5 HIGH-2 — produced-token-non-observer gate (direct, discriminating):
-        // a produced token carrying an ETB observer trigger fails the gate, while
-        // a landfall-only (EnterBattlefield(Some(Land))) trigger passes. This
-        // exercises the gate's classifier directly — the copy path that would
-        // surface such a trigger end-to-end always falls back wholesale anyway
-        // (the met copy-instead branch, asserted below).
+        // the gate is the INTERSECTION of a trigger's registered keys with the
+        // produced token's CR 603.6a emission. A Creature produced token emits
+        // exactly {EnterBattlefield(None), EnterBattlefield(Some(Creature)),
+        // TokenCreated}. A creature-ETB observer intersects (refused); the real
+        // Scute-shape landfall trigger (EnterBattlefield(Some(Land))) does NOT
+        // intersect a creature emission and is batch-SAFE (the HIGH fix — the old
+        // coarse wildcard gate refused this and the headline repro never batched).
         #[test]
         fn produced_token_non_observer_gate_discriminates() {
             use super::super::effects::token::produced_token_is_non_observer;
-            // A creature-ETB observer trigger ⇒ NOT a valid produced-token trigger.
+            // The produced (copied) token is a Creature: emission =
+            // {None, Some(Creature), TokenCreated}.
+            let produced_creature = [CoreType::Creature];
+
+            // A creature-ETB observer trigger registers under Some(Creature) ⇒
+            // intersects the creature emission ⇒ must fail the gate.
             let etb_observer = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .destination(Zone::Battlefield)
                 .valid_card(TargetFilter::Typed(TypedFilter {
@@ -3906,11 +4428,18 @@ mod tests {
                     ..Default::default()
                 }));
             assert!(
-                !produced_token_is_non_observer(std::slice::from_ref(&etb_observer)),
-                "an ETB-observing produced token must fail the gate"
+                !produced_token_is_non_observer(
+                    std::slice::from_ref(&etb_observer),
+                    &produced_creature
+                ),
+                "a creature-ETB-observing produced token must fail the gate"
             );
-            // A landfall trigger (registers under EnterBattlefield(Some(Land))) is
-            // STILL an EnterBattlefield key ⇒ conservatively rejected.
+
+            // The HEADLINE fix: a landfall trigger registers under
+            // EnterBattlefield(Some(Land)). A Creature copy emits no Land key, so
+            // the intersection is EMPTY ⇒ the Scute-shape copy is batch-SAFE. The
+            // old coarse gate (any EnterBattlefield(_)) refused this and the named
+            // repro never collapsed.
             let landfall = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .destination(Zone::Battlefield)
                 .valid_card(TargetFilter::Typed(TypedFilter {
@@ -3918,12 +4447,39 @@ mod tests {
                     ..Default::default()
                 }));
             assert!(
-                !produced_token_is_non_observer(std::slice::from_ref(&landfall)),
-                "any EnterBattlefield-keyed trigger is conservatively rejected"
+                produced_token_is_non_observer(std::slice::from_ref(&landfall), &produced_creature),
+                "a Land-keyed landfall trigger on a Creature copy does not observe \
+                 its creature siblings ⇒ batch-safe (the HIGH fix)"
             );
+
+            // Over-permit guard: a broad permanent-ETB observer registers under
+            // the broad EnterBattlefield(None) key, which is in EVERY token's
+            // emission ⇒ must still be refused.
+            let broad_etb = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    ..Default::default()
+                }));
+            assert!(
+                !produced_token_is_non_observer(
+                    std::slice::from_ref(&broad_etb),
+                    &produced_creature
+                ),
+                "a broad permanent-ETB observer (None key) intersects every emission ⇒ refused"
+            );
+
+            // Symmetry check: the SAME landfall trigger on a LAND copy (emission
+            // includes Some(Land)) DOES intersect ⇒ refused. Proves the gate keys
+            // off the produced token's real core types, not a fixed assumption.
+            assert!(
+                !produced_token_is_non_observer(std::slice::from_ref(&landfall), &[CoreType::Land]),
+                "a landfall trigger on a Land copy observes its land siblings ⇒ refused"
+            );
+
             // No triggers ⇒ passes (the bare Insect/Servo go-wide case).
             assert!(
-                produced_token_is_non_observer(&[]),
+                produced_token_is_non_observer(&[], &produced_creature),
                 "a trigger-free produced token passes the gate"
             );
         }
@@ -4012,7 +4568,7 @@ mod tests {
             // therefore refuses regardless — confirming a copy-source observer
             // never reaches a batched resolution.
             assert!(
-                effects::try_resolve_batch(&state, &ability, run_len).is_none(),
+                try_batch(&state, &ability, run_len).is_none(),
                 "copy branch (and any copy-source observer) must refuse to batch"
             );
         }
@@ -4050,7 +4606,7 @@ mod tests {
             // The optional replacement could pause for a NeedsChoice prompt
             // mid-batch ⇒ Layer B refuses.
             assert!(
-                effects::try_resolve_batch(&state, &ability, run_len).is_none(),
+                try_batch(&state, &ability, run_len).is_none(),
                 "optional replacement must force fall-back"
             );
         }
@@ -4103,7 +4659,7 @@ mod tests {
 
             let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            let plan = try_batch(&state, &ability, run_len).unwrap();
             // The creature-ETB candidate IS the run source `src`. Pre-fix, the
             // exclusion dropped it and this assertion would FAIL (batch allowed);
             // post-fix it must hold (refuse to batch).
@@ -4172,7 +4728,7 @@ mod tests {
 
             let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            let plan = try_batch(&state, &ability, run_len).unwrap();
             assert!(
                 !observers_are_batch_safe(&state, &plan),
                 "narrow artifact-ETB observer must force refusal (Some(Artifact) bucket)"
@@ -4224,7 +4780,7 @@ mod tests {
 
             let run_len = batch_run_len(&state).unwrap();
             let ability = state.stack.back().unwrap().ability().unwrap().clone();
-            let plan = effects::try_resolve_batch(&state, &ability, run_len).unwrap();
+            let plan = try_batch(&state, &ability, run_len).unwrap();
             assert!(
                 !observers_are_batch_safe(&state, &plan),
                 "broad permanent-ETB observer must force refusal (None bucket)"
@@ -4241,32 +4797,11 @@ mod tests {
             let build = |lands: usize| -> GameState {
                 let mut state = setup();
                 add_lands(&mut state, lands);
-                let src = add_scute_source(&mut state);
-                let copy_effect = Effect::CopyTokenOf {
-                    target: TargetFilter::SelfRef,
-                    owner: TargetFilter::Controller,
-                    source_filter: None,
-                    enters_attacking: false,
-                    tapped: false,
-                    count: QuantityExpr::Fixed { value: 1 },
-                    extra_keywords: vec![],
-                    additional_modifications: vec![],
-                };
-                let mut sub = ResolvedAbility::new(copy_effect, vec![], src, PlayerId(0));
-                sub.condition = Some(AbilityCondition::ConditionInstead {
-                    inner: Box::new(AbilityCondition::QuantityCheck {
-                        lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::ObjectCount {
-                                filter: TargetFilter::Typed(TypedFilter {
-                                    type_filters: vec![TypeFilter::Land],
-                                    ..Default::default()
-                                }),
-                            },
-                        },
-                        comparator: Comparator::GE,
-                        rhs: QuantityExpr::Fixed { value: 6 },
-                    }),
-                });
+                // Observer-free copy source so the met-copy branch can batch
+                // (a copy inherits the source's triggers; an ETB-keyed trigger
+                // would fail the §2.3a non-observer gate).
+                let src = add_plain_creature_source(&mut state, "Scout", 1, 1);
+                let sub = copy_instead_sub(src, 6);
                 push_token_triggers(
                     &mut state,
                     src,
@@ -4300,21 +4835,317 @@ mod tests {
                 assert_eq!(batched.battlefield.len(), sequential.battlefield.len());
             }
 
-            // MET (6 lands): copy-instead fires ⇒ Layer B refuses ⇒ falls back to
-            // sequential; final state still correct (5 copies, one per step).
+            // MET (6 lands): copy-instead fires ⇒ Layer B copy-prefix batches.
+            // The single source's 5 entries share identical copiable values
+            // (CR 707.2), and the observer-free copy token passes §2.3a, so the
+            // whole run collapses into ONE batched step producing 5 copies —
+            // equal to the sequential path.
             {
-                let mut state = build(6);
-                let steps = resolve_to_empty_batched(&mut state);
-                assert!(
-                    steps.iter().all(|&c| c == 1),
-                    "met copy-instead must fall back one-at-a-time, got {steps:?}"
+                let base = build(6);
+                let mut batched = base.clone();
+                let mut sequential = base.clone();
+                let steps = resolve_to_empty_batched(&mut batched);
+                resolve_to_empty_sequential(&mut sequential);
+                assert_eq!(
+                    steps,
+                    vec![5],
+                    "met copy-instead with identical values must batch in one step, got {steps:?}"
                 );
                 assert_eq!(
-                    token_ids(&state).len(),
+                    token_ids(&batched).len(),
                     5,
                     "5 copy-token resolutions produce 5 tokens"
                 );
+                assert_eq!(
+                    token_ids(&batched).len(),
+                    token_ids(&sequential).len(),
+                    "batched copy count must equal sequential"
+                );
             }
+        }
+
+        // CR 111.2 + CR 109.4 — cross-source base-token collapse: K distinct
+        // sources each fire one base Insect Token trigger. Because a base token
+        // reads nothing from its source, the run-identity source axis is
+        // `SourceIndependent` and all K entries form ONE batch (the Scute Swarm
+        // O(N²)→O(N) fix). Result equals the sequential path.
+        #[test]
+        fn cross_source_base_token_forms_one_batch() {
+            let mut base = setup();
+            add_lands(&mut base, 3);
+            let sources = push_token_triggers_from_distinct_sources(
+                &mut base,
+                insect_token_effect(),
+                None,
+                7,
+            );
+            assert_eq!(sources.len(), 7);
+
+            let mut batched = base.clone();
+            let mut sequential = base.clone();
+
+            let steps = resolve_to_empty_batched(&mut batched);
+            resolve_to_empty_sequential(&mut sequential);
+
+            assert_eq!(
+                steps,
+                vec![7],
+                "7 distinct-source base-token entries must collapse into one batch"
+            );
+            assert_eq!(token_ids(&batched).len(), 7);
+            assert_eq!(token_ids(&sequential).len(), 7);
+            assert_eq!(batched.battlefield.len(), sequential.battlefield.len());
+        }
+
+        // CR 707.2 — cross-source copy collapse: K distinct sources with
+        // IDENTICAL copiable values each fire a met copy-instead self-copy. The
+        // value-equal prefix spans the whole run, so all K collapse into one
+        // batch producing K copies. Result equals the sequential path.
+        #[test]
+        fn cross_source_copy_identical_values_forms_one_batch() {
+            let mut base = setup();
+            add_lands(&mut base, 6); // met ⇒ copy branch fires.
+
+            // K distinct, value-identical observer-free creature sources, each
+            // firing a met copy-instead self-copy.
+            for _ in 0..5 {
+                let src = add_plain_creature_source(&mut base, "Clone Base", 2, 2);
+                let sub = copy_instead_sub(src, 6);
+                push_token_triggers(
+                    &mut base,
+                    src,
+                    insect_token_effect(),
+                    Some(Box::new(sub)),
+                    1,
+                );
+            }
+
+            let mut batched = base.clone();
+            let mut sequential = base.clone();
+
+            let steps = resolve_to_empty_batched(&mut batched);
+            resolve_to_empty_sequential(&mut sequential);
+
+            assert_eq!(
+                steps,
+                vec![5],
+                "5 identical-value cross-source copies must collapse into one batch, got {steps:?}"
+            );
+            // 5 copy tokens, all copies of "Clone Base".
+            let batched_copies: Vec<_> = token_ids(&batched)
+                .into_iter()
+                .filter(|id| batched.objects[id].name == "Clone Base")
+                .collect();
+            assert_eq!(batched_copies.len(), 5);
+            assert_eq!(
+                token_ids(&batched).len(),
+                token_ids(&sequential).len(),
+                "batched copy count must equal sequential"
+            );
+        }
+
+        // CR 707.2 + CR 707.5 + CR 603.6a — THE HEADLINE Scute Swarm repro:
+        // K distinct copy sources are real Scute-Swarm-shape creatures, each
+        // carrying a landfall trigger keyed EnterBattlefield(Some(Land)). The
+        // copied tokens are CREATURES that inherit the landfall trigger (CR
+        // 707.2/707.5). A Creature copy emits {None, Some(Creature), TokenCreated}
+        // — the Land-keyed landfall does NOT intersect it, so the §2.3a gate is
+        // safe and the whole run STILL collapses into ONE batch. This is
+        // DISCRIMINATING: under the OLD coarse gate (any EnterBattlefield(_)
+        // rejected) try_resolve_copy_batch returned None and the run resolved
+        // one-at-a-time — the named perf bug was never fixed for its own card.
+        #[test]
+        fn cross_source_copy_with_landfall_trigger_still_batches() {
+            let mut base = setup();
+            add_lands(&mut base, 6); // met ⇒ copy branch fires.
+
+            // K distinct value-identical Scute-shape sources, each firing a met
+            // copy-instead self-copy. Each source (and thus each copy) carries a
+            // landfall trigger keyed on Land ETB — exactly Scute Swarm.
+            for _ in 0..5 {
+                let src = add_landfall_creature_source(&mut base, "Scute Swarm", 1, 1);
+                let sub = copy_instead_sub(src, 6);
+                push_token_triggers(
+                    &mut base,
+                    src,
+                    insect_token_effect(),
+                    Some(Box::new(sub)),
+                    1,
+                );
+            }
+
+            let mut batched = base.clone();
+            let mut sequential = base.clone();
+
+            let steps = resolve_to_empty_batched(&mut batched);
+            resolve_to_empty_sequential(&mut sequential);
+
+            assert_eq!(
+                steps,
+                vec![5],
+                "the real Scute Swarm shape (landfall on a creature copy) MUST collapse \
+                 into one batch — would be all-1 under the old coarse gate, got {steps:?}"
+            );
+            let batched_copies: Vec<_> = token_ids(&batched)
+                .into_iter()
+                .filter(|id| batched.objects[id].name == "Scute Swarm")
+                .collect();
+            assert_eq!(batched_copies.len(), 5, "5 Scute Swarm copies produced");
+            assert_eq!(
+                token_ids(&batched).len(),
+                token_ids(&sequential).len(),
+                "batched copy count must equal sequential"
+            );
+            // The copies carry the inherited landfall trigger (CR 707.2/707.5).
+            for id in &batched_copies {
+                assert!(
+                    !batched.objects[id].trigger_definitions.is_empty(),
+                    "the copy must inherit the source's landfall trigger"
+                );
+            }
+        }
+
+        // CR 603.6a (over-permit guard) — a SelfRef copy whose copied token DOES
+        // observe its in-batch siblings must STILL refuse. The copy source is a
+        // Creature carrying a "whenever a creature you control enters" trigger
+        // (EnterBattlefield(Some(Creature))); the Creature copy's emission
+        // includes Some(Creature), so the intersection is non-empty ⇒ refused.
+        // Proves the refined gate did not become unsafe.
+        #[test]
+        fn cross_source_copy_with_creature_etb_observer_refuses_batch() {
+            let mut state = setup();
+            add_lands(&mut state, 6); // met ⇒ copy branch fires.
+
+            for _ in 0..5 {
+                let src = add_creature_observer_source(&mut state, "Watcher", 2, 2);
+                let sub = copy_instead_sub(src, 6);
+                push_token_triggers(
+                    &mut state,
+                    src,
+                    insect_token_effect(),
+                    Some(Box::new(sub)),
+                    1,
+                );
+            }
+
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            // The copied token observes creature ETB (its siblings) ⇒ the §2.3a
+            // intersection is non-empty ⇒ must refuse to batch.
+            assert!(
+                try_batch(&state, &ability, run_len).is_none(),
+                "a copy whose token observes creature-ETB siblings must refuse to batch"
+            );
+        }
+
+        // CR 707.2 — divergent-tail prefix batching: K cross-source copies where
+        // a middle source diverges in copiable values. The contiguous value-equal
+        // PREFIX collapses; the divergent tail resolves in subsequent steps. The
+        // step pattern proves prefix batching (not all-1, not one vec![K]), and
+        // the final token count equals the sequential path.
+        #[test]
+        fn cross_source_copy_divergent_tail_batches_prefix_then_resolves_rest() {
+            let mut base = setup();
+            add_lands(&mut base, 6);
+
+            // Push order (resolution order is top-down = LIFO): the LAST pushed
+            // entry resolves first. Push the divergent source FIRST so it sits at
+            // the BOTTOM and the value-equal sources are at the top.
+            //
+            // Build: 2 identical "Alpha" sources, then 1 "Beta" (divergent P/T),
+            // then 2 more "Alpha". Pushed bottom→top. Resolution order (top→down):
+            // Alpha, Alpha, Beta, Alpha, Alpha. The prefix is the top 2 Alphas.
+            let specs: [(&str, i32, i32); 5] = [
+                ("Alpha", 2, 2),
+                ("Alpha", 2, 2),
+                ("Beta", 3, 3),
+                ("Alpha", 2, 2),
+                ("Alpha", 2, 2),
+            ];
+            for (name, p, t) in specs {
+                let src = add_plain_creature_source(&mut base, name, p, t);
+                let sub = copy_instead_sub(src, 6);
+                push_token_triggers(
+                    &mut base,
+                    src,
+                    insect_token_effect(),
+                    Some(Box::new(sub)),
+                    1,
+                );
+            }
+
+            let mut batched = base.clone();
+            let mut sequential = base.clone();
+
+            let steps = resolve_to_empty_batched(&mut batched);
+            resolve_to_empty_sequential(&mut sequential);
+
+            // The top 2 Alphas batch (prefix), then Beta resolves, then the
+            // bottom 2 Alphas batch. NOT all-1 and NOT a single vec![5].
+            assert_eq!(
+                steps,
+                vec![2, 1, 2],
+                "prefix batching must collapse the value-equal head, got {steps:?}"
+            );
+            // 5 copy tokens total (3 Alpha + 1 Beta + ... by name), equal to
+            // sequential.
+            assert_eq!(token_ids(&batched).len(), 5);
+            assert_eq!(
+                token_ids(&batched).len(),
+                token_ids(&sequential).len(),
+                "batched count must equal sequential"
+            );
+        }
+
+        // CR 608.2c (H1 discriminator) — a met copy that creates LANDS gated on a
+        // LAND count must NOT batch: the copy's core types intersect the counted
+        // type, so the intervening condition is order-sensitive across the run.
+        // This FAILS if the invariance gate is fed the base placeholder core
+        // types ([Creature]) and PASSES (refuses) when fed the COPY core types
+        // ([Land]).
+        #[test]
+        fn met_copy_creating_lands_gated_on_land_count_refuses_batch() {
+            let mut state = setup();
+            add_lands(&mut state, 6); // met ⇒ copy branch fires.
+
+            // Observer-free copy source whose copiable type is LAND (not the
+            // base Insect Creature). Copying it produces Land tokens.
+            let land_src = create_object(
+                &mut state,
+                CardId(911),
+                PlayerId(0),
+                "Mirror Land".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&land_src).unwrap();
+                obj.base_card_types = crate::types::card_type::CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec!["Forest".to_string()],
+                };
+                obj.card_types = obj.base_card_types.clone();
+                obj.base_name = "Mirror Land".to_string();
+            }
+            crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+            let sub = copy_instead_sub(land_src, 6);
+            push_token_triggers(
+                &mut state,
+                land_src,
+                insect_token_effect(),
+                Some(Box::new(sub)),
+                5,
+            );
+
+            let run_len = batch_run_len(&state).unwrap();
+            let ability = state.stack.back().unwrap().ability().unwrap().clone();
+            // The copy creates Lands; the condition counts Lands ⇒ each created
+            // Land flips the count ⇒ order-sensitive ⇒ must refuse.
+            assert!(
+                try_batch(&state, &ability, run_len).is_none(),
+                "a met copy creating Lands gated on a Land count must refuse to batch"
+            );
         }
 
         /// Build an OPTIONAL token-count-doubling replacement ("you may create
@@ -4342,5 +5173,1489 @@ mod tests {
             def.quantity_modification = Some(QuantityModification::Double);
             def
         }
+
+        // ====================================================================
+        // Incremental layer-flush performance + correctness regression tests.
+        // ====================================================================
+
+        use crate::game::layers::{evaluate_layers, flush_layers, FULL_EVALUATE_LAYERS_COUNT};
+        use std::sync::atomic::Ordering;
+
+        /// (A) REAL-BOARD smoke test on the 583-Scute-Swarm `/tmp/gamestate.json`
+        /// repro. Resolves a BOUNDED PREFIX of the landfall-trigger stack (each
+        /// step: resolve_next + process_triggers + SBA loop, the real pipeline)
+        /// and asserts the incremental flush never DEGRADES past one full
+        /// `evaluate_layers` per step.
+        ///
+        /// NOTE: this fixture is NOT an O(N) board, and that is rules-correct. Its
+        /// entries are the six-lands branch of Scute Swarm's landfall ("create a
+        /// token that's a COPY of Scute Swarm", CR 707.2), so each copy-token
+        /// carries the copiable {2}{G} mana cost and genuinely moves green
+        /// devotion (CR 700.5). Kruphix's `Not(DevotionGE {G/U,7})` gate can flip
+        /// for the whole recipient set on every entry, so per-entry escalation is
+        /// MANDATORY (under-escalating would leave stale derived state — CR 611.3a,
+        /// the #1 hard rule). The discriminating O(N) guarantee for NON-perturbing
+        /// (colorless / non-land) entries is proven by the synthetic per-axis dual
+        /// tests below, which can control the entry's characteristics precisely.
+        ///
+        /// Bounded to a prefix because the FULL 2,891-trigger resolution is
+        /// dominated by the O(N²) trigger-scan / SBA pipeline (independent of the
+        /// layers fix) and is impractically slow in a debug build.
+        ///
+        /// Self-skips when `/tmp/gamestate.json` is absent (CI lacks the repro).
+        /// `#[ignore]` by default: depends on a local-only 27MB snapshot. Run with
+        /// `cargo test -p engine -- --ignored real_scute_board`.
+        /// Re-parse every `StaticCondition::Unrecognized` carried in a snapshot's
+        /// static definitions through the live `parse_inner_condition`, replacing
+        /// any that now parse to a typed condition. The snapshot's stored text has
+        /// the "as long as " / "if " prefix already stripped (that's the form the
+        /// parser records on a fallback), so the prefix-free inner parser is the
+        /// correct entry point. Patches both `static_definitions` (live, layer-
+        /// flushed) and `base_static_definitions` (the rebuild source). This makes
+        /// a pre-fix snapshot reflect the parser change under test.
+        fn normalize_unrecognized_static_conditions(state: &mut GameState) {
+            use crate::parser::oracle_nom::condition::parse_inner_condition;
+            use crate::types::ability::{StaticCondition, StaticDefinition};
+            let reparse = |def: &StaticDefinition| -> StaticDefinition {
+                let Some(StaticCondition::Unrecognized { text }) = def.condition.as_ref() else {
+                    return def.clone();
+                };
+                match parse_inner_condition(text) {
+                    Ok(("", parsed)) => {
+                        let mut new_def = def.clone();
+                        new_def.condition = Some(parsed);
+                        new_def
+                    }
+                    _ => def.clone(),
+                }
+            };
+            let ids: Vec<ObjectId> = state.objects.keys().copied().collect();
+            for id in ids {
+                let Some(obj) = state.objects.get_mut(&id) else {
+                    continue;
+                };
+                let new_live: Vec<StaticDefinition> =
+                    obj.static_definitions.iter_all().map(&reparse).collect();
+                let new_base: Vec<StaticDefinition> =
+                    obj.base_static_definitions.iter().map(&reparse).collect();
+                obj.static_definitions = new_live.into();
+                obj.base_static_definitions = Arc::new(new_base);
+            }
+        }
+
+        #[test]
+        #[ignore = "requires local /tmp/gamestate.json repro"]
+        fn real_scute_board_resolution_is_not_full_eval_per_token() {
+            let path = "/tmp/gamestate.json";
+            let Ok(contents) = std::fs::read_to_string(path) else {
+                eprintln!("skipping: {path} not present");
+                return;
+            };
+            let wrapper: serde_json::Value =
+                serde_json::from_str(&contents).expect("repro wrapper must parse");
+            let gs_value = wrapper
+                .get("gameState")
+                .expect("wrapper must have gameState member")
+                .clone();
+            let mut state: GameState =
+                serde_json::from_value(gs_value).expect("gameState must deserialize");
+
+            // This repro was serialized BEFORE the Grist source-zone parser fix,
+            // so Grist's "as long as ~ isn't on the battlefield" static is frozen
+            // in the snapshot as `StaticCondition::Unrecognized` (which the
+            // escalation classifier must treat as conservatively population-
+            // sensitive → escalate every step). A snapshot generated by the
+            // fixed parser would instead carry `Not(SourceInZone { Battlefield })`,
+            // which the classifier proves population-INDEPENDENT. Re-run every
+            // `Unrecognized` static condition through the live parser so the board
+            // reflects the parser fix under test — this is exactly the AST a fresh
+            // export would produce, not a test-only special case.
+            normalize_unrecognized_static_conditions(&mut state);
+
+            let stack_size = state.stack.len();
+            assert!(
+                stack_size > 100,
+                "repro must have a large stack (got {stack_size})"
+            );
+
+            // First flush rebuilds fully (deserialized snapshot defaults to Full).
+            // Reset the counter AFTER that initial mandatory full pass so we only
+            // measure per-resolution behavior.
+            flush_layers(&mut state);
+            FULL_EVALUATE_LAYERS_COUNT.store(0, Ordering::Relaxed);
+
+            const PREFIX_STEPS: usize = 120;
+            let mut steps = 0usize;
+            let resolve_start = std::time::Instant::now();
+            while !state.stack.is_empty() && steps < PREFIX_STEPS {
+                let mut events = Vec::new();
+                resolve_next(&mut state, &mut events);
+                triggers::process_triggers(&mut state, &events);
+                crate::game::sba::check_state_based_actions(&mut state, &mut events);
+                steps += 1;
+            }
+            let resolve_elapsed = resolve_start.elapsed();
+            let full_evals = FULL_EVALUATE_LAYERS_COUNT.load(Ordering::Relaxed);
+            eprintln!(
+                "real-board probe: full_evals={full_evals} steps={steps} \
+                 wall_clock={resolve_elapsed:?} ({:.1}ms/step)",
+                resolve_elapsed.as_secs_f64() * 1000.0 / steps.max(1) as f64
+            );
+
+            assert!(
+                steps > 20,
+                "prefix must resolve enough steps to discriminate (got {steps})"
+            );
+            // CR 611.3a + CR 611.3b — TRUTH-DELTA SHORT-CIRCUIT: full evals on
+            // this repro collapse to NEAR-CONSTANT (measured 4 across 120 steps,
+            // down from ~63 before the short-circuit). The board carries board-
+            // population-gated statics (Kruphix `Not(DevotionGE {G/U,7})`,
+            // Anger/Brawn land-presence, Grist's source-zone gate). The entries
+            // are the six-lands branch of Scute Swarm's landfall: "create a token
+            // that's a COPY of Scute Swarm" (CR 707.2 — the copy takes the
+            // copiable mana cost {2}{G}), so each copy-token carries a GREEN mana
+            // symbol and CR 700.5 devotion to green strictly INCREASES on every
+            // entry.
+            //
+            // Under d9a40be71 every such devotion-perturbing entry escalated to a
+            // full pass (~1 per copy → ~63). But Kruphix's gate is
+            // `Not(DevotionGE 7)`: once green devotion is already >= 7 (it is,
+            // early), the gate TRUTH is stable FALSE and never flips again no
+            // matter how high devotion climbs. The truth-delta short-circuit
+            // recomputes the gate's AFTER truth against the live board and skips
+            // escalation when `before == after` — so devotion-perturbing-but-
+            // non-flipping entries now stay on the incremental fast path. The few
+            // residual full evals are rules-MANDATORY flips (a genuine gate
+            // crossing, e.g. an early devotion edge or a land-presence gate
+            // flipping once) or Axis-1 escalations; they are NOT
+            // under-escalation — `after` is always recomputed authoritatively
+            // from the live board (CR 611.3a), so the short-circuit errs only
+            // toward over-escalation, never stale derived state.
+            //
+            // Bound: `full_evals < steps/4 + 8` proves the near-O(1) collapse
+            // (the measured 4 sits far under 38) while leaving headroom for the
+            // handful of rules-mandatory flips. The per-axis synthetic dual tests
+            // above pin the exact short-circuit / escalation decision per axis.
+            assert!(
+                full_evals < steps / 4 + 8,
+                "truth-delta short-circuit must keep full evaluate_layers passes \
+                 near-constant: got {full_evals} full passes across {steps} steps \
+                 (stack was {stack_size}). Kruphix's `Not(DevotionGE 7)` gate is \
+                 stable FALSE once devotion >= 7 (CR 700.5 / CR 611.3a), so \
+                 devotion-perturbing copy-token entries must NOT escalate — a count \
+                 anywhere near `steps` would mean the short-circuit regressed back \
+                 to per-entry escalation."
+            );
+        }
+
+        /// Build a battlefield with a Devotion-magnitude anthem source plus
+        /// pre-existing creatures, then push a single token-creation trigger.
+        /// Returns (state, anthem_source_id).
+        ///
+        /// The anthem is "creatures you control get +X/+X where X = your devotion
+        /// to green" — a board-population-dependent magnitude
+        /// (`DistinctColorsAmongPermanents`-class via `Devotion`). A token entry
+        /// changes devotion, so the magnitude applied to PRE-EXISTING creatures
+        /// must re-evaluate; the escalation scan must force a full pass.
+        fn devotion_anthem_board() -> GameState {
+            use crate::types::ability::DevotionColors;
+            use crate::types::ability::{ContinuousModification, StaticDefinition};
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            // Two pre-existing green creatures.
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(50 + i),
+                    PlayerId(0),
+                    format!("Bear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            // Anthem source: "creatures you control get +X/+X, X = devotion to green".
+            let anthem = create_object(
+                &mut state,
+                CardId(60),
+                PlayerId(0),
+                "Devotion Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::Fixed(vec![ManaColor::Green]),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::Fixed(vec![ManaColor::Green]),
+                        },
+                    },
+                },
+            ];
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (B1) Population-magnitude escalation: with a devotion-magnitude anthem,
+        /// a token entry must escalate the incremental flush to a full pass so
+        /// pre-existing creatures' P/T re-evaluate. Dual-run: the normal flush
+        /// path must produce a board characteristic-identical to a forced-Full
+        /// flush.
+        #[test]
+        fn devotion_anthem_token_entry_escalates_and_matches_full() {
+            let mut base = devotion_anthem_board();
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 1);
+
+            // Normal path (incremental flush eligible; must escalate).
+            let mut normal = base.clone();
+            resolve_to_empty_batched(&mut normal);
+            flush_layers(&mut normal);
+
+            // Forced-full reference: same resolution, then force a full re-eval.
+            let mut forced = base.clone();
+            resolve_to_empty_batched(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+
+            assert_pt_identical(&normal, &forced, "devotion anthem escalation");
+        }
+
+        /// (B2) Recipient-local dynamic ("+1/+1 for each +1/+1 counter on IT",
+        /// `CountersOn { Recipient }`) must NOT escalate — it does not read board
+        /// population — and the incremental result still matches a full recompute.
+        #[test]
+        fn recipient_local_dynamic_does_not_escalate_and_matches_full() {
+            use crate::types::ability::{ContinuousModification, ObjectScope, StaticDefinition};
+            use crate::types::statics::StaticMode;
+            let mut base = setup();
+            // A creature with a recipient-local self-buff static and a +1/+1 counter.
+            let id = create_object(
+                &mut base,
+                CardId(70),
+                PlayerId(0),
+                "Recipient Buff".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::SelfRef);
+            sd.modifications = vec![ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Recipient,
+                        counter_type: Some(CounterType::Plus1Plus1),
+                    },
+                },
+            }];
+            {
+                let o = base.objects.get_mut(&id).unwrap();
+                o.base_power = Some(1);
+                o.base_toughness = Some(1);
+                o.power = Some(1);
+                o.toughness = Some(1);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.counters.insert(CounterType::Plus1Plus1, 2);
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+            }
+            base.layers_dirty = crate::types::game_state::LayersDirty::Full;
+
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 1);
+
+            let mut normal = base.clone();
+            // Prove the escalation predicate does NOT fire for this board: after
+            // resolving, the dirty state right before flush should be EnteredObjects
+            // and the incremental path must apply.
+            FULL_EVALUATE_LAYERS_COUNT.store(0, Ordering::Relaxed);
+            resolve_to_empty_batched(&mut normal);
+            flush_layers(&mut normal);
+
+            let mut forced = base.clone();
+            resolve_to_empty_batched(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+
+            assert_pt_identical(&normal, &forced, "recipient-local dynamic");
+        }
+
+        /// (B-embedded) Population-dependent EMBEDDED THRESHOLD escalation.
+        ///
+        /// A continuous static whose AFFECTED FILTER is a `PtComparison` with an
+        /// `ObjectCount`-backed threshold ("creatures with power <= the number of
+        /// creatures you control get +1/+1"). A token entry changes the creature
+        /// count, which changes the threshold, which changes whether PRE-EXISTING
+        /// creatures match the affected filter. The escalation scan must fire via
+        /// the `affected_filter_uses_object_population` → embedded-threshold
+        /// `quantity_expr_uses_object_count` recursion, forcing a full pass.
+        ///
+        /// Dual-run: the normal flush path must produce a board characteristic-
+        /// identical to a forced-Full flush.
+        #[test]
+        fn embedded_threshold_token_entry_escalates_and_matches_full() {
+            use crate::types::ability::{
+                Comparator, ContinuousModification, FilterProp, PtStat, PtValueScope,
+                StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut base = setup();
+            // Two pre-existing 1/1 green creatures.
+            for i in 0..2 {
+                let id = create_object(
+                    &mut base,
+                    CardId(80 + i),
+                    PlayerId(0),
+                    format!("Smol{i}"),
+                    Zone::Battlefield,
+                );
+                let o = base.objects.get_mut(&id).unwrap();
+                o.base_power = Some(1);
+                o.base_toughness = Some(1);
+                o.power = Some(1);
+                o.toughness = Some(1);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            // Anthem source: "creatures you control with power <= (number of
+            // creatures you control) get +1/+1" — affected set keyed by an
+            // ObjectCount-backed PtComparison threshold.
+            let anthem = create_object(
+                &mut base,
+                CardId(90),
+                PlayerId(0),
+                "Threshold Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Creature],
+                                ..Default::default()
+                            }),
+                        },
+                    },
+                }],
+                ..Default::default()
+            }));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            {
+                let o = base.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            base.layers_dirty = crate::types::game_state::LayersDirty::Full;
+
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 1);
+
+            let mut normal = base.clone();
+            resolve_to_empty_batched(&mut normal);
+            flush_layers(&mut normal);
+
+            let mut forced = base.clone();
+            resolve_to_empty_batched(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+
+            assert_pt_identical(&normal, &forced, "embedded-threshold escalation");
+        }
+
+        /// (B-condition) Population-dependent source-level CONDITION escalation.
+        ///
+        /// A continuous anthem static "creatures you control get +1/+1 as long as
+        /// you control 3 or more creatures" — a source-level enabling condition
+        /// (`QuantityComparison` over `ObjectCount`) that gates the effect for the
+        /// WHOLE recipient set (not recipient-local). The board starts one short
+        /// of the threshold (2 creatures), so the condition is OFF and no creature
+        /// is buffed. A single token entry crosses the threshold (→ 3 creatures),
+        /// flipping the condition ON for EVERY pre-existing creature.
+        ///
+        /// The incremental flush re-derives only the entered token, so without the
+        /// condition-axis escalation clause the pre-existing creatures would keep
+        /// stale (unbuffed) P/T. The escalation scan must fire via
+        /// `static_condition_uses_object_population` →
+        /// `quantity_expr_uses_object_count`, forcing a full pass.
+        ///
+        /// Asserts (a) the entry escalated to a FULL pass (the full-eval counter
+        /// incremented exactly once during the normal-path flush) and (b) dual-run
+        /// characteristic-identity: the normal flush produces a board identical to
+        /// a forced-Full flush, with pre-existing creatures at the flipped-on P/T.
+        #[test]
+        fn condition_gated_anthem_token_entry_escalates_and_matches_full() {
+            use crate::types::ability::{
+                Comparator, ContinuousModification, StaticCondition, StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut base = setup();
+            // Two pre-existing 2/2 creatures — one short of the ≥3 threshold.
+            let mut creature_ids = Vec::new();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut base,
+                    CardId(100 + i),
+                    PlayerId(0),
+                    format!("Gater{i}"),
+                    Zone::Battlefield,
+                );
+                let o = base.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                creature_ids.push(id);
+            }
+            // Anthem source (an Enchantment — does NOT count toward the creature
+            // threshold): "creatures you control get +1/+1 as long as you control
+            // 3 or more creatures".
+            let anthem = create_object(
+                &mut base,
+                CardId(110),
+                PlayerId(0),
+                "Condition Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            sd.condition = Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            ..Default::default()
+                        }),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            });
+            {
+                let o = base.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            base.layers_dirty = crate::types::game_state::LayersDirty::Full;
+
+            // Sanity: with 2 creatures the condition is OFF — no buff yet.
+            flush_layers(&mut base);
+            for &id in &creature_ids {
+                let o = base.objects.get(&id).unwrap();
+                assert_eq!(o.power, Some(2), "condition should be off below threshold");
+            }
+
+            let src = add_scute_source(&mut base);
+            push_token_triggers(&mut base, src, insect_token_effect(), None, 1);
+
+            // Normal path: incremental flush eligible; the condition-axis escalation
+            // must force a full pass. Reset the counter BEFORE resolution so a
+            // flush triggered inside the resolve pipeline (SBA / batch resolve)
+            // is counted too — escalation must occur somewhere in the
+            // resolve-then-flush window, not necessarily on the final explicit
+            // flush (the pipeline may have already drained the EnteredObjects
+            // mark by the time we flush below).
+            let mut normal = base.clone();
+            FULL_EVALUATE_LAYERS_COUNT.store(0, Ordering::Relaxed);
+            resolve_to_empty_batched(&mut normal);
+            flush_layers(&mut normal);
+            let full_evals = FULL_EVALUATE_LAYERS_COUNT.load(Ordering::Relaxed);
+            assert!(
+                full_evals >= 1,
+                "token entry crossing a board-population-gated condition must \
+                 escalate the incremental flush to a full pass (got {full_evals})"
+            );
+
+            // Forced-full reference. Build AFTER reading the counter so its own
+            // `evaluate_layers` does not perturb the measurement above.
+            let mut forced = base.clone();
+            resolve_to_empty_batched(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+
+            // Pre-existing creatures must be flipped ON (3/3), not stale (2/2).
+            for &id in &creature_ids {
+                let o = normal.objects.get(&id).unwrap();
+                assert_eq!(
+                    o.power,
+                    Some(3),
+                    "pre-existing creature must be buffed after the condition flips on"
+                );
+            }
+            assert_pt_identical(&normal, &forced, "condition-gated anthem escalation");
+        }
+
+        // ====================================================================
+        // ENTRY-AWARE escalation tests (cheap-reject classifier + entry-
+        // membership narrowing). Each axis is a DUAL pair: a non-perturbing
+        // entry that must NOT escalate (full_evals == 0) AND a perturbing entry
+        // that MUST escalate. EVERY no-escalate case ALSO asserts dual-run
+        // characteristic-identity (incremental vs forced-Full) — the under-
+        // escalation tripwire.
+        // ====================================================================
+
+        /// ISOLATED single-flush measurement of the entry-aware escalation
+        /// decision. `setup_board` returns a board with the anthem already in
+        /// place (still `Full`-dirty). The helper:
+        ///   1. flushes the board to Clean (the anthem's initial full pass — NOT
+        ///      measured),
+        ///   2. invokes `add_entry` to create the entering object and returns its
+        ///      id (the closure must `mark_layers_entered` so the dirty lattice is
+        ///      `EnteredObjects`),
+        ///   3. resets the counter and performs a SINGLE `flush_layers`, capturing
+        ///      exactly the entry-aware escalation decision (0 = incremental fast
+        ///      path engaged, >=1 = escalated to a full pass),
+        ///   4. builds a forced-Full reference from the same post-entry board for
+        ///      dual-run characteristic identity.
+        ///
+        /// This isolates the escalation DECISION from the token-RESOLUTION
+        /// pipeline (which does unrelated full passes during `Effect::Token`
+        /// resolution / SBA).
+        ///
+        /// The escalation signal is read RACE-FREE from
+        /// `incremental_flush_must_escalate` directly (a pure predicate over the
+        /// post-entry board) rather than from the process-wide
+        /// `FULL_EVALUATE_LAYERS_COUNT`, which `cargo test`'s parallel runner
+        /// would otherwise corrupt. Returns `(incremental_board, escalated,
+        /// forced_full_board)`, where `escalated == false` means the entry-aware
+        /// fast path engaged and `escalated == true` means the entry forced a full
+        /// pass. The dual-run identity (`incremental_board` vs `forced_full_board`)
+        /// is the under-escalation tripwire regardless of the decision.
+        fn flush_entry_and_forced(
+            setup_board: impl Fn() -> GameState,
+            add_entry: impl Fn(&mut GameState) -> ObjectId,
+        ) -> (GameState, bool, GameState) {
+            // Normal path: flush the anthem in, add the entry, read the decision,
+            // then flush incrementally (or full, per the decision).
+            let mut normal = setup_board();
+            flush_layers(&mut normal);
+            add_entry(&mut normal);
+            let entered_ids: std::collections::HashSet<ObjectId> = match &normal.layers_dirty {
+                crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
+                other => panic!("expected EnteredObjects dirty state, got {other:?}"),
+            };
+            let escalated =
+                crate::game::layers::incremental_flush_must_escalate(&normal, &entered_ids);
+            flush_layers(&mut normal);
+
+            // Forced-Full reference: same board + entry, then a full re-eval.
+            let mut forced = setup_board();
+            flush_layers(&mut forced);
+            add_entry(&mut forced);
+            forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            evaluate_layers(&mut forced);
+            (normal, escalated, forced)
+        }
+
+        /// Create a plain colorless, non-land creature ("Insect"-like) entry and
+        /// mark layers entered. Flips no devotion / land-presence gate and matches
+        /// no artifact/land filter.
+        fn add_colorless_creature_entry(state: &mut GameState, card_id: u64) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                "Insect".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(1);
+                o.base_toughness = Some(1);
+                o.power = Some(1);
+                o.toughness = Some(1);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![];
+                o.color = vec![];
+            }
+            crate::game::layers::mark_layers_entered(state, id);
+            id
+        }
+
+        /// (1a) Devotion gate — NON-perturbing: a colorless creature entering under
+        /// a devotion-to-green magnitude anthem flips no green devotion symbol, so
+        /// the entry must stay on the incremental path (full_evals==0) AND the
+        /// incremental board must match a forced-Full board.
+        #[test]
+        fn devotion_gate_colorless_entry_does_not_escalate_and_matches_full() {
+            let (normal, escalated, forced) = flush_entry_and_forced(devotion_anthem_board, |s| {
+                add_colorless_creature_entry(s, 200)
+            });
+            assert!(
+                !escalated,
+                "colorless entry flips no green devotion shard — must not escalate"
+            );
+            assert_pt_identical(&normal, &forced, "devotion gate colorless non-escalation");
+        }
+
+        /// (1b) Devotion gate — PERTURBING: a green {G}-cost permanent entering DOES
+        /// add a green devotion symbol (CR 700.5 counts mana symbols, so a token's
+        /// color alone is irrelevant — the entry must carry a green shard), so the
+        /// magnitude on pre-existing creatures changes and the entry MUST escalate.
+        #[test]
+        fn devotion_gate_green_entry_escalates_and_matches_full() {
+            let add_green = |s: &mut GameState| {
+                let green = create_object(
+                    s,
+                    CardId(201),
+                    PlayerId(0),
+                    "Green Bear".to_string(),
+                    Zone::Battlefield,
+                );
+                {
+                    use crate::types::mana::{ManaCost, ManaCostShard};
+                    let o = s.objects.get_mut(&green).unwrap();
+                    o.base_card_types.core_types = vec![CoreType::Creature];
+                    o.card_types.core_types = vec![CoreType::Creature];
+                    o.base_color = vec![ManaColor::Green];
+                    o.color = vec![ManaColor::Green];
+                    o.mana_cost = ManaCost::Cost {
+                        shards: vec![ManaCostShard::Green],
+                        generic: 0,
+                    };
+                    o.base_mana_cost = o.mana_cost.clone();
+                }
+                crate::game::layers::mark_layers_entered(s, green);
+                green
+            };
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(devotion_anthem_board, add_green);
+            assert!(
+                escalated,
+                "green {{G}}-cost permanent entry moves devotion — must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "devotion gate green escalation");
+        }
+
+        /// Build a board with an `IsPresent(Land)`-gated anthem: "creatures you
+        /// control get +1/+1 as long as you control a land". Two pre-existing
+        /// creatures, no land yet (gate OFF).
+        fn is_present_land_board() -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, StaticCondition, StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(210 + i),
+                    PlayerId(0),
+                    format!("LandGater{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(220),
+                PlayerId(0),
+                "Land Presence Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            sd.condition = Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))),
+            });
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (2a) IsPresent(Land) gate — NON-perturbing: a colorless creature entry
+        /// does not satisfy the Land filter, so the land-presence gate cannot
+        /// flip; must NOT escalate AND must match a forced-Full board.
+        #[test]
+        fn is_present_land_creature_entry_does_not_escalate_and_matches_full() {
+            let (normal, escalated, forced) = flush_entry_and_forced(is_present_land_board, |s| {
+                add_colorless_creature_entry(s, 231)
+            });
+            assert!(
+                !escalated,
+                "creature entry doesn't match Land filter — gate can't flip, no escalation"
+            );
+            assert_pt_identical(&normal, &forced, "IsPresent(Land) creature non-escalation");
+        }
+
+        /// (2b) IsPresent(Land) gate — PERTURBING: a land entering satisfies the
+        /// Land filter and flips the gate from OFF to ON for every pre-existing
+        /// creature; MUST escalate AND match a forced-Full board.
+        #[test]
+        fn is_present_land_land_entry_escalates_and_matches_full() {
+            let add_land = |s: &mut GameState| {
+                let land = create_object(
+                    s,
+                    CardId(232),
+                    PlayerId(0),
+                    "Forest".to_string(),
+                    Zone::Battlefield,
+                );
+                {
+                    let o = s.objects.get_mut(&land).unwrap();
+                    o.base_card_types.core_types = vec![CoreType::Land];
+                    o.card_types.core_types = vec![CoreType::Land];
+                }
+                crate::game::layers::mark_layers_entered(s, land);
+                land
+            };
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(is_present_land_board, add_land);
+            assert!(
+                escalated,
+                "land entry flips IsPresent(Land) ON — must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "IsPresent(Land) land escalation");
+        }
+
+        /// Build a board with a count-anthem magnitude keyed by "artifacts you
+        /// control": "creatures you control get +X/+X, X = number of artifacts
+        /// you control". Two pre-existing creatures.
+        fn artifact_count_anthem_board() -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, StaticDefinition, TypeFilter as TF, TypedFilter as TFil,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(240 + i),
+                    PlayerId(0),
+                    format!("CountBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(250),
+                PlayerId(0),
+                "Artifact Count Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let artifact_filter = TargetFilter::Typed(TFil::new(TF::Artifact));
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: artifact_filter.clone(),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: artifact_filter,
+                        },
+                    },
+                },
+            ];
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// Create a colorless artifact (non-land, non-creature) entry and mark
+        /// layers entered.
+        fn add_artifact_entry(state: &mut GameState, card_id: u64) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                "Treasure".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_card_types.core_types = vec![CoreType::Artifact];
+                o.card_types.core_types = vec![CoreType::Artifact];
+            }
+            crate::game::layers::mark_layers_entered(state, id);
+            id
+        }
+
+        /// (3a) Count-anthem (ObjectCount artifacts) — NON-perturbing: a colorless
+        /// creature entry doesn't match "artifacts you control", so the magnitude
+        /// on pre-existing creatures cannot change; must NOT escalate AND match
+        /// full.
+        #[test]
+        fn count_anthem_nonmatching_entry_does_not_escalate_and_matches_full() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(artifact_count_anthem_board, |s| {
+                    add_colorless_creature_entry(s, 251)
+                });
+            assert!(
+                !escalated,
+                "creature entry doesn't match artifact count filter — no escalation"
+            );
+            assert_pt_identical(&normal, &forced, "count-anthem non-matching non-escalation");
+        }
+
+        /// (3b) Count-anthem (ObjectCount artifacts) — PERTURBING: an artifact
+        /// entry matches the count filter, changing the magnitude applied to
+        /// pre-existing creatures; MUST escalate AND match full.
+        #[test]
+        fn count_anthem_matching_entry_escalates_and_matches_full() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(artifact_count_anthem_board, |s| add_artifact_entry(s, 252));
+            assert!(
+                escalated,
+                "artifact entry matches artifact count filter — must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "count-anthem matching escalation");
+        }
+
+        /// (4) MEDIUM-2 — whole-board TALLY affected filter
+        /// (`MostPrevalentCreatureTypeIn`). The anthem affects "creatures of the
+        /// most prevalent creature type on the battlefield". A creature token
+        /// entry whose own type is NOT the anthem's inner concern can STILL flip
+        /// which type is most prevalent for PRE-EXISTING creatures, so the entry
+        /// MUST escalate UNCONDITIONALLY (independent of any entered-object filter
+        /// match) AND match a forced-Full board.
+        /// Build a board whose anthem affects "creatures of the most prevalent
+        /// creature type on the battlefield" — a whole-board TALLY affected
+        /// filter (`MostPrevalentCreatureTypeIn`). Two pre-existing Bears.
+        fn most_prevalent_anthem_board() -> GameState {
+            use crate::types::ability::{ContinuousModification, FilterProp, StaticDefinition};
+            use crate::types::statics::StaticMode;
+            let mut base = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut base,
+                    CardId(260 + i),
+                    PlayerId(0),
+                    format!("TallyBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = base.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_card_types.subtypes = vec!["Bear".to_string()];
+                o.card_types.subtypes = vec!["Bear".to_string()];
+            }
+            let anthem = create_object(
+                &mut base,
+                CardId(270),
+                PlayerId(0),
+                "Most Prevalent Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::MostPrevalentCreatureTypeIn {
+                    zone: crate::types::zones::Zone::Battlefield,
+                    scope: crate::types::ability::ControllerRef::You,
+                }],
+                ..Default::default()
+            }));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            {
+                let o = base.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            base.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            base
+        }
+
+        #[test]
+        fn most_prevalent_tally_entry_escalates_unconditionally_and_matches_full() {
+            // The entered creature is an "Insect" — a DIFFERENT creature type than
+            // the pre-existing Bears, so it does NOT match the anthem's current
+            // "most prevalent" membership (Bear), yet adding it changes the tally
+            // and so must escalate UNCONDITIONALLY (MEDIUM-2).
+            let add_insect = |s: &mut GameState| {
+                let id = create_object(
+                    s,
+                    CardId(271),
+                    PlayerId(0),
+                    "Insect".to_string(),
+                    Zone::Battlefield,
+                );
+                {
+                    let o = s.objects.get_mut(&id).unwrap();
+                    o.base_power = Some(1);
+                    o.base_toughness = Some(1);
+                    o.power = Some(1);
+                    o.toughness = Some(1);
+                    o.base_card_types.core_types = vec![CoreType::Creature];
+                    o.card_types.core_types = vec![CoreType::Creature];
+                    o.base_card_types.subtypes = vec!["Insect".to_string()];
+                    o.card_types.subtypes = vec!["Insect".to_string()];
+                }
+                crate::game::layers::mark_layers_entered(s, id);
+                id
+            };
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(most_prevalent_anthem_board, add_insect);
+            assert!(
+                escalated,
+                "whole-board tally (MostPrevalentCreatureTypeIn) must escalate \
+                 unconditionally on ANY creature entry"
+            );
+            assert_pt_identical(
+                &normal,
+                &forced,
+                "most-prevalent tally unconditional escalation",
+            );
+        }
+
+        // ====================================================================
+        // Truth-delta short-circuit tests (CR 611.3a + CR 611.3b).
+        //
+        // A source-level (non-recipient-context) population-gated CONTINUOUS
+        // static no longer escalates an incremental flush merely because an
+        // entry perturbs its gate INPUT — it escalates only when the gate TRUTH
+        // flips. Recipient-context gates, magnitude perturbation (Axis 2a), and
+        // key-absent fail-closed all still escalate unconditionally.
+        // ====================================================================
+
+        /// Build a board with a SOURCE-LEVEL `Not(DevotionGE {Green, 7})`-gated
+        /// anthem ("creatures you control get +1/+1 as long as your devotion to
+        /// green is LESS than 7"). The gate is whole-effect on/off (consumed at
+        /// collection, `condition: None` on the active effect) and NON-recipient-
+        /// context (`condition_uses_recipient_context` is false for `DevotionGE`,
+        /// recursed through `Not`). `green_symbols` green mana symbols on the
+        /// anthem source set the controller's baseline devotion (CR 700.5), so the
+        /// caller controls whether a green {G} entry crosses the threshold-7 edge.
+        /// Two pre-existing green creatures are the anthem recipients.
+        fn devotion_gated_anthem_board(green_symbols: usize) -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, StaticCondition, StaticDefinition,
+            };
+            use crate::types::mana::{ManaCost, ManaCostShard};
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(300 + i),
+                    PlayerId(0),
+                    format!("DevBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(310),
+                PlayerId(0),
+                "Devotion-Gated Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            // CR 700.5 + CR 611.3a: source-level gate "devotion to green < 7".
+            sd.condition = Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::DevotionGE {
+                    colors: vec![ManaColor::Green],
+                    threshold: 7,
+                }),
+            });
+            let cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green; green_symbols],
+                generic: 0,
+            };
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+                o.mana_cost = cost.clone();
+                o.base_mana_cost = cost;
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// Add a single green {G}-cost creature entry. Raises green devotion by
+        /// exactly one mana symbol (CR 700.5).
+        fn add_green_devotion_entry(state: &mut GameState, card_id: u64) -> ObjectId {
+            use crate::types::mana::{ManaCost, ManaCostShard};
+            let id = create_object(
+                state,
+                CardId(card_id),
+                PlayerId(0),
+                "Green Sprout".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let cost = ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 0,
+                };
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(1);
+                o.base_toughness = Some(1);
+                o.power = Some(1);
+                o.toughness = Some(1);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+                o.mana_cost = cost.clone();
+                o.base_mana_cost = cost;
+            }
+            crate::game::layers::mark_layers_entered(state, id);
+            id
+        }
+
+        /// (a) GATE-STAYS — the truth-delta short-circuit's discriminating case.
+        /// Devotion is already 8 (>= 7), so `Not(DevotionGE 7)` is FALSE (gate
+        /// OFF); a green {G} entry raises devotion to 9 — the gate INPUT is
+        /// perturbed but its TRUTH stays FALSE. Under d9a40be71 the perturbation
+        /// alone forced escalation; the truth-delta short-circuit must now skip
+        /// it. `!escalated` FAILS under d9a40be71, PASSES after. `assert_pt_identical`
+        /// confirms the incremental board (anthem off → base 2/2 recipients)
+        /// matches a forced-full board.
+        #[test]
+        fn source_condition_gate_unchanged_does_not_escalate_and_matches_full() {
+            let (normal, escalated, forced) = flush_entry_and_forced(
+                || devotion_gated_anthem_board(8),
+                |s| add_green_devotion_entry(s, 320),
+            );
+            assert!(
+                !escalated,
+                "green entry perturbs devotion but does not flip the < 7 gate \
+                 (8 → 9, still >= 7) — truth-delta short-circuit must not escalate"
+            );
+            assert_pt_identical(&normal, &forced, "devotion gate unchanged non-escalation");
+        }
+
+        /// (b) GATE-FLIPS — baseline devotion 6 (< 7, gate ON, anthem applies
+        /// +1/+1); a green {G} entry raises devotion to 7, flipping
+        /// `Not(DevotionGE 7)` to FALSE (gate OFF). Every PRE-EXISTING recipient
+        /// loses the buff, so the flush MUST escalate. `escalated` + match-full.
+        #[test]
+        fn source_condition_gate_flip_escalates_and_matches_full() {
+            let (normal, escalated, forced) = flush_entry_and_forced(
+                || devotion_gated_anthem_board(6),
+                |s| add_green_devotion_entry(s, 321),
+            );
+            assert!(
+                escalated,
+                "green entry flips the < 7 gate (6 → 7) OFF — pre-existing \
+                 recipients lose the anthem, must escalate"
+            );
+            assert_pt_identical(&normal, &forced, "devotion gate flip escalation");
+        }
+
+        /// Build a MULTI-AXIS anthem: BOTH a `Devotion`-backed magnitude (Axis 2a,
+        /// population-sensitive) AND a source-level population-gated condition
+        /// (`IsPresent(Creature)`, ON and stable). A green {G} entry perturbs the
+        /// magnitude on PRE-EXISTING creatures, so Axis 2a must escalate FIRST —
+        /// regardless of the condition's stable truth. Pins the multi-axis
+        /// ordering (the truth-delta short-circuit must never suppress a magnitude
+        /// perturbation).
+        fn devotion_magnitude_and_condition_board() -> GameState {
+            use crate::types::ability::{
+                ContinuousModification, DevotionColors, StaticCondition, StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            for i in 0..2 {
+                let id = create_object(
+                    &mut state,
+                    CardId(330 + i),
+                    PlayerId(0),
+                    format!("MultiBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(340),
+                PlayerId(0),
+                "Multi-Axis Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::Fixed(vec![ManaColor::Green]),
+                        },
+                    },
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::Fixed(vec![ManaColor::Green]),
+                        },
+                    },
+                },
+            ];
+            // Source-level population gate, ON (creatures exist) and stable.
+            sd.condition = Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+            });
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+                o.base_color = vec![ManaColor::Green];
+                o.color = vec![ManaColor::Green];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (c) MULTI-AXIS — magnitude perturbation always escalates (Axis 2a),
+        /// even though the source-level condition's truth is stable ON. A green
+        /// {G} entry moves green devotion, changing the magnitude applied to
+        /// PRE-EXISTING creatures; the truth-delta short-circuit must NOT
+        /// suppress this. `escalated` + match-full.
+        #[test]
+        fn source_condition_and_magnitude_always_escalates() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(devotion_magnitude_and_condition_board, |s| {
+                    add_green_devotion_entry(s, 341)
+                });
+            assert!(
+                escalated,
+                "magnitude (devotion) perturbation must escalate via Axis 2a \
+                 regardless of the stable source-level condition truth"
+            );
+            assert_pt_identical(&normal, &forced, "multi-axis magnitude escalation");
+        }
+
+        /// Build a RECIPIENT-CONTEXT population-gated anthem (the BLOCKER's
+        /// discriminating guard). The condition is
+        /// `QuantityComparison { ObjectCount { Creature AND Another } GE 3 }` —
+        /// "as long as there are at least 3 OTHER creatures". `FilterProp::Another`
+        /// makes the count recipient-relative (`filter_uses_recipient` true), so
+        /// the gate is RE-EVALUATED PER RECIPIENT (`evaluate_condition_with_recipient`
+        /// threads `recipient` into the count, excluding that recipient) and
+        /// `source_condition_gate_passes` only OVER-approximates it. It is also
+        /// population-sensitive (`ObjectCount`). With 3 pre-existing creatures,
+        /// each recipient sees 2 OTHERS (gate OFF). A 4th creature entry makes
+        /// each PRE-EXISTING recipient see 3 others → its per-recipient gate flips
+        /// ON. A single board-level boolean cannot summarize this, so a
+        /// recipient-context gate must ALWAYS escalate (never short-circuit).
+        /// Ships green-and-stale WITHOUT the recipient-context exclusion.
+        fn recipient_context_count_anthem_board() -> GameState {
+            use crate::types::ability::{
+                Comparator, ContinuousModification, FilterProp, StaticCondition, StaticDefinition,
+            };
+            use crate::types::statics::StaticMode;
+            let mut state = setup();
+            // Three pre-existing creatures (recipients of the anthem).
+            for i in 0..3 {
+                let id = create_object(
+                    &mut state,
+                    CardId(350 + i),
+                    PlayerId(0),
+                    format!("CountBear{i}"),
+                    Zone::Battlefield,
+                );
+                let o = state.objects.get_mut(&id).unwrap();
+                o.base_power = Some(2);
+                o.base_toughness = Some(2);
+                o.power = Some(2);
+                o.toughness = Some(2);
+                o.base_card_types.core_types = vec![CoreType::Creature];
+                o.card_types.core_types = vec![CoreType::Creature];
+            }
+            let anthem = create_object(
+                &mut state,
+                CardId(360),
+                PlayerId(0),
+                "Other-Creatures Anthem".to_string(),
+                Zone::Battlefield,
+            );
+            let mut sd = StaticDefinition::new(StaticMode::Continuous);
+            sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            sd.modifications = vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ];
+            // Recipient-relative count: "creatures other than the recipient".
+            let other_creatures = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                properties: vec![FilterProp::Another],
+                ..Default::default()
+            });
+            sd.condition = Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: other_creatures,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            });
+            {
+                let o = state.objects.get_mut(&anthem).unwrap();
+                o.base_static_definitions = Arc::new(vec![sd.clone()]);
+                o.static_definitions = vec![sd].into();
+                o.base_card_types.core_types = vec![CoreType::Enchantment];
+                o.card_types.core_types = vec![CoreType::Enchantment];
+            }
+            state.layers_dirty = crate::types::game_state::LayersDirty::Full;
+            state
+        }
+
+        /// (d) RECIPIENT-CONTEXT (BLOCKER guard) — a population-gated condition
+        /// whose truth is PER-RECIPIENT must always escalate when perturbed, even
+        /// though `source_condition_gate_passes` would report a single, possibly-
+        /// unchanged board-level value. A 4th creature flips each pre-existing
+        /// recipient's "at least 3 other creatures" gate ON, so escalation is
+        /// mandatory. `escalated` + match-full. This ships green-and-stale WITHOUT
+        /// the recipient-context exclusion (the discriminating BLOCKER guard).
+        #[test]
+        fn recipient_context_population_condition_always_escalates_and_matches_full() {
+            let (normal, escalated, forced) =
+                flush_entry_and_forced(recipient_context_count_anthem_board, |s| {
+                    add_colorless_creature_entry(s, 361)
+                });
+            assert!(
+                escalated,
+                "recipient-context population gate re-evaluates per recipient — \
+                 a threshold-edge creature entry flips pre-existing recipients' \
+                 gates; must escalate unconditionally (never short-circuit)"
+            );
+            assert_pt_identical(
+                &normal,
+                &forced,
+                "recipient-context unconditional escalation",
+            );
+        }
+
+        /// (e) FAIL-CLOSED KEY-ABSENT — when a source-level population-gated
+        /// static's key is ABSENT from `static_gate_truth` (e.g. the cache was
+        /// never refreshed for it, or it was phased out at the last full eval),
+        /// the consult must FAIL CLOSED and escalate. Prime the board, perturb,
+        /// then clear the cache before consulting `incremental_flush_must_escalate`
+        /// directly — the missing BEFORE truth forces a conservative full pass.
+        #[test]
+        fn absent_gate_key_escalates() {
+            let mut state = devotion_gated_anthem_board(6);
+            flush_layers(&mut state);
+            // A green entry perturbs the < 7 gate (would flip 6 → 7).
+            add_green_devotion_entry(&mut state, 322);
+            let entered_ids: std::collections::HashSet<ObjectId> = match &state.layers_dirty {
+                crate::types::game_state::LayersDirty::EnteredObjects(ids) => ids.clone(),
+                other => panic!("expected EnteredObjects, got {other:?}"),
+            };
+            // Simulate a stale/absent cache: drop every recorded gate truth.
+            state.static_gate_truth.clear();
+            assert!(
+                crate::game::layers::incremental_flush_must_escalate(&state, &entered_ids),
+                "absent gate-truth key must fail closed and escalate (invariant 1)"
+            );
+        }
+
+        /// Assert every battlefield object's computed power/toughness/loyalty and
+        /// keyword set are identical across two states.
+        fn assert_pt_identical(a: &GameState, b: &GameState, label: &str) {
+            assert_eq!(
+                a.battlefield.len(),
+                b.battlefield.len(),
+                "{label}: battlefield size mismatch"
+            );
+            for &id in a.battlefield.iter() {
+                let oa = a.objects.get(&id).expect("a object");
+                let ob = b.objects.get(&id).expect("b object");
+                assert_eq!(oa.power, ob.power, "{label}: power mismatch for {id:?}");
+                assert_eq!(
+                    oa.toughness, ob.toughness,
+                    "{label}: toughness mismatch for {id:?}"
+                );
+                assert_eq!(
+                    oa.keywords, ob.keywords,
+                    "{label}: keyword mismatch for {id:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 706.2 + CR 706.4 + CR 603.12: A reflexive "When you do … the result"
+    /// sub-ability resolves on its OWN `StackEntryKind::TriggeredAbility` entry,
+    /// in a later resolution scope than the original roll. The rolled value is
+    /// carried on the entry's `die_result` field and re-stamped into
+    /// `die_result_this_resolution` by `resolve_top` so the entry's
+    /// `EventContextAmount` reads the roll (11), NOT the surviving combat-damage
+    /// event amount (6). This is the building-block guard for Ancient Bronze
+    /// Dragon's reflexive class (issue #1602, Deliverable 1).
+    #[test]
+    fn reflexive_entry_lifts_carried_die_result_into_resolution_scope() {
+        let mut state = setup();
+        // A source object on the battlefield (controller P0).
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Ancient Bronze Dragon".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The reflexive sub-ability: "gain life equal to the result".
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::EventContextAmount,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        // Carry die_result: Some(11) onto the entry, alongside a SURVIVING
+        // combat-damage trigger event (amount 6). Match-count is None so the
+        // die slot is what the cascade must read.
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 6,
+            is_combat: true,
+            excess: 0,
+        });
+        state.stack.push_back(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Ancient Bronze Dragon".to_string(),
+                subject_match_count: None,
+                die_result: Some(11),
+            },
+        });
+
+        let life_before = state.players[0].life;
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        // Gained 11 (the carried die result), NOT 6 (the combat-damage event).
+        assert_eq!(
+            state.players[0].life - life_before,
+            11,
+            "reflexive entry must read the carried die result (11), not the \
+             surviving combat-damage amount (6)"
+        );
+        // The die slot is cleared at the cross-resolution boundary after the
+        // entry resolves (mirrors the batched subject-count lifecycle).
+        assert_eq!(state.die_result_this_resolution, None);
+        assert_eq!(state.current_trigger_match_count, None);
     }
 }

@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Rozwiązywanie {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Karta zakryta",
     "loading": "Wczytywanie {{name}}",
     "unimplemented": "Niezaimplementowane: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Obrócona"
   },
   "preview": {
     "holdCtrlBack": "Przytrzymaj Ctrl, aby zobaczyć tylną stronę",
@@ -25,9 +29,32 @@
     "fromSource": "(od {{source}})",
     "basePT": "(bazowo {{power}}/{{toughness}})",
     "damage": "Obrażenia: {{amount}}",
+    "activateCost": "Aktywuj — {{cost}}",
     "ptDeltaFrom": "{{delta}} od {{source}}",
     "colors": "Kolory: {{colors}}",
-    "colorless": "Bezbarwny"
+    "colorless": "Bezbarwny",
+    "chosen": {
+      "title": "Wybrane",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Gracz {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Nieznane",
+      "kind": {
+        "color": "Kolor",
+        "creatureType": "Typ stwora",
+        "basicLandType": "Typ podstawowego lądu",
+        "cardType": "Typ karty",
+        "oddOrEven": "Parzyste lub nieparzyste",
+        "cardName": "Nazwa karty",
+        "number": "Liczba",
+        "player": "Gracz",
+        "twoColors": "Dwa kolory",
+        "tributeOutcome": "Tribute",
+        "keyword": "Słowo kluczowe",
+        "label": "Etykieta",
+        "fallback": "Wybór"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Wyczyść atakujących",
@@ -211,6 +238,9 @@
     "radAriaLabel_one": "{{count}} znacznik promieniowania",
     "radAriaLabel_other": "{{count}} znaczników promieniowania",
     "radTooltip": "Znaczniki promieniowania: {{count}}",
+    "experienceAriaLabel_one": "{{count}} znacznik doświadczenia",
+    "experienceAriaLabel_other": "{{count}} znaczniki doświadczenia",
+    "experienceTooltip": "Znaczniki doświadczenia: {{count}}",
     "speedAriaLabel": "Prędkość {{value}}",
     "speedTooltip": "Prędkość: {{value}}",
     "companion": "Towarzysz"
@@ -381,12 +411,14 @@
     "chooseNewTarget": "Wybierz nowy cel czaru",
     "chooseNewTargetForSpell": "Wybierz nowy cel dla {{spell}}",
     "chooseCreatureToExplore": "Wybierz, który stwór eksploruje jako następny",
+    "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",
     "chooseTarget": "Wybierz cel",
     "noLegalTargets": "Brak dostępnych dozwolonych celów",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "do jednego {{target}}",
     "one": "{{target}}",
     "nounPlayer": "gracz",
@@ -449,7 +481,26 @@
     "companionRevealed": "{{player}} ujawnił towarzysza: {{cardName}}",
     "companionMovedToHand": "{{player}} wziął towarzysza {{cardName}} do ręki",
     "powerToughnessChanged": "Obiekt {{objectId}} ma teraz {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Zdarzenie: {{type}}"
+    "genericEvent": "Zdarzenie: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Narzędzia silnika",
@@ -861,6 +912,7 @@
       "titleSacrifice": "Poświęć",
       "titleTopdeck": "Połóż na bibliotekę",
       "titleBattlefield": "Połóż na pole bitwy",
+      "titleHand": "Zwróć",
       "subtitleSacrificeExact_one": "Wybierz {{count}} trwałego do poświęcenia",
       "subtitleSacrificeExact_other": "Wybierz {{count}} trwałych do poświęcenia",
       "subtitleSacrificeUpTo_one": "Wybierz do {{count}} trwałego do poświęcenia",
@@ -879,12 +931,19 @@
       "subtitleBattlefieldUpTo_other": "Wybierz do {{count}} kart, aby położyć na pole bitwy",
       "subtitleBattlefieldRange_one": "Wybierz {{min}}-{{count}} kartę, aby położyć na pole bitwy",
       "subtitleBattlefieldRange_other": "Wybierz {{min}}-{{count}} kart, aby położyć na pole bitwy",
+      "subtitleHandExact_one": "Wybierz {{count}} trwałego do zwrócenia do ręki właściciela",
+      "subtitleHandExact_other": "Wybierz {{count}} trwałych do zwrócenia do ręki właścicieli",
+      "subtitleHandUpTo_one": "Wybierz do {{count}} trwałego do zwrócenia do ręki właściciela",
+      "subtitleHandUpTo_other": "Wybierz do {{count}} trwałych do zwrócenia do ręki właścicieli",
+      "subtitleHandRange_one": "Wybierz {{min}}-{{count}} trwałego do zwrócenia do ręki właściciela",
+      "subtitleHandRange_other": "Wybierz {{min}}-{{count}} trwałych do zwrócenia do ręki właścicieli",
       "labelSkip": "Pomiń",
       "labelDecline": "Odmów",
       "labelPutOnTop": "Połóż na wierzch ({{order}})",
       "labelConfirm": "Potwierdź ({{selected}}/{{count}})",
       "labelTop": "Wierzch ({{selected}}/{{count}})",
       "labelPut": "Połóż ({{selected}}/{{count}})",
+      "labelReturn": "Zwróć ({{selected}}/{{count}})",
       "orderTop": "Wierzch"
     },
     "drawnThisTurn": {
@@ -980,6 +1039,12 @@
       "subtitle_one": "Wygnaj {{count}} kartę z {{source}}",
       "subtitle_other": "Wygnaj {{count}} kart z {{source}}"
     },
+    "craft": {
+      "title": "Wytwórz",
+      "subtitle_one": "Wygnaj {{count}} materiał, aby wytworzyć",
+      "subtitle_other": "Wygnaj {{count}} materiały, aby wytworzyć",
+      "subtitleRange": "Wygnaj od {{min}} do {{count}} materiałów, aby wytworzyć"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Wygnaj pasującego trwałego lub kartę",
@@ -1062,6 +1127,16 @@
       "subtitle": "Wybierz, jaką kombinację many wytworzyć"
     }
   },
+  "specializeColor": {
+    "title": "Wybierz specjalizację",
+    "subtitle": "Wybierz kolor zgodny z odrzuconą kartą",
+    "confirm": "Specjalizuj",
+    "white": "Biały",
+    "blue": "Niebieski",
+    "black": "Czarny",
+    "red": "Czerwony",
+    "green": "Zielony"
+  },
   "dialogShell": {
     "eyebrow": "Wybór w grze",
     "restoreDialog": "Przywróć okno dialogowe",
@@ -1105,6 +1180,18 @@
     "bestowNormalLabel": "Rzuć jako stwora",
     "bestowAltLabel": "Rzuć z Bestow",
     "bestowSubtitle": "Rzuć {{name}} normalnie jako stwora lub zapłać jego koszt Bestow, aby rzucić go jako Aurę.",
+    "awakenEyebrow": "Awaken",
+    "awakenNormalLabel": "Rzuć normalnie",
+    "awakenAltLabel": "Rzuć z Awaken",
+    "awakenSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Awaken, aby dodatkowo umieścić znaczniki +1/+1 na ziemi, którą kontrolujesz, i zmienić ją w stwora Elementala 0/0 z pośpiechem.",
+    "cleaveEyebrow": "Cleave",
+    "cleaveNormalLabel": "Rzuć normalnie",
+    "cleaveAltLabel": "Rzuć z Cleave",
+    "cleaveSubtitle": "Rzuć {{name}} normalnie, lub zapłać jego koszt Cleave, aby usunąć tekst w nawiasach kwadratowych.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Wygnaj kartę",
     "additionalSacrifice": "+ Poświęć trwałego",
     "additionalPayLife": "+ Zapłać życie",
@@ -1116,6 +1203,10 @@
     "title": "Wybierz obrońcę",
     "battleFallback": "Bitwa",
     "subtitle": "{{name}} potrzebuje nowego obrońcy. Wybierz, który przeciwnik będzie jej bronił."
+  },
+  "clashOpponent": {
+    "title": "Wybierz przeciwnika do starcia",
+    "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
   },
   "cardDataMissing": {
     "title": "Brak danych kart",
@@ -1163,8 +1254,8 @@
   },
   "categoryChoice": {
     "title": "Wybierz trwałe do zatrzymania",
-    "subtitleOpponent": "Wybierz po jednym trwałym każdego typu spośród trwałych niebędących ziemiami, które kontroluje {{name}}; reszta zostaje poświęcona.",
-    "subtitleSelf": "Wybierz po jednym trwałym każdego typu spośród trwałych niebędących ziemiami, które kontrolujesz; reszta zostaje poświęcona.",
+    "subtitleOpponent": "Wybierz trwały dla każdej kategorii dla {{name}}.",
+    "subtitleSelf": "Wybierz trwały dla każdej kategorii.",
     "noneToKeep": "Brak {{category}} — nic do zatrzymania",
     "objectFallback": "Obiekt {{id}}"
   },
@@ -1268,7 +1359,9 @@
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
-    "buttonSubtitle": "Wybierz jedną opcję"
+    "buttonSubtitle": "Wybierz jedną opcję",
+    "filterPlaceholder": "Filtruj opcje...",
+    "noOptionsMatch": "Brak pasujących opcji"
   },
   "nonFatalPanic": {
     "heading": "Ostrzeżenie silnika (niekrytyczne)",
@@ -1405,5 +1498,21 @@
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
+  },
+  "coinFlip": {
+    "keep": {
+      "title": "Krark's Thumb",
+      "subtitle": "Flip two coins and ignore one — choose which result to keep.",
+      "heads": "Heads",
+      "tails": "Tails"
+    },
+    "buttons": {
+      "keep": "Keep this"
+    }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

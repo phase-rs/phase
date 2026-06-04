@@ -71,7 +71,7 @@ expression: "&ir"
               "type_filters": [
                 "Planeswalker"
               ],
-              "controller": "You",
+              "controller": "TargetPlayer",
               "properties": []
             }
           },

@@ -178,7 +178,12 @@ export class ServerDraftAdapter implements EngineAdapter {
     return new Promise<SubmitResult>((resolve, reject) => {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
-      this.send({ type: "Action", data: { action } });
+      if (!this.send({ type: "Action", data: { action } })) {
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        this.emit({ type: "actionPendingChanged", pending: false });
+        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+      }
     });
   }
 
@@ -278,7 +283,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     return new Promise<DraftPlayerView>((resolve, reject) => {
       this.draftResolve = resolve;
       this.draftReject = reject;
-      this.send({
+      const sent = this.send({
         type: "DraftAction",
         data: {
           draft_code: this.draftCode,
@@ -288,6 +293,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           },
         },
       });
+      if (!sent) {
+        this.draftResolve = null;
+        this.draftReject = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
+      }
     });
   }
 
@@ -298,7 +308,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     return new Promise<DraftPlayerView>((resolve, reject) => {
       this.draftResolve = resolve;
       this.draftReject = reject;
-      this.send({
+      const sent = this.send({
         type: "DraftAction",
         data: {
           draft_code: this.draftCode,
@@ -308,6 +318,11 @@ export class ServerDraftAdapter implements EngineAdapter {
           },
         },
       });
+      if (!sent) {
+        this.draftResolve = null;
+        this.draftReject = null;
+        reject(new AdapterError("WS_CLOSED", "Failed to send draft action", true));
+      }
     });
   }
 
@@ -414,7 +429,20 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
     };
 
-    socket.ws.send(JSON.stringify(setupFrame));
+    if (!this.send(setupFrame)) {
+      socket.close();
+      const err = new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
+      if (this.initReject) {
+        this.initReject(err);
+        this.initResolve = null;
+        this.initReject = null;
+      }
+      if (this.draftReject) {
+        this.draftReject(err);
+        this.draftResolve = null;
+        this.draftReject = null;
+      }
+    }
   }
 
   // ── Message handling ───────────────────────────────────────────────
@@ -695,8 +723,27 @@ export class ServerDraftAdapter implements EngineAdapter {
     }, 5000);
   }
 
-  private send(msg: unknown): void {
-    this.ws?.send(JSON.stringify(msg));
+  private send(msg: unknown): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      this.emit({
+        type: "error",
+        message: "Cannot send message: WebSocket is not open.",
+      });
+      return false;
+    }
+    try {
+      ws.send(JSON.stringify(msg));
+      return true;
+    } catch (err) {
+      this.emit({
+        type: "error",
+        message: `Failed to send message: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+      return false;
+    }
   }
 
   dispose(): void {

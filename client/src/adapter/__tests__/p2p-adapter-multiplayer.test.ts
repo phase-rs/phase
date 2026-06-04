@@ -107,20 +107,22 @@ const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce
 const mockGetAiAction = mocks.getAiAction as unknown as AsyncMockWithResolvedValueOnce;
 
 vi.mock("../wasm-adapter", () => ({
-  WasmAdapter: vi.fn().mockImplementation(() => ({
-    initialize: vi.fn(async () => undefined),
-    initializeGame: mocks.initializeGame,
-    submitAction: mocks.submitAction,
-    getState: mocks.getState,
-    getLegalActions: mocks.getLegalActions,
-    getLegalActionsForViewer: mocks.getLegalActionsForViewer,
-    getFilteredState: mocks.getFilteredState,
-    getViewerSnapshot: mocks.getViewerSnapshot,
-    getAiAction: mocks.getAiAction,
-    applySeatMutation: mocks.applySeatMutation,
-    setMultiplayerMode: mocks.setMultiplayerMode,
-    dispose: vi.fn(),
-  })),
+  WasmAdapter: vi.fn().mockImplementation(function () {
+    return {
+      initialize: vi.fn(async () => undefined),
+      initializeGame: mocks.initializeGame,
+      submitAction: mocks.submitAction,
+      getState: mocks.getState,
+      getLegalActions: mocks.getLegalActions,
+      getLegalActionsForViewer: mocks.getLegalActionsForViewer,
+      getFilteredState: mocks.getFilteredState,
+      getViewerSnapshot: mocks.getViewerSnapshot,
+      getAiAction: mocks.getAiAction,
+      applySeatMutation: mocks.applySeatMutation,
+      setMultiplayerMode: mocks.setMultiplayerMode,
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 // Stub crypto.randomUUID for deterministic token assertions
@@ -307,6 +309,66 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       { type: "MulliganDecision", data: { choice: { type: "Keep" } } },
       1,
     );
+  });
+
+  it("keeps the host AI loop silent when the host controls an AI seat's turn", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: {
+          type: "Ai",
+          data: { difficulty: "Medium", deck: { type: "Random" } },
+        },
+      },
+    });
+
+    mockGetState.mockResolvedValueOnce({
+      waiting_for: { type: "Priority", data: { player: 1 } },
+      priority_player: 0,
+    });
+
+    await adapter.initializeGame();
+
+    expect(mockGetAiAction).not.toHaveBeenCalled();
+    expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
+  it("drives the AI submitter when an AI controls the host's turn", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: {
+          type: "Ai",
+          data: { difficulty: "Medium", deck: { type: "Random" } },
+        },
+      },
+    });
+
+    mockGetState
+      .mockResolvedValueOnce({
+        waiting_for: { type: "Priority", data: { player: 0 } },
+        priority_player: 1,
+      })
+      .mockResolvedValueOnce({
+        waiting_for: { type: "Priority", data: { player: 0 } },
+        priority_player: 0,
+      })
+      .mockResolvedValueOnce({
+        waiting_for: { type: "Priority", data: { player: 0 } },
+        priority_player: 0,
+      });
+    mockGetAiAction.mockResolvedValueOnce({ type: "PassPriority" });
+
+    await adapter.initializeGame();
+
+    expect(mockGetAiAction).toHaveBeenCalledWith("Medium", 1);
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
   });
 
   it("issues unique tokens per guest and includes them in per-seat game_setup", async () => {

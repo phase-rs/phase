@@ -7,7 +7,9 @@ pub use engine::game::combat::AttackTarget;
 pub use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 pub use engine::types::actions::GameAction;
 pub use engine::types::events::GameEvent;
-pub use engine::types::game_state::{ActionResult, DamageSlot, WaitingFor};
+pub use engine::types::game_state::{
+    ActionResult, CostResume, DamageSlot, PayCostKind, WaitingFor,
+};
 pub use engine::types::identifiers::ObjectId;
 pub use engine::types::keywords::Keyword;
 pub use engine::types::phase::Phase;
@@ -94,7 +96,7 @@ pub fn run_combat(
 }
 
 // Mechanic test modules (stubs -- populated in Plans 02 and 03)
-#[path = "rules/battle.rs"]
+mod attractions;
 mod battle;
 #[path = "rules/casting.rs"]
 mod casting;

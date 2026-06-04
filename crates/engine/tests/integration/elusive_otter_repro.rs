@@ -14,7 +14,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::game_state::CastingVariant;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastOfferKind, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -66,7 +66,13 @@ fn elusive_otter_creature_face_cast_does_not_panic() {
         })
         .expect("cast should be accepted");
     assert!(
-        matches!(r1.waiting_for, WaitingFor::AdventureCastChoice { .. }),
+        matches!(
+            r1.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            }
+        ),
         "Expected AdventureCastChoice, got {:?}",
         r1.waiting_for
     );
@@ -110,7 +116,7 @@ fn elusive_otter_adventure_face_cast_does_not_panic() {
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
-    add_mana(&mut runner, &[ManaType::Green]);
+    add_mana(&mut runner, &[ManaType::Green, ManaType::Colorless]);
 
     let card_id = runner.state().objects[&otter_id].card_id;
     runner
@@ -123,11 +129,11 @@ fn elusive_otter_adventure_face_cast_does_not_panic() {
     runner
         .act(GameAction::ChooseAdventureFace { creature: false })
         .expect("adventure face cast should succeed");
-    // X-cost commit (X=0; finalize_cast stamps the final variant onto the
-    // stack entry only after the X choice).
+    // X-cost commit. Grove's Bounty requires each target to receive at least
+    // one +1/+1 counter, so X=1 is the smallest legal adventure cast.
     runner
-        .act(GameAction::ChooseX { value: 0 })
-        .expect("X=0 commit should succeed");
+        .act(GameAction::ChooseX { value: 1 })
+        .expect("X=1 commit should succeed");
 
     // CR 715.3a: finalized on the stack with the Adventure variant so it
     // resolves to exile (not graveyard) and remembers the alternative-cast

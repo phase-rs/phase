@@ -40,6 +40,13 @@ fn player_context_target(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> Option<TargetRef> {
+    if matches!(target_filter, TargetFilter::SourceChosenPlayer) {
+        // CR 607.2d + CR 608.2c: Resolve "the chosen player" from the
+        // source's linked persisted choice.
+        return crate::game::game_object::source_chosen_player(state, ability.source_id)
+            .map(TargetRef::Player);
+    }
+
     if matches!(
         target_filter,
         TargetFilter::Controller
@@ -315,7 +322,7 @@ pub(crate) fn apply_damage_after_replacement(
                         target_obj.dealt_deathtouch_damage = true;
                     }
                 }
-                state.layers_dirty = true;
+                crate::game::layers::mark_layers_full(state);
             } else {
                 // Classify the target before mutating so the post-classification
                 // helper can take a fresh `&mut GameState` borrow.
@@ -473,14 +480,44 @@ pub(crate) fn apply_damage_after_replacement(
                 .map(|object| object.controller)
                 .unwrap_or(ctx.controller),
         };
-        state.damage_dealt_this_turn.push(DamageRecord {
+        // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
+        // damage time so look-back source-filter queries ("opponents who were
+        // dealt combat damage by ~ or a Dragon this turn") evaluate against the
+        // source as it was when the damage was dealt — the source may later
+        // change type, leave the battlefield (CR 113.7a LKI), or be removed.
+        let src = state.objects.get(&ctx.source_id);
+        let mut record = DamageRecord {
             source_id: ctx.source_id,
             source_controller: ctx.controller,
             target: t.clone(),
             target_controller,
             amount: actual_amount,
             is_combat,
-        });
+            // CR 608.2i + CR 608.2h: the obj-derived source snapshot below
+            // overwrites these when the source still exists; the empty/default
+            // tail (Default::default()) covers the source-already-gone case.
+            source_controller_snapshot: ctx.controller,
+            source_owner: ctx.controller,
+            ..Default::default()
+        };
+        if let Some(obj) = src {
+            record.source_name = obj.name.clone();
+            record.source_core_types = obj.card_types.core_types.clone();
+            record.source_subtypes = obj.card_types.subtypes.clone();
+            record.source_supertypes = obj.card_types.supertypes.clone();
+            record.source_keywords = obj.keywords.clone();
+            record.source_power = obj.power;
+            record.source_toughness = obj.toughness;
+            record.source_colors = obj.color.clone();
+            record.source_mana_value = obj.mana_cost.mana_value();
+            record.source_controller_snapshot = obj.controller;
+            record.source_owner = obj.owner;
+            // CR 608.2i: snapshot the source's zone (Stack for a spell,
+            // Battlefield for a permanent) so a zone-discriminating look-back
+            // source filter evaluates against the zone as it was at damage time.
+            record.source_zone = obj.zone;
+        }
+        state.damage_dealt_this_turn.push_back(record);
     }
 
     // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to damage dealt.
@@ -855,14 +892,26 @@ fn collect_matching_players(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != source_controller && p.life_gained_this_turn > 0
                     }
-                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
-                    // damage this turn (`damage_dealt_this_turn` ledger).
-                    PlayerFilter::OpponentDealtCombatDamage => {
+                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
+                    // who was dealt combat damage this turn, optionally
+                    // restricted to a matching source.
+                    PlayerFilter::OpponentDealtCombatDamage { ref source } => {
+                        crate::game::quantity::opponent_dealt_combat_damage_matches(
+                            state,
+                            p.id,
+                            source_controller,
+                            source,
+                            source_id,
+                        )
+                    }
+                    // CR 508.6: opponent this player attacked this turn.
+                    PlayerFilter::OpponentAttackedThisTurn => {
+                        p.id != source_controller && state.has_attacked(source_controller, p.id)
+                    }
+                    // CR 508.6: opponent this source creature attacked this turn.
+                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
                         p.id != source_controller
-                            && state.damage_dealt_this_turn.iter().any(|r| {
-                                r.is_combat
-                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
-                            })
+                            && state.creature_attacked_player_this_turn(source_id, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -913,18 +962,51 @@ fn collect_matching_players(
                     // for a damage-each-player effect (no parent object target
                     // is in scope); never matches.
                     PlayerFilter::ParentObjectTargetController => false,
-                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
-                    // control [filter]" — candidate satisfies both `relation`
-                    // and the controls/controls-none predicate.
-                    PlayerFilter::ControlsPermanent {
+                    // CR 109.4 + CR 109.5: "each [player class] who controls
+                    // [comparator] [count] [filter]" — candidate satisfies both
+                    // `relation` and the controlled-permanent count comparison.
+                    PlayerFilter::ControlsCount {
                         ref relation,
-                        ref presence,
                         ref filter,
+                        ref comparator,
+                        ref count,
                     } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            count,
+                            source_controller,
+                            source_id,
+                        );
                         crate::game::players::matches_relation(p.id, source_controller, *relation)
-                            && crate::game::effects::player_controls_matching_permanent(
-                                state, p.id, presence, filter, source_id,
+                            && crate::game::effects::player_control_count_compares(
+                                state,
+                                p.id,
+                                filter,
+                                *comparator,
+                                threshold,
+                                source_id,
                             )
+                    }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `attr` is read directly off `p`; `value` is
+                    // the controller-relative threshold, resolved once.
+                    PlayerFilter::PlayerAttribute {
+                        ref relation,
+                        ref attr,
+                        ref comparator,
+                        ref value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            value,
+                            source_controller,
+                            source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, source_controller, *relation)
+                            && crate::game::effects::candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })
@@ -982,14 +1064,26 @@ pub fn resolve_each_player(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != ability.controller && p.life_gained_this_turn > 0
                     }
-                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
-                    // damage this turn (`damage_dealt_this_turn` ledger).
-                    PlayerFilter::OpponentDealtCombatDamage => {
+                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
+                    // who was dealt combat damage this turn, optionally
+                    // restricted to a matching source.
+                    PlayerFilter::OpponentDealtCombatDamage { source } => {
+                        crate::game::quantity::opponent_dealt_combat_damage_matches(
+                            state,
+                            p.id,
+                            ability.controller,
+                            source,
+                            ability.source_id,
+                        )
+                    }
+                    // CR 508.6: opponent this player attacked this turn.
+                    PlayerFilter::OpponentAttackedThisTurn => {
+                        p.id != ability.controller && state.has_attacked(ability.controller, p.id)
+                    }
+                    // CR 508.6: opponent this source creature attacked this turn.
+                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
                         p.id != ability.controller
-                            && state.damage_dealt_this_turn.iter().any(|r| {
-                                r.is_combat
-                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
-                            })
+                            && state.creature_attacked_player_this_turn(ability.source_id, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -1042,22 +1136,51 @@ pub fn resolve_each_player(
                     // for a damage-each-player effect (no parent object target
                     // is in scope); never matches.
                     PlayerFilter::ParentObjectTargetController => false,
-                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
-                    // control [filter]" — candidate satisfies both `relation`
-                    // and the controls/controls-none predicate.
-                    PlayerFilter::ControlsPermanent {
+                    // CR 109.4 + CR 109.5: "each [player class] who controls
+                    // [comparator] [count] [filter]" — candidate satisfies both
+                    // `relation` and the controlled-permanent count comparison.
+                    PlayerFilter::ControlsCount {
                         relation,
-                        presence,
                         filter,
+                        comparator,
+                        count,
                     } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            count,
+                            ability.controller,
+                            ability.source_id,
+                        );
                         crate::game::players::matches_relation(p.id, ability.controller, *relation)
-                            && crate::game::effects::player_controls_matching_permanent(
+                            && crate::game::effects::player_control_count_compares(
                                 state,
                                 p.id,
-                                presence,
                                 filter,
+                                *comparator,
+                                threshold,
                                 ability.source_id,
                             )
+                    }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `attr` is read directly off `p`; `value` is
+                    // the controller-relative threshold, resolved once.
+                    PlayerFilter::PlayerAttribute {
+                        relation,
+                        attr,
+                        comparator,
+                        value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            value,
+                            ability.controller,
+                            ability.source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, ability.controller, *relation)
+                            && crate::game::effects::candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })
@@ -1139,6 +1262,47 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 122.1c: damage to a permanent with a shield counter is prevented and
+    /// one shield counter is removed (non-combat / single-source path).
+    #[test]
+    fn shield_counter_prevents_noncombat_damage_and_is_consumed() {
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+
+        let ability = make_ability(3, vec![TargetRef::Object(obj_id)]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&obj_id].damage_marked, 0,
+            "shield counter prevents the damage"
+        );
+        assert_eq!(
+            state.objects[&obj_id].counters.get(&CounterType::Shield),
+            None,
+            "the shield counter is consumed"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+            "a DamagePrevented event is emitted"
+        );
     }
 
     #[test]
@@ -1835,12 +1999,11 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.objects[&battle_id].defense, Some(0));
-        assert_eq!(
-            state.objects[&battle_id]
+        assert!(
+            !state.objects[&battle_id]
                 .counters
-                .get(&CounterType::Defense)
-                .copied(),
-            Some(0)
+                .contains_key(&CounterType::Defense),
+            "zero-count defense entry should be pruned after damage removes the last counter"
         );
     }
 

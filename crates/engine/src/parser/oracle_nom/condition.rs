@@ -1599,6 +1599,26 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
 
+    // CR 119: "you have at least N life more than your starting life total"
+    // (Angel of Destiny intervening-if; also the "as long as" static gate) →
+    // LifeAboveStarting ≥ N. Reuses the `LifeAboveStarting` building block
+    // (current life − starting life total) so the trigger and static paths share
+    // one canonical condition shape. Both "at least N" and "N or more" wordings
+    // map to GE; the trailing-suffix tag gates this branch, so non-matching
+    // "at least"/"or more" life phrases fall through to the bare-life arms below.
+    if let Ok((after_n, n)) = alt((
+        preceded(tag::<_, _, OracleError<'_>>("at least "), parse_number),
+        terminated(parse_number, tag::<_, _, OracleError<'_>>(" or more")),
+    ))
+    .parse(rest)
+    {
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>(" life more than your starting life total").parse(after_n)
+        {
+            return Ok((rest, make_quantity_ge(QuantityRef::LifeAboveStarting, n)));
+        }
+    }
+
     // "you have N or more [you-only quantity-suffix]"
     let (rest, n) = parse_number(rest)?;
 
@@ -2491,7 +2511,19 @@ fn parse_zone_phrase(input: &str) -> OracleResult<'_, Zone> {
 /// etc.) without enumerating each (zone × zone) permutation.
 fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_self_token(input)?;
-    let (rest, _) = tag(" is").parse(rest)?;
+    // CR 113.6b vs CR 113.6c: the copula polarity decides which zone-function
+    // rule applies. Affirmative ("~ is on the battlefield") names the zones the
+    // ability functions IN (CR 113.6b). Negated ("~ isn't on the battlefield" /
+    // "~ is not on the battlefield") names the zones it does NOT function in,
+    // i.e. it functions everywhere except those zones (CR 113.6c) — modeled by
+    // wrapping the affirmative reading in `Not`. Negated copulae are tried first
+    // so " is not " is not greedily split into " is " + "not …" (mirrors the
+    // polarity alternation in `parse_recipient_is_filter_condition`).
+    let (rest, negated) = alt((
+        value(true, alt((tag(" isn't"), tag(" is not")))),
+        value(false, tag(" is")),
+    ))
+    .parse(rest)?;
     let (rest, first) = parse_zone_phrase(rest)?;
     // CR 113.6b: a single ability that names multiple zones functions in each
     // of them — the "or"-separated zone list composes disjunctively across the
@@ -2499,15 +2531,26 @@ fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticConditi
     // authority for the disjunction is the same CR 113.6b that authorizes the
     // zone clause itself.)
     let (rest, more) = many0(preceded(parse_zone_list_separator, parse_zone_phrase)).parse(rest)?;
-    if more.is_empty() {
-        return Ok((rest, StaticCondition::SourceInZone { zone: first }));
-    }
-    let mut conditions = Vec::with_capacity(more.len() + 1);
-    conditions.push(StaticCondition::SourceInZone { zone: first });
-    for zone in more {
-        conditions.push(StaticCondition::SourceInZone { zone });
-    }
-    Ok((rest, StaticCondition::Or { conditions }))
+    let condition = if more.is_empty() {
+        StaticCondition::SourceInZone { zone: first }
+    } else {
+        let mut conditions = Vec::with_capacity(more.len() + 1);
+        conditions.push(StaticCondition::SourceInZone { zone: first });
+        for zone in more {
+            conditions.push(StaticCondition::SourceInZone { zone });
+        }
+        StaticCondition::Or { conditions }
+    };
+    let condition = if negated {
+        // CR 113.6c: an ability that states which zones it doesn't function in
+        // functions everywhere except those zones.
+        StaticCondition::Not {
+            condition: Box::new(condition),
+        }
+    } else {
+        condition
+    };
+    Ok((rest, condition))
 }
 
 fn parse_zone_list_separator(input: &str) -> OracleResult<'_, ()> {
@@ -5030,6 +5073,55 @@ mod tests {
         );
     }
 
+    /// CR 113.6c: "as long as ~ isn't on the battlefield" (Grist, the Hunger
+    /// Tide's command-zone-as-creature static) — the negated copula must wrap
+    /// the affirmative `SourceInZone { Battlefield }` reading in `Not`, marking
+    /// that the ability functions everywhere EXCEPT the battlefield.
+    #[test]
+    fn parse_source_isnt_on_battlefield_wraps_in_not() {
+        let (rest, c) = parse_condition("as long as ~ isn't on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceInZone {
+                    zone: crate::types::zones::Zone::Battlefield,
+                }),
+            },
+        );
+    }
+
+    /// CR 113.6b: the affirmative copula still produces the bare
+    /// `SourceInZone { Battlefield }` (no `Not` wrapper) — guards against the
+    /// polarity alternation regressing the existing affirmative path.
+    #[test]
+    fn parse_source_is_on_battlefield_stays_affirmative() {
+        let (rest, c) = parse_condition("as long as ~ is on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::SourceInZone {
+                zone: crate::types::zones::Zone::Battlefield,
+            },
+        );
+    }
+
+    /// CR 113.6c: the "is not" spelling variant must also wrap in `Not` and must
+    /// not be greedily split into " is " + "not on the battlefield".
+    #[test]
+    fn parse_source_is_not_on_battlefield_wraps_in_not() {
+        let (rest, c) = parse_condition("as long as ~ is not on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceInZone {
+                    zone: crate::types::zones::Zone::Battlefield,
+                }),
+            },
+        );
+    }
+
     // --- parse_reflexive_conditional_connector (CR 603.12 / 608.2c) ---
 
     #[test]
@@ -7425,6 +7517,55 @@ mod tests {
                 other => panic!("expected life total comparison for {text}, got {other:?}"),
             }
         }
+    }
+
+    /// CR 119: "you have at least N life more than your starting life total"
+    /// (Angel of Destiny class) — reuses the `LifeAboveStarting` building block
+    /// (current life − starting life total), so the canonical shape is
+    /// `LifeAboveStarting GE Fixed(N)`. Both "at least N" and "N or more"
+    /// wordings resolve identically. This is the same shape the static
+    /// "as long as …" gate produces (see oracle_static `shared.rs`).
+    #[test]
+    fn test_you_have_life_more_than_starting_life_total() {
+        for text in [
+            "you have at least 15 life more than your starting life total",
+            "you have 15 or more life more than your starting life total",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeAboveStarting,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 15 },
+                },
+                "expected LifeAboveStarting GE Fixed(15) for {text:?}",
+            );
+        }
+    }
+
+    /// Regression guard: the new life-offset branch must NOT steal the plain
+    /// "you have N or more life" condition (no "more than" suffix) — it falls
+    /// through to the bare LifeTotal-GE comparison.
+    #[test]
+    fn test_you_have_or_more_life_still_parses_without_offset() {
+        let (rest, c) = parse_inner_condition("you have 5 or more life").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            },
+        );
     }
 
     #[test]

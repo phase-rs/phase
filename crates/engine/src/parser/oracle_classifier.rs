@@ -178,6 +178,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "have ",
     "has ",
     "can't be blocked",
+    // CR 301.5 + CR 303.4 + CR 701.3a: positive attachment restriction on an
+    // Aura/Equipment ("~ can be attached only to {filter}") — Strata Scythe,
+    // Brass Knuckles, Konda's Banner. Routes to parse_static_line so it lowers
+    // to StaticMode::AttachmentRestriction instead of an effect.
+    "can be attached only to",
     "can't attack",
     "can't block",
     "can't be countered",
@@ -272,6 +277,17 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // boundary — "is also a " does not subsume "is also an X".
     "is also a ",
     "is also an ",
+    // CR 702.73a + CR 205.3: "[subject] {is|are} every creature type" —
+    // Changeling-class type grant (Mistform Ultimus / Dr. Julius Jumblemorph
+    // self-ref CDA, Maskwood Nexus / Omo filter-subject grant, and the
+    // Aura/Equipment conjunctive form on Arachnoform / Runed Stalactite /
+    // Amorphous Axe). Both articles are listed because subject number
+    // ("creature" vs "creatures") drives copula choice — neither subsumes the
+    // other. The phrase is unique to creature-type grants (no other CR 205.3
+    // construction uses "every creature type"), so the contains-scan cannot
+    // false-positive into other pattern classes.
+    "is every creature type",
+    "are every creature type",
 ];
 
 const STATIC_PREFIX_PATTERNS: &[&str] = &[
@@ -512,6 +528,9 @@ const EFFECT_IMPERATIVE_PREFIXES: &[&str] = &[
     "attach ",
     "counter ",
     "create ",
+    "open ",
+    "opens ",
+    "roll to visit ",
     "deal ",
     "destroy ",
     "detain ",

@@ -282,6 +282,17 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     ),
     (("CopiableValues", "color"), OrderingClass::SetEquivalent),
     (("CopiableValues", "keywords"), OrderingClass::SetEquivalent),
+    // ----- CleaveVariant (alternate-text face; mirrors CardFace's lists) -----
+    (("CleaveVariant", "abilities"), OrderingClass::SetEquivalent),
+    (("CleaveVariant", "triggers"), OrderingClass::SetEquivalent),
+    (
+        ("CleaveVariant", "replacements"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("CleaveVariant", "static_abilities"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- Effect embedded lists -----
     (
         ("Effect", "additional_modifications"),
@@ -311,6 +322,9 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     (("Effect", "remove_types"), OrderingClass::SetEquivalent),
     (("Effect", "restrictions"), OrderingClass::SetEquivalent),
     (("Effect", "results"), OrderingClass::OrderSignificant),
+    // CR 701.23a: `SearchLibrary.source_zones` is a disjunctive zone set
+    // ("graveyard, hand, and/or library") — order carries no rules meaning.
+    (("Effect", "source_zones"), OrderingClass::SetEquivalent),
     (("Effect", "static_abilities"), OrderingClass::SetEquivalent),
     (("Effect", "statics"), OrderingClass::SetEquivalent),
     (("Effect", "supertypes"), OrderingClass::SetEquivalent),
@@ -325,6 +339,12 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     (("QuantityExpr", "exprs"), OrderingClass::SetEquivalent),
     (
         ("ReplacementCondition", "subtypes"),
+        OrderingClass::SetEquivalent,
+    ),
+    // Conjunctive condition list (And/Or) — independent predicates, order has
+    // no rules effect (mirrors AbilityCondition/StaticCondition conjunctions).
+    (
+        ("ReplacementCondition", "conditions"),
         OrderingClass::SetEquivalent,
     ),
     (

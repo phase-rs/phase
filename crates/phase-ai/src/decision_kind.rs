@@ -92,7 +92,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::AbilityModeChoice { .. }
-        | WaitingFor::AdventureCastChoice { .. }
+        // CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
+        // Adventure / Miracle / Madness / Cascade / Discover / Paradigm cast
+        // offers are modeled as ability-style opt-in decisions.
+        | WaitingFor::CastOffer { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::CastingVariantChoice { .. }
@@ -100,16 +103,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseRingBearer { .. }
         | WaitingFor::ChooseDungeon { .. }
         | WaitingFor::ChooseDungeonRoom { .. }
-        | WaitingFor::DiscardForCost { .. }
-        | WaitingFor::SacrificeForCost { .. }
-        | WaitingFor::ReturnToHandForCost { .. }
+        | WaitingFor::SpecializeColor { .. }
+        | WaitingFor::PayCost { .. }
         | WaitingFor::BlightChoice { .. }
-        | WaitingFor::BeholdForCost { .. }
-        | WaitingFor::TapCreaturesForSpellCost { .. }
-        | WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::ChooseManaColor { .. }
-        | WaitingFor::ExileForCost { .. }
-        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
         | WaitingFor::OptionalEffectChoice { .. }
@@ -121,12 +118,11 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::WardSacrificeChoice { .. }
         | WaitingFor::UnlessBounceChoice { .. }
-        | WaitingFor::DiscoverChoice { .. }
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::RepeatDecision { .. }
-        | WaitingFor::CascadeChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
+        | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesPartition { .. }
@@ -143,19 +139,14 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // mid-resolution choices; route to ActivateAbility as a catch-all.
         | WaitingFor::PayAmountChoice { .. }
         | WaitingFor::GameOver { .. }
-        // CR 702.xxx: Paradigm (Strixhaven) — modeled as an ability-style
-        // offer decision. Assign when WotC publishes SOS CR update.
-        | WaitingFor::ParadigmCastOffer { .. }
         // CR 702.94a: Miracle reveal — opt-in cast offer, routed to the
         // ability-offer bucket so activation policies evaluate the candidates.
         | WaitingFor::MiracleReveal { .. }
-        | WaitingFor::MiracleCastOffer { .. }
-        | WaitingFor::MadnessCastOffer { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
-        | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileForManaAbility { .. }
-        | WaitingFor::SacrificeForManaAbility { .. }
         | WaitingFor::PayManaAbilityMana { .. }
+        // CR 705.1 + CR 614.1a: Krark's Thumb keep choice is a forced
+        // mid-resolution selection; route to the ability catch-all.
+        | WaitingFor::CoinFlipKeepChoice { .. }
         | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
     }
 }

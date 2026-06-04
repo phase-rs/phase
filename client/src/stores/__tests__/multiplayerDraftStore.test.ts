@@ -54,11 +54,15 @@ const mockGuestAdapter = {
 };
 
 vi.mock("../../adapter/draftPodHostAdapter", () => ({
-  DraftPodHostAdapter: vi.fn().mockImplementation(() => ({ ...mockHostAdapter })),
+  DraftPodHostAdapter: vi.fn().mockImplementation(function () {
+    return { ...mockHostAdapter };
+  }),
 }));
 
 vi.mock("../../adapter/draftPodGuestAdapter", () => ({
-  DraftPodGuestAdapter: vi.fn().mockImplementation(() => ({ ...mockGuestAdapter })),
+  DraftPodGuestAdapter: vi.fn().mockImplementation(function () {
+    return { ...mockGuestAdapter };
+  }),
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────────

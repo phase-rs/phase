@@ -1,18 +1,20 @@
-import type { BatchResolveResult, GameAction, GameEvent, GameState, LegalActionsResult } from "../adapter/types";
+import type { BatchResolveResult, GameAction, GameEvent, GameState, LegalActionsResult, WaitingFor } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
+import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { getPlayerId } from "../hooks/usePlayerId";
 import type { AnimationStep } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
+import { flashInGameRolls } from "./diceContest";
 import { useAnimationStore } from "../stores/animationStore";
 import { isMultiplayerMode, useGameStore, legalResultState, saveGame, saveCheckpoints } from "../stores/gameStore";
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
-import { stackPressureFromLength } from "../utils/stackPressure";
+import { stackPressureFromLength, STACK_PRESSURE_ELEVATED } from "../utils/stackPressure";
 import { applySpellPaymentPreference } from "./castPaymentMode";
 
 /**
@@ -48,6 +50,8 @@ interface PendingLocalAction {
   kind: "local";
   action: GameAction;
   actor: number;
+  /** WaitingFor object that prompted this local action. */
+  waitingFor: WaitingFor | null;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -71,17 +75,18 @@ const pendingQueue: PendingWork[] = [];
 
 /**
  * The local action currently being processed (set while inside processAction),
- * paired with the seat that dispatched it. Used alongside pendingQueue to
- * deduplicate rapid double-clicks: if the same action from the same actor is
- * already in flight, a second dispatch is a silent no-op rather than a queued
- * duplicate that would fail against a transitioned engine state.
+ * paired with the seat and WaitingFor object it was issued against. Used with
+ * pendingQueue to deduplicate rapid double-clicks.
  *
- * The actor is part of the identity: a double-click is one seat firing the
- * same action twice. Two different seats firing the same action type (e.g.
- * the human and the AI both passing priority across an intervening priority
- * round — issue #459) are distinct game decisions and must NOT be collapsed.
+ * Actor preserves the #459 cross-seat priority case. WaitingFor preserves the
+ * #1513 doubled-trigger case where two structurally identical choices are
+ * responses to different engine prompts.
  */
-let inFlightLocalAction: { action: GameAction; actor: number } | null = null;
+let inFlightLocalAction: {
+  action: GameAction;
+  actor: number;
+  waitingFor: WaitingFor | null;
+} | null = null;
 
 /** Structural equality for GameAction — action objects are small plain JSON. */
 function actionsEqual(a: GameAction, b: GameAction): boolean {
@@ -230,6 +235,11 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
   }
 
+  // 5b. Surface in-game dice/coin rolls out-of-band (DiceRollOverlay), the same
+  // way the turn banner bypasses the animation queue. These events are marked
+  // NON_VISUAL so normalizeEvents skips them below.
+  flashInGameRolls(events);
+
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;
   const steps = normalizeEvents(events, { pacingMultipliers });
@@ -329,7 +339,7 @@ async function processQueue(): Promise<void> {
     const next = pendingQueue.shift()!;
     try {
       if (next.kind === "local") {
-        inFlightLocalAction = { action: next.action, actor: next.actor };
+        inFlightLocalAction = { action: next.action, actor: next.actor, waitingFor: next.waitingFor };
         try {
           await processAction(next.action, next.actor);
         } finally {
@@ -391,19 +401,24 @@ export async function dispatchAction(
   action: GameAction,
   actor: number = getPlayerId(),
 ): Promise<void> {
+  const { gameMode } = useGameStore.getState();
+  if (gameMode === "spectate" || actor === SPECTATOR_PLAYER_ID) {
+    return;
+  }
+
   const submittedAction = actor === getPlayerId() ? applySpellPaymentPreference(action) : action;
+  // Snapshot the prompt object that caused this action. The same action from
+  // the same actor is a duplicate only while it answers the same prompt.
+  const currentWaitingFor = useGameStore.getState().waitingFor;
 
   if (isAnimating) {
-    // Enqueue-time de-dup: if the exact same action from the same actor is
-    // already in flight or already queued, silently resolve. Covers rapid
-    // double-clicks (e.g. a planeswalker ability fired twice before the first
-    // transitions the engine into TargetSelection). The actor is part of the
-    // identity — two seats passing priority across an intervening priority
-    // round are distinct decisions and must both be delivered (issue #459).
+    // Same action + same actor + same prompt is a duplicate. A changed prompt
+    // is a new decision even when the payload is structurally identical.
     if (
       inFlightLocalAction &&
       inFlightLocalAction.actor === actor &&
-      actionsEqual(inFlightLocalAction.action, submittedAction)
+      actionsEqual(inFlightLocalAction.action, submittedAction) &&
+      Object.is(inFlightLocalAction.waitingFor, currentWaitingFor)
     ) {
       return;
     }
@@ -411,19 +426,27 @@ export async function dispatchAction(
       if (
         pending.kind === "local" &&
         pending.actor === actor &&
-        actionsEqual(pending.action, submittedAction)
+        actionsEqual(pending.action, submittedAction) &&
+        Object.is(pending.waitingFor, currentWaitingFor)
       ) {
         return;
       }
     }
     debugLog(`dispatch queued (mutex held): ${submittedAction.type}, queue=${pendingQueue.length}`, "warn");
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "local", action: submittedAction, actor, resolve, reject });
+      pendingQueue.push({
+        kind: "local",
+        action: submittedAction,
+        actor,
+        waitingFor: currentWaitingFor,
+        resolve,
+        reject,
+      });
     });
   }
 
   isAnimating = true;
-  inFlightLocalAction = { action: submittedAction, actor };
+  inFlightLocalAction = { action: submittedAction, actor, waitingFor: currentWaitingFor };
   try {
     await processAction(submittedAction, actor);
   } catch (e) {
@@ -590,8 +613,12 @@ const BATCH_CHUNK_SIZE = 5;
 // drain in large chunks instead — the engine can resolve unboundedly in one
 // call, but a bounded chunk keeps each WASM call short enough that the main
 // thread yields between chunks (no "page unresponsive" freeze) while still
-// collapsing ~580 round-trips into a handful.
-const BATCH_CHUNK_INSTANT = 200;
+// collapsing ~580 round-trips into a few dozen. The value is an empirical
+// tradeoff: smaller chunks give visibly-advancing "resolving X of Y" progress
+// (the bar updates once per chunk) at the cost of more per-chunk `getState`
+// serialization; the rAF yield below — not this size — is what guarantees the
+// overlay repaints between chunks.
+const BATCH_CHUNK_INSTANT = 50;
 const BATCH_CHUNK_BASE_DELAY_MS = 150;
 let batchResolveInProgress = false;
 
@@ -608,6 +635,13 @@ export async function dispatchResolveAll(
 
   batchResolveInProgress = true;
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
+  const { setResolutionProgress } = useGameStore.getState();
+  // Storm-origin denominator: latched from the FIRST chunk's `total` because
+  // the engine reports the *remaining* stack per chunk (shrinks as it drains),
+  // so only the first chunk carries the true origin count.
+  let latchedTotal = 0;
+  // Engine-authoritative gross resolved count, accumulated across chunks.
+  let resolvedSoFar = 0;
 
   try {
     for (;;) {
@@ -620,6 +654,20 @@ export async function dispatchResolveAll(
       const batchResult: BatchResolveResult = await adapter.resolveAll(
         requester, aiSeats, chunkSize,
       );
+
+      if (latchedTotal === 0) latchedTotal = batchResult.total;
+      resolvedSoFar += batchResult.itemsResolved;
+      // Surface progress only for a genuine storm (trivial multi-item resolves
+      // drain too fast to render). Clamp to the latched total: `itemsResolved`
+      // is a net-shrink count that can lag the true gross when a resolution
+      // spawns triggers, so clamping keeps the bar monotonic and lets it
+      // complete. `resolved`/`total` are engine-provided — no frontend derivation.
+      if (latchedTotal >= STACK_PRESSURE_ELEVATED) {
+        setResolutionProgress({
+          resolved: Math.min(resolvedSoFar, latchedTotal),
+          total: latchedTotal,
+        });
+      }
 
       const newState = await adapter.getState();
       const legalResult = await adapter.getLegalActions();
@@ -637,9 +685,14 @@ export async function dispatchResolveAll(
         batchResult.waitingFor.type !== "Priority";
       if (done) break;
 
-      // Skip the inter-chunk pacing delay while draining a storm — the delay
-      // exists for visual countdown pacing, which Instant pressure forgoes.
-      if (instant) continue;
+      if (instant) {
+        // Yield one frame so the resolution-progress overlay repaints between
+        // chunks. This rAF is the load-bearing progress fix — without it,
+        // back-to-back Instant chunks never let the browser paint, producing
+        // the "wait, then N vanish at once" symptom.
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        continue;
+      }
 
       const chunkDelay = Math.round(BATCH_CHUNK_BASE_DELAY_MS * multiplier);
       if (chunkDelay > 0) {
@@ -654,5 +707,6 @@ export async function dispatchResolveAll(
     if (gameId && newState) saveGame(gameId, newState);
   } finally {
     batchResolveInProgress = false;
+    setResolutionProgress(null);
   }
 }

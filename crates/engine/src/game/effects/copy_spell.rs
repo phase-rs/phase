@@ -79,6 +79,7 @@ pub fn resolve(
         {
             set_resolved_source_recursive(a, copy_id);
             a.context.additional_cost_paid = false;
+            a.context.alternative_mana_cost_paid = false;
             a.context.additional_cost_payment_count = 0;
             a.context.kickers_paid.clear();
         }
@@ -316,7 +317,30 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
         }
         return None;
     }
+    if let Some(entry) = triggering_spell_stack_entry(state) {
+        return Some(entry);
+    }
     state.stack.last().cloned()
+}
+
+/// CR 601.2i + CR 603.2 + CR 707.10: "Copy that spell" / `Trigger_ThatSpell`
+/// on a `SpellCast` trigger (Mendicant Core, Guidelight; Twincast-style copies
+/// gated on optional costs). When another triggered ability sits above the cast
+/// spell on the stack (Rhystic Study, Monastery Mentor, etc.), `stack.last()`
+/// points at the wrong entry — bind from the triggering event's spell instead.
+fn triggering_spell_stack_entry(state: &GameState) -> Option<StackEntry> {
+    let event = state.current_trigger_event.as_ref()?;
+    let object_id = crate::game::targeting::extract_source_from_event(event)?;
+    let mut fallback = None;
+    for entry in &state.stack {
+        if entry.id == object_id {
+            return Some(entry.clone());
+        }
+        if fallback.is_none() && entry.source_id == object_id {
+            fallback = Some(entry.clone());
+        }
+    }
+    fallback
 }
 
 fn stack_entry_cant_be_copied(state: &GameState, entry: &StackEntry) -> bool {
@@ -725,6 +749,18 @@ mod tests {
         owner: PlayerId,
         ability: ResolvedAbility,
     ) {
+        push_trigger_with_event(state, obj_id, card_id, owner, ability, None);
+    }
+
+    /// Helper: push a triggered ability onto the stack with an optional trigger event.
+    fn push_trigger_with_event(
+        state: &mut GameState,
+        obj_id: ObjectId,
+        card_id: CardId,
+        owner: PlayerId,
+        ability: ResolvedAbility,
+        trigger_event: Option<GameEvent>,
+    ) {
         let obj = crate::game::game_object::GameObject::new(
             obj_id,
             card_id,
@@ -741,10 +777,11 @@ mod tests {
                 source_id: obj_id,
                 ability: Box::new(ability),
                 condition: None,
-                trigger_event: None,
+                trigger_event,
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
     }
@@ -847,6 +884,171 @@ mod tests {
                 .is_some_and(|a| matches!(a.effect, Effect::ChangeZone { .. })),
             "Copy should replicate ChangeZone (Anguished Unmaking), not the trigger"
         );
+    }
+
+    /// CR 601.2i + CR 603.2 + CR 707.10 (issue #1672): Mendicant Core,
+    /// Guidelight — copy the triggering artifact spell even when another
+    /// triggered ability sits above it on the stack (Rhystic Study class).
+    #[test]
+    fn copy_spell_triggering_spell_finds_cast_spell_past_intermediate_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let cast_spell_id = ObjectId(10);
+        let rhystic_trigger_id = ObjectId(11);
+
+        let cast_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            cast_spell_id,
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            cast_spell_id,
+            CardId(1),
+            PlayerId(0),
+            "Rhystic Study",
+            cast_ability,
+            CastingVariant::Normal,
+        );
+
+        let rhystic_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            rhystic_trigger_id,
+            PlayerId(1),
+        );
+        push_trigger(
+            &mut state,
+            rhystic_trigger_id,
+            CardId(2),
+            PlayerId(1),
+            rhystic_ability,
+        );
+
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(1),
+            object_id: cast_spell_id,
+            controller: PlayerId(0),
+        });
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.stack.len(),
+            3,
+            "cast spell, rhystic trigger, and copy"
+        );
+        let copy_entry = state.stack.back().unwrap();
+        assert!(
+            copy_entry
+                .ability()
+                .is_some_and(|a| matches!(a.effect, Effect::Draw { .. })),
+            "copy should replicate the cast spell, not the Rhystic trigger on top"
+        );
+    }
+
+    /// CR 601.2i + CR 603.2 + CR 707.10: the real stack resolver sets
+    /// `current_trigger_event` from the triggered stack entry before executing
+    /// the copy effect, so the copy source must still be the triggering spell
+    /// rather than the intervening topmost trigger.
+    #[test]
+    fn copy_spell_triggering_spell_uses_stack_entry_trigger_event() {
+        let mut state = GameState::new_two_player(42);
+        let cast_spell_id = ObjectId(10);
+        let rhystic_trigger_id = ObjectId(11);
+        let copy_trigger_id = ObjectId(12);
+
+        let cast_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            cast_spell_id,
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            cast_spell_id,
+            CardId(1),
+            PlayerId(0),
+            "Mendicant artifact spell",
+            cast_ability,
+            CastingVariant::Normal,
+        );
+
+        let rhystic_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            rhystic_trigger_id,
+            PlayerId(1),
+        );
+        push_trigger(
+            &mut state,
+            rhystic_trigger_id,
+            CardId(2),
+            PlayerId(1),
+            rhystic_ability,
+        );
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        push_trigger_with_event(
+            &mut state,
+            copy_trigger_id,
+            CardId(3),
+            PlayerId(0),
+            copy_ability,
+            Some(GameEvent::SpellCast {
+                card_id: CardId(1),
+                object_id: cast_spell_id,
+                controller: PlayerId(0),
+            }),
+        );
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.stack.len(),
+            3,
+            "cast spell, rhystic trigger, and copy"
+        );
+        let copy_entry = state.stack.back().unwrap();
+        assert!(
+            copy_entry
+                .ability()
+                .is_some_and(|a| matches!(a.effect, Effect::Draw { .. })),
+            "copy should replicate the cast spell, not the Rhystic trigger on top"
+        );
+        assert!(state.current_trigger_event.is_none());
     }
 
     /// CR 707.10: "A copy of a spell is controlled by the player under whose
@@ -1264,6 +1466,7 @@ mod tests {
                 description: Some("At the beginning of your end step".to_string()),
                 source_name: "Hope Estheim".to_string(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
         state.stack.push_back(StackEntry {
@@ -1286,6 +1489,7 @@ mod tests {
                 description: Some("Opponent trigger".to_string()),
                 source_name: "Opponent Source".to_string(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 

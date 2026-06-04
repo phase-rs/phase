@@ -14,7 +14,12 @@ class ResizeObserverMock {
   unobserve(): void {}
 }
 
-function makeCard(name: string, typeLine: string, cmc = 0): ScryfallCard {
+function makeCard(
+  name: string,
+  typeLine: string,
+  cmc = 0,
+  oracleText?: string,
+): ScryfallCard {
   return {
     id: name.toLowerCase(),
     name,
@@ -23,6 +28,7 @@ function makeCard(name: string, typeLine: string, cmc = 0): ScryfallCard {
     type_line: typeLine,
     color_identity: [],
     legalities: {},
+    oracle_text: oracleText,
   };
 }
 
@@ -84,6 +90,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
+        getEffectiveCap={() => 4}
       />,
     );
 
@@ -135,6 +142,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
+        getEffectiveCap={() => 4}
       />,
     );
 
@@ -161,6 +169,94 @@ describe("DeckStack", () => {
     expectDocumentOrder(banishingTile, plainsTile);
   });
 
+  it("keeps the add button enabled past 4 copies for 'any number' cards (CR 100.2a)", () => {
+    // Regression for #1494: Relentless Rats / Rat Colony override the 4-copy
+    // deck construction limit per CR 100.2a. The engine resolves the override to
+    // an unbounded cap (Infinity); the tile's + button must stay enabled.
+    render(
+      <DeckStack
+        deck={{
+          main: [{ name: "Relentless Rats", count: 5 }],
+          sideboard: [],
+        }}
+        commanders={[]}
+        cardDataCache={
+          new Map([
+            ["Relentless Rats", makeCard("Relentless Rats", "Creature — Rat", 3)],
+          ])
+        }
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        getEffectiveCap={(name) => (name === "Relentless Rats" ? Infinity : 4)}
+      />,
+    );
+
+    expect(screen.getByTitle("Add one Relentless Rats")).toBeEnabled();
+  });
+
+  it("respects a bounded 'up to N' override cap (CR 100.2a)", () => {
+    // Seven Dwarves overrides to UpTo(7). At 6 copies the + button is enabled;
+    // at 7 it is disabled.
+    const { rerender } = render(
+      <DeckStack
+        deck={{ main: [{ name: "Seven Dwarves", count: 6 }], sideboard: [] }}
+        commanders={[]}
+        cardDataCache={
+          new Map([["Seven Dwarves", makeCard("Seven Dwarves", "Creature — Dwarf", 4)]])
+        }
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        getEffectiveCap={(name) => (name === "Seven Dwarves" ? 7 : 4)}
+      />,
+    );
+    expect(screen.getByTitle("Add one Seven Dwarves")).toBeEnabled();
+
+    rerender(
+      <DeckStack
+        deck={{ main: [{ name: "Seven Dwarves", count: 7 }], sideboard: [] }}
+        commanders={[]}
+        cardDataCache={
+          new Map([["Seven Dwarves", makeCard("Seven Dwarves", "Creature — Dwarf", 4)]])
+        }
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        getEffectiveCap={(name) => (name === "Seven Dwarves" ? 7 : 4)}
+      />,
+    );
+    expect(
+      screen.getByTitle("Seven Dwarves is at the copy limit"),
+    ).toBeDisabled();
+  });
+
+  it("disables the add button at 1 copy for singleton formats", () => {
+    render(
+      <DeckStack
+        deck={{
+          main: [{ name: "Sol Ring", count: 1 }],
+          sideboard: [],
+        }}
+        commanders={[]}
+        cardDataCache={
+          new Map([["Sol Ring", makeCard("Sol Ring", "Artifact", 1)]])
+        }
+        format="Commander"
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        getEffectiveCap={() => 1}
+      />,
+    );
+
+    expect(screen.getByTitle("Sol Ring is at the copy limit")).toBeDisabled();
+  });
+
   it("moves a second-section card back to the main deck via its move button", () => {
     // The recovery path for the Commander 'maybeboard trap': a card parked in
     // the second section must be returnable to the main deck from the stack.
@@ -182,6 +278,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={onMoveCard}
         onRemoveCommander={vi.fn()}
+        getEffectiveCap={() => 4}
       />,
     );
 

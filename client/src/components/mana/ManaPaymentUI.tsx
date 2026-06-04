@@ -9,7 +9,11 @@ import type {
 } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { manaCostToShards, SHARD_ABBREVIATION } from "../../viewmodel/costLabel.ts";
+import {
+  abilityCostToManaShards,
+  manaCostToShards,
+  SHARD_ABBREVIATION,
+} from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { ManaBadge } from "./ManaBadge.tsx";
 import { ManaSymbol } from "./ManaSymbol.tsx";
@@ -60,6 +64,12 @@ export function ManaPaymentUI() {
   const costShards = useMemo(() => {
     if (!gameState) return null;
     if (gameState.pending_cast) {
+      // Activated-ability mana payment: prefer `activation_cost` when present.
+      // The engine reuses PendingCast for both spell casts and activated abilities;
+      // for the latter, the mana to be paid is stored on `activation_cost`.
+      if (gameState.pending_cast.activation_cost) {
+        return abilityCostToManaShards(gameState.pending_cast.activation_cost) ?? [];
+      }
       return manaCostToShards(gameState.pending_cast.cost);
     }
     if (isPhyrexianPayment && spellObjectId != null) {
@@ -217,7 +227,12 @@ export function ManaPaymentUI() {
         exit={{ y: 80, opacity: 0 }}
         transition={{ duration: 0.25 }}
       >
-        <div className="rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
+        {/* `pointer-events-auto` re-enables clicks on the panel itself: under a
+            click-through convoke/improvise host (CR 702.51a / 702.126a) the
+            DialogHost wrapper is `pointer-events: none` so board taps reach the
+            artifacts/creatures, but the Pay/Cancel controls must still respond.
+            The surrounding full-width strip stays pass-through. */}
+        <div className="pointer-events-auto rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
             {t("mana.payMana")}
             {cardName && (

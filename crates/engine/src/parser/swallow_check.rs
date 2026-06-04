@@ -817,11 +817,7 @@ fn target_filter_has_targets_property(filter: &TargetFilter) -> bool {
 
 fn static_has_target_gated_cost_modification(def: &StaticDefinition) -> bool {
     match &def.mode {
-        StaticMode::ReduceCost {
-            spell_filter: Some(filter),
-            ..
-        }
-        | StaticMode::RaiseCost {
+        StaticMode::ModifyCost {
             spell_filter: Some(filter),
             ..
         } => target_filter_has_targets_property(filter),
@@ -1149,7 +1145,7 @@ fn detect_dynamic_qty(
         // CR 601.2f / CR 117.7: spell- and ability-cost reductions whose
         // {N} amount is multiplied by a dynamic count of objects, zone
         // contents, mana value, etc. The carrier is the `dynamic_count`
-        // field on `StaticMode::ReduceCost` and `StaticMode::RaiseCost`,
+        // field on `StaticMode::ModifyCost` (Reduce / Raise modes),
         // populated with `ObjectCount` / `ZoneCardCount` / `Devotion` /
         // `ManaValue` typed quantity refs.
         "\"dynamic_count\":{",
@@ -1236,6 +1232,14 @@ fn detect_dynamic_qty(
     // The `Not` gate is what proves the decline-consequence clause is
     // represented (issue #491 follow-up).
     if cleaned_for_each_is_only_decline_iteration(cleaned) && json_has_any(ast_json, &["\"Not\""]) {
+        return;
+    }
+    // CR 101.4 + CR 701.21a: Tragic Arrogance-style "For each player, you choose
+    // ..." is a turn-order choice procedure, not a numeric quantity. Its carrier
+    // is the dedicated ChooseAndSacrificeRest effect rather than a QuantityExpr.
+    if cleaned.contains("for each player, you choose ") // allow-noncombinator: swallow detector marker scan on classified text
+        && json_has_any(ast_json, &["ChooseAndSacrificeRest"])
+    {
         return;
     }
     // CR 701.38: Council's-dilemma vote-tally payoffs ("create a number of X
@@ -1984,6 +1988,14 @@ fn detect_duration_this_turn(
         // in unrelated positions (e.g. a description string).
         "\"PerTurnCastLimit\":{",
         "\"PerTurnDrawLimit\":{",
+        // CR 604.1 + CR 601.2a + CR 113.6b: `ExileCastPermission` is a static
+        // ability (CR 604.1) that is itself the per-turn permission window
+        // (`frequency: OncePerTurn` slot reset at turn cleanup, plus the per-turn
+        // rolling `cards_exiled_with_source_this_turn` pool keyed by source). The
+        // "this turn" / "once each turn" wording is intrinsic to the variant — not
+        // a separate `duration` slot. Mirrors PerTurnCastLimit / PerTurnDrawLimit
+        // above.
+        "\"ExileCastPermission\":{",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -2256,6 +2268,7 @@ fn effect_name(effect: &Effect) -> &str {
 mod tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use crate::types::statics::StaticMode;
 
     fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
         parse_named(text, "Test Card", types)
@@ -2347,6 +2360,34 @@ mod tests {
             &["Land"],
         );
 
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn duration_this_turn_accepts_exile_cast_permission_scope() {
+        // CR 601.2a + CR 113.6b: Maralen, Fae Ascendant — the "this turn"
+        // wording on the cast-permission line is intrinsic to
+        // `ExileCastPermission { frequency: OncePerTurn, ... }` (the per-turn
+        // rolling pool keyed by source), not a separate duration slot.
+        let parsed = parse_named(
+            "Flying\n\
+             Whenever ~ or another Elf or Faerie you control enters, exile the top two cards of target opponent's library.\n\
+             Once each turn, you may cast a spell with mana value less than or equal to the number of Elves and Faeries you control from among cards exiled with ~ this turn without paying its mana cost.",
+            "Maralen, Fae Ascendant",
+            &["Creature"],
+        );
+
+        // Guard against the silent-regression case: the negative assertion below
+        // would also pass if the `ExileCastPermission` static simply stopped
+        // parsing (no marker emitted, no other "this turn" AST). Pin that the
+        // structural variant the exemption keys on is actually present.
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::ExileCastPermission { .. })),
+            "expected an ExileCastPermission static to parse for Maralen"
+        );
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
 
@@ -2639,6 +2680,17 @@ mod tests {
         let parsed = parse(
             "Put a +1/+1 counter on target creature you control, then double the number of +1/+1 counters on that creature.",
             &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    #[test]
+    fn dynamic_qty_accepts_choose_and_sacrifice_rest_for_each_player() {
+        let parsed = parse_named(
+            "For each player, you choose from among the permanents that player controls an artifact, a creature, an enchantment, and a planeswalker. Then each player sacrifices all other nonland permanents they control.",
+            "Tragic Arrogance",
+            &["Sorcery"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));

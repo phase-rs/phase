@@ -80,8 +80,15 @@ export function getWaitingForObjectChoiceIds(
       );
     case "ExploreChoice":
       return waitingFor.data.choosable;
+    case "PopulateChoice":
+      return waitingFor.data.valid_tokens;
     case "ReturnAsAuraTarget":
-      return waitingFor.data.legal_targets;
+      // CR 303.4 / CR 115.1: `legal_targets` is a TargetRef[] of object hosts
+      // *and* players (Curse / enchant-player Auras). Only object hosts glow on
+      // the board; player hosts are handled by PlayerHud/OpponentHud glow.
+      return waitingFor.data.legal_targets.flatMap((target) =>
+        "Object" in target ? [target.Object] : [],
+      );
     case "PairChoice":
       return waitingFor.data.choices;
     default:

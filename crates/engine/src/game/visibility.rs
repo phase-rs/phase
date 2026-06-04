@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
@@ -123,6 +123,22 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             && !effect_zone_hand_cards.contains(&obj_id)
             && !drawn_choice_hand_cards.contains(&obj_id)
         {
+            hide_card(&mut filtered, obj_id);
+        }
+    }
+
+    // CR 717.2: A player's Attraction deck is a hidden-order supplementary
+    // deck, like a library — even its owner doesn't know the order. Redact
+    // every unrevealed Attraction card's identity for all viewers, mirroring
+    // the library treatment above, so the serialized state can't leak the
+    // contents or order of any player's Attraction deck.
+    let all_attraction_ids: Vec<ObjectId> = filtered
+        .players
+        .iter()
+        .flat_map(|p| p.attraction_deck.iter().copied())
+        .collect();
+    for obj_id in all_attraction_ids {
+        if !state.revealed_cards.contains(&obj_id) {
             hide_card(&mut filtered, obj_id);
         }
     }
@@ -298,74 +314,61 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // CR 408 — the spell on the stack is public information).
     // The graveyard variant of `ExileForCost` is intentionally NOT redacted
     // because the graveyard is a public zone (CR 400.2).
-    if let WaitingFor::ExileForCost {
+    // CR 400.2: Hand and library are hidden zones. The eligible-objects list
+    // for a `PayCost` choice can leak hidden-zone contents to opponents
+    // (e.g. the count of blue cards in the caster's hand). Redact the
+    // `choices` for viewers who cannot see the caster's private zones; `count`
+    // and `resume` stay public (CR 601.2 + CR 408 — the spell on the stack is
+    // public information). Public-zone choices (graveyard / battlefield) and
+    // public-zone exile costs are intentionally NOT redacted.
+    if let WaitingFor::PayCost {
         player,
-        zone,
-        count,
-        ref cards,
-        ref pending_cast,
-    } = state.waiting_for
-    {
-        if zone == ExileCostSourceZone::Hand && !can_view_private_for_player(player) {
-            filtered.waiting_for = WaitingFor::ExileForCost {
-                player,
-                zone,
-                count,
-                cards: cards.iter().map(|_| ObjectId(0)).collect(),
-                pending_cast: pending_cast.clone(),
-            };
-        }
-    }
-
-    // CR 400.2: Hand and library are hidden zones. Mana-ability exile costs
-    // can choose from hand/graveyard/battlefield depending on the printed cost;
-    // redact hidden-zone choices for opponents while preserving public-zone
-    // graveyard/battlefield choices.
-    if let WaitingFor::ExileForManaAbility {
-        player,
-        zone,
-        count,
-        cards: _,
-        ref pending_mana_ability,
-    } = state.waiting_for
-    {
-        if matches!(zone, Zone::Hand | Zone::Library) && !can_view_private_for_player(player) {
-            filtered.waiting_for = WaitingFor::ExileForManaAbility {
-                player,
-                zone,
-                count,
-                cards: vec![ObjectId(0); count],
-                pending_mana_ability: pending_mana_ability.clone(),
-            };
-        }
-    }
-
-    if let WaitingFor::BeholdForCost {
-        player,
-        count,
+        ref kind,
         ref choices,
-        action,
-        ref pending_cast,
+        count,
+        min_count,
+        ref resume,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
-            filtered.waiting_for = WaitingFor::BeholdForCost {
-                player,
-                count,
-                choices: choices
-                    .iter()
-                    .filter_map(|id| {
-                        state
-                            .objects
-                            .get(id)
-                            .filter(|obj| obj.zone == Zone::Hand)
-                            .is_none()
-                            .then_some(*id)
-                    })
-                    .collect(),
-                action,
-                pending_cast: pending_cast.clone(),
+            // CR 400.2: redacted `choices` for the viewer, computed per `kind`.
+            let redacted: Option<Vec<ObjectId>> = match kind {
+                // Hand-pitch exile cost (Force of Will family): hand is hidden,
+                // so opaque every choice. Graveyard exile is public — no redaction.
+                PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Hand,
+                } => Some(choices.iter().map(|_| ObjectId(0)).collect()),
+                // Mana-ability exile cost: hidden only for hand/library zones.
+                PayCostKind::ExileFromManaZone {
+                    zone: Zone::Hand | Zone::Library,
+                } => Some(vec![ObjectId(0); count]),
+                // Behold from hand: drop the hand-card choices entirely (only
+                // battlefield permanents remain visible to opponents).
+                PayCostKind::Behold { .. } => Some(
+                    choices
+                        .iter()
+                        .filter_map(|id| {
+                            state
+                                .objects
+                                .get(id)
+                                .filter(|obj| obj.zone == Zone::Hand)
+                                .is_none()
+                                .then_some(*id)
+                        })
+                        .collect(),
+                ),
+                _ => None,
             };
+            if let Some(redacted_choices) = redacted {
+                filtered.waiting_for = WaitingFor::PayCost {
+                    player,
+                    kind: kind.clone(),
+                    choices: redacted_choices,
+                    count,
+                    min_count,
+                    resume: resume.clone(),
+                };
+            }
         }
     }
 
@@ -544,7 +547,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
 /// the controller's not-yet-public choices. Strip every payload
 /// an opponent has no rules-permission to see, leaving only
 /// the public spine (source_id, controller, timestamp, ability,
-/// condition, target_constraints, subject_match_count,
+/// condition, target_constraints, subject_match_count, die_result,
 /// may_trigger_origin) needed for the engine to keep running on
 /// the wire and for the opponent's frontend to render an
 /// "opponent is ordering N triggers" indicator.
@@ -574,8 +577,9 @@ mod tests {
     use crate::types::ability::{BeholdCostAction, Effect, ResolvedAbility};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, CastPaymentMode, CastingVariant, ManaAbilityResume, MayTriggerAutoChoiceKey,
-        MayTriggerOrigin, PendingBeginGameAbility, PendingCast, PendingManaAbility,
+        AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityResume,
+        MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility, PendingCast,
+        PendingManaAbility,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -599,6 +603,7 @@ mod tests {
                 caster,
             ),
             cost: ManaCost::NoCost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],
@@ -607,8 +612,10 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -1025,6 +1032,7 @@ mod tests {
             player: PlayerId(0),
             pending_cast: pending.clone(),
             target_slots: vec![],
+            mode_labels: Vec::new(),
             selection: Default::default(),
         };
         state.pending_cast = Some(pending);
@@ -1077,20 +1085,23 @@ mod tests {
             Zone::Hand,
         );
         let pending = dummy_pending_cast(ObjectId(50), CardId(99), PlayerId(1));
-        state.waiting_for = WaitingFor::ExileForCost {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(1),
-            zone: ExileCostSourceZone::Hand,
+            kind: PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Hand,
+            },
+            choices: vec![card_id],
             count: 1,
-            cards: vec![card_id],
-            pending_cast: pending,
+            min_count: 0,
+            resume: CostResume::Spell { spell: pending },
         };
 
         // Caster sees the real ID.
         let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
         match filtered_self.waiting_for {
-            WaitingFor::ExileForCost {
-                cards,
-                zone,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone { zone },
+                choices: cards,
                 count,
                 player,
                 ..
@@ -1100,18 +1111,22 @@ mod tests {
                 assert_eq!(count, 1);
                 assert_eq!(player, PlayerId(1));
             }
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         }
 
-        // Opponent sees a placeholder, but `count` and `pending_cast` survive.
+        // Opponent sees a placeholder, but `count` and `resume` survive.
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
         match filtered_opp.waiting_for {
-            WaitingFor::ExileForCost {
-                cards,
-                zone,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone { zone },
+                choices: cards,
                 count,
                 player,
-                pending_cast,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
+                ..
             } => {
                 assert_eq!(zone, ExileCostSourceZone::Hand);
                 assert_eq!(cards, vec![ObjectId(0)]);
@@ -1119,7 +1134,7 @@ mod tests {
                 assert_eq!(player, PlayerId(1));
                 assert_eq!(pending_cast.object_id, ObjectId(50));
             }
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         }
     }
 
@@ -1140,36 +1155,45 @@ mod tests {
             "Other hidden mana cost card".to_string(),
             Zone::Hand,
         );
-        state.waiting_for = WaitingFor::ExileForManaAbility {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(1),
-            zone: Zone::Hand,
+            kind: PayCostKind::ExileFromManaZone { zone: Zone::Hand },
+            choices: vec![card_id, other_card_id],
             count: 1,
-            cards: vec![card_id, other_card_id],
-            pending_mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+            min_count: 0,
+            resume: CostResume::ManaAbility {
+                mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+            },
         };
 
         let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
         match filtered_self.waiting_for {
-            WaitingFor::ExileForManaAbility {
-                zone, cards, count, ..
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromManaZone { zone },
+                choices: cards,
+                count,
+                ..
             } => {
                 assert_eq!(zone, Zone::Hand);
                 assert_eq!(cards, vec![card_id, other_card_id]);
                 assert_eq!(count, 1);
             }
-            other => panic!("expected ExileForManaAbility, got {other:?}"),
+            other => panic!("expected PayCost ExileFromManaZone, got {other:?}"),
         }
 
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
         match filtered_opp.waiting_for {
-            WaitingFor::ExileForManaAbility {
-                zone, cards, count, ..
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromManaZone { zone },
+                choices: cards,
+                count,
+                ..
             } => {
                 assert_eq!(zone, Zone::Hand);
                 assert_eq!(cards, vec![ObjectId(0)]);
                 assert_eq!(count, 1);
             }
-            other => panic!("expected ExileForManaAbility, got {other:?}"),
+            other => panic!("expected PayCost ExileFromManaZone, got {other:?}"),
         }
     }
 
@@ -1191,37 +1215,86 @@ mod tests {
             Zone::Hand,
         );
         let pending = dummy_pending_cast(ObjectId(51), CardId(99), PlayerId(1));
-        state.waiting_for = WaitingFor::BeholdForCost {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(1),
-            count: 1,
+            kind: PayCostKind::Behold {
+                action: BeholdCostAction::ChooseOrReveal,
+            },
             choices: vec![public_choice, private_choice],
-            action: BeholdCostAction::ChooseOrReveal,
-            pending_cast: pending,
+            count: 1,
+            min_count: 0,
+            resume: CostResume::Spell { spell: pending },
         };
 
         let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
         match filtered_self.waiting_for {
-            WaitingFor::BeholdForCost { choices, count, .. } => {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Behold { .. },
+                choices,
+                count,
+                ..
+            } => {
                 assert_eq!(choices, vec![public_choice, private_choice]);
                 assert_eq!(count, 1);
             }
-            other => panic!("expected BeholdForCost, got {other:?}"),
+            other => panic!("expected PayCost Behold, got {other:?}"),
         }
 
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
         match filtered_opp.waiting_for {
-            WaitingFor::BeholdForCost {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Behold { .. },
                 choices,
                 count,
-                pending_cast,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             } => {
                 assert_eq!(choices, vec![public_choice]);
                 assert_eq!(count, 1);
                 assert_eq!(pending_cast.object_id, ObjectId(51));
             }
-            other => panic!("expected BeholdForCost, got {other:?}"),
+            other => panic!("expected PayCost Behold, got {other:?}"),
         }
+    }
+
+    /// Issue #1518 (Pithing Needle): a permanent's chosen card name is public
+    /// information (CR 400.2) and MUST remain visible to opponents after the
+    /// per-viewer redaction. `filter_state_for_viewer` only redacts cards in
+    /// hidden zones; a face-up battlefield permanent keeps its
+    /// `chosen_attributes` for every viewer, so the opponent can see which name
+    /// was chosen.
+    #[test]
+    fn chosen_card_name_on_battlefield_permanent_is_visible_to_opponents() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let needle = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pithing Needle".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&needle)
+            .unwrap()
+            .chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::CardName(
+                "Goblin Guide".to_string(),
+            ));
+
+        // The opponent (PlayerId(1)) must still see the chosen name.
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+        let seen = &filtered.objects[&needle].chosen_attributes;
+        assert!(
+            seen.iter().any(|a| matches!(
+                a,
+                crate::types::ability::ChosenAttribute::CardName(name) if name == "Goblin Guide"
+            )),
+            "opponent must see the chosen card name on a battlefield permanent, got {seen:?}"
+        );
     }
 
     #[test]
@@ -1287,17 +1360,24 @@ mod tests {
             Zone::Graveyard,
         );
         let pending = dummy_pending_cast(ObjectId(50), CardId(99), PlayerId(1));
-        state.waiting_for = WaitingFor::ExileForCost {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(1),
-            zone: ExileCostSourceZone::Graveyard,
+            kind: PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
+            choices: vec![card_id],
             count: 1,
-            cards: vec![card_id],
-            pending_cast: pending,
+            min_count: 0,
+            resume: CostResume::Spell { spell: pending },
         };
 
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
         match filtered_opp.waiting_for {
-            WaitingFor::ExileForCost { zone, cards, .. } => {
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone { zone },
+                choices: cards,
+                ..
+            } => {
                 assert_eq!(zone, ExileCostSourceZone::Graveyard);
                 assert_eq!(
                     cards,
@@ -1305,7 +1385,7 @@ mod tests {
                     "graveyard variant must NOT be redacted"
                 );
             }
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         }
     }
 
@@ -1319,17 +1399,26 @@ mod tests {
             "Titans' Nest filler".to_string(),
             Zone::Graveyard,
         );
-        state.waiting_for = WaitingFor::ExileForManaAbility {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(1),
-            zone: Zone::Graveyard,
+            kind: PayCostKind::ExileFromManaZone {
+                zone: Zone::Graveyard,
+            },
+            choices: vec![card_id],
             count: 1,
-            cards: vec![card_id],
-            pending_mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+            min_count: 0,
+            resume: CostResume::ManaAbility {
+                mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+            },
         };
 
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
         match filtered_opp.waiting_for {
-            WaitingFor::ExileForManaAbility { zone, cards, .. } => {
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromManaZone { zone },
+                choices: cards,
+                ..
+            } => {
                 assert_eq!(zone, Zone::Graveyard);
                 assert_eq!(
                     cards,
@@ -1337,7 +1426,7 @@ mod tests {
                     "graveyard mana ability cost choices must NOT be redacted"
                 );
             }
-            other => panic!("expected ExileForManaAbility, got {other:?}"),
+            other => panic!("expected PayCost ExileFromManaZone, got {other:?}"),
         }
     }
 
@@ -1405,7 +1494,7 @@ mod tests {
                 1,
                 "viewer {viewer:?} must see the commander-damage entry",
             );
-            let views = derive_views(&filtered);
+            let views = derive_views(&filtered, Some(viewer));
             let from_p0 = views
                 .commander_damage_by_attacker
                 .get(&PlayerId(0))

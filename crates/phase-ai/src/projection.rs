@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use engine::ai_support::legal_actions;
 use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply, EngineError};
-use engine::types::{CoreType, GameAction, GameState, ObjectId, Phase, PlayerId, WaitingFor};
+use engine::types::{
+    CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
+};
 use web_time::{Duration, Instant};
 
 /// How far into the opponent's upcoming turn to project.
@@ -329,13 +331,16 @@ fn resolve_choice(
             pick_empty_blockers(&actions)
         }
 
-        WaitingFor::ManaPayment { .. }
-        | WaitingFor::ChooseXValue { .. }
+        // CR 118.3 + CR 605.3b: ReturnToHand, Behold, and TapCreatures cost
+        // payments project as "first legal payment" (matching the pre-collapse
+        // behavior — Discard / Sacrifice / Exile / RemoveCounter PayCost kinds
+        // fall through to the catch-all below, as their old variants did).
+        WaitingFor::PayCost {
+            kind: PayCostKind::ReturnToHand | PayCostKind::Behold { .. } | PayCostKind::TapCreatures,
+            ..
+        }
+        | WaitingFor::ManaPayment { .. }
         | WaitingFor::ChooseManaColor { .. }
-        | WaitingFor::ReturnToHandForCost { .. }
-        | WaitingFor::BeholdForCost { .. }
-        | WaitingFor::TapCreaturesForSpellCost { .. }
-        | WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PhyrexianPayment { .. }
         | WaitingFor::CombatTaxPayment { .. }
@@ -348,6 +353,18 @@ fn resolve_choice(
                 .cloned()
                 .ok_or(BailReason::NoLegalManaPayment)?
         }
+
+        // CR 107.1c + CR 601.2f: X-value projection picks the maximum legal X.
+        // Candidates are emitted in `min..=max` order
+        // (`engine::ai_support::candidates`), so the last action is the
+        // maximum. Issue #710: projecting X=0 (the previous behavior, shared
+        // with the payment arms above) collapsed the search-tree value of every
+        // X-cost spell to "does nothing." The engine has already capped `max`
+        // to a legally payable amount, so `last()` is always affordable.
+        WaitingFor::ChooseXValue { .. } => actions
+            .last()
+            .cloned()
+            .ok_or(BailReason::NoLegalManaPayment)?,
 
         WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }

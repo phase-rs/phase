@@ -25,6 +25,8 @@ export function TargetingOverlay() {
   const isCopyRetarget = waitingFor?.type === "CopyRetarget";
   const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) => slot.current != null);
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
+  // CR 701.36a: Populate — choose a creature token you control to copy.
+  const isPopulateChoice = waitingFor?.type === "PopulateChoice";
   // CR 303.4 + CR 303.4g + CR 115.1: Return-as-Aura attach pick. Picker is a
   // CHOICE (not a target), but the action shape mirrors ExploreChoice
   // (`GameAction::ChooseTarget` with the chosen ObjectId).
@@ -37,7 +39,8 @@ export function TargetingOverlay() {
   const retargetSpellName = isRetargetChoice
     ? objects?.[stack?.[waitingFor.data.stack_entry_index]?.source_id ?? -1]?.name
     : undefined;
-  const isTapCreatureChoice = waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost";
+  const isTapCreatureChoice =
+    waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
   const selection = isTargetSelection ? waitingFor.data.selection : null;
   const currentTargetSlot = isCopyRetarget
@@ -51,12 +54,14 @@ export function TargetingOverlay() {
       ? waitingFor.data.pending_cast?.object_id
       : waitingFor?.type === "ExploreChoice"
         ? waitingFor.data.source_id
+      : waitingFor?.type === "PopulateChoice"
+        ? waitingFor.data.source_id
       : waitingFor?.type === "ReturnAsAuraTarget"
         ? waitingFor.data.source_id
-      : waitingFor?.type === "TapCreaturesForManaAbility"
-        ? (waitingFor.data.pending_mana_ability as { source_id?: number } | undefined)?.source_id
-      : waitingFor?.type === "TapCreaturesForSpellCost"
-        ? waitingFor.data.pending_cast?.object_id
+      : waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures"
+        ? waitingFor.data.resume.type === "ManaAbility"
+          ? (waitingFor.data.resume.ManaAbility as { source_id?: number } | undefined)?.source_id
+          : (waitingFor.data.resume.Spell as { object_id?: number } | undefined)?.object_id
       : undefined;
   const sourceName = sourceId != null ? objects?.[sourceId]?.name : undefined;
 
@@ -98,7 +103,7 @@ export function TargetingOverlay() {
     return () => clearSelectedCards();
   }, [clearSelectedCards, isTapCreatureChoice]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isReturnAsAuraTarget && !isRetargetChoice && !isTapCreatureChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isPopulateChoice && !isReturnAsAuraTarget && !isRetargetChoice && !isTapCreatureChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;
@@ -137,6 +142,8 @@ export function TargetingOverlay() {
                   })()
               : isExploreChoice
                 ? t("targeting.chooseCreatureToExplore")
+              : isPopulateChoice
+                ? t("targeting.chooseCreatureTokenToPopulate")
               : isReturnAsAuraTarget
                 ? t("targeting.chooseReturnAsAuraTarget")
               : isRetargetChoice
@@ -161,7 +168,10 @@ export function TargetingOverlay() {
         {/* Player targets are handled by PlayerHud/OpponentHud glow + click */}
 
         <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
-          {(waitingFor.type === "TargetSelection" || waitingFor.type === "TapCreaturesForSpellCost") && (
+          {(waitingFor.type === "TargetSelection" ||
+            (waitingFor.type === "PayCost" &&
+              waitingFor.data.kind.type === "TapCreatures" &&
+              waitingFor.data.resume.type === "Spell")) && (
             <button
               onClick={handleCancel}
               className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
@@ -206,9 +216,10 @@ export function TargetingOverlay() {
 
 type TargetingPromptParams = {
   waitingFor: {
-    type: "TargetSelection" | "TriggerTargetSelection" | "ExploreChoice" | "CopyTargetChoice" | "TapCreaturesForManaAbility" | "TapCreaturesForSpellCost";
+    type: "TargetSelection" | "TriggerTargetSelection" | "ExploreChoice" | "CopyTargetChoice" | "PayCost";
     data: {
       target_slots?: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean }[];
+      mode_labels?: (string | null)[];
       selection?: { current_slot: number };
       player?: number;
     };
@@ -233,6 +244,9 @@ function buildInferredTargetPrompt({
   if (!selection) return null;
 
   if (!activeSlot) return null;
+  // Skip mode-context wrapping on the no-legal-targets branch (CR 700.2c): the
+  // engine does not surface a target for this slot, so there is no mode prompt
+  // to qualify.
   if (activeSlot.legal_targets.length === 0) {
     return t("targeting.noLegalTargets");
   }
@@ -240,15 +254,25 @@ function buildInferredTargetPrompt({
   const targetWord = inferTargetNoun(activeSlot.legal_targets, objects, t);
   const useUpToOne = selection && targetSlots.length === 1 && activeSlot.optional;
 
+  let prompt: string;
   if (waitingFor.type === "TriggerTargetSelection") {
-    return useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
+    prompt = useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
+  } else if (targetSlots.length <= 1) {
+    prompt = useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
+  } else {
+    prompt = t("targeting.chooseTargetOf", { current: Math.min(selection.current_slot + 1, targetSlots.length), total: targetSlots.length });
   }
 
-  if (targetSlots.length <= 1) {
-    return useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
+  // CR 700.2 / CR 601.2b: For a modal spell/ability, the engine attaches a
+  // per-slot mode label so the player knows which chosen mode the current
+  // target belongs to. Wrap the computed prompt once with the active slot's
+  // label when present. `mode = ` interpolates the raw engine label (Oracle
+  // mode text, not localized); `prompt` is the already-localized base.
+  const modeLabel = waitingFor.data.mode_labels?.[selection.current_slot];
+  if (modeLabel) {
+    return t("targeting.modeContext", { mode: modeLabel, prompt });
   }
-
-  return t("targeting.chooseTargetOf", { current: Math.min(selection.current_slot + 1, targetSlots.length), total: targetSlots.length });
+  return prompt;
 }
 
 function inferTargetNoun(

@@ -15,7 +15,9 @@ use super::context::ParseContext;
 use super::error::OracleResult;
 use super::primitives::{parse_article, parse_counter_type_typed, parse_number};
 use super::target::parse_type_filter_word;
-use crate::parser::oracle_target::{parse_shared_quality_clause, parse_type_phrase};
+use crate::parser::oracle_target::{
+    parse_shared_quality, parse_shared_quality_clause, parse_type_phrase,
+};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
@@ -72,7 +74,7 @@ pub fn parse_half_rounded(input: &str) -> OracleResult<'_, QuantityExpr> {
     parse_fraction_rounded(input)
 }
 
-fn parse_fraction_divisor(input: &str) -> OracleResult<'_, u32> {
+pub(crate) fn parse_fraction_divisor(input: &str) -> OracleResult<'_, u32> {
     alt((
         value(2, tag("half ")),
         value(3, alt((tag("a third "), tag("one third "), tag("third ")))),
@@ -353,15 +355,19 @@ fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
 /// expressions. When absent (malformed text or upstream trimming), defaults
 /// to `Down` — the more common direction in actual Magic cards and a safe
 /// fallback for misparses.
-fn parse_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
-    let (rest, rounding) = opt(alt((
+pub(crate) fn parse_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
+    let (rest, rounding) = opt(parse_explicit_rounding_suffix).parse(input)?;
+    Ok((rest, rounding.unwrap_or(RoundingMode::Down)))
+}
+
+pub(crate) fn parse_explicit_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
+    alt((
         value(RoundingMode::Up, tag(", rounded up")),
         value(RoundingMode::Down, tag(", rounded down")),
         value(RoundingMode::Up, tag(", round up")),
         value(RoundingMode::Down, tag(", round down")),
-    )))
-    .parse(input)?;
-    Ok((rest, rounding.unwrap_or(RoundingMode::Down)))
+    ))
+    .parse(input)
 }
 
 /// Parse a literal number OR the variable `X` in filter-threshold contexts.
@@ -394,6 +400,7 @@ pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr>
 /// "your life total", "cards in your hand", etc.
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
+        parse_object_count_by_shared_quality,
         parse_the_number_of,
         parse_distinct_card_types_exiled_with_source,
         parse_linked_exile_mana_value_ref,
@@ -434,6 +441,51 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_counters_among_ref,
     )))
     .parse(input)
+}
+
+/// CR 109.3 + CR 205.3m: Parse "the greatest/fewest/total number of
+/// <type-phrase> that have/share [a] <quality> in common" into a grouped
+/// object-count quantity.
+///
+/// The "in common" wrapper is not a target predicate: it asks for the size of
+/// quality buckets within the already-matched population. Keep it separate from
+/// `FilterProp::SharesQuality`, which validates a chosen group against a
+/// reference object/set.
+fn parse_object_count_by_shared_quality(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the ").parse(input)?;
+    let (rest, aggregate) = alt((
+        value(AggregateFunction::Max, tag("greatest")),
+        value(AggregateFunction::Min, tag("fewest")),
+        value(AggregateFunction::Sum, tag("total")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" number of ").parse(rest)?;
+    let (rest, type_text) = take_until(" that ").parse(rest)?;
+    let (rest, _) = tag(" that ").parse(rest)?;
+    let (rest, _) = alt((tag("have "), tag("has "), tag("share "), tag("shares "))).parse(rest)?;
+    let (rest, _) = opt(alt((tag("a "), tag("at least one ")))).parse(rest)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let (rest, _) = tag(" in common").parse(rest)?;
+
+    let (filter, type_remainder) = parse_type_phrase(type_text.trim());
+    if !type_remainder.trim().is_empty()
+        || matches!(filter, TargetFilter::Any)
+        || !quantity_filter_has_meaningful_content(&filter)
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCountBySharedQuality {
+            filter,
+            quality,
+            aggregate,
+        },
+    ))
 }
 
 /// CR 607.2a: Parse linked-exile mana-value phrases into the shared aggregate
@@ -535,6 +587,10 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // whose " you control" suffix would otherwise not match but whose
         // type-word prefix overlaps.
         parse_controlled_by_extremum_player,
+        // CR 604.3: "<type> of the chosen type on the battlefield" — global CDA
+        // count; must precede `parse_number_of_controlled_type`, whose
+        // " you control" suffix does not match the battlefield-wide form.
+        parse_number_of_chosen_type_on_battlefield,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -542,6 +598,9 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // possessive routes to `TargetZoneCardCount` (resolves against the player
         // target in scope) instead of falling back to a controller-less
         // `InZone` filter that counts every player's cards.
+        // CR 613.1: "cards in the chosen player's <zone>" — the persisted ETB
+        // choice; must precede the generic target/zone arms below.
+        parse_number_of_cards_in_chosen_player_zone,
         parse_number_of_cards_in_target_zone,
         parse_number_of_cards_in_all_players_hands,
         parse_number_of_cards_in_zone,
@@ -677,18 +736,94 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
     ))
 }
 
-/// Parse "[type(s)] you control" after "the number of".
+/// Parse "[type(s)] you control" / "[type(s)] the chosen player controls" after
+/// "the number of". CR 613.1: "the chosen player" is the player persisted on the
+/// source via `ChosenAttribute::Player` (Skyshroud War Beast, Lost Order of
+/// Jarkeld), distinct from the controller ("you control").
 fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, tf) = parse_type_filter_word(input)?;
-    let (rest, _) = tag(" you control").parse(rest)?;
+    let (rest, head) = parse_type_filter_word(input)?;
+    let (rest, controller) = alt((
+        value(ControllerRef::You, tag(" you control")),
+        value(
+            ControllerRef::SourceChosenPlayer,
+            tag(" the chosen player controls"),
+        ),
+    ))
+    .parse(rest)?;
+    // CR 205.2b: "<head> you control that are <t1> and/or <t2>" restricts the
+    // controlled population to objects that have any of the listed card types.
+    // CR 205.2b makes a multi-type object satisfy any of its types, so a
+    // permanent that is both a creature and a Vehicle is counted once via the
+    // `AnyOf` disjunction (Collision Course). When the relative clause names a
+    // single type, that type alone replaces the head. A non-type "that are"
+    // clause (e.g. "that are tapped") leaves the suffix unconsumed so a later
+    // arm can handle it rather than mis-parsing it here.
+    let (rest, type_filters) =
+        match opt(preceded(tag(" that are "), parse_type_filter_list)).parse(rest)? {
+            (r, Some(list)) if list.len() > 1 => (r, vec![TypeFilter::AnyOf(list)]),
+            (r, Some(list)) => (r, list),
+            (r, None) => (r, vec![head]),
+        };
     Ok((
         rest,
         QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter {
-                type_filters: vec![tf],
-                controller: Some(ControllerRef::You),
+                type_filters,
+                controller: Some(controller),
                 properties: Vec::new(),
             }),
+        },
+    ))
+}
+
+/// CR 604.3 + CR 613.1: Parse "<type> of the chosen type [on the battlefield]"
+/// after "the number of" → a battlefield-wide (any-controller) population count
+/// of permanents whose subtypes include the source's chosen creature type.
+///
+/// Distinct from `parse_number_of_controlled_type`, whose " you control" suffix
+/// restricts the count to a single controller. This is the global form that
+/// backs characteristic-defining power/toughness abilities such as Caller of
+/// the Hunt ("~'s power and toughness are each equal to the number of creatures
+/// of the chosen type on the battlefield"). The chosen type is read at
+/// evaluation time via `FilterProp::IsChosenCreatureType` (mirrors the existing
+/// "<type> you control of the chosen type" filter), so this covers every CDA in
+/// the class, not a single card.
+///
+/// Prefix variants such as "other"/"another"/"non-X"/"legendary" are
+/// intentionally out of scope for this global chosen-type CDA class; this mirrors
+/// the controlled chosen-type sibling below and avoids shadowing its controller
+/// suffix.
+fn parse_number_of_chosen_type_on_battlefield(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, head) = parse_type_filter_word(input)?;
+    let (rest, _) = alt((tag(" of the chosen type"), tag(" of that type"))).parse(rest)?;
+    // CR 400.1: the population is battlefield-wide; tolerate an explicit
+    // " on the battlefield" scope phrase without altering the default
+    // battlefield zone of the resulting `ObjectCount`.
+    let (rest, _) = opt(tag(" on the battlefield")).parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![head],
+                controller: None,
+                properties: vec![FilterProp::IsChosenCreatureType],
+            }),
+        },
+    ))
+}
+
+/// CR 613.1: Parse "cards in the chosen player's <zone>" after "the number of"
+/// into the general zone-count building block scoped to the source's persisted
+/// chosen player.
+fn parse_number_of_cards_in_chosen_player_zone(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("cards in the chosen player's ").parse(input)?;
+    let (rest, zone) = parse_zone_ref_singular(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types: Vec::new(),
+            scope: CountScope::SourceChosenPlayer,
         },
     ))
 }
@@ -1490,6 +1625,11 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         value(QuantityRef::EventContextAmount, tag("that much")),
         value(QuantityRef::EventContextAmount, tag("that many")),
         value(QuantityRef::EventContextAmount, tag("that damage")),
+        // CR 120.1 + CR 603.7c: "the damage dealt" bare form in a triggered
+        // ability body — refers to the total from the triggering combat-damage
+        // event. Distinct from "that damage" (different article+verb) and
+        // "damage dealt this way" (PreviousEffectAmount).
+        value(QuantityRef::EventContextAmount, tag("the damage dealt")),
         value(
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
@@ -1991,12 +2131,12 @@ fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         value(
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            alt((
-                tag("creature under your control"),
-                tag("creature you control"),
-                tag("creatures under your control"),
-                tag("creatures you control"),
-            )),
+            // number axis × controller-phrase axis (PATTERNS.md §8b) — "creatures"
+            // before "creature" since alt() is short-circuit.
+            (
+                alt((tag("creatures"), tag("creature"))),
+                alt((tag(" under your control"), tag(" you control"))),
+            ),
         ),
         value(
             TargetFilter::Typed(TypedFilter::creature()),
@@ -2004,12 +2144,10 @@ fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
         ),
         value(
             TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
-            alt((
-                tag("permanent under your control"),
-                tag("permanent you control"),
-                tag("permanents under your control"),
-                tag("permanents you control"),
-            )),
+            (
+                alt((tag("permanents"), tag("permanent"))),
+                alt((tag(" under your control"), tag(" you control"))),
+            ),
         ),
         value(
             TargetFilter::Typed(TypedFilter::permanent()),
@@ -2513,8 +2651,11 @@ pub fn parse_the_number_of_player_counters(input: &str) -> OracleResult<'_, Quan
 }
 
 /// CR 122.1: Typed alt over named player-counter kinds. Each arm emits the
-/// `PlayerCounterKind` variant directly (no intermediate string).
-fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
+/// `PlayerCounterKind` variant directly (no intermediate string). `pub(crate)`
+/// so the `PlayerCounter` player-attribute predicate parser
+/// (`oracle_quantity::parse_player_attribute_predicate`) shares this single
+/// kind grammar rather than re-enumerating counter tags.
+pub(crate) fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
     alt((
         value(PlayerCounterKind::Experience, tag("experience")),
         value(PlayerCounterKind::Poison, tag("poison")),
@@ -2580,6 +2721,32 @@ mod tests {
         let (rest, q) = parse_quantity("3 damage").unwrap();
         assert_eq!(q, QuantityExpr::Fixed { value: 3 });
         assert_eq!(rest, " damage");
+    }
+
+    #[test]
+    fn parse_number_of_chosen_type_on_battlefield_global_count() {
+        // CR 604.3: Caller of the Hunt — "the number of creatures of the chosen
+        // type on the battlefield" is a battlefield-wide CDA count (any
+        // controller), distinct from the " you control" controlled-type form.
+        for text in [
+            "the number of creatures of the chosen type on the battlefield",
+            "the number of creatures of the chosen type",
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "", "{text:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(tf.controller, None, "{text:?}: counts every controller");
+                    assert!(
+                        tf.properties.contains(&FilterProp::IsChosenCreatureType),
+                        "{text:?}: must gate on the source's chosen creature type"
+                    );
+                }
+                other => panic!("{text:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -3326,6 +3493,57 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 613.1: the en-Kor… no — the CDA "chosen player" cycle. "the chosen
+    /// player" is the player persisted on the source via `ChosenAttribute::Player`
+    /// (Skyshroud War Beast, Lost Order of Jarkeld, Entropic Specter, Sewer
+    /// Nemesis). Controls-counts route through `ControllerRef::SourceChosenPlayer`;
+    /// zone-counts through `CountScope::SourceChosenPlayer`.
+    #[test]
+    fn parse_quantity_ref_chosen_player_cda_forms() {
+        let (rest, q) =
+            parse_quantity_ref("the number of creatures the chosen player controls").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::SourceChosenPlayer));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+
+        for (text, zone) in [
+            (
+                "the number of cards in the chosen player's hand",
+                ZoneRef::Hand,
+            ),
+            (
+                "the number of cards in the chosen player's graveyard",
+                ZoneRef::Graveyard,
+            ),
+            (
+                "the number of cards in the chosen player's library",
+                ZoneRef::Library,
+            ),
+            (
+                "the number of cards in the chosen player's exile",
+                ZoneRef::Exile,
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                q,
+                QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: Vec::new(),
+                    scope: CountScope::SourceChosenPlayer,
+                }
+            );
+        }
+    }
+
     #[test]
     fn parse_quantity_ref_total_cards_in_all_players_hands() {
         let (rest, q) =
@@ -3759,6 +3977,11 @@ mod tests {
         assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, "");
 
+        // CR 603.7c: bare "the damage dealt" form maps to EventContextAmount.
+        let (rest, q) = parse_quantity_ref("the damage dealt").unwrap();
+        assert_eq!(q, QuantityRef::EventContextAmount);
+        assert_eq!(rest, "");
+
         let (rest2, q2) = parse_quantity_ref("that creature's power").unwrap();
         assert_eq!(
             q2,
@@ -3978,6 +4201,109 @@ mod tests {
             }
             other => panic!("expected Treasure TokensCreatedThisTurn, got {other:?}"),
         }
+    }
+
+    fn assert_shared_quality_count_typed(
+        q: QuantityRef,
+    ) -> (
+        Vec<TypeFilter>,
+        Option<ControllerRef>,
+        Vec<FilterProp>,
+        SharedQuality,
+        AggregateFunction,
+    ) {
+        match q {
+            QuantityRef::ObjectCountBySharedQuality {
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }),
+                quality,
+                aggregate,
+            } => (type_filters, controller, properties, quality, aggregate),
+            other => panic!("expected ObjectCountBySharedQuality over Typed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_greatest_creature_type_count_in_common() {
+        let (rest, q) = parse_quantity_ref(
+            "the greatest number of creatures you control that have a creature type in common",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, properties, quality, aggregate) =
+            assert_shared_quality_count_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(!properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SharesQuality { .. })));
+        assert_eq!(quality, SharedQuality::CreatureType);
+        assert_eq!(aggregate, AggregateFunction::Max);
+    }
+
+    #[test]
+    fn parse_fewest_noncreature_shared_quality_count_in_common() {
+        let (rest, q) = parse_quantity_ref(
+            "the fewest number of artifacts you control that share a color in common",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, quality, aggregate) =
+            assert_shared_quality_count_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Artifact]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(quality, SharedQuality::Color);
+        assert_eq!(aggregate, AggregateFunction::Min);
+    }
+
+    #[test]
+    fn parse_singular_at_least_one_shared_quality_count_in_common() {
+        let (rest, q) = parse_quantity_ref(
+            "the greatest number of permanent you control that has at least one color in common",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, quality, aggregate) =
+            assert_shared_quality_count_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Permanent]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(quality, SharedQuality::Color);
+        assert_eq!(aggregate, AggregateFunction::Max);
+    }
+
+    #[test]
+    fn parse_total_shared_quality_count_in_common() {
+        let (rest, q) = parse_quantity_ref(
+            "the total number of permanents you control that have a card type in common",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, quality, aggregate) =
+            assert_shared_quality_count_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Permanent]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(quality, SharedQuality::CardType);
+        assert_eq!(aggregate, AggregateFunction::Sum);
+    }
+
+    #[test]
+    fn parse_shared_quality_count_rejects_partial_population() {
+        assert!(parse_quantity_ref(
+            "the greatest number of creatures you control banana that have a creature type in common",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parse_shared_quality_count_rejects_empty_population() {
+        assert!(parse_quantity_ref(
+            "the greatest number of you control that have a creature type in common",
+        )
+        .is_err());
     }
 
     /// Helper: pull the `(type_filters, controller, properties, qualities)` tuple
@@ -4798,5 +5124,114 @@ mod tests {
                 "phrase {phrase:?} must yield ObjectManaValue{{CostPaidObject}}"
             );
         }
+    }
+
+    /// CR 700.12: "the number of outlaws you control" counts every permanent
+    /// with an outlaw creature type (Assassin/Mercenary/Pirate/Rogue/Warlock).
+    /// Laughing Jasper Flint. Routes through `parse_number_of_controlled_type`
+    /// once `parse_type_filter_word` recognizes the "outlaws" head noun.
+    #[test]
+    fn parse_quantity_ref_the_number_of_outlaws_you_control() {
+        let outlaws = TypeFilter::AnyOf(
+            ["Assassin", "Mercenary", "Pirate", "Rogue", "Warlock"]
+                .iter()
+                .map(|s| TypeFilter::Subtype((*s).to_string()))
+                .collect(),
+        );
+        let (rest, q) = parse_quantity_ref("the number of outlaws you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![outlaws],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// CR 205.2b: "permanents you control that are creatures and/or Vehicles"
+    /// restricts the controlled population to the listed types, merged into an
+    /// `AnyOf` disjunction so a creature-Vehicle is counted once. Collision
+    /// Course.
+    #[test]
+    fn parse_quantity_ref_controlled_type_disjunction_clause() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of permanents you control that are creatures and/or vehicles",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::AnyOf(vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Subtype("Vehicle".to_string()),
+                    ])],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// Regression: a plain controlled-type count without a "that are" clause
+    /// keeps the single head type.
+    #[test]
+    fn parse_quantity_ref_controlled_type_no_clause_keeps_head() {
+        let (rest, q) = parse_quantity_ref("the number of creatures you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// A single-type "that are" clause replaces the head with that one type
+    /// (no `AnyOf` wrapper).
+    #[test]
+    fn parse_quantity_ref_controlled_type_single_clause() {
+        let (rest, q) =
+            parse_quantity_ref("the number of permanents you control that are artifacts").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// A non-type "that are" clause (e.g. "that are tapped") must NOT be
+    /// consumed by the optional type-list clause — the `opt` returns `None` and
+    /// the count keeps the head type, leaving the clause for a later parser.
+    #[test]
+    fn parse_quantity_ref_controlled_type_non_type_clause_falls_through() {
+        let (rest, q) =
+            parse_number_of_controlled_type("creatures you control that are tapped").unwrap();
+        assert_eq!(rest, " that are tapped");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
     }
 }

@@ -77,6 +77,13 @@ pub(crate) enum SpecialClause {
     /// additional `StaticDefinition` cloned from the antecedent grant template,
     /// with both the granted keyword and the gating condition's keyword swapped.
     SameIsTrueFor(Vec<Keyword>),
+    /// CR 608.2c: "Repeat this process for <keyword list>." — Kathril, Aspect
+    /// Warper. Replicates the antecedent conditional keyword-counter clause
+    /// (`PutCounter { counter_type: Keyword(..) }` gated by a graveyard-keyword
+    /// condition) once per listed keyword, swapping both the placed counter's
+    /// keyword and the gating condition's keyword. The counters-class analogue
+    /// of `SameIsTrueFor` (which handles static keyword grants).
+    RepeatProcessForKeywords(Vec<Keyword>),
 }
 
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.

@@ -13,6 +13,19 @@ pub(super) fn run_post_action_pipeline(
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
 ) -> Result<WaitingFor, EngineError> {
+    run_post_action_pipeline_from(state, events, 0, default_wf, skip_trigger_scan)
+}
+
+/// Run the normal post-action settlement while scanning only events produced at
+/// or after `event_start`. Use for nested resume paths that carry earlier
+/// payment/choice events in the same output buffer.
+pub(super) fn run_post_action_pipeline_from(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    default_wf: &WaitingFor,
+    skip_trigger_scan: bool,
+) -> Result<WaitingFor, EngineError> {
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
     let stack_before = state.stack.len();
@@ -29,12 +42,24 @@ pub(super) fn run_post_action_pipeline(
     // events that should be deferred have already been moved into
     // `state.deferred_entry_events` for replay by `handle_copy_target_choice`.
     if !skip_trigger_scan {
-        let filtered_events: Vec<_> = events
+        let filtered_events: Vec<_> = events[event_start..]
             .iter()
             .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
             .cloned()
             .collect();
-        triggers::process_triggers(state, &filtered_events);
+        // CR 603.3b: If the resolution step that just ran paused for a player
+        // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered
+        // abilities it generated (e.g. "whenever you scry, ...") must NOT be
+        // collected and ordered now — doing so overwrites the pending choice's
+        // WaitingFor (the `OrderTriggers` PromptForChoice arm clobbers
+        // `ScryChoice` when 2+ same-controller triggers fire). Park them in
+        // `deferred_triggers`; they are drained below once the action settles
+        // back to Priority. Mirrors `batch_or_drain_observer_triggers`' B2 branch.
+        if super::engine_resolution_choices::handles(&state.waiting_for) {
+            triggers::collect_triggers_into_deferred(state, &filtered_events);
+        } else {
+            triggers::process_triggers(state, &filtered_events);
+        }
     }
 
     // CR 704.3: SBA/trigger loop. SBAs may generate events (e.g., ZoneChanged for
@@ -48,6 +73,21 @@ pub(super) fn run_post_action_pipeline(
             triggers::process_triggers(state, &sba_events);
         } else {
             break;
+        }
+    }
+
+    // CR 603.3b: Triggered abilities parked while a resolution choice was open
+    // (e.g. "whenever you scry, ..." deferred above so it couldn't clobber the
+    // choice's WaitingFor) go on the stack once resolution truly settles. The
+    // drain is gated inside `drain_deferred_trigger_queue` (no mid-continuation
+    // / mid-spell settles; same-controller groups get `OrderTriggers` first).
+    // A drained trigger that itself needs input returns its own WaitingFor,
+    // handled by the check below.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !state.deferred_triggers.is_empty()
+    {
+        if let Some(wf) = triggers::drain_deferred_trigger_queue(state, events) {
+            state.waiting_for = wf;
         }
     }
 
@@ -90,9 +130,7 @@ pub(super) fn run_post_action_pipeline(
         ));
     }
 
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
     Ok(flush_pending_miracle_offer(state, default_wf.clone()))
 }

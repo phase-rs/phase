@@ -111,6 +111,8 @@
   },
   "landing": {
     "title": "Draft",
+    "eyebrow": "Draft",
+    "description": "Quick draft against AI, build a cube, or host a pod with friends.",
     "startNew": "Start New",
     "quickDraft": {
       "title": "Quick Draft",
@@ -315,6 +317,23 @@
     "kicked": "You were kicked from the pod",
     "hostLeft": "Host left the draft",
     "connection": "Connection Error"
+  },
+  "spectator": {
+    "eyebrow": "Draft spectator",
+    "title": "Watching draft {{code}}",
+    "missingCode": "Enter a draft code",
+    "connecting": "Connecting to draft…",
+    "errorGeneric": "Could not connect as spectator",
+    "backToLobby": "Back to lobby",
+    "banner": "Spectating this draft pod",
+    "omniscient": "Omniscient view",
+    "seats": "Seats",
+    "deckSubmitted": "deck in",
+    "standings": "Standings",
+    "pairings": "Pairings",
+    "pools": "Pools (omniscient)",
+    "poolSize": "{{count}} cards picked",
+    "seat": "Seat {{index}}"
   },
   "lobby": {
     "title": "Draft Pod Lobby",

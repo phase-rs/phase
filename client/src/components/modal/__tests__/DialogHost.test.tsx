@@ -87,6 +87,46 @@ describe("DialogHost", () => {
     expect(wrapper?.className ?? "").not.toMatch(/fixed/);
   });
 
+  it("anchors convoke mana payment at z-40 but stays click-through via pointer-events (regression)", () => {
+    // CR 702.51a / CR 702.126a: a convoke/improvise spell enters `ManaPayment`
+    // with `convoke_mode` set, and the caster taps creatures/artifacts on the
+    // battlefield to pay. The host MUST anchor the panel in its `fixed inset-0
+    // z-40` stacking context (otherwise framer-motion's transform demotes an
+    // un-anchored host to a z-auto context that paints BELOW the board's z-10
+    // grid, burying the pay panel behind the HUD/hand). Click-through is
+    // achieved with `pointer-events: none` so board taps still reach the
+    // creatures/artifacts; the panel's own controls re-enable events.
+    setWaitingFor({
+      type: "ManaPayment",
+      data: { player: 0, convoke_mode: "Convoke" },
+    } as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.className ?? "").toMatch(/z-40/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
+  it("keeps the viewport wrapper for plain mana payment without convoke", () => {
+    // Plain payment is committed via the panel's Pay button (no board taps), so
+    // the host wraps normally — only `convoke_mode` payments go click-through.
+    setWaitingFor({
+      type: "ManaPayment",
+      data: { player: 0 },
+    } as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+  });
+
   it("resets peek to false when WaitingFor changes (regression)", () => {
     setWaitingFor({ type: "ModeChoice", data: { player: 0 } } as never);
     render(

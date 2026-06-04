@@ -62,6 +62,6 @@ pub(crate) fn pair_if_legal(state: &mut GameState, ability: &ResolvedAbility, ta
         target_id,
         ability.controller,
     ) {
-        crate::game::pairing::pair_objects(state, ability.source_id, target_id);
+        crate::game::pairing::pair_objects(state, ability.source_id, target_id, ability.controller);
     }
 }

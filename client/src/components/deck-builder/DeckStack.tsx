@@ -8,6 +8,8 @@ import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
 import type { SourcePrinting } from "../../hooks/useCardImage";
 import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import type { GameFormat } from "../../adapter/types";
+import { BASIC_LAND_NAMES } from "../../constants/game";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview } from "./hoverPreview";
@@ -22,9 +24,12 @@ interface DeckStackProps {
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
-  /** Deck format string — resolves the sideboard policy so the second section
+  /** Deck format — resolves the sideboard policy so the second section
    *  is labelled "Sideboard" or "Maybeboard" consistently with the list view. */
-  format?: string;
+  format?: GameFormat;
+  /** CR 100.2a / CR 903.5b: engine-backed per-card copy cap resolver. Returns
+   *  the format default (4 / 1) unless the card prints an override. */
+  getEffectiveCap: (name: string) => number;
 }
 
 type DeckStackSection = "commander" | "main" | "sideboard";
@@ -432,6 +437,7 @@ export function DeckStack({
   onRemoveCommander,
   onCardHover,
   format,
+  getEffectiveCap,
 }: DeckStackProps) {
   const { t } = useTranslation("deck-builder");
   const isMaybeboard = isMaybeboardPolicy(useSideboardPolicy(format));
@@ -448,11 +454,15 @@ export function DeckStack({
   const canAddCard = useMemo(
     () => (item: DeckStackItem) => {
       if (item.section !== "main") return false;
-      const typeLine = cardDataCache.get(item.name)?.type_line.toLowerCase() ?? "";
-      const isBasicLand = typeLine.includes("basic") && typeLine.includes("land");
-      return isBasicLand || item.count < 4;
+      // CR 100.2a / CR 903.5b: basic lands are always addable; every other card
+      // is capped at its engine-resolved effective limit (4 / 1 default, raised
+      // by "any number" / "up to N" overrides). Mirrors the guard inside
+      // useDeckBuilder.handleAddCard so the stack tile's + button doesn't
+      // disagree with the hook's add path.
+      if (BASIC_LAND_NAMES.has(item.name)) return true;
+      return item.count < getEffectiveCap(item.name);
     },
-    [cardDataCache],
+    [getEffectiveCap],
   );
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);

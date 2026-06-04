@@ -27,6 +27,16 @@ fn mark_enchantment(runner: &mut GameRunner, id: ObjectId) {
         .push(CoreType::Enchantment);
 }
 
+fn seed_terra_library(scenario: &mut GameScenario) -> ObjectId {
+    for i in 0..10 {
+        scenario.add_card_to_library_top(P0, &format!("Padding {i}"));
+    }
+    for i in (0..4).rev() {
+        scenario.add_card_to_library_top(P0, &format!("Instant {i}"));
+    }
+    scenario.add_card_to_library_top(P0, "Milled Aura")
+}
+
 /// Issue #1298: parsed ETB must chain `Mill` → `ChangeZone` with
 /// `TrackedSetFiltered`, not a bare type filter.
 #[test]
@@ -102,14 +112,7 @@ fn terra_etb_offers_only_milled_enchantments_not_battlefield() {
         .add_creature_to_hand(P0, "Terra, Magical Adept", 2, 2)
         .id();
 
-    // Library convention: first added = top (`library.iter().take(n)`).
-    let milled_enchantment = scenario.add_card_to_library_top(P0, "Milled Aura");
-    for i in 0..4 {
-        scenario.add_card_to_library_top(P0, &format!("Instant {i}"));
-    }
-    for i in 0..10 {
-        scenario.add_card_to_library_top(P0, &format!("Padding {i}"));
-    }
+    let milled_enchantment = seed_terra_library(&mut scenario);
 
     let mut runner = scenario.build();
     mark_enchantment(&mut runner, milled_enchantment);
@@ -159,7 +162,6 @@ fn terra_etb_offers_only_milled_enchantments_not_battlefield() {
 /// Full cast → ETB trigger → mill → put-from-milled path (issue #1298).
 #[test]
 fn terra_cast_etb_offers_only_milled_enchantments() {
-    use engine::types::actions::GameAction;
     use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 
     let parsed = parse_oracle_text(
@@ -190,13 +192,7 @@ fn terra_cast_etb_offers_only_milled_enchantments() {
         .with_trigger_definition(etb)
         .id();
 
-    let milled_enchantment = scenario.add_card_to_library_top(P0, "Milled Aura");
-    for i in 0..4 {
-        scenario.add_card_to_library_top(P0, &format!("Instant {i}"));
-    }
-    for i in 0..10 {
-        scenario.add_card_to_library_top(P0, &format!("Padding {i}"));
-    }
+    let milled_enchantment = seed_terra_library(&mut scenario);
 
     let mut runner = scenario.build();
     mark_enchantment(&mut runner, milled_enchantment);
@@ -228,40 +224,25 @@ fn terra_cast_etb_offers_only_milled_enchantments() {
         .mana_pool
         .add(ManaUnit::new(ManaType::Red, dummy, false, vec![]));
 
-    let card_id = runner.state().objects[&terra_id].card_id;
-    let mut result = runner
-        .act(GameAction::CastSpell {
-            object_id: terra_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("cast Terra");
+    // Cast Terra and resolve it onto the battlefield. The ETB trigger's
+    // put-from-milled clause halts the pipeline at its `EffectZoneChoice`
+    // (a prompt the cast driver leaves for the caller to inspect), so the
+    // final waiting state is the offered-cards choice we assert on.
+    let outcome = runner.cast(terra_id).resolve();
 
-    let mut guard = 0;
-    loop {
-        guard += 1;
-        assert!(guard < 96, "stuck waiting; last = {:?}", result.waiting_for);
-        match &result.waiting_for {
-            WaitingFor::EffectZoneChoice {
-                cards, destination, ..
-            } => {
-                assert!(cards.contains(&milled_enchantment), "offered = {cards:?}");
-                assert!(
-                    !cards.contains(&battlefield_enchantment),
-                    "battlefield trap offered (issue #1298); offered = {cards:?}"
-                );
-                assert_eq!(*destination, Some(Zone::Hand));
-                return;
-            }
-            WaitingFor::ManaPayment { .. } => {
-                result = runner
-                    .act(GameAction::PassPriority)
-                    .expect("finalize mana payment");
-            }
-            WaitingFor::Priority { .. } => {
-                result = runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            other => panic!("unexpected waiting_for during Terra cast ETB: {other:?}"),
-        }
-    }
+    let WaitingFor::EffectZoneChoice {
+        cards, destination, ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "expected EffectZoneChoice for put-from-milled clause, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert!(cards.contains(&milled_enchantment), "offered = {cards:?}");
+    assert!(
+        !cards.contains(&battlefield_enchantment),
+        "battlefield trap offered (issue #1298); offered = {cards:?}"
+    );
+    assert_eq!(*destination, Some(Zone::Hand));
 }

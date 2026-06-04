@@ -66,6 +66,13 @@ fn resolve_sacrifice_scope(
                 .map(|pid| vec![pid])
                 .unwrap_or_default()
         }
+        // CR 613.1: Player persisted on the source via an "as ~ enters, choose
+        // a player" replacement.
+        Some(ControllerRef::SourceChosenPlayer) => {
+            crate::game::game_object::source_chosen_player(state, ability.source_id)
+                .map(|pid| vec![pid])
+                .unwrap_or_default()
+        }
         // CR 608.2c + CR 109.4: Player chosen by an earlier `Choose(Player)`
         // in this resolution.
         Some(ControllerRef::ChosenPlayer { index }) => ability
@@ -217,7 +224,7 @@ pub fn resolve(
         // this rather than round-tripping through EffectZoneChoice.
         if !up_to && eligible.len() <= count {
             let mut sacrificed: i32 = 0;
-            for obj_id in eligible {
+            for &obj_id in &eligible {
                 match sacrifice::sacrifice_permanent(state, obj_id, chooser, events) {
                     Ok(SacrificeOutcome::Complete) => sacrificed += 1,
                     Ok(SacrificeOutcome::NeedsReplacementChoice(player)) => {
@@ -228,6 +235,15 @@ pub fn resolve(
                     Err(_) => {}
                 }
             }
+            // CR 701.21a + CR 603.10a + CR 608.2f: every eligible permanent was
+            // sacrificed as part of the same resolution event, so co-departing
+            // sacrifice/LTB observers (Blood Artist) observe each other.
+            // `departed_subset` drops any permanent that didn't actually leave
+            // (e.g. CantBeSacrificed members excluded upstream).
+            crate::game::zones::mark_simultaneous_departures(
+                events,
+                &crate::game::zones::departed_subset(state, &eligible),
+            );
             state.last_effect_count = Some(sacrificed);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),

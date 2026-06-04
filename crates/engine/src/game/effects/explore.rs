@@ -285,18 +285,21 @@ pub fn resolve(
         // then player chooses to put the card back on top or into graveyard.
         add_explore_counter(state, explorer_id, events);
 
-        // Reuse WaitingFor::DigChoice with keep_count=1:
-        //   - selected cards go to hand (keep_count=1 means choose 1 to keep)
-        //   - rest go to graveyard (but there's only 1 card, so keep=hand, don't keep=graveyard)
+        // CR 701.44a: the player may put the revealed nonland card back on top
+        // of their library, or put it into their graveyard. Model with
+        // DigChoice keep_count=1, up_to=true so the player may keep 0 or 1:
+        //   - keep 1 -> kept_destination (top of library, "put it back")
+        //   - keep 0 -> rest_destination (graveyard)
+        // The card must NEVER go to hand for a nonland explore.
         state.waiting_for = WaitingFor::DigChoice {
             player: controller,
             library_owner: controller,
             selectable_cards: vec![top_card_id],
             cards: vec![top_card_id],
             keep_count: 1,
-            up_to: false,
-            kept_destination: None,
-            rest_destination: None,
+            up_to: true,
+            kept_destination: Some(crate::types::zones::Zone::Library),
+            rest_destination: Some(crate::types::zones::Zone::Graveyard),
             source_id: Some(ability.source_id),
         };
 
@@ -479,6 +482,123 @@ mod tests {
             }
             other => panic!("Expected DigChoice, got {:?}", other),
         }
+    }
+
+    /// Build an explorer + a nonland on top of its controller's library, with a
+    /// land beneath it so "top of library" is unambiguous. Returns (state, ability,
+    /// explorer, nonland_id).
+    fn nonland_explore_setup() -> (GameState, ResolvedAbility, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let explorer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Merfolk Branchwalker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&explorer)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let spell_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        // A land beneath the revealed nonland so library-top is meaningful.
+        let beneath = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&beneath)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let ability = make_explore_ability(explorer);
+        (state, ability, explorer, spell_id)
+    }
+
+    /// CR 701.44a: a put-back explored nonland card returns to the TOP of the
+    /// library, never to hand. Regression for #2017 / #2005 (the kept card
+    /// previously fell through to Zone::Hand).
+    #[test]
+    fn explore_nonland_put_back_goes_to_library_top_not_hand() {
+        let (mut state, ability, _explorer, spell_id) = nonland_explore_setup();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Keep the revealed card (put it back on top of the library).
+        let waiting = state.waiting_for.clone();
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            waiting,
+            crate::types::actions::GameAction::SelectCards {
+                cards: vec![spell_id],
+            },
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.players[0].library.front().copied(),
+            Some(spell_id),
+            "put-back explored nonland must be on top of the library"
+        );
+        assert!(
+            !state.players[0].hand.contains(&spell_id),
+            "explored nonland must never go to hand"
+        );
+    }
+
+    /// CR 701.44a: declining to put the card back sends the explored nonland to
+    /// the graveyard (not hand). Regression for #2017 — `up_to: false` previously
+    /// forced keeping the card, removing the graveyard option entirely.
+    #[test]
+    fn explore_nonland_decline_goes_to_graveyard() {
+        let (mut state, ability, _explorer, spell_id) = nonland_explore_setup();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Decline (keep 0) — put it into the graveyard.
+        let waiting = state.waiting_for.clone();
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            waiting,
+            crate::types::actions::GameAction::SelectCards { cards: vec![] },
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            state.players[0].graveyard.contains(&spell_id),
+            "declined explored nonland must go to graveyard"
+        );
+        assert!(
+            !state.players[0].hand.contains(&spell_id),
+            "explored nonland must never go to hand"
+        );
+        assert!(
+            !state.players[0].library.contains(&spell_id),
+            "declined explored nonland must leave the library"
+        );
     }
 
     #[test]

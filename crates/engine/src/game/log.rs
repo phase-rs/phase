@@ -89,6 +89,10 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::GameOver { .. }
         | GameEvent::PlayerLost { .. }
         | GameEvent::PlayerEliminated { .. }
+        // CR 103.1: grouped with the setup event MulliganStarted under `Game`
+        // (not `Special` like in-game DieRolled) — it is game setup, not a
+        // CR 706 die-roll log entry.
+        | GameEvent::StartingPlayerContest { .. }
         | GameEvent::MulliganStarted => LogCategory::Game,
 
         GameEvent::TurnStarted { .. }
@@ -125,7 +129,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CardsDrawn { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
-        | GameEvent::CardsRevealed { .. } => LogCategory::Zone,
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::Foretold { .. } => LogCategory::Zone,
 
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
@@ -195,6 +200,10 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::RoomDoorUnlocked { .. }
         | GameEvent::DungeonCompleted { .. }
         | GameEvent::InitiativeTaken { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
+        | GameEvent::Specialized { .. }
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. }
@@ -287,6 +296,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 AbilityTag::Evolve => " activates evolve: ",
                 AbilityTag::Exhaust => " activates exhaust: ",
                 AbilityTag::Outlast => " activates outlast: ",
+                // CR 702.29c: Cycling emits a dedicated `GameEvent::Cycled`, not a
+                // `KeywordAbilityActivated` event, so this arm is unreachable.
+                AbilityTag::Cycling => " activates cycling: ",
             };
             vec![
                 player_seg(state, *player_id),
@@ -319,6 +331,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::SpellCountered {
             object_id,
             countered_by,
+            ..
         } => vec![
             card_seg(state, *countered_by),
             text(" counters "),
@@ -528,11 +541,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::CombatDamageDealtToPlayer {
             player_id,
-            source_ids,
+            source_amounts,
+            ..
         } => vec![
             player_seg(state, *player_id),
             text(" is dealt combat damage by "),
-            num(source_ids.len() as i32),
+            num(source_amounts.len() as i32),
             text(" creature(s)"),
         ],
 
@@ -633,6 +647,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::Transformed { object_id } => {
             vec![card_seg(state, *object_id), text(" transforms")]
+        }
+
+        GameEvent::Specialized { object_id, color } => {
+            vec![
+                card_seg(state, *object_id),
+                text(&format!(" specializes ({color:?})")),
+            ]
         }
 
         GameEvent::TurnedFaceUp { object_id } => {
@@ -741,6 +762,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         }
 
         GameEvent::MulliganStarted => vec![text("Mulligan phase begins")],
+
+        // CR 103.1: concise one-line summary of the starting-player roll-off;
+        // round-by-round detail lives in the structured event for the UI.
+        GameEvent::StartingPlayerContest { winner, .. } => vec![
+            player_seg(state, *winner),
+            text(" wins the roll to take the first turn"),
+        ],
 
         GameEvent::GameOver { winner } => match winner {
             Some(pid) => vec![
@@ -963,6 +991,29 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::RoomDoorUnlocked { .. } => vec![text("Room door unlocked")],
         GameEvent::DungeonCompleted { .. } => vec![text("Dungeon completed")],
         GameEvent::InitiativeTaken { .. } => vec![text("Initiative taken")],
+        GameEvent::AttractionOpened { object_id, .. } => {
+            vec![text("Opened Attraction "), card_seg(state, *object_id)]
+        }
+        GameEvent::AttractionsRolledToVisit { roll, .. } => {
+            vec![
+                text("Rolled "),
+                text(&roll.to_string()),
+                text(" to visit Attractions"),
+            ]
+        }
+        GameEvent::AttractionVisited {
+            attraction_id,
+            roll,
+            ..
+        } => {
+            vec![
+                text("Visited Attraction "),
+                card_seg(state, *attraction_id),
+                text(" (rolled "),
+                text(&roll.to_string()),
+                text(")"),
+            ]
+        }
         GameEvent::Clash { .. } => vec![text("Clash")],
         GameEvent::VoteCast { voter, choice, .. } => {
             vec![player_seg(state, *voter), text(" voted "), text(choice)]
@@ -1025,6 +1076,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *host),
             text(" revoked debug actions from "),
             player_seg(state, *player_id),
+        ],
+        GameEvent::Foretold {
+            player_id,
+            object_id,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" foretold "),
+            card_seg(state, *object_id),
         ],
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already
@@ -1136,6 +1195,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         );
@@ -1207,6 +1267,12 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 20,
                 result: 17,
+            },
+            GameEvent::StartingPlayerContest {
+                rounds: vec![crate::types::events::ContestRound {
+                    rolls: vec![(PlayerId(0), 17), (PlayerId(1), 5)],
+                }],
+                winner: PlayerId(0),
             },
             GameEvent::CoinFlipped {
                 player_id: PlayerId(0),

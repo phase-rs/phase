@@ -275,6 +275,18 @@ function DebugCardContextMenuInner({
         </div>
       )}
 
+      {/* Sacrifice — routes through the engine's CR 701.21 sacrifice pipeline so
+          dies / leaves-the-battlefield triggers fire, unlike "Remove" which
+          deletes the object outright. Offered for any battlefield permanent. */}
+      {onBattlefield && (
+        <div className="border-b border-gray-800 py-0.5">
+          <MenuItem
+            label="Sacrifice"
+            onClick={() => dispatchDebug({ type: "Sacrifice", data: { object_id: objectId } })}
+          />
+        </div>
+      )}
+
       {/* Destructive action */}
       <div className="py-0.5">
         <MenuItem

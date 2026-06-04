@@ -79,7 +79,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // triggered and are unaffected by this variant.
     // CR 702.8a: CastWithFlash — card may be cast at instant speed.
     registry.insert(StaticMode::CastWithFlash, handle_rule_mod);
-    // CR 601.2f: ReduceCost/RaiseCost are data-carrying variants — runtime checks are
+    // CR 601.2f: ModifyCost (Reduce/Raise modes) is a data-carrying variant — runtime checks are
     // in game/casting.rs::apply_battlefield_cost_modifiers(). Coverage support is via
     // is_data_carrying_static() in game/coverage.rs.
     // Note: ReduceAbilityCost runtime checks are in game/keywords.rs::apply_ability_cost_reduction().
@@ -116,6 +116,12 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // Runtime enforcement is in effects/copy_spell.rs via active_static_definitions.
     registry.insert(StaticMode::CantBeCopied, handle_cant_be_copied);
     registry.insert(StaticMode::CantBeDestroyed, handle_cant_be_destroyed);
+    // CR 701.19c: CantBeRegenerated — a marked permanent's regeneration shields
+    // are not applied the next time it would be destroyed. Passive rule
+    // modification; runtime enforcement is in replacement.rs::destroy_applier via
+    // object_has_active_cant_be_regenerated(). Registered as a rule-mod so coverage
+    // marks the standalone "can't be regenerated" effect as supported.
+    registry.insert(StaticMode::CantBeRegenerated, handle_rule_mod);
     // CR 702.34: FlashBack — allows casting from graveyard, exiled after resolution.
     registry.insert(StaticMode::FlashBack, handle_flashback);
     // CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -143,11 +149,16 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantUntap, handle_rule_mod);
     // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
     registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
+    // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
+    // must do so ("All creatures able to block ~ do so"; enforced in combat.rs).
+    registry.insert(StaticMode::MustBeBlockedByAll, handle_rule_mod);
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
     registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
     registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
+    // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
+    registry.insert(StaticMode::CantCrew, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
     // CR 104.3b: CantLoseTheGame — player can't lose the game (Platinum Angel).
     // Runtime enforcement is in sba.rs::player_has_cant_lose().
@@ -259,7 +270,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     //   - ChangesZoneAll            → `TriggerMode::ChangesZoneAll`
     //   - PreventDamage             → `Effect::PreventDamage`
     //   - DamageReduction / cost-mod variants → typed `StaticMode` variants
-    //     (`ReduceCost`, `RaiseCost`, `DefilerCostReduction`, etc.)
+    //     (`ModifyCost`, `DefilerCostReduction`, etc.)
     //   - ETBReplacement / LeavesPlay → `ReplacementDefinition`
     //     (ChangeZone / Moved events)
     //
@@ -757,6 +768,19 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
     ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantLoseLife)
 }
 
+/// CR 702.11e: Check if `player_id` may target creatures as though they didn't
+/// have hexproof, including "hexproof from [quality]" variants.
+pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::IgnoreHexproof,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
+}
+
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static
 /// ability prohibits `player_id` from paying life as a cost.
 ///
@@ -1046,6 +1070,14 @@ fn static_condition_matches_context(
     })
 }
 
+/// CR 702.122c: Returns true when the creature has an active "can't crew Vehicles" static.
+pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::functioning_abilities::active_static_definitions(state, obj)
+            .any(|def| def.mode == StaticMode::CantCrew)
+    })
+}
+
 /// Check if a static ability named `name` applies to a specific object
 /// (target-scoped query). Used for object-targeted prohibitions like
 /// `CantBeSacrificed`, `CantBeEnchanted`, `CantTransform`, etc.
@@ -1118,6 +1150,8 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TargetPlayer => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
+                        // CR 613.1: chosen-player scope has no static context here.
+                        crate::types::ability::ControllerRef::SourceChosenPlayer => false,
                         // CR 109.4: Chosen-player scope has no static context.
                         crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
                         // CR 603.2 + CR 109.4: Triggering-player scope has no

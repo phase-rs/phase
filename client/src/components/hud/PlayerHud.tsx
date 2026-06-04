@@ -21,6 +21,7 @@ export function PlayerHud() {
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
   const poisonCounters = useGameStore((s) => s.gameState?.players[playerId]?.poison_counters ?? 0);
   const radCounters = useGameStore((s) => s.gameState?.players[playerId]?.player_counters?.Rad ?? 0);
+  const experienceCounters = useGameStore((s) => s.gameState?.players[playerId]?.player_counters?.Experience ?? 0);
   const designations = usePlayerDesignations(playerId);
   const isPhasedOut = useGameStore(
     (s) => s.gameState?.players[playerId]?.status?.type === "PhasedOut",
@@ -49,9 +50,16 @@ export function PlayerHud() {
     && waitingFor.data.player === playerId
     && waitingFor.data.scope.type === "Single"
     && waitingFor.data.legal_new_targets.some((t) => "Player" in t && t.Player === playerId);
+  // CR 303.4g + CR 115.1: a returned / non-spell Aura that can enchant a player
+  // (a Curse) is hosted by a board pick — the picker's controller may attach it
+  // to this player when they appear in `legal_targets`. Click dispatches the
+  // same `ChooseTarget { Player }` the engine accepts (engine.rs ~2984).
+  const returnAsAuraHasMe = waitingFor?.type === "ReturnAsAuraTarget"
+    && waitingFor.data.player === playerId
+    && waitingFor.data.legal_targets.some((t) => "Player" in t && t.Player === playerId);
   const isValidTarget = (isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
     (target) => "Player" in target && target.Player === playerId,
-  )) || copyRetargetCurrentSlotHasMe || retargetChoiceHasMe;
+  )) || copyRetargetCurrentSlotHasMe || retargetChoiceHasMe || returnAsAuraHasMe;
 
   const handleTargetClick = useCallback(() => {
     if (isValidTarget) {
@@ -102,6 +110,7 @@ export function PlayerHud() {
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
             {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
+            {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
           </>
         }

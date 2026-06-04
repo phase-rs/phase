@@ -285,6 +285,7 @@ describe("DeckBuilder", () => {
 
     const deckTab = screen.getByRole("tab", { name: /deck/i });
     const infoTab = screen.getByRole("tab", { name: /info/i });
+    const playtestTab = screen.getByRole("tab", { name: /playtest/i });
 
     // Roving tabindex: only the selected tab is in the tab sequence.
     expect(deckTab).toHaveAttribute("tabindex", "0");
@@ -296,6 +297,10 @@ describe("DeckBuilder", () => {
     expect(infoTab).toHaveAttribute("aria-selected", "true");
     expect(infoTab).toHaveFocus();
     expect(infoTab).toHaveAttribute("tabindex", "0");
+
+    await user.keyboard("{ArrowRight}");
+    expect(playtestTab).toHaveAttribute("aria-selected", "true");
+    expect(playtestTab).toHaveFocus();
 
     await user.keyboard("{ArrowRight}");
     // Wraps back to the first tab.

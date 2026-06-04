@@ -25,9 +25,10 @@ use crate::game::game_object::AttachTarget;
 #[serde(tag = "type")]
 pub enum CastChoice {
     /// CR 701.57a + CR 702.85a: Cast the offered card without paying its mana
-    /// cost. The cast pipeline still enforces target legality, alternative
-    /// constraints (e.g., `CascadeResultingMvBelow`), and other CR 601.2
-    /// checks.
+    /// cost. The cast pipeline still enforces target legality, the
+    /// cast-during-resolution resulting-MV constraint (`ManaValue` carried on
+    /// the `ExileWithAltCost` permission with `resolution_cleanup`), and other
+    /// CR 601.2 checks.
     Cast,
     /// CR 701.57a + CR 702.85a: Decline the offer. For Discover the card goes
     /// to hand; for Cascade the card joins the misses on the bottom of the
@@ -153,6 +154,12 @@ pub enum GameAction {
     ChooseExert {
         exert: bool,
     },
+    /// CR 701.30b: The clashing player's choice of which opponent to clash with,
+    /// answering a pending `WaitingFor::ClashChooseOpponent`. `opponent` must be
+    /// one of that prompt's `candidates`.
+    ChooseClashOpponent {
+        opponent: PlayerId,
+    },
     /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
     /// prompt. See [`MulliganChoice`] for the three branches.
     MulliganDecision {
@@ -180,6 +187,11 @@ pub enum GameAction {
     },
     SelectCards {
         cards: Vec<ObjectId>,
+    },
+    /// CR 705.1: Krark's Thumb keep-choice — indices into `results` the player
+    /// keeps (ignoring the rest, CR 614.1a). Length must equal `keep_count`.
+    SelectCoinFlips {
+        keep_indices: Vec<usize>,
     },
     /// CR 400.11 + CR 406.3: Player commits one or more selections from the
     /// offered outside-game pool. Each selection is a discriminated source —
@@ -392,7 +404,7 @@ pub enum GameAction {
         card_id: CardId,
         payment_mode: CastPaymentMode,
     },
-    /// CR 702.35a: Accept a pending `WaitingFor::MadnessCastOffer` and cast
+    /// CR 702.35a: Accept a pending `WaitingFor::CastOffer` (Madness) and cast
     /// `object_id` from exile for its madness cost. Decline is via the shared
     /// `DecideOptionalEffect { accept: false }`.
     CastSpellAsMadness {
@@ -593,15 +605,19 @@ pub enum GameAction {
     CastPreparedCopy {
         source: ObjectId,
     },
+    /// Digital-only Specialize: pick the color specialization to apply.
+    ChooseSpecializeColor {
+        color: super::mana::ManaColor,
+    },
     /// CR 702.xxx: Paradigm (Strixhaven) — accept the turn-based offer during
-    /// `WaitingFor::ParadigmCastOffer`, casting a token copy of the exiled
+    /// `WaitingFor::CastOffer` (Paradigm), casting a token copy of the exiled
     /// source spell without paying its mana cost. The exiled source stays in
     /// exile. Assign when WotC publishes SOS CR update.
     CastParadigmCopy {
         source: ObjectId,
     },
     /// CR 702.xxx: Paradigm (Strixhaven) — decline the turn-based offer during
-    /// `WaitingFor::ParadigmCastOffer`. The exiled source stays in exile and
+    /// `WaitingFor::CastOffer` (Paradigm). The exiled source stays in exile and
     /// may be offered again next turn. Assign when WotC publishes SOS CR
     /// update.
     PassParadigmOffer,
@@ -646,6 +662,13 @@ pub enum LearnOption {
     Skip,
 }
 
+/// Serde default for debug spawn `run_etb` flags: omitting the field means
+/// "run the ETB pipeline", preserving the historical always-ETB behavior for
+/// any payload that predates the toggle.
+fn default_true() -> bool {
+    true
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt. Gated on `GameState::debug_mode`.
@@ -677,14 +700,30 @@ pub enum DebugAction {
         zone: Zone,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attach_to: Option<AttachTarget>,
+        /// When `true`, route a `Battlefield` spawn through the real ETB pipeline
+        /// (replacements → ETB triggers → SBAs). When `false`, place the card raw
+        /// with no entry effects — mirrors `MoveToZone { simulate: false }`. Only
+        /// consulted for `zone == Battlefield`; ignored for other destinations.
+        #[serde(default = "default_true")]
+        run_etb: bool,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
+    /// CR 701.21: Sacrifice a permanent — route through the single sacrifice
+    /// authority so the replacement pipeline and dies/leaves-the-battlefield
+    /// triggers fire. Distinct from `RemoveObject`, which deletes the object
+    /// outright with no triggers. The sacrificing player is the permanent's
+    /// controller.
+    Sacrifice { object_id: ObjectId },
     /// Draw N cards using the real draw pipeline (CR 121.1).
     /// Routes through replacement effects and emits CardDrawn events.
     DrawCards { player_id: PlayerId, count: u32 },
     /// Mill N cards from library to graveyard.
     Mill { player_id: PlayerId, count: u32 },
+    /// CR 701.20a: Reveal the top N card(s) of a player's library using the real
+    /// `Effect::RevealTop` resolver — marks them revealed and emits
+    /// `CardsRevealed` without moving the cards (CR 701.20b).
+    Reveal { player_id: PlayerId, count: u32 },
     /// Shuffle a player's library.
     ShuffleLibrary { player_id: PlayerId },
     /// Start a proliferate choice for a player using the real proliferate
@@ -707,6 +746,12 @@ pub enum DebugAction {
     },
     /// Tap or untap an object.
     SetTapped { object_id: ObjectId, tapped: bool },
+    /// CR 722.3a: Give or remove the "prepared" designation on an object so a
+    /// preparation card's prepare spell can be cast for testing. Routes through
+    /// the `game::effects::prepare` single authority, so setting `prepared`
+    /// no-ops on objects without a prepare-spell face and emits the
+    /// `BecamePrepared` / `BecameUnprepared` events.
+    SetPrepared { object_id: ObjectId, prepared: bool },
     /// Change an object's controller. Marks layers dirty.
     SetController {
         object_id: ObjectId,
@@ -779,7 +824,16 @@ pub enum DebugAction {
     /// `TokenSpec::enter_with_counters` — same semantics, real pipeline.
     /// CR 122.6a (counters placed at ETB), CR 614.1 (replacement window),
     /// CR 704.5f (0-toughness SBA — why this field exists).
-    CreateToken { request: DebugTokenRequest },
+    ///
+    /// When `run_etb` is `true`, the created token's ETB triggers are placed on
+    /// the stack and SBAs run; when `false`, the token is still created (with its
+    /// replacement-window counters) but its "when ~ enters" triggers and the SBA
+    /// pass are skipped — mirrors `MoveToZone { simulate: false }`.
+    CreateToken {
+        request: DebugTokenRequest,
+        #[serde(default = "default_true")]
+        run_etb: bool,
+    },
     /// Create a token copy of an existing object using the real copy-token
     /// resolver (CR 707.2).
     CreateTokenCopy {
@@ -874,6 +928,7 @@ impl DebugAction {
                 owner,
                 zone,
                 attach_to,
+                run_etb,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -882,16 +937,24 @@ impl DebugAction {
                     }
                     None => String::new(),
                 };
+                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 format!(
-                    "CreateCard ({} for {} in {:?}{})",
+                    "CreateCard ({} for {} in {:?}{}{})",
                     card_name,
                     player_label(*owner),
                     zone,
                     attach_suffix,
+                    etb_suffix,
                 )
             }
             DebugAction::RemoveObject { object_id } => {
                 format!("RemoveObject ({})", obj(*object_id))
+            }
+            DebugAction::Sacrifice { object_id } => {
+                format!("Sacrifice ({})", obj(*object_id))
+            }
+            DebugAction::Reveal { player_id, count } => {
+                format!("Reveal (top {} of {})", count, player_label(*player_id))
             }
             DebugAction::DrawCards { player_id, count } => {
                 format!("DrawCards ({} draws {})", player_label(*player_id), count)
@@ -944,6 +1007,14 @@ impl DebugAction {
                 "SetTapped ({} → {})",
                 obj(*object_id),
                 if *tapped { "tapped" } else { "untapped" }
+            ),
+            DebugAction::SetPrepared {
+                object_id,
+                prepared,
+            } => format!(
+                "SetPrepared ({} → {})",
+                obj(*object_id),
+                if *prepared { "prepared" } else { "unprepared" }
             ),
             DebugAction::SetController {
                 object_id,
@@ -999,7 +1070,7 @@ impl DebugAction {
                 player_label(*active_player)
             ),
             DebugAction::RunStateBasedActions => "RunStateBasedActions".to_string(),
-            DebugAction::CreateToken { request } => {
+            DebugAction::CreateToken { request, run_etb } => {
                 let counters = if request.enter_with_counters().is_empty() {
                     String::new()
                 } else {
@@ -1016,11 +1087,13 @@ impl DebugAction {
                         characteristics, ..
                     } => characteristics.display_name.as_str(),
                 };
+                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 format!(
-                    "CreateToken ({} for {}{})",
+                    "CreateToken ({} for {}{}{})",
                     token_label,
                     player_label(request.owner()),
-                    counters
+                    counters,
+                    etb_suffix
                 )
             }
             DebugAction::CreateTokenCopy { source_id, owner } => format!(
@@ -1120,6 +1193,7 @@ impl GameAction {
             | GameAction::MulliganDecision { .. }
             | GameAction::ReorderHand { .. }
             | GameAction::SelectCards { .. }
+            | GameAction::SelectCoinFlips { .. }
             | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
@@ -1147,12 +1221,14 @@ impl GameAction {
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
             | GameAction::ChooseDungeonRoom { .. }
+            | GameAction::ChooseSpecializeColor { .. }
             | GameAction::HarmonizeTap { .. }
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
+            | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass

@@ -1,5 +1,7 @@
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, ParadigmPrime, WaitingFor};
+use crate::types::game_state::{
+    CastOfferKind, ExileLink, ExileLinkKind, GameState, ParadigmPrime, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
@@ -63,7 +65,7 @@ pub fn paradigm_offers_for(state: &GameState, player: PlayerId) -> Vec<ObjectId>
         .collect()
 }
 
-/// Enqueue a `WaitingFor::ParadigmCastOffer` if offers exist for the given
+/// Enqueue a `WaitingFor::CastOffer` (Paradigm) if offers exist for the given
 /// player. Returns true if a `WaitingFor` was set; false if no offers and the
 /// caller should continue normal phase flow.
 pub fn enqueue_offer_if_any(state: &mut GameState, player: PlayerId) -> bool {
@@ -71,7 +73,10 @@ pub fn enqueue_offer_if_any(state: &mut GameState, player: PlayerId) -> bool {
     if offers.is_empty() {
         return false;
     }
-    state.waiting_for = WaitingFor::ParadigmCastOffer { player, offers };
+    state.waiting_for = WaitingFor::CastOffer {
+        player,
+        kind: CastOfferKind::Paradigm { offers },
+    };
     true
 }
 

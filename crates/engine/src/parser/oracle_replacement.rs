@@ -79,6 +79,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     let normalized = replace_self_refs(&text, card_name);
     let norm_lower = normalized.to_lowercase();
 
+    // --- Krark's Thumb: "If you would flip a coin, instead flip two coins and
+    //     ignore one." (CR 705.1 + CR 614.1a) ---
+    // Checked early so the generic "instead" / event-substitution handlers below
+    // don't mis-claim the line.
+    if let Some(def) = parse_krark_coin_flip_replacement(&text, &lower) {
+        return Some(def);
+    }
+
     // --- "As ~ enters, choose a [type]" → Moved replacement with persisted Choose ---
     // Must be checked BEFORE shock lands, which may contain this as a sub-pattern.
     if let Some(def) = parse_as_enters_choose(&norm_lower, &text) {
@@ -636,6 +644,50 @@ fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
 }
 
+/// CR 705.1 + CR 614.1a: Krark's Thumb — "If you would flip a coin, instead flip
+/// two coins and ignore one."
+///
+/// Emits a controller-scoped `CoinFlip` replacement whose `execute` doubles the
+/// flip count (`Multiply { factor: 2, EventContextAmount }`). The runtime applier
+/// reads this to set the doubled count; the resolver then performs the keep-1
+/// choice. No `valid_card` filter — the replacement is objectless (it watches the
+/// controller's flips, not a permanent moving), so it must not be skipped by an
+/// object-filter mismatch.
+fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
+    let ((), rest) = nom_on_lower(text, lower, |i| {
+        let (i, _) = tag("if you would flip a coin, instead flip ").parse(i)?;
+        let (i, _) = alt((tag("two coins"), tag("2 coins"))).parse(i)?;
+        let (i, _) = tag(" and ignore ").parse(i)?;
+        let (i, _) = alt((tag("one"), tag("1"))).parse(i)?;
+        let (i, _) = opt(char('.')).parse(i)?;
+        Ok((i, ()))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::CoinFlip)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            // CR 614.1a: "instead flip two coins" — double the count the
+            // replacement applier sees, then ignore all but one (CR 705.1).
+            Effect::FlipCoins {
+                count: QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                },
+                win_effect: None,
+                lose_effect: None,
+            },
+        ))
+        .description(text.to_string());
+    // CR 614.1a: "If you would flip a coin" — controller-scoped.
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    Some(def)
+}
+
 fn parse_enters_prepared(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
     let mut parser = value(
         (),
@@ -977,17 +1029,20 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 /// Parse "As ~ enters, choose a [type]" into a Moved replacement with persisted Choose.
 /// Skips lines that also contain shock land markers (handled by parse_shock_land).
 fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let has_phrase = |phrase: &'static str| {
+        nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
+            tag::<_, _, OracleError<'_>>(phrase).parse(input)
+        })
+        .is_some()
+    };
+
     // Must have "as" + "enters" framing
-    if !nom_primitives::scan_contains(norm_lower, "as")
-        || !nom_primitives::scan_contains(norm_lower, "enters")
-    {
+    if !has_phrase("as ") || !has_phrase("enters") {
         return None;
     }
 
     // Don't match shock lands — they have their own handler
-    if nom_primitives::scan_contains(norm_lower, "you may pay")
-        && nom_primitives::scan_contains(norm_lower, "life")
-    {
+    if has_phrase("you may pay") && has_phrase("life") {
         return None;
     }
 
@@ -997,15 +1052,45 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     })?;
     let choice_type = try_parse_named_choice(choose_text)?;
 
+    let choose = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Choose {
+            choice_type,
+            persist: true,
+        },
+    );
+
+    // CR 614.1c + CR 614.1d: The Thriving land cycle ("This land enters tapped.
+    // As it enters, choose a color other than <C>.") layers TWO replacement
+    // effects on the same entry event — the enters-tapped modifier AND the
+    // choice. This handler is dispatched BEFORE the unconditional enters-tapped
+    // guard and returns early, so without composing here the tap is silently
+    // dropped (issue #1581). Compose them into one Moved replacement:
+    // `Tap { SelfRef }` (the enter_tapped event-modifier) followed by the
+    // `Choose` as post-replacement "real work" — exactly the shape the engine
+    // already resolves for Vesuva's "enter tapped as a copy"
+    // (`Tap { SelfRef }` -> `sub_ability(BecomeCopy)`). The modifier must come
+    // first so `EventModifiers` accumulates the tap before reaching the choice.
+    let enters_tapped = (has_phrase("enters tapped")
+        || has_phrase("enters the battlefield tapped"))
+        && !has_phrase("unless")
+        && !has_phrase("if you control");
+
+    let execute = if enters_tapped {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .sub_ability(choose)
+    } else {
+        choose
+    };
+
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Choose {
-                    choice_type,
-                    persist: true,
-                },
-            ))
+            .execute(execute)
             .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
     )
@@ -1623,6 +1708,40 @@ fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetF
     }
 }
 
+/// Scope of a distributive ETB-with-counters subject (CR 614.12). `Other`
+/// excludes the source (`FilterProp::Another`); `Distributive` is a general
+/// subset that includes the source if it matches the type filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubjectScope {
+    /// "each other [type] ..." / "other [type] ..." — excludes the source.
+    Other,
+    /// "each [type] ..." — general subset including the source per CR 614.12.
+    Distributive,
+}
+
+/// Strip a distributive subject prefix from an ETB-with-counters line, reporting
+/// whether the source is excluded (`Other`) or included (`Distributive`).
+///
+/// CR 614.12: a replacement that modifies how a permanent enters may affect
+/// "only that permanent" or "a general subset of permanents that includes it".
+/// The "each other "/"other " forms exclude the source; the bare "each " form
+/// is a general subset that includes it. Returns `None` for self-ETB lines
+/// ("~ enters with ..."), which fall through to `SelfRef`.
+///
+/// The `"each other "` alternative must precede `"each "` so the longer match
+/// wins; `alt` is order-sensitive and `"each "` would otherwise shadow it.
+fn parse_distributive_subject(work_text: &str) -> Option<(&str, SubjectScope)> {
+    alt((
+        value(
+            SubjectScope::Other,
+            alt((tag::<_, _, OracleError<'_>>("each other "), tag("other "))),
+        ),
+        value(SubjectScope::Distributive, tag("each ")),
+    ))
+    .parse(work_text)
+    .ok()
+}
+
 /// Extract life payment amount from "pay N life" pattern.
 fn extract_life_payment(text: &str) -> Option<i32> {
     let after_pay = strip_after(text, "pay ")?;
@@ -1807,7 +1926,12 @@ fn parse_enters_with_counters(
     // sibling shorthand "counters on it equal to [quantity]", parse the
     // dynamic expression.
     if let Ok((_, (_, qty_text))) = nom_primitives::split_once_on(work_text, "equal to ") {
-        let trimmed = qty_text.trim().trim_end_matches('.');
+        // The quantity phrase never spans a sentence boundary, so isolate the
+        // first sentence before parsing — Slumbering Trudge trails a separate
+        // "If X is 2 or less, it enters tapped." clause after "equal to three
+        // minus X.", which would otherwise leave the quantity parsers a dangling
+        // tail and force the `Fixed { 1 }` fallback (only 1 stun counter).
+        let trimmed = qty_text.split('.').next().unwrap_or(qty_text).trim();
         if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
             count_expr = QuantityExpr::Ref { qty: qty_ref };
         } else if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
@@ -1816,11 +1940,24 @@ fn parse_enters_with_counters(
             crate::parser::oracle_quantity::parse_event_context_quantity(trimmed)
         {
             count_expr = qty;
+        } else if let Some((qty, rest_q)) = crate::parser::oracle_util::parse_count_expr(trimmed) {
+            // CR 107.3a: arithmetic over the cost variable ("three minus X").
+            // `parse_count_expr` emits `Variable("X")`; the rewrite below maps it
+            // to the entering object's `CostXPaid`. Require full consumption so a
+            // partial parse never silently truncates the quantity.
+            if rest_q.trim().is_empty() {
+                count_expr = qty;
+            }
         }
     }
     if let Some(qty) = parse_enters_with_where_x_suffix(work_text) {
         count_expr = qty;
     }
+    // CR 614.12: Any `Variable("X")` that survived the dynamic-quantity
+    // overrides above refers to the X paid on the *entering* object's cost, not
+    // a trigger-event source, so rewrite it to `CostXPaid` (idempotent —
+    // already-rewritten `CostXPaid` leaves are untouched).
+    rewrite_variable_x_to_cost_x_paid(&mut count_expr);
 
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
@@ -1837,39 +1974,47 @@ fn parse_enters_with_counters(
         put_counter
     };
 
-    // Determine valid_card filter: self vs other permanents.
-    // CR 614.1c: "each other Angel you control enters with ..." is a
-    // replacement effect that applies to a general subset of permanents, not
-    // the source. Strip the "each other " / "other " prefix (nom), then let
-    // `parse_type_phrase` be the detector: accept the subject iff the parse
-    // yields a typed filter with a concrete type/subtype (not the `Any`
-    // fallback). `parse_type_phrase` already classifies "creature",
-    // "permanent", AND subtypes ("Angel", "Sliver", ...) — so subtype-only
-    // subjects are no longer rejected by a hardcoded "creature"/"permanent"
-    // keyword guard. A non-type subject parses to the `[Any]` fallback and is
+    // Determine valid_card filter: self vs a general subset of permanents.
+    // CR 614.1c: Effects that read "[permanent] enters with ..." are
+    // replacement effects. CR 614.12 distinguishes effects that affect "only
+    // that permanent" (self-ETB → SelfRef) from those affecting "a general
+    // subset of permanents that includes it" (distributive → typed filter).
+    //
+    // Two distributive shapes exist:
+    //   - "each other [type] you control enters with ..." (Giada) — explicitly
+    //     EXCLUDES the source, so `FilterProp::Another` must be injected.
+    //   - "each [type] you control enters with ..." (Dragonstorm Globe) — the
+    //     general subset INCLUDES the source if it matches the type; per
+    //     CR 614.12 the subset "includes it", so NO `Another` is injected. (The
+    //     artifact source simply doesn't match a Dragon type filter, so no
+    //     self-application occurs here — but the class must not exclude itself.)
+    //
+    // `parse_distributive_subject` strips the prefix and reports the scope, then
+    // `parse_type_phrase` acts as the type detector: accept the subject iff the
+    // parse yields a typed filter with a concrete type/subtype (not the `Any`
+    // fallback). A non-type subject parses to the `[Any]` fallback and is
     // rejected, falling through to the `SelfRef` self-ETB branch.
-    let subject = alt((tag::<_, _, OracleError<'_>>("each other "), tag("other ")))
-        .parse(work_text)
-        .ok()
-        .map(|(rest, _)| rest)
-        .filter(|s| {
-            let (filter, _) = parse_type_phrase(s);
-            matches!(
-                &filter,
-                TargetFilter::Typed(TypedFilter { type_filters, .. })
-                    if !type_filters.is_empty()
-                        && type_filters.as_slice() != [TypeFilter::Any]
-            )
-        });
-    let valid_card = if let Some(subject_text) = subject {
+    let subject = parse_distributive_subject(work_text).and_then(|(subject_text, scope)| {
         let (filter, _) = parse_type_phrase(subject_text);
-        // Inject Another since we stripped "other" above
-        let filter = match filter {
-            TargetFilter::Typed(TypedFilter {
-                type_filters,
-                controller,
-                mut properties,
-            }) => {
+        let is_valid = matches!(
+            &filter,
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if !type_filters.is_empty()
+                    && type_filters.as_slice() != [TypeFilter::Any]
+        );
+        is_valid.then_some((filter, scope))
+    });
+    let valid_card = if let Some((filter, scope)) = subject {
+        // CR 614.12: only the "other" scope excludes the source from the subset.
+        let filter = match (filter, scope) {
+            (
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    mut properties,
+                }),
+                SubjectScope::Other,
+            ) => {
                 properties.insert(0, FilterProp::Another);
                 TargetFilter::Typed(TypedFilter {
                     type_filters,
@@ -1877,7 +2022,7 @@ fn parse_enters_with_counters(
                     properties,
                 })
             }
-            other => other,
+            (other, _) => other,
         };
         Some(filter)
     } else {
@@ -3100,6 +3245,15 @@ fn parse_damage_modification_replacement(
 /// `tag("the next time ")` prefix combinator succeeding, never a string
 /// heuristic. Returns `None` (fall-through) when the prefix or grammar fails.
 pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effect> {
+    // CR 614.9: passive-voice one-shot redirection — "the next N damage that
+    // would be dealt to ~ this turn is dealt to <recipient> instead" (the en-Kor
+    // cycle). This "would be dealt to" (passive, recipient-first) spine is not
+    // covered by the active "the next time [source] would deal" grammar below,
+    // so try it first and fall through on mismatch.
+    if let Some(effect) = parse_oneshot_next_n_damage_to_self_redirect(norm_lower) {
+        return Some(effect);
+    }
+
     // CR 614.1a + CR 514.2: "the next time ... this turn" — a replacement effect
     // ("instead", CR 614.1a) with a "this turn" duration that ends at cleanup
     // (CR 514.2). The one-opportunity consumption is CR 614.5 (see resolver).
@@ -3154,6 +3308,7 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
             target_filter,
             modification: Some(modification),
             redirect_to: None,
+            redirect_amount: None,
             redirect_object_filter: None,
             recipient_object_filter,
         });
@@ -3173,6 +3328,7 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
             target_filter,
             modification: None,
             redirect_to: Some(redirect_to),
+            redirect_amount: None,
             redirect_object_filter,
             recipient_object_filter,
         });
@@ -3198,6 +3354,61 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
     }
 
     None
+}
+
+/// CR 614.9 + CR 614.5: Parse the en-Kor cycle's one-shot redirection —
+/// "the next N damage that would be dealt to ~ this turn is dealt to target
+/// creature you control instead" (Nomads / Lancers / Outrider / Shaman / Spirit
+/// / Warrior en-Kor). The original recipient is the source itself (`~`), encoded
+/// as `recipient_object_filter: SelfRef`: the resolver hosts the shield on the
+/// source with `valid_card: SelfRef` so it fires only on damage to it, and the
+/// targeting layer surfaces no slot for the self recipient. The redirect
+/// recipient is a chosen object target ("target creature you control"). The
+/// amount N is retained as a depletion-style redirection cap so only that much
+/// damage is moved to the chosen recipient.
+fn parse_oneshot_next_n_damage_to_self_redirect(norm_lower: &str) -> Option<Effect> {
+    let (rest, (_, amount, _)) = (
+        tag::<_, _, OracleError<'_>>("the next "),
+        nom_primitives::parse_number,
+        tag::<_, _, OracleError<'_>>(" damage that would be dealt to ~ this turn is dealt to "),
+    )
+        .parse(norm_lower)
+        .ok()?;
+
+    // CR 115.1: redirect recipient — "target creature you control" (every en-Kor
+    // card) or the looser "target creature"; both become a chosen object target.
+    let (rest, redirect_object_filter) = alt((
+        value(
+            inject_controller(
+                TargetFilter::Typed(TypedFilter::creature()),
+                ControllerRef::You,
+            ),
+            tag::<_, _, OracleError<'_>>("target creature you control"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::creature()),
+            tag("target creature"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" instead").parse(rest).ok()?;
+    let (rest, _) = opt(char::<_, OracleError<'_>>('.')).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(Effect::CreateDamageReplacement {
+        source_filter: None,
+        combat_scope: None,
+        target_filter: None,
+        modification: None,
+        redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+        redirect_amount: Some(PreventionAmount::Next(amount)),
+        redirect_object_filter: Some(redirect_object_filter),
+        recipient_object_filter: Some(TargetFilter::SelfRef),
+    })
 }
 
 /// Split the one-shot body at the "this turn[,]" boundary into the would-deal
@@ -3430,12 +3641,25 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         ));
     }
 
+    // "a spell" — any spell is the source; no typed filter (Benevolent Unicorn).
+    // Must precede `parse_type_phrase`, which maps bare "spell" to Card.
+    if subject == "spell" {
+        return None;
+    }
+
     // "a source" with no qualifier — no filter needed (matches any source)
     if subject == "source" {
         return None;
     }
 
-    // "a spell" — no source filter (handled as general case for now)
+    // CR 614.1a: Typed damage sources ("creature you control with a +1/+1
+    // counter on it", "Giant source you control", …) — delegate to the shared
+    // type-phrase parser (Uncivil Unrest, Torbran-adjacent prints).
+    let (filter, rest) = parse_type_phrase(subject);
+    if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        return Some(filter);
+    }
+
     None
 }
 
@@ -3489,14 +3713,33 @@ fn damage_target_opponent_or_permanents() -> DamageTargetFilter {
     }
 }
 
+fn damage_target_source_chosen_player_or_permanents() -> DamageTargetFilter {
+    DamageTargetFilter::PlayerOrPermanentsControlledBy {
+        player: DamageTargetPlayerScope::SourceChosenPlayer,
+    }
+}
+
 /// Nom combinator for damage target phrases. Most specific tags first.
 fn parse_damage_target_phrase(
     input: &str,
 ) -> nom::IResult<&str, DamageTargetFilter, OracleError<'_>> {
     alt((
         value(
+            damage_target_source_chosen_player_or_permanents(),
+            alt((
+                tag("to the chosen player or a permanent they control"),
+                tag("to the chosen player or a permanent the chosen player controls"),
+            )),
+        ),
+        value(
             damage_target_opponent_or_permanents(),
             tag("to an opponent or a permanent an opponent controls"),
+        ),
+        value(
+            DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+            },
+            tag("to the chosen player"),
         ),
         value(
             DamageTargetFilter::CreatureOnly,
@@ -6764,6 +7007,49 @@ mod tests {
     }
 
     #[test]
+    fn enters_tapped_then_choose_color_composes_tap_and_choice() {
+        // CR 614.1c + CR 614.1d: Thriving land text ("This land enters
+        // tapped. As it enters, choose a color other than green.") must compose
+        // BOTH the enters-tapped modifier AND the colour choice into one Moved
+        // replacement: Tap { SelfRef } (modifier) -> sub_ability(Choose).
+        let def = parse_replacement_line(
+            "This land enters tapped. As it enters, choose a color other than green.",
+            "Thriving Grove",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().unwrap();
+        // Primary effect is the enters-tapped event modifier.
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "primary effect must be Tap {{ SelfRef }} (enter_tapped modifier), got {:?}",
+            execute.effect
+        );
+        // The colour choice rides as the sub-ability "real work".
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("enters-tapped choose-colour must carry the Choose as a sub-ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Color { ref excluded },
+                    persist: true,
+                } if excluded == &vec![ManaColor::Green]
+            ),
+            "sub-ability must be Choose color (excluding Green), got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn as_enters_choose_a_color_other_than_white() {
         let def = parse_replacement_line(
             "As this land enters, choose a color other than white.",
@@ -6916,6 +7202,63 @@ mod tests {
         ));
     }
 
+    /// Issue #1988 — Slumbering Trudge. "This creature enters with a number of
+    /// stun counters on it equal to three minus X. If X is 2 or less, it enters
+    /// tapped." The "three minus X" arithmetic plus the trailing tapped sentence
+    /// previously defeated every quantity parser, so `count` fell back to
+    /// `Fixed { 1 }` (1 stun counter regardless of X). The count must be the
+    /// `Offset { Multiply { -1, CostXPaid }, 3 }` expression so X=0 resolves to
+    /// 3 stun counters (and X>3 clamps to 0 in the resolver).
+    #[test]
+    fn slumbering_trudge_enters_with_three_minus_x_stun_counters() {
+        let def = parse_replacement_line(
+            "This creature enters with a number of stun counters on it equal to \
+             three minus X. If X is 2 or less, it enters tapped.",
+            "Slumbering Trudge",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("execute ability");
+        // "it enters tapped" → Tap wrapper with the counter as its sub_ability.
+        assert!(matches!(
+            *execute.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().expect("counter sub_ability");
+        match &*sub.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Stun);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                match count {
+                    QuantityExpr::Offset { inner, offset } => {
+                        assert_eq!(*offset, 3);
+                        match inner.as_ref() {
+                            QuantityExpr::Multiply { factor, inner } => {
+                                assert_eq!(*factor, -1);
+                                assert!(matches!(
+                                    inner.as_ref(),
+                                    QuantityExpr::Ref {
+                                        qty: QuantityRef::CostXPaid
+                                    }
+                                ));
+                            }
+                            other => panic!("expected Multiply{{-1, CostXPaid}}, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Offset{{.., 3}}, got {other:?}"),
+                }
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn self_enters_with_counters() {
         let def = parse_replacement_line(
@@ -6999,6 +7342,120 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// Dragonstorm Globe (#bug): "Each Dragon you control enters with an
+    /// additional +1/+1 counter on it." The bare distributive "each " subject
+    /// (no "other") must produce a typed Dragon filter WITHOUT `FilterProp::Another`
+    /// — per CR 614.12 the general subset includes the source if it matches.
+    /// Previously this fell through to `SelfRef`, so an Artifact source (which is
+    /// never a Dragon) could never match an entering Dragon and the counter was
+    /// never applied. External (non-SelfRef) → ChangeZone so token Dragons also
+    /// receive the counter (CR 614.12).
+    #[test]
+    fn each_distributive_subject_no_another_changezone() {
+        let def = parse_replacement_line(
+            "Each Dragon you control enters with an additional +1/+1 counter on it.",
+            "Dragonstorm Globe",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Dragon".to_string())],
+                controller: Some(ControllerRef::You),
+                // NO FilterProp::Another for the bare "each" distributive form.
+                properties: Vec::new(),
+            })),
+            "bare 'each [type]' must yield a typed filter WITHOUT Another (CR 614.12)"
+        );
+        match *def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } => assert_eq!(*counter_type, CounterType::Plus1Plus1),
+            ref other => panic!("expected PutCounter Fixed(1) Plus1Plus1, got {other:?}"),
+        }
+    }
+
+    /// Regression guard: the explicit "each other " form still injects
+    /// `FilterProp::Another` (excludes the source) per CR 614.12.
+    #[test]
+    fn each_other_subject_keeps_another() {
+        let def = parse_replacement_line(
+            "Each other Angel you control enters with a +1/+1 counter on it.",
+            "Angelic Overseer",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Angel".to_string())],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            })),
+            "'each other [type]' must keep FilterProp::Another (CR 614.12 excludes source)"
+        );
+    }
+
+    /// Regression guard: a bare "each [non-type]" subject is rejected by the
+    /// concrete-type `.filter()` guard (the word after "each " is not a card
+    /// type), so it falls through to `SelfRef` rather than being mis-redirected
+    /// to a typed distributive filter. This exercises the `Distributive`-scope
+    /// rejection branch that the bare "each " prefix newly reaches.
+    #[test]
+    fn each_non_type_subject_falls_through_to_selfref() {
+        // "each opponent" — "opponent" is not a `TypeFilter` variant, so
+        // `parse_type_phrase` yields the `[Any]` fallback and the subject is
+        // rejected, leaving the self-ETB `SelfRef`/`Moved` result.
+        let def = parse_replacement_line(
+            "Each opponent enters with a +1/+1 counter on it.",
+            "Nonsense Source",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// Plain self-ETB ("~ enters with N counters on it") with no subject prefix
+    /// stays `SelfRef`/`Moved` — `parse_distributive_subject` returns `None`.
+    #[test]
+    fn self_etb_no_subject_prefix_stays_selfref() {
+        let def = parse_replacement_line(
+            "This creature enters with two +1/+1 counters on it.",
+            "Generic Creature",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// Building-block unit test: `parse_distributive_subject` must report the
+    /// correct `SubjectScope` and strip the prefix, with `"each other "`
+    /// winning over the shorter `"each "` (order-sensitivity contract).
+    #[test]
+    fn parse_distributive_subject_scopes_and_ordering() {
+        assert_eq!(
+            parse_distributive_subject("each other dragon you control enters with"),
+            Some(("dragon you control enters with", SubjectScope::Other)),
+            "'each other ' must win over the shorter 'each ' prefix"
+        );
+        assert_eq!(
+            parse_distributive_subject("other dragon you control enters with"),
+            Some(("dragon you control enters with", SubjectScope::Other)),
+        );
+        assert_eq!(
+            parse_distributive_subject("each dragon you control enters with"),
+            Some(("dragon you control enters with", SubjectScope::Distributive)),
+        );
+        // No distributive prefix → None (self-ETB falls through to SelfRef).
+        assert_eq!(
+            parse_distributive_subject("this creature enters with two counters on it"),
+            None,
+        );
     }
 
     #[test]
@@ -7174,7 +7631,9 @@ mod tests {
             CounterType::Plus1Plus1,
             CounterType::Keyword(crate::types::keywords::KeywordKind::Flying),
             CounterType::Keyword(crate::types::keywords::KeywordKind::Deathtouch),
-            CounterType::Generic("shield".to_string()),
+            // CR 122.1c: "shield" is now a first-class counter type (issue #1959),
+            // no longer a Generic.
+            CounterType::Shield,
         ];
         for counter in expected {
             assert!(matches!(
@@ -7185,7 +7644,7 @@ mod tests {
                     target: TargetFilter::SelfRef,
                 } if *counter_type == counter
             ));
-            if counter == CounterType::Generic("shield".to_string()) {
+            if counter == CounterType::Shield {
                 assert!(cursor.sub_ability.is_none());
             } else {
                 cursor = cursor.sub_ability.as_deref().expect("next counter");
@@ -8451,6 +8910,35 @@ mod tests {
         assert_eq!(def.damage_source_filter, None); // any source
         assert_eq!(def.damage_target_filter, None); // any target
         assert_eq!(def.combat_scope, None); // all damage
+    }
+
+    #[test]
+    fn uncivil_unrest_double_damage_parses_creature_source_filter() {
+        let def = parse_replacement_line(
+            "If a creature you control with a +1/+1 counter on it would deal damage to a permanent or player, it deals double that damage instead.",
+            "Uncivil Unrest",
+        )
+        .expect("Uncivil Unrest replacement should parse");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        let Some(TargetFilter::Typed(tf)) = def.damage_source_filter else {
+            panic!(
+                "expected typed damage source filter, got {:?}",
+                def.damage_source_filter
+            );
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                    ..
+                }
+            )),
+            "expected +1/+1 counter qualifier, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]
@@ -10245,6 +10733,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_amount: None,
                 source_filter: Some(TargetFilter::SelfRef),
                 combat_scope: Some(CombatDamageScope::CombatOnly),
                 target_filter: Some(DamageTargetFilter::Player { .. }),
@@ -10259,6 +10748,34 @@ mod snapshot_tests {
     }
 
     #[test]
+    fn oneshot_en_kor_next_n_damage_to_self_redirect() {
+        // The en-Kor cycle (Nomads / Lancers / Outrider / Shaman / Spirit /
+        // Warrior en-Kor): passive "the next N damage that would be dealt to ~"
+        // — the recipient is the source itself — redirected to a chosen creature
+        // you control.
+        let effect = parse_oneshot_damage_replacement(
+            "the next 1 damage that would be dealt to ~ this turn is dealt to target creature you control instead",
+        )
+        .expect("must parse the en-Kor one-shot redirection");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_amount: Some(PreventionAmount::Next(1)),
+                // CR 614.9: the recipient is the source itself (`~`), encoded as
+                // SelfRef so the resolver hosts the shield on the source.
+                recipient_object_filter: Some(TargetFilter::SelfRef),
+                // CR 115.1: "target creature you control" surfaces a redirect slot.
+                redirect_object_filter: Some(TargetFilter::Typed(_)),
+                source_filter: None,
+                combat_scope: None,
+                target_filter: None,
+            } => {}
+            other => panic!("expected en-Kor redirect-to-target, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn oneshot_redirect_to_source_passive_phrasing() {
         // Beacon of Destiny — passive "that damage is dealt to ~ instead".
         let effect = parse_oneshot_damage_replacement(
@@ -10269,6 +10786,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::SourceObject),
+                redirect_amount: None,
                 source_filter: Some(TargetFilter::ChosenDamageSource),
                 ..
             } => {}
@@ -10287,6 +10805,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_amount: None,
                 source_filter: Some(TargetFilter::ChosenDamageSource),
                 // CR 614.9: "would deal damage to target creature" — the
                 // protected creature is a chosen original-recipient target, not
@@ -10311,6 +10830,7 @@ mod snapshot_tests {
             Effect::CreateDamageReplacement {
                 modification: None,
                 redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_amount: None,
                 source_filter: Some(TargetFilter::SelfRef),
                 combat_scope: Some(CombatDamageScope::CombatOnly),
                 ..

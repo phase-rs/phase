@@ -71,18 +71,12 @@ fn discriminator_cultivate_splits_battlefield_and_hand() {
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     add_cultivate_mana(&mut runner);
 
-    let card_id = runner.state().objects[&cultivate].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: cultivate,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Cultivate cast should succeed");
-    runner.advance_until_stack_empty();
+    // The cast driver resolves Cultivate and stops at the SearchChoice boundary
+    // (default SearchPolicy::Stop), leaving the live runner parked there.
+    let outcome = runner.cast(cultivate).resolve();
 
     // Step 1: SearchChoice — pick BOTH basics as the found set.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::SearchChoice { cards, .. } => {
             assert!(cards.contains(&forest) && cards.contains(&mountain));
         }
@@ -162,18 +156,12 @@ fn cultivate_single_basic_auto_routes_no_partition() {
         .filter(|&&id| id != cultivate)
         .count();
 
-    let card_id = runner.state().objects[&cultivate].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: cultivate,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Cultivate cast should succeed");
-    runner.advance_until_stack_empty();
+    // The cast driver resolves Cultivate and stops at the SearchChoice boundary
+    // (default SearchPolicy::Stop), leaving the live runner parked there.
+    let outcome = runner.cast(cultivate).resolve();
 
     // Only one legal basic -> pick it.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::SearchChoice { cards, .. } => {
             assert!(cards.contains(&forest));
         }
@@ -225,15 +213,9 @@ fn search_partition_selectcards_is_dispatched() {
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     add_cultivate_mana(&mut runner);
 
-    let card_id = runner.state().objects[&cultivate].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: cultivate,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Cultivate cast should succeed");
-    runner.advance_until_stack_empty();
+    // The cast driver resolves Cultivate and stops at the SearchChoice boundary
+    // (default SearchPolicy::Stop), leaving the live runner parked there.
+    let _ = runner.cast(cultivate).resolve();
     runner
         .act(GameAction::SelectCards {
             cards: vec![forest, mountain],

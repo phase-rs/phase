@@ -1,7 +1,9 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::space1;
 use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
+use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -16,19 +18,17 @@ use super::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
 };
-#[cfg(test)]
-use crate::types::ability::TypeFilter;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
-    FilterProp, GainLifePlayer, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool,
-    PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
+    FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PaymentCost, PlayerScope,
+    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -654,7 +654,7 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
         },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
             amount,
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
         NumericImperativeAst::LoseLife { amount } => Effect::LoseLife {
             amount,
@@ -1297,6 +1297,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: Zone::Battlefield,
+                        enters_under: d.enters_under,
                         enter_tapped: d.enter_tapped,
                     })
                 } else {
@@ -1306,6 +1307,7 @@ pub(super) fn parse_targeted_action_ast(
                         enter_transformed: d.transformed,
                         enters_under: d.enters_under,
                         enter_tapped: d.enter_tapped,
+                        enters_attacking: d.enters_attacking,
                         enter_with_counters: d.enter_with_counters,
                     })
                 }
@@ -1322,6 +1324,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: Zone::Hand,
+                        enters_under: None,
                         enter_tapped: false,
                     })
                 } else {
@@ -1334,6 +1337,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: d.zone,
+                        enters_under: None,
                         enter_tapped: false,
                     })
                 } else {
@@ -1495,6 +1499,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_transformed,
             enters_under,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
         } => Effect::ChangeZone {
             origin,
@@ -1504,7 +1509,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_transformed,
             enters_under,
             enter_tapped,
-            enters_attacking: false,
+            enters_attacking,
             up_to: false,
             enter_with_counters,
         },
@@ -1529,6 +1534,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             origin,
             destination,
+            enters_under,
             enter_tapped,
         } => {
             let origin = if matches!(target, TargetFilter::ExiledBySource) {
@@ -1540,6 +1546,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 origin,
                 destination,
                 target,
+                enters_under,
                 enter_tapped,
             }
         }
@@ -1575,6 +1582,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 // CR 611.2a: bound to the ability controller by
                 // `grant_permission::resolve`.
                 granted_to: None,
+                resolution_cleanup: None,
+                duration: None,
             },
             target,
             grantee: Default::default(),
@@ -1672,6 +1681,11 @@ pub(super) fn parse_search_and_creation_ast(
         return Some(SearchCreationImperativeAst::MultiZoneSameNameExile);
     }
     if starts_with_possessive(lower, "search", "library")
+        // CR 701.23a: God-Pharaoh's-Gift-class multi-zone tutors ("search your
+        // graveyard, hand, and/or library for ...") — the word after the
+        // possessive is a non-library zone, so `starts_with_possessive` misses
+        // them; the zone-list detector routes them through the same lowering.
+        || super::parse_multi_search_zones(lower).is_some()
         || nom_on_lower(lower, lower, |i| {
             alt((
                 value((), tag("search target opponent's library")),
@@ -1695,6 +1709,7 @@ pub(super) fn parse_search_and_creation_ast(
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
             split: details.split,
+            source_zones: details.source_zones,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -1904,6 +1919,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             multi_destination: _,
             multi_enter_tapped: _,
             split,
+            source_zones,
         } => Effect::SearchLibrary {
             filter,
             // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
@@ -1917,6 +1933,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             target_player,
             selection_constraint,
             split,
+            source_zones,
         },
         SearchCreationImperativeAst::SearchOutsideGame {
             filter,
@@ -2013,6 +2030,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
                 },
                 crate::types::ability::FilterProp::SameNameAsParentTarget,
             ])),
+            enters_under: None,
             enter_tapped: false,
         },
     }
@@ -2502,12 +2520,17 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
     rest_lower: &str,
 ) -> Option<ChooseImperativeAst> {
     parse_category_and_sacrifice_rest(rest_lower).map(|ast| match ast {
-        ChooseImperativeAst::CategoryAndSacrificeRest { categories, .. } => {
-            ChooseImperativeAst::CategoryAndSacrificeRest {
-                categories,
-                chooser_scope: CategoryChooserScope::ControllerForAll,
-            }
-        }
+        ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            choose_filter,
+            sacrifice_filter,
+            ..
+        } => ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            chooser_scope: CategoryChooserScope::ControllerForAll,
+            choose_filter,
+            sacrifice_filter,
+        },
         other => other,
     })
 }
@@ -2531,7 +2554,7 @@ const PERMANENT_TYPE_CATEGORIES: [CoreType; 6] = [
 ///
 /// Parser structure (nom combinators):
 /// - `tag("from among")` detects pattern 1
-/// - `take_until("from among")` + category parsing for pattern 2
+/// - `parse_category_list_prefix` consumes pattern 2's category list and returns the remainder
 /// - Category list: `parse_category_item` composed with comma + "and" separator
 fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
@@ -2556,6 +2579,8 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
                 return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                     categories: PERMANENT_TYPE_CATEGORIES.to_vec(),
                     chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    choose_filter: permanent_filter(),
+                    sacrifice_filter: permanent_filter(),
                 });
             }
         }
@@ -2565,58 +2590,68 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
     if let Ok((after_from_among, _)) = tag::<_, _, E>("from among ").parse(rest_lower) {
         // Skip past "the permanents they control" / "the permanents that player controls"
         // to find the category list.
-        let categories_text = skip_permanent_clause(after_from_among)?;
+        let (categories_text, choose_filter) = parse_choose_domain(after_from_among).ok()?;
         let categories = parse_category_list(categories_text)?;
         return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            sacrifice_filter: choose_filter.clone(),
+            choose_filter,
         });
     }
 
     // Pattern 2: "an artifact, a creature, ... from among [the nonland] permanents they control"
-    if let Ok((_, before_from)) = take_until::<_, _, E>("from among").parse(rest_lower) {
-        let categories = parse_category_list(before_from.trim())?;
+    if let Ok((after_categories, categories)) = parse_category_list_prefix(rest_lower) {
+        let (_, choose_filter) = preceded(
+            preceded(opt(tag::<_, _, E>(",")), tag(" from among ")),
+            parse_choose_domain,
+        )
+        .parse(after_categories)
+        .ok()?;
         return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            sacrifice_filter: choose_filter.clone(),
+            choose_filter,
         });
     }
 
     None
 }
 
-/// Skip past "the permanents they control" / "the [nonland] permanents that player controls"
-/// clauses to find the category list that follows.
-fn skip_permanent_clause(input: &str) -> Option<&str> {
+fn permanent_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::permanent())
+}
+
+fn nonland_permanent_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+    )
+}
+
+/// Parse "the permanents they control" / "the [nonland] permanents that player controls"
+/// domains and return the category-list remainder plus the domain filter.
+fn parse_choose_domain(input: &str) -> OracleResult<'_, TargetFilter> {
     type E<'a> = OracleError<'a>;
 
-    // "the permanents they control " / "the permanents that player controls "
-    // / "the nonland permanents they control "
-    let (rest, _) = tag::<_, _, E>("the ").parse(input).ok()?;
-
-    // Optional "nonland " modifier
-    let rest = tag::<_, _, E>("nonland ")
-        .parse(rest)
-        .map(|(r, _)| r)
-        .unwrap_or(rest);
-
-    let (rest, _) = tag::<_, _, E>("permanents ").parse(rest).ok()?;
-
-    // "they control" / "that player controls"
-    let rest = if let Ok((r, _)) = tag::<_, _, E>("they control").parse(rest) {
-        r
-    } else if let Ok((r, _)) = tag::<_, _, E>("that player controls").parse(rest) {
-        r
-    } else {
-        return None;
-    };
-
-    // Strip optional trailing space/comma
-    let rest = rest.trim_start_matches(' ');
-    if rest.is_empty() {
-        return None;
-    }
-    Some(rest)
+    let (rest, _) = tag::<_, _, E>("the ").parse(input)?;
+    let (rest, nonland) = opt(tag::<_, _, E>("nonland ")).parse(rest)?;
+    let (rest, _) = tag::<_, _, E>("permanents ").parse(rest)?;
+    let (rest, _) = alt((
+        tag::<_, _, E>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(alt((tag::<_, _, E>(", "), tag(" ")))).parse(rest)?;
+    Ok((
+        rest,
+        if nonland.is_some() {
+            nonland_permanent_filter()
+        } else {
+            permanent_filter()
+        },
+    ))
 }
 
 /// Parse a comma-separated category list: "an artifact, a creature, an enchantment, and a land"
@@ -2624,41 +2659,53 @@ fn skip_permanent_clause(input: &str) -> Option<&str> {
 fn parse_category_list(input: &str) -> Option<Vec<CoreType>> {
     type E<'a> = OracleError<'a>;
 
-    let mut categories = Vec::new();
-    let mut remaining = input.trim();
+    let (remaining, categories) = parse_category_list_prefix(input).ok()?;
+    let remaining = remaining.trim_start();
+    if remaining.is_empty()
+        || tag::<_, _, E>(", then ").parse(remaining).is_ok()
+        || tag::<_, _, E>(". then ").parse(remaining).is_ok()
+        || tag::<_, _, E>(".").parse(remaining).is_ok()
+    {
+        return Some(categories);
+    }
 
-    loop {
-        // Strip optional leading ", " or ", and " or "and "
-        if let Ok((r, _)) = tag::<_, _, E>(", and ").parse(remaining) {
-            remaining = r;
-        } else if let Ok((r, _)) = tag::<_, _, E>(", ").parse(remaining) {
-            remaining = r;
-        } else if let Ok((r, _)) = tag::<_, _, E>("and ").parse(remaining) {
-            remaining = r;
-        }
+    None
+}
 
-        // Parse article + type: "an artifact" / "a creature" / "a land" / "a planeswalker" / "an enchantment"
-        let (after_article, _) = alt((tag::<_, _, E>("an "), tag("a ")))
-            .parse(remaining)
-            .ok()?;
+fn parse_category_list_prefix(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    type E<'a> = OracleError<'a>;
 
-        let (rest, core_type) = parse_core_type_name(after_article)?;
-        categories.push(core_type);
-        remaining = rest.trim();
+    let (mut remaining, first) = parse_category_item(input)?;
+    let mut categories = vec![first];
 
-        if remaining.is_empty()
-            || tag::<_, _, E>(", then ").parse(remaining).is_ok()
-            || tag::<_, _, E>(". then ").parse(remaining).is_ok()
-            || tag::<_, _, E>("from among").parse(remaining).is_ok()
-        {
+    while let Ok((after_separator, _)) = alt((
+        tag::<_, _, E>(", and "),
+        tag(", "),
+        tag(" and "),
+        tag("and "),
+    ))
+    .parse(remaining)
+    {
+        let Ok((after_item, core_type)) = parse_category_item(after_separator) else {
             break;
-        }
+        };
+        categories.push(core_type);
+        remaining = after_item;
     }
 
-    if categories.is_empty() {
-        return None;
-    }
-    Some(categories)
+    Ok((remaining, categories))
+}
+
+fn parse_category_item(input: &str) -> OracleResult<'_, CoreType> {
+    type E<'a> = OracleError<'a>;
+
+    let (input, _) = alt((tag::<_, _, E>("an "), tag("a "))).parse(input)?;
+    parse_core_type_name(input).ok_or_else(|| {
+        nom::Err::Error(OracleError::from_error_kind(
+            input,
+            nom::error::ErrorKind::Alt,
+        ))
+    })
 }
 
 /// Parse a core type name from lowercase text using nom combinators.
@@ -2737,9 +2784,13 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope,
+            choose_filter,
+            sacrifice_filter,
         } => Effect::ChooseAndSacrificeRest {
             categories,
             chooser_scope,
+            choose_filter,
+            sacrifice_filter,
         },
         // CR 115.1c + CR 601.2c: Two independent target slots. The bare-Effect
         // lowering surfaces only the first slot — the chained `TargetOnly`
@@ -3388,7 +3439,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             enter_transformed,
             enters_attacking,
             up_to,
-            choice_count,
+            choice_count: choice_count.map(Box::new),
             enter_with_counters,
         });
     }
@@ -3433,6 +3484,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     origin: Some(Zone::Exile),
                     destination,
                     target,
+                    enters_under: None,
                     enter_tapped,
                 }
             } else {
@@ -3972,6 +4024,7 @@ pub(super) fn lower_multi_filter_search_library(
             target_player,
             selection_constraint: SearchSelectionConstraint::MatchEachFilter { filters },
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         });
     }
 
@@ -4013,6 +4066,7 @@ pub(super) fn lower_multi_filter_search_library(
                 target_player: target_player.clone(),
                 selection_constraint: selection_constraint.clone(),
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
         );
         search_def.sub_ability = tail;
@@ -4031,6 +4085,7 @@ pub(super) fn lower_multi_filter_search_library(
         target_player,
         selection_constraint,
         split: None,
+        source_zones: vec![crate::types::zones::Zone::Library],
     });
     clause.sub_ability = tail;
     clause
@@ -4096,6 +4151,7 @@ fn lower_target_referenced_search_library(
             target_player,
             selection_constraint,
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         })
     } else {
         lower_multi_filter_search_library(
@@ -4146,6 +4202,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         origin: Some(origin),
         destination: Zone::Library,
         target: TargetFilter::Controller,
+        enters_under: None,
         enter_tapped: false,
     }
 }
@@ -4442,7 +4499,7 @@ pub(super) fn parse_exile_ast(
     })
 }
 
-fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
+pub(super) fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
     }
@@ -4923,12 +4980,80 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
     }
 }
 
+/// CR 500.8 + CR 510.2: Quantity for "<N> additional <step/phase>s". The
+/// scanner advances along word boundaries and tries a single composed
+/// combinator at each position:
+///   `quantifier ~ " additional"` where `quantifier` =
+///     `tag("that many")` → event-bound (`QuantityRef::EventContextAmount`)
+///   | `parse_number`        → literal N (e.g. "two additional combat phases")
+///
+/// Anything else — including the article forms "an"/"a"/"the" already parsed
+/// elsewhere as 1 — falls through to the singular default
+/// `QuantityExpr::Fixed { value: 1 }`. Anchoring on `" additional"` keeps the
+/// helper agnostic to surrounding sentence shapes ("you get that many
+/// additional upkeep steps after this phase", "after this phase, there is an
+/// additional combat phase").
+fn parse_additional_phase_count(lower: &str) -> QuantityExpr {
+    fn count_combinator(input: &str) -> OracleResult<'_, QuantityExpr> {
+        let event_bound = value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many"),
+        );
+        let literal = map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+            value: n as i32,
+        });
+        terminated(alt((event_bound, literal)), tag(" additional")).parse(input)
+    }
+
+    let mut remaining = lower;
+    while !remaining.is_empty() {
+        if let Ok((_rest, qty)) = count_combinator(remaining) {
+            return qty;
+        }
+        // Advance to the next word boundary so the combinator stays anchored
+        // to candidate quantifier positions.
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    QuantityExpr::Fixed { value: 1 }
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
+
+    // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
+    // Glorious End, Discontinuity, Day's Undoing). Whole-phrase imperative
+    // with no target; parse it as an anchored nom production rather than a
+    // substring scan so unrelated clauses cannot accidentally match it.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("end the turn"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn));
+    }
+
+    // CR 724.2: "end the combat phase" (Mandate of Peace). Whole-phrase
+    // imperative with no target; anchored nom production mirroring the
+    // "end the turn" parse so unrelated clauses cannot accidentally match it.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("end the combat phase"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
+    }
 
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
@@ -4945,6 +5070,7 @@ pub(super) fn parse_imperative_family_ast(
             } else {
                 vec![]
             },
+            count: parse_additional_phase_count(lower),
         }));
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
@@ -4953,6 +5079,7 @@ pub(super) fn parse_imperative_family_ast(
             phase: Phase::Upkeep,
             after: Phase::Upkeep,
             followed_by: vec![],
+            count: parse_additional_phase_count(lower),
         }));
     }
 
@@ -5330,10 +5457,39 @@ pub(super) fn parse_imperative_family_ast(
             .ok()
             .map(|(_, ast)| ast)
         }
-        // CR 706 + CR 706.2: "roll a d20" with an optional "and add/subtract X"
-        // modifier suffix attached as a typed `DieRollModifier`.
-        "roll" | "rolls" => try_parse_roll_die_with_modifier(lower)
-            .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier }),
+        // CR 701.52: "roll to visit your Attractions" (not a generic d20/d6 roll).
+        "roll" | "rolls" => {
+            if nom_parse_lower(lower, |input| {
+                value(
+                    ImperativeFamilyAst::RollToVisitAttractions,
+                    (
+                        alt((tag("roll"), tag("rolls"))),
+                        tag(" to visit your attractions"),
+                        eof,
+                    ),
+                )
+                .parse(input)
+            })
+            .is_some()
+            {
+                Some(ImperativeFamilyAst::RollToVisitAttractions)
+            } else if let Some(ast) = try_parse_roll_n_dice(lower) {
+                // CR 706.1: "roll two six-sided dice" / "roll X d12" — the
+                // multi-dice form. Tried before the single-die path; returns
+                // None for count == 1 so "roll a d6" / "roll one d6" falls through.
+                Some(ast)
+            } else {
+                try_parse_roll_die_with_modifier(lower).map(|(sides, modifier)| {
+                    ImperativeFamilyAst::RollDie {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        sides,
+                        modifier,
+                    }
+                })
+            }
+        }
+        // CR 701.51b: "open an Attraction" / "open two Attractions"
+        "open" | "opens" => parse_open_attraction_imperative(lower),
         // CR 725.1: "become the monarch"
         "become" | "becomes" => {
             if lower == "become the monarch" || lower == "becomes the monarch" {
@@ -5538,16 +5694,24 @@ pub(super) fn parse_imperative_family_ast(
             if nom_primitives::scan_contains(lower, "control of") {
                 parse_targeted_action_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
+            } else if let Some(effect) =
+                try_parse_gain_keyword(text).or_else(|| try_parse_gain_quoted_ability(text))
+            {
+                // CR 113.3 + CR 604.1: grant a keyword ability (or, via
+                // try_parse_gain_quoted_ability, a quoted ability) to an object.
+                // Checked BEFORE the life-gain branch because the bare
+                // `scan_contains(lower, "life")` guard below also matches
+                // keywords whose name contains "life" — e.g. "gain lifelink",
+                // which otherwise misrouted to the numeric life-gain parser and
+                // fell through to Unimplemented. `try_parse_gain_keyword`
+                // returns `None` unless it actually finds a keyword, so genuine
+                // life-gain clauses ("gain 3 life") still fall through below.
+                Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if nom_primitives::scan_contains(lower, "life") {
                 parse_numeric_imperative_ast(text, lower)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             } else {
-                // CR 702: bare keyword grant first; CR 113.3 + CR 604.1: fall
-                // back to quoted-ability grant when the gain clause carries an
-                // inline ability ('gain "When this creature dies, draw a card."').
-                try_parse_gain_keyword(text)
-                    .or_else(|| try_parse_gain_quoted_ability(text))
-                    .map(ImperativeFamilyAst::GainKeyword)
+                None
             }
         }
 
@@ -5932,14 +6096,71 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
     Some(ImperativeFamilyAst::FlipCoins { count: expr })
 }
 
+/// CR 706.1: Parse "roll N six-sided dice" / "roll X d12" / "roll two d6" —
+/// the multi-dice form. Mirrors `try_parse_flip_n_coins`: strip the
+/// "roll "/"rolls " prefix, take the count via `parse_count_expr` (digit,
+/// word-number, and `X` forms), then parse the die size from the remainder.
+/// Returns None for count == 1 so "roll a d6" / "roll one d6" falls through
+/// to the existing single-die path.
+fn try_parse_roll_n_dice(lower: &str) -> Option<ImperativeFamilyAst> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll "), tag("rolls ")))
+        .parse(lower)
+        .ok()?;
+
+    // `parse_count_expr` returns the remainder with leading whitespace trimmed
+    // ("two six-sided dice" → after = "six-sided dice").
+    let (expr, after) = parse_count_expr(rest)?;
+
+    // CR 706.1: Reject count == 1 so "roll a d6" / "roll one d6" prefers the
+    // single-die `RollDie { count: Fixed(1), .. }` path.
+    if matches!(expr, QuantityExpr::Fixed { value: 1 }) {
+        return None;
+    }
+
+    let (sides, rest_after_sides) = parse_die_sides_with_rest(after)?;
+    // CR 706.1: The remainder must be only the plural/singular die noun
+    // (possibly with trailing punctuation) — a wider clause means this isn't a
+    // bare multi-dice roll, so fall through to higher-level chain parsing.
+    let rest_after_sides = rest_after_sides
+        .trim_start()
+        .trim_end_matches(['.', ',', ';'])
+        .trim();
+    if !rest_after_sides.is_empty() {
+        return None;
+    }
+
+    Some(ImperativeFamilyAst::RollDie {
+        count: expr,
+        sides,
+        // CR 706.2: multi-dice forms with a result-shifting modifier are
+        // vanishingly rare and parsed via the table path; the bare form has
+        // no modifier.
+        modifier: None,
+    })
+}
+
 /// CR 706.1a: Returns `(sides, remainder)`. The remainder is the slice immediately after
 /// the consumed die phrase, with whitespace untrimmed. Callers needing to
 /// attach trailing modifiers / clauses can branch on the remainder shape.
 fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
-    // Strip the "roll a " / "rolls a " prefix.
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll a "), tag("rolls a ")))
-        .parse(lower)
-        .ok()?;
+    // Strip the single-die article/count prefix.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("roll a "),
+        tag("rolls a "),
+        tag("roll one "),
+        tag("rolls one "),
+    ))
+    .parse(lower)
+    .ok()?;
+    parse_die_sides_with_rest(rest)
+}
+
+/// CR 706.1a: Parse a die size (`dN` numeric form or `N-sided`/word form) from
+/// the text immediately following the count/article, returning `(sides,
+/// remainder)`. Shared by the single-die (`roll a dN`) and multi-dice (`roll N
+/// dN`) parsers so both pick up every die-size spelling uniformly. The
+/// trailing " die"/" dice" noun is consumed when present.
+fn parse_die_sides_with_rest(rest: &str) -> Option<(u8, &str)> {
     // CR 706.1a: Numeric form — consume "d" followed by the longest run of
     // ASCII digits. This permits trailing text like " and add the number of
     // cards in your hand" or terminating punctuation.
@@ -5968,10 +6189,13 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     ))
     .parse(rest)
     .ok()?;
-    // Consume the optional " die" suffix so it doesn't leak into the
-    // modifier-detection path. Tolerant of absence ("roll a six-sided").
+    // Consume the optional " dice"/" die" noun so it doesn't leak into the
+    // modifier-detection path. " dice" (plural, multi-dice form) is tried
+    // before " die" so it isn't mis-consumed as " die" + "ce". Tolerant of
+    // absence ("roll a six-sided").
     let after_word = alt((
-        value((), tag::<_, _, OracleError<'_>>(" die")),
+        value((), tag::<_, _, OracleError<'_>>(" dice")),
+        value((), tag(" die")),
         value((), tag("")),
     ))
     .parse(after_word)
@@ -5979,6 +6203,42 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     .map(|(rest, _)| rest)
     .unwrap_or(after_word);
     Some((sides, after_word))
+}
+
+/// CR 701.51b: "open N attraction(s)" after the open/opens prefix.
+fn parse_open_attractions_count_imperative(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
+    let (rest, count) = nom_primitives::parse_number(input)?;
+    let (rest, _) = space1(rest)?;
+    let (rest, _) = alt((tag("attractions"), tag("attraction"))).parse(rest)?;
+    Ok((rest, ImperativeFamilyAst::OpenAttractions { count }))
+}
+
+/// CR 701.51b: "open an Attraction" / "open two Attractions".
+fn parse_open_attraction_imperative(lower: &str) -> Option<ImperativeFamilyAst> {
+    nom_parse_lower(lower, |input| {
+        map(
+            (
+                alt((tag("open "), tag("opens "))),
+                alt((
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("an attraction"),
+                    ),
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("a attraction"),
+                    ),
+                    parse_open_attractions_count_imperative,
+                )),
+                opt(nom::bytes::complete::take_while(|c: char| {
+                    c == '.' || c == ','
+                })),
+                eof,
+            ),
+            |(_, ast, _, _)| ast,
+        )
+        .parse(input)
+    })
 }
 
 /// CR 706 + CR 706.2: Try to parse a full `"roll a d{N}"` clause, including
@@ -6130,7 +6390,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_with_counters,
             });
             let mut clause = parsed_clause(effect);
-            clause.multi_target = Some(choice_count);
+            clause.multi_target = Some(*choice_count);
             clause
         }
         ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::PutCounterList {
@@ -6181,6 +6441,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 multi_enter_tapped,
                 // Reference-target searches are not cultivate-class splits.
                 split: _,
+                // Reference-target searches are library-only (default).
+                source_zones: _,
             },
         )) => lower_target_referenced_search_library(
             reference_target,
@@ -6213,6 +6475,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 multi_enter_tapped,
                 // Multi-filter searches handle destinations per-filter, not via split.
                 split: _,
+                // Multi-filter searches are library-only (default).
+                source_zones: _,
             },
         )) if !extra_filters.is_empty() => lower_multi_filter_search_library(
             filter,
@@ -6283,6 +6547,11 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,
         },
+        ImperativeFamilyAst::ForceAttack { duration } => Effect::ForceAttack {
+            target: TargetFilter::Any,
+            required_player: TargetFilter::Controller,
+            duration,
+        },
         // CR 701.15a: Goad target creature. Subject injection fills target from parsed text.
         ImperativeFamilyAst::Goad => Effect::Goad {
             target: TargetFilter::Any,
@@ -6323,6 +6592,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
+        ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
+        ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
         // CR 701.56a: Time travel.
         ImperativeFamilyAst::TimeTravel => Effect::TimeTravel,
@@ -6334,7 +6605,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::LoseKeyword(effect) => effect,
         ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame,
         ImperativeFamilyAst::WinTheGame => Effect::WinTheGame,
-        ImperativeFamilyAst::RollDie { sides, modifier } => Effect::RollDie {
+        ImperativeFamilyAst::RollDie {
+            count,
+            sides,
+            modifier,
+        } => Effect::RollDie {
+            count,
             sides,
             results: vec![],
             modifier,
@@ -6388,6 +6664,87 @@ pub(super) fn counter_placement_is_mass(clause_lower: &str) -> bool {
         || nom_primitives::scan_contains(clause_lower, "counters on all")
         || nom_primitives::scan_contains(clause_lower, "on each ")
         || nom_primitives::scan_contains(clause_lower, "on all ")
+}
+
+/// CR 122.1 + CR 608.2c: In a distributive "put a number of +1/+1 counters on
+/// EACH ... equal to THAT CREATURE's <stat>" (Canopy Gargantuan), "that
+/// creature" is the per-iteration recipient — each object receives counters
+/// equal to its OWN stat. The shared `parse_event_context_refs` lowers "that
+/// creature's <stat>" to `ObjectScope::CostPaidObject` (correct in trigger
+/// bodies, where it refers to the triggering object), so for a mass placement
+/// we rebind it to `ObjectScope::Recipient`; `resolve_add_all` then re-evaluates
+/// the count per object. A genuine cost referent ("the SACRIFICED creature's
+/// power") carries a cost/zone-change participle and is left as
+/// `CostPaidObject` — `resolve_add_all` resolves that once and applies it
+/// uniformly per CR 608.2k.
+fn rebind_distributive_recipient_count(count: QuantityExpr, lower: &str) -> QuantityExpr {
+    let is_cost_referent = nom_primitives::scan_contains(lower, "sacrificed")
+        || nom_primitives::scan_contains(lower, "exiled")
+        || nom_primitives::scan_contains(lower, "discarded")
+        || nom_primitives::scan_contains(lower, "milled");
+    if is_cost_referent {
+        return count;
+    }
+    rebind_costpaid_scope_to_recipient(count)
+}
+
+/// Walk a `QuantityExpr` and rebind `ObjectScope::CostPaidObject` on the object
+/// P/T/mana-value leaves to `ObjectScope::Recipient`. Recurses through the
+/// arithmetic wrappers ("that creature's toughness plus 1", "twice that
+/// creature's power") so the whole class composes.
+fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
+    use crate::types::ability::ObjectScope::{CostPaidObject, Recipient};
+    match expr {
+        QuantityExpr::Ref { qty } => QuantityExpr::Ref {
+            qty: match qty {
+                QuantityRef::Power {
+                    scope: CostPaidObject,
+                } => QuantityRef::Power { scope: Recipient },
+                QuantityRef::Toughness {
+                    scope: CostPaidObject,
+                } => QuantityRef::Toughness { scope: Recipient },
+                QuantityRef::ObjectManaValue {
+                    scope: CostPaidObject,
+                } => QuantityRef::ObjectManaValue { scope: Recipient },
+                other => other,
+            },
+        },
+        QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+            offset,
+        },
+        QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
+            factor,
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+        },
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+            divisor,
+            rounding,
+        },
+        QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(rebind_costpaid_scope_to_recipient)
+                .collect(),
+        },
+        QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
+            max: Box::new(rebind_costpaid_scope_to_recipient(*max)),
+        },
+        QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
+            base,
+            exponent: Box::new(rebind_costpaid_scope_to_recipient(*exponent)),
+        },
+        QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
+            left: Box::new(rebind_costpaid_scope_to_recipient(*left)),
+            right: Box::new(rebind_costpaid_scope_to_recipient(*right)),
+        },
+        QuantityExpr::Fixed { value } => QuantityExpr::Fixed { value },
+    }
 }
 
 pub(super) fn parse_zone_counter_ast(
@@ -6465,7 +6822,7 @@ pub(super) fn parse_zone_counter_ast(
                 if is_all && multi_target.is_none() {
                     Some(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
-                        count,
+                        count: rebind_distributive_recipient_count(count, lower),
                         target,
                     })
                 } else {
@@ -6550,6 +6907,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     origin,
                     destination: Zone::Exile,
                     target,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             } else {
@@ -6742,40 +7100,32 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
     Some(Effect::Adapt { count })
 }
 
-/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" as a temporary MustAttack.
+/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" requirements.
 ///
-/// Handles bare forms ("attacks this turn if able") and player-targeted forms
-/// ("attacks you this turn if able", "attacks that opponent this combat if able",
-/// "attacks target opponent this turn if able"). The player target is currently
-/// not enforced at runtime — MustAttack forces the creature to attack if able,
-/// but the specific-player constraint requires additional engine support.
-///
-/// Emits a `GenericEffect` with `StaticMode::MustAttack` and the appropriate duration.
+/// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
+/// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
+/// "you" to the resolving ability controller and grants `MustAttackPlayer`.
 fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
     // First try: bare forms without a player reference.
-    let result: Result<(&str, Duration), nom::Err<OracleError<'_>>> = alt((
-        value(Duration::UntilEndOfTurn, tag("attacks this turn if able")),
-        value(Duration::UntilEndOfTurn, tag("attack this turn if able")),
-        value(
-            Duration::UntilEndOfCombat,
-            tag("attacks this combat if able"),
+    // verb axis × phase axis (PATTERNS.md §8b): factor "attack(s)" out front,
+    // then map the phase clause to its duration.
+    let result: Result<(&str, Duration), nom::Err<OracleError<'_>>> = (
+        alt((tag("attacks"), tag("attack"))),
+        preceded(
+            tag(" "),
+            alt((
+                value(Duration::UntilEndOfTurn, tag("this turn if able")),
+                value(
+                    Duration::UntilEndOfCombat,
+                    alt((tag("this combat if able"), tag("that combat if able"))),
+                ),
+            )),
         ),
-        value(
-            Duration::UntilEndOfCombat,
-            tag("attack this combat if able"),
-        ),
-        value(
-            Duration::UntilEndOfCombat,
-            tag("attacks that combat if able"),
-        ),
-        value(
-            Duration::UntilEndOfCombat,
-            tag("attack that combat if able"),
-        ),
-    ))
-    .parse(trimmed);
+    )
+        .map(|(_, duration)| duration)
+        .parse(trimmed);
 
     if let Ok((_, duration)) = result {
         return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
@@ -6785,51 +7135,34 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
         }));
     }
 
-    // Second try: player-targeted forms — "attacks [player] this turn/combat if able".
-    // Strip verb prefix, skip over the player phrase, then match the duration suffix.
-    let rest = if let Ok((r, _)) =
-        alt((tag::<_, _, OracleError<'_>>("attacks "), tag("attack "))).parse(trimmed)
-    {
-        r
-    } else {
-        return None;
-    };
+    let targeted: Result<(&str, Duration), nom::Err<OracleError<'_>>> = (
+        alt((tag("attacks"), tag("attack"))),
+        preceded(tag(" "), tag("you")),
+        preceded(
+            tag(" "),
+            alt((
+                value(Duration::UntilEndOfTurn, tag("this turn if able")),
+                value(
+                    Duration::UntilEndOfCombat,
+                    alt((
+                        tag("this combat if able"),
+                        tag("that combat if able"),
+                        tag("each combat if able"),
+                    )),
+                ),
+            )),
+        ),
+    )
+        .map(|(_, _, duration)| duration)
+        .parse(trimmed);
 
-    // Match duration suffix: "this turn if able" or "this combat if able"
-    let duration_suffix: Result<(&str, Duration), nom::Err<OracleError<'_>>> = alt((
-        value(Duration::UntilEndOfTurn, tag(" this turn if able")),
-        value(Duration::UntilEndOfCombat, tag(" this combat if able")),
-        value(Duration::UntilEndOfCombat, tag(" each combat if able")),
-    ))
-    .parse(rest);
-
-    // If a duration suffix is found somewhere in the remaining text,
-    // the player phrase is whatever sits between the verb and the suffix.
-    if duration_suffix.is_err() {
-        // Try scanning for the suffix by finding it anywhere after the verb
-        for (suffix_tag, dur) in [
-            (" this turn if able", Duration::UntilEndOfTurn),
-            (" this combat if able", Duration::UntilEndOfCombat),
-            (" each combat if able", Duration::UntilEndOfCombat),
-        ] {
-            if rest.ends_with(suffix_tag) {
-                return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-                    static_abilities: vec![must_attack_static_definition()],
-                    duration: Some(dur),
-                    target: None,
-                }));
-            }
+    if let Ok((rest, duration)) = targeted {
+        if rest.is_empty() {
+            return Some(ImperativeFamilyAst::ForceAttack { duration });
         }
-        return None;
     }
 
-    let (_, duration) = duration_suffix.ok()?;
-
-    Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-        static_abilities: vec![must_attack_static_definition()],
-        duration: Some(duration),
-        target: None,
-    }))
+    None
 }
 
 /// CR 508.1d: Build the `StaticDefinition` for a transient "attacks if able"
@@ -8087,6 +8420,7 @@ mod tests {
                 origin,
                 destination,
                 target: TargetFilter::Or { filters },
+                enters_under: None,
                 enter_tapped,
             } => {
                 assert_eq!(origin, None);
@@ -8804,6 +9138,71 @@ mod tests {
         assert!(result.is_some(), "Should parse 'after this phase' variant");
     }
 
+    /// CR 500.8 + CR 510.2: Obeka, Splitter of Seconds — "you get that many
+    /// additional upkeep steps after this phase" must thread the triggering
+    /// combat damage amount through `EventContextAmount`, not collapse it to
+    /// the singular default.
+    #[test]
+    fn parse_obeka_that_many_additional_upkeep_steps_binds_event_amount() {
+        let text = "you get that many additional upkeep steps after this phase";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let effect = lower_imperative_family_effect(
+            result.expect("Obeka consequent should parse as AdditionalPhase"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                phase: Phase::Upkeep,
+                after: Phase::Upkeep,
+                count:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                ..
+            } => {}
+            other => {
+                panic!("expected AdditionalPhase with EventContextAmount count, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn parse_fixed_count_additional_upkeep_steps_binds_literal_count() {
+        let text = "you get two additional upkeep steps after this phase";
+        let lower = text.to_lowercase();
+        let effect = lower_imperative_family_effect(
+            parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("fixed-count additional upkeep should parse"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            } => {}
+            other => panic!("expected count=Fixed(2) for fixed-count form, got {other:?}"),
+        }
+    }
+
+    /// Singular "an additional upkeep step" must keep the legacy Fixed(1)
+    /// semantics so Paradox Haze and similar cards still push exactly one
+    /// extra step.
+    #[test]
+    fn parse_additional_upkeep_step_defaults_to_count_one() {
+        let text = "get an additional upkeep step after this step";
+        let lower = text.to_lowercase();
+        let effect = lower_imperative_family_effect(
+            parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("should parse singular additional upkeep"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } => {}
+            other => panic!("expected count=Fixed(1) for singular form, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_discard_your_hand() {
         let text = "discard your hand";
@@ -9236,6 +9635,7 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                ..
             }) => {
                 assert_eq!(
                     categories,
@@ -9268,6 +9668,7 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                ..
             }) => {
                 assert_eq!(
                     categories,
@@ -9299,6 +9700,8 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                choose_filter,
+                sacrifice_filter,
             }) => {
                 assert_eq!(
                     categories,
@@ -9313,6 +9716,44 @@ mod tests {
                     chooser_scope,
                     crate::types::ability::CategoryChooserScope::EachPlayerSelf
                 );
+                assert!(
+                    matches!(
+                        &choose_filter,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            ..
+                        }) if type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))
+                    ),
+                    "Gearhulk choose_filter should be nonland permanent, got {choose_filter:?}"
+                );
+                assert_eq!(choose_filter, sacrifice_filter);
+            }
+            other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_from_among_gearhulk_pattern_with_comma() {
+        let text = "choose an artifact, a creature, an enchantment, and a planeswalker, from among the nonland permanents they control";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                choose_filter,
+                sacrifice_filter,
+                ..
+            }) => {
+                assert_eq!(
+                    categories,
+                    vec![
+                        CoreType::Artifact,
+                        CoreType::Creature,
+                        CoreType::Enchantment,
+                        CoreType::Planeswalker
+                    ]
+                );
+                assert_eq!(choose_filter, sacrifice_filter);
             }
             other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
         }
@@ -9554,6 +9995,21 @@ mod tests {
                 assert_eq!(duration, Some(Duration::UntilEndOfCombat));
             }
             other => panic!("Expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_attack_you_this_combat_if_able() {
+        let result = try_parse_attack_if_able("attacks you this combat if able");
+        assert!(
+            result.is_some(),
+            "Should parse 'attacks you this combat if able'"
+        );
+        match result.unwrap() {
+            ImperativeFamilyAst::ForceAttack { duration } => {
+                assert_eq!(duration, Duration::UntilEndOfCombat);
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
         }
     }
 
@@ -9926,7 +10382,7 @@ mod tests {
         else {
             panic!("expected GenericEffect, got something else");
         };
-        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(duration.as_ref(), Some(&Duration::UntilEndOfTurn));
         let static_def = static_abilities
             .first()
             .expect("static_abilities must contain the granted modification");
@@ -10037,6 +10493,115 @@ mod tests {
         }
     }
 
+    /// "lifelink" contains the substring "life", so the `gain` dispatch must
+    /// route "gain lifelink" to the keyword-grant parser, not the numeric
+    /// life-gain branch (which would fail and fall through to Unimplemented).
+    /// Reaches cards like Blessing of Belzenlok ("…it also gains lifelink…").
+    #[test]
+    fn gain_lifelink_dispatches_to_keyword_grant_not_life() {
+        let ast = parse_imperative_family_ast(
+            "gain lifelink",
+            "gain lifelink",
+            &mut ParseContext::default(),
+        )
+        .expect("'gain lifelink' should parse");
+        match ast {
+            ImperativeFamilyAst::GainKeyword(effect) => assert!(
+                generic_has_keyword(&effect, crate::types::keywords::Keyword::Lifelink),
+                "expected a Lifelink keyword grant"
+            ),
+            _ => panic!("expected GainKeyword(Lifelink)"),
+        }
+    }
+
+    /// CR 724.1: "end the turn" parses to the no-target `Effect::EndTheTurn`
+    /// (Time Stop, Sundial of the Infinite, Obeka, Glorious End).
+    #[test]
+    fn end_the_turn_parses_to_end_the_turn_effect() {
+        let ast = parse_imperative_family_ast(
+            "end the turn",
+            "end the turn",
+            &mut ParseContext::default(),
+        )
+        .expect("'end the turn' should parse");
+        assert!(
+            matches!(ast, ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn)),
+            "expected Effect::EndTheTurn"
+        );
+    }
+
+    /// CR 724.2: "end the combat phase" parses to the no-target
+    /// `Effect::EndCombatPhase` (Mandate of Peace).
+    #[test]
+    fn end_the_combat_phase_parses_to_end_combat_phase_effect() {
+        let ast = parse_imperative_family_ast(
+            "end the combat phase",
+            "end the combat phase",
+            &mut ParseContext::default(),
+        )
+        .expect("'end the combat phase' should parse");
+        assert!(
+            matches!(
+                ast,
+                ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase)
+            ),
+            "expected Effect::EndCombatPhase"
+        );
+    }
+
+    /// Regression: a genuine life-gain clause must still reach the numeric
+    /// life-gain parser, not be captured by the keyword-grant branch.
+    #[test]
+    fn gain_life_still_dispatches_to_numeric_life_gain() {
+        let ast =
+            parse_imperative_family_ast("gain 3 life", "gain 3 life", &mut ParseContext::default())
+                .expect("'gain 3 life' should parse");
+        assert!(
+            matches!(
+                ast,
+                ImperativeFamilyAst::Structured(ImperativeAst::Numeric(_))
+            ),
+            "expected numeric life-gain dispatch"
+        );
+    }
+
+    /// Production-path regression for the same lifelink/life substring
+    /// ambiguity, including default duration and SelfRef scope.
+    #[test]
+    fn effect_gain_lifelink_dispatches_to_keyword_grant() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "gain lifelink until end of turn",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!(
+                "expected GenericEffect for lifelink grant, got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(duration.as_ref(), Some(&Duration::UntilEndOfTurn));
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::SelfRef),
+            "bare creature-scoped keyword grant must remain SelfRef"
+        );
+        assert!(
+            static_abilities[0].modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Lifelink
+                }
+            )),
+            "expected AddKeyword(Lifelink), got {:?}",
+            static_abilities[0].modifications
+        );
+    }
+
     /// Pure pump body → None (falls through to the bare numeric Pump arm).
     #[test]
     fn coalesce_pure_pump_is_none() {
@@ -10110,16 +10675,143 @@ mod tests {
     }
 
     /// CR 706 + CR 706.2: "Roll a d20" with no modifier parses to a bare RollDie.
+    /// Issue #1675 — Canopy Gargantuan. "Put a number of +1/+1 counters on each
+    /// other creature you control equal to that creature's toughness." rebinds
+    /// the per-recipient "that creature's toughness" count to `Recipient` so the
+    /// resolver re-evaluates it per object.
+    #[test]
+    fn put_counter_all_each_equal_to_that_creatures_toughness_rebinds_to_recipient() {
+        use crate::types::ability::ObjectScope;
+        let def = super::super::parse_effect_chain(
+            "Put a number of +1/+1 counters on each other creature you control equal to that creature's toughness.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::PutCounterAll { count, .. } => assert!(
+                matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                ),
+                "count must rebind to Recipient, got {count:?}"
+            ),
+            other => panic!("expected PutCounterAll, got {other:?}"),
+        }
+    }
+
+    /// The rebind is gated: a genuine cost referent ("the sacrificed creature's
+    /// power") stays `CostPaidObject` (resolved once, applied uniformly), so the
+    /// rebind does not hijack cost-paid `*All` counts.
+    #[test]
+    fn rebind_distributive_recipient_count_leaves_cost_referent_alone() {
+        use crate::types::ability::ObjectScope;
+        let cost_paid = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        let out = super::rebind_distributive_recipient_count(
+            cost_paid.clone(),
+            "put a +1/+1 counter on each creature you control equal to the sacrificed creature's power",
+        );
+        assert_eq!(
+            out, cost_paid,
+            "cost-referent count must NOT rebind to Recipient"
+        );
+
+        // And "that creature's power" (no cost participle) DOES rebind.
+        let anaphor = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        let rebound = super::rebind_distributive_recipient_count(
+            anaphor,
+            "put a +1/+1 counter on each creature you control equal to that creature's power",
+        );
+        assert!(matches!(
+            rebound,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn rebind_distributive_recipient_count_walks_all_quantity_wrappers() {
+        use crate::types::ability::ObjectScope;
+
+        let expr = QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+            right: Box::new(QuantityExpr::Power {
+                base: 2,
+                exponent: Box::new(QuantityExpr::UpTo {
+                    max: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                    }),
+                }),
+            }),
+        };
+
+        let rebound = super::rebind_distributive_recipient_count(
+            expr,
+            "put a number of +1/+1 counters on each creature you control equal to that creature's power",
+        );
+
+        let QuantityExpr::Difference { left, right } = rebound else {
+            panic!("expected Difference, got {rebound:?}");
+        };
+        assert!(matches!(
+            *left,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+
+        let QuantityExpr::Power { exponent, .. } = *right else {
+            panic!("expected Power, got {right:?}");
+        };
+        let QuantityExpr::UpTo { max } = *exponent else {
+            panic!("expected UpTo, got {exponent:?}");
+        };
+        assert!(matches!(
+            *max,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+    }
+
     #[test]
     fn roll_a_d20_no_modifier_parses_to_roll_die() {
         let def = super::super::parse_effect_chain("Roll a d20.", AbilityKind::Spell);
         match &*def.effect {
             Effect::RollDie {
+                count,
                 sides,
                 modifier,
                 results,
             } => {
                 assert_eq!(*sides, 20);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
                 assert!(modifier.is_none());
                 assert!(results.is_empty());
             }
@@ -10155,6 +10847,35 @@ mod tests {
                     },
                     other => panic!("expected Add modifier, got {other:?}"),
                 }
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1a + CR 706.2: The single-die parser accepts word-count "one"
+    /// as the same semantic count as article "a", including modifier clauses.
+    #[test]
+    fn roll_one_d20_with_add_modifier_parses_to_roll_die_with_modifier() {
+        let def = super::super::parse_effect_chain(
+            "Roll one d20 and add the number of cards in your hand.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::RollDie {
+                count,
+                sides,
+                modifier,
+                ..
+            } => {
+                assert_eq!(*sides, 20);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+                assert!(matches!(
+                    modifier,
+                    Some(crate::types::ability::DieRollModifier::Add { .. })
+                ));
             }
             other => panic!("expected RollDie, got {other:?}"),
         }
@@ -10196,6 +10917,84 @@ mod tests {
             } => {
                 assert_eq!(*sides, 6);
                 assert!(modifier.is_none());
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1: "Roll two six-sided dice" is the multi-dice word form —
+    /// parses to `RollDie { count: Fixed(2), sides: 6 }`. Mirrors the
+    /// `FlipCoins { count }` precedent for the dice axis.
+    #[test]
+    fn roll_two_six_sided_dice_parses_to_roll_die_count_two() {
+        let def = super::super::parse_effect_chain("Roll two six-sided dice.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie {
+                count,
+                sides,
+                modifier,
+                ..
+            } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 2 }
+                );
+                assert!(modifier.is_none());
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1: The single-die path is unchanged — "Roll a six-sided die"
+    /// still lowers to `count: Fixed(1)` so back-compat with existing
+    /// single-die cards holds.
+    #[test]
+    fn roll_a_six_sided_die_lowers_to_count_one() {
+        let def = super::super::parse_effect_chain("Roll a six-sided die.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1: The `dN` shorthand also supports a leading count: "Roll two
+    /// d6" → `count: Fixed(2), sides: 6`.
+    #[test]
+    fn roll_two_d6_parses_to_roll_die_count_two() {
+        let def = super::super::parse_effect_chain("Roll two d6.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 6);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 2 }
+                );
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1 + CR 107.3a: "Roll X twelve-sided dice" binds the count to the
+    /// announced `X`, lowering to `count: Variable("X"), sides: 12`.
+    #[test]
+    fn roll_x_twelve_sided_dice_parses_to_variable_count() {
+        let def = super::super::parse_effect_chain("Roll X twelve-sided dice.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::RollDie { count, sides, .. } => {
+                assert_eq!(*sides, 12);
+                assert!(matches!(
+                    count,
+                    crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable { .. }
+                    }
+                ));
             }
             other => panic!("expected RollDie, got {other:?}"),
         }

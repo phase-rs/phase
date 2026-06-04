@@ -2,10 +2,12 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::ability::Comparator;
 use super::events::GameEvent;
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
 use super::player::PlayerId;
+use super::zones::Zone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaColor {
@@ -242,6 +244,14 @@ pub struct SpellMeta {
     pub keyword_kinds: Vec<KeywordKind>,
     /// Zone the spell is being cast from.
     pub cast_from_zone: Option<crate::types::zones::Zone>,
+    /// CR 202.3: Mana value of the spell being cast, consulted by mana-value
+    /// spend restrictions (`OnlyForSpellWithManaValue`). `None` at payment
+    /// sites with no associated spell mana value.
+    pub mana_value: Option<u32>,
+    /// CR 105.2: Number of colors of the spell being cast, consulted by
+    /// color-count spend restrictions (`OnlyForSpellWithColorCount`). `None` at
+    /// payment sites with no associated spell.
+    pub color_count: Option<u32>,
 }
 
 /// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
@@ -293,6 +303,19 @@ pub enum ManaRestriction {
     OnlyForSpellWithKeywordKind(KeywordKind),
     /// "Spend this mana only to cast spells with flashback from a graveyard."
     OnlyForSpellWithKeywordKindFromZone(KeywordKind, crate::types::zones::Zone),
+    /// CR 106.6: "Spend this mana only to cast spells with mana value N or
+    /// greater" (or "or less"). `comparator` applies `spell_mana_value <cmp>
+    /// value`. Parameterized over [`Comparator`] — one variant per threshold reading.
+    OnlyForSpellWithManaValue { comparator: Comparator, value: u32 },
+    /// CR 105.2 + CR 106.6: "Spend this mana only to cast spells with exactly N
+    /// colors" (also "N or more / N or fewer"). `comparator` applies
+    /// `spell_color_count <cmp> count`. Colorless spells have color_count 0.
+    OnlyForSpellWithColorCount { comparator: Comparator, count: u32 },
+    /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
+    /// graveyard" / "from exile". Gates on the spell's cast-from zone, consulting
+    /// `SpellMeta.cast_from_zone`. A distinct axis from
+    /// `OnlyForSpellWithKeywordKindFromZone` (which also requires a keyword).
+    OnlyForSpellFromZone(Zone),
     /// CR 702.51a: Internal marker for a convoke tap that substitutes for
     /// paying mana. The payment algorithm may consume it for the current spell,
     /// but cast-spent metrics and mana-added triggers must ignore it.
@@ -359,6 +382,21 @@ impl ManaRestriction {
                 meta.keyword_kinds.contains(required_keyword)
                     && meta.cast_from_zone == Some(*required_zone)
             }
+            // CR 106.6: Mana-value-gated spend. Mirrors the cast-permission
+            // mana-value check in game::casting
+            // (`comparator.evaluate(obj.mana_cost.mana_value() as i32, value)`).
+            // A spell with no known mana value (None) is not eligible.
+            ManaRestriction::OnlyForSpellWithManaValue { comparator, value } => meta
+                .mana_value
+                .is_some_and(|mv| comparator.evaluate(mv as i32, *value as i32)),
+            // CR 105.2: Color-count-gated spend. Colorless spells have a color
+            // count of 0. A spell with no recorded color count (None) is ineligible.
+            ManaRestriction::OnlyForSpellWithColorCount { comparator, count } => meta
+                .color_count
+                .is_some_and(|cc| comparator.evaluate(cc as i32, *count as i32)),
+            // CR 106.6 + CR 400.7: zone-gated spend — the spell must be cast from
+            // the named zone. A spell with no recorded cast-from zone is ineligible.
+            ManaRestriction::OnlyForSpellFromZone(zone) => meta.cast_from_zone == Some(*zone),
             ManaRestriction::ConvokePayment => true,
         }
     }
@@ -374,7 +412,10 @@ impl ManaRestriction {
             | ManaRestriction::OnlyForSpellType(_)
             | ManaRestriction::OnlyForCreatureType(_)
             | ManaRestriction::OnlyForSpellWithKeywordKind(_)
-            | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _) => false,
+            | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _)
+            | ManaRestriction::OnlyForSpellWithManaValue { .. }
+            | ManaRestriction::OnlyForSpellWithColorCount { .. }
+            | ManaRestriction::OnlyForSpellFromZone(_) => false,
             // CR 106.6: The ability-activation half of the OR. "Elemental sources"
             // includes objects with creature type Elemental — consult subtypes too.
             ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => {
@@ -742,6 +783,16 @@ impl ManaCost {
         ManaCost::Cost {
             shards: Vec::new(),
             generic: 0,
+        }
+    }
+
+    /// CR 118.9a: Whether this mana cost represents casting without paying mana
+    /// (`NoCost`, or a zero `{0}` cost from `ExileWithAltCost` grants).
+    pub fn is_without_paying_mana(&self) -> bool {
+        match self {
+            ManaCost::NoCost => true,
+            ManaCost::Cost { shards, generic } => shards.is_empty() && *generic == 0,
+            ManaCost::SelfManaCost => false,
         }
     }
 
@@ -1293,18 +1344,24 @@ mod tests {
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let legendary_spell = SpellMeta {
             types: vec!["Legendary".to_string(), "Creature".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         assert!(restriction.allows_spell(&creature_spell));
         assert!(!restriction.allows_spell(&instant_spell));
@@ -1322,6 +1379,8 @@ mod tests {
             subtypes: vec![],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let source_types = vec!["Artifact".to_string()];
         let source_subtypes = Vec::new();
@@ -1342,18 +1401,24 @@ mod tests {
             subtypes: vec!["Elf".to_string(), "Warrior".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let elf_instant = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         assert!(restriction.allows_spell(&elf_creature));
         assert!(!restriction.allows_spell(&goblin_creature));
@@ -1376,6 +1441,8 @@ mod tests {
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let spent = pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&spell))
@@ -1399,6 +1466,8 @@ mod tests {
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&elf_spell))
@@ -1456,6 +1525,8 @@ mod tests {
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&goblin_spell))
@@ -1474,24 +1545,32 @@ mod tests {
             subtypes: vec!["Elemental".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let tribal_elemental_instant = SpellMeta {
             types: vec!["Tribal".to_string(), "Instant".to_string()],
             subtypes: vec!["Elemental".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let plain_instant = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         assert!(restriction.allows_spell(&elemental_creature));
         assert!(restriction.allows_spell(&tribal_elemental_instant));
@@ -1510,18 +1589,24 @@ mod tests {
             subtypes: vec!["Eldrazi".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let colored_eldrazi = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Eldrazi".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let colorless_construct = SpellMeta {
             types: vec!["Artifact".to_string(), "Colorless".to_string()],
             subtypes: vec!["Construct".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         assert!(restriction.allows_spell(&colorless_eldrazi));
         assert!(!restriction.allows_spell(&colored_eldrazi));
@@ -1556,12 +1641,16 @@ mod tests {
             subtypes: vec![],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let artifact_types = vec!["Artifact".to_string()];
         let creature_types = vec!["Creature".to_string()];
@@ -1605,15 +1694,237 @@ mod tests {
             subtypes: vec![],
             keyword_kinds: vec![KeywordKind::Flashback],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         let normal_spell = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
         };
         assert!(restriction.allows_spell(&flashback_spell));
         assert!(!restriction.allows_spell(&normal_spell));
+    }
+
+    // CR 106.6 + CR 202.3: "Spend this mana only to cast spells with mana value
+    // N or greater" — the GE half of the parameterized mana-value gate.
+    #[test]
+    fn restriction_allows_spell_with_mana_value_ge_threshold() {
+        let restriction = ManaRestriction::OnlyForSpellWithManaValue {
+            comparator: Comparator::GE,
+            value: 5,
+        };
+        let mv_six = SpellMeta {
+            mana_value: Some(6),
+            color_count: None,
+            ..SpellMeta::default()
+        };
+        let mv_four = SpellMeta {
+            mana_value: Some(4),
+            color_count: None,
+            ..SpellMeta::default()
+        };
+        let no_mv = SpellMeta::default();
+        assert!(restriction.allows_spell(&mv_six));
+        assert!(!restriction.allows_spell(&mv_four));
+        // A spell with no known mana value is not eligible.
+        assert!(!restriction.allows_spell(&no_mv));
+    }
+
+    // CR 106.6 + CR 202.3: the LE half of the parameterized mana-value gate
+    // ("mana value N or less").
+    #[test]
+    fn restriction_allows_spell_with_mana_value_le_threshold() {
+        let restriction = ManaRestriction::OnlyForSpellWithManaValue {
+            comparator: Comparator::LE,
+            value: 3,
+        };
+        let mv_two = SpellMeta {
+            mana_value: Some(2),
+            color_count: None,
+            ..SpellMeta::default()
+        };
+        let mv_four = SpellMeta {
+            mana_value: Some(4),
+            color_count: None,
+            ..SpellMeta::default()
+        };
+        assert!(restriction.allows_spell(&mv_two));
+        assert!(!restriction.allows_spell(&mv_four));
+    }
+
+    #[test]
+    fn spend_for_enforces_mana_value_restriction() {
+        let mut pool = ManaPool::default();
+        pool.add(make_restricted_unit(
+            ManaType::Green,
+            ObjectId(1),
+            vec![ManaRestriction::OnlyForSpellWithManaValue {
+                comparator: Comparator::GE,
+                value: 5,
+            }],
+        ));
+
+        let mv_four = SpellMeta {
+            mana_value: Some(4),
+            color_count: None,
+            ..SpellMeta::default()
+        };
+        assert!(pool
+            .spend_for(ManaType::Green, &PaymentContext::Spell(&mv_four))
+            .is_none());
+        assert_eq!(pool.total(), 1);
+
+        let mv_five = SpellMeta {
+            mana_value: Some(5),
+            color_count: None,
+            ..SpellMeta::default()
+        };
+        assert!(pool
+            .spend_for(ManaType::Green, &PaymentContext::Spell(&mv_five))
+            .is_some());
+        assert_eq!(pool.total(), 0);
+    }
+
+    // CR 106.6: a mana-value gate names spell casting, so it rejects ability
+    // activation regardless of comparator.
+    #[test]
+    fn restriction_mana_value_rejects_activation() {
+        let restriction = ManaRestriction::OnlyForSpellWithManaValue {
+            comparator: Comparator::GE,
+            value: 5,
+        };
+        let source_types = vec!["Creature".to_string()];
+        let source_subtypes: Vec<String> = vec![];
+        assert!(!restriction.allows_activation(&source_types, &source_subtypes));
+    }
+
+    // CR 105.2 + CR 106.6: "Spend this mana only to cast spells with exactly N
+    // colors" — the EQ reading of the parameterized color-count gate. A spell
+    // with no recorded color count (None) is ineligible.
+    #[test]
+    fn restriction_allows_spell_with_color_count_eq() {
+        let restriction = ManaRestriction::OnlyForSpellWithColorCount {
+            comparator: Comparator::EQ,
+            count: 3,
+        };
+        let three_colors = SpellMeta {
+            color_count: Some(3),
+            ..SpellMeta::default()
+        };
+        let two_colors = SpellMeta {
+            color_count: Some(2),
+            ..SpellMeta::default()
+        };
+        assert!(restriction.allows_spell(&three_colors));
+        assert!(!restriction.allows_spell(&two_colors));
+        // No recorded color count → ineligible.
+        assert!(!restriction.allows_spell(&SpellMeta::default()));
+        // CR 105.2: a color-count gate names spell casting, so it rejects ability
+        // activation.
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &[]));
+    }
+
+    // CR 105.2: colorless spells have a color count of 0, so "exactly 0 colors"
+    // matches colorless spells and rejects colored ones.
+    #[test]
+    fn restriction_allows_spell_with_color_count_colorless() {
+        let restriction = ManaRestriction::OnlyForSpellWithColorCount {
+            comparator: Comparator::EQ,
+            count: 0,
+        };
+        let colorless = SpellMeta {
+            color_count: Some(0),
+            ..SpellMeta::default()
+        };
+        let one_color = SpellMeta {
+            color_count: Some(1),
+            ..SpellMeta::default()
+        };
+        assert!(restriction.allows_spell(&colorless));
+        assert!(!restriction.allows_spell(&one_color));
+    }
+
+    // CR 105.2 + CR 106.6: range comparators share the same color-count gate as
+    // exact matching.
+    #[test]
+    fn restriction_allows_spell_with_color_count_ranges() {
+        let two_or_more = ManaRestriction::OnlyForSpellWithColorCount {
+            comparator: Comparator::GE,
+            count: 2,
+        };
+        let two_or_fewer = ManaRestriction::OnlyForSpellWithColorCount {
+            comparator: Comparator::LE,
+            count: 2,
+        };
+        let three_colors = SpellMeta {
+            color_count: Some(3),
+            ..SpellMeta::default()
+        };
+        let one_color = SpellMeta {
+            color_count: Some(1),
+            ..SpellMeta::default()
+        };
+        assert!(two_or_more.allows_spell(&three_colors));
+        assert!(!two_or_more.allows_spell(&one_color));
+        assert!(two_or_fewer.allows_spell(&one_color));
+        assert!(!two_or_fewer.allows_spell(&three_colors));
+    }
+
+    #[test]
+    fn spend_for_enforces_color_count_restriction() {
+        let mut pool = ManaPool::default();
+        pool.add(make_restricted_unit(
+            ManaType::Green,
+            ObjectId(1),
+            vec![ManaRestriction::OnlyForSpellWithColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }],
+        ));
+
+        let one_color = SpellMeta {
+            color_count: Some(1),
+            ..SpellMeta::default()
+        };
+        assert!(pool
+            .spend_for(ManaType::Green, &PaymentContext::Spell(&one_color))
+            .is_none());
+        assert_eq!(pool.total(), 1);
+
+        let two_colors = SpellMeta {
+            color_count: Some(2),
+            ..SpellMeta::default()
+        };
+        assert!(pool
+            .spend_for(ManaType::Green, &PaymentContext::Spell(&two_colors))
+            .is_some());
+        assert_eq!(pool.total(), 0);
+    }
+
+    // CR 106.6 + CR 400.7: zone-gated spend allows only spells cast from the
+    // named zone; a different zone or an unknown (None) origin is ineligible,
+    // and the restriction never permits ability activation.
+    #[test]
+    fn restriction_allows_spell_from_zone() {
+        let restriction = ManaRestriction::OnlyForSpellFromZone(Zone::Graveyard);
+        let from_gy = SpellMeta {
+            cast_from_zone: Some(Zone::Graveyard),
+            ..SpellMeta::default()
+        };
+        let from_exile = SpellMeta {
+            cast_from_zone: Some(Zone::Exile),
+            ..SpellMeta::default()
+        };
+        assert!(restriction.allows_spell(&from_gy));
+        assert!(!restriction.allows_spell(&from_exile));
+        // No recorded cast-from zone → ineligible.
+        assert!(!restriction.allows_spell(&SpellMeta::default()));
+        // Zone-gated spend is spell-casting only.
+        assert!(!restriction.allows_activation(&["Creature".to_string()], &[]));
     }
 
     #[test]

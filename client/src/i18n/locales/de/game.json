@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Auflösen {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Verdeckte Karte",
     "loading": "{{name}} wird geladen",
     "unimplemented": "Nicht implementiert: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Getappt"
   },
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",
@@ -25,9 +29,32 @@
     "fromSource": "(von {{source}})",
     "basePT": "(Basis {{power}}/{{toughness}})",
     "damage": "Schaden: {{amount}}",
+    "activateCost": "Aktivieren — {{cost}}",
     "ptDeltaFrom": "{{delta}} von {{source}}",
     "colors": "Farben: {{colors}}",
-    "colorless": "Farblos"
+    "colorless": "Farblos",
+    "chosen": {
+      "title": "Gewählt",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Spieler {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Unbekannt",
+      "kind": {
+        "color": "Farbe",
+        "creatureType": "Kreaturentyp",
+        "basicLandType": "Standardlandtyp",
+        "cardType": "Kartentyp",
+        "oddOrEven": "Ungerade oder gerade",
+        "cardName": "Kartenname",
+        "number": "Zahl",
+        "player": "Spieler",
+        "twoColors": "Zwei Farben",
+        "tributeOutcome": "Tribut",
+        "keyword": "Schlüsselwort",
+        "label": "Label",
+        "fallback": "Auswahl"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Angreifer löschen",
@@ -211,6 +238,9 @@
     "radAriaLabel_one": "{{count}} Strahlungsmarke",
     "radAriaLabel_other": "{{count}} Strahlungsmarken",
     "radTooltip": "Strahlungsmarken: {{count}}",
+    "experienceAriaLabel_one": "{{count}} Erfahrungsmarke",
+    "experienceAriaLabel_other": "{{count}} Erfahrungsmarken",
+    "experienceTooltip": "Erfahrungsmarken: {{count}}",
     "speedAriaLabel": "Tempo {{value}}",
     "speedTooltip": "Tempo: {{value}}",
     "companion": "Gefährte"
@@ -379,12 +409,14 @@
     "chooseNewTargetForCopy": "Wähle ein neues Ziel für die Kopie",
     "chooseTargetForCopy": "Wähle ein Ziel für die Kopie",
     "chooseCreatureToExplore": "Wähle, welche Kreatur als Nächstes erkundet",
+    "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
     "chooseTarget": "Wähle ein Ziel",
     "noLegalTargets": "Keine legalen Ziele verfügbar",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "bis zu eine {{target}}",
     "one": "eine {{target}}",
     "nounPlayer": "Spieler",
@@ -449,7 +481,26 @@
     "companionRevealed": "{{player}} hat den Gefährten aufgedeckt: {{cardName}}",
     "companionMovedToHand": "{{player}} hat den Gefährten {{cardName}} auf die Hand genommen",
     "powerToughnessChanged": "Objekt {{objectId}} ist jetzt {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Ereignis: {{type}}"
+    "genericEvent": "Ereignis: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Engine-Werkzeuge",
@@ -861,6 +912,7 @@
       "titleSacrifice": "Opfern",
       "titleTopdeck": "Auf die Bibliothek legen",
       "titleBattlefield": "Auf das Schlachtfeld legen",
+      "titleHand": "Zurückgeben",
       "subtitleSacrificeExact_one": "Wähle {{count}} bleibende Karte zum Opfern",
       "subtitleSacrificeExact_other": "Wähle {{count}} bleibende Karten zum Opfern",
       "subtitleSacrificeUpTo_one": "Wähle bis zu {{count}} bleibende Karte zum Opfern",
@@ -879,12 +931,19 @@
       "subtitleBattlefieldUpTo_other": "Wähle bis zu {{count}} Karten, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldRange_one": "Wähle {{min}}-{{count}} Karte, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldRange_other": "Wähle {{min}}-{{count}} Karten, um sie auf das Schlachtfeld zu legen",
+      "subtitleHandExact_one": "Wähle {{count}} bleibende Karte, um sie in die Hand ihres Besitzers zurückzugeben",
+      "subtitleHandExact_other": "Wähle {{count}} bleibende Karten, um sie in die Hand ihrer Besitzer zurückzugeben",
+      "subtitleHandUpTo_one": "Wähle bis zu {{count}} bleibende Karte, um sie in die Hand ihres Besitzers zurückzugeben",
+      "subtitleHandUpTo_other": "Wähle bis zu {{count}} bleibende Karten, um sie in die Hand ihrer Besitzer zurückzugeben",
+      "subtitleHandRange_one": "Wähle {{min}}-{{count}} bleibende Karte, um sie in die Hand ihres Besitzers zurückzugeben",
+      "subtitleHandRange_other": "Wähle {{min}}-{{count}} bleibende Karten, um sie in die Hand ihrer Besitzer zurückzugeben",
       "labelSkip": "Überspringen",
       "labelDecline": "Ablehnen",
       "labelPutOnTop": "Oben drauflegen ({{order}})",
       "labelConfirm": "Bestätigen ({{selected}}/{{count}})",
       "labelTop": "Oben ({{selected}}/{{count}})",
       "labelPut": "Legen ({{selected}}/{{count}})",
+      "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "orderTop": "Oben"
     },
     "drawnThisTurn": {
@@ -980,6 +1039,12 @@
       "subtitle_one": "Schicke {{count}} Karte aus {{source}} ins Exil",
       "subtitle_other": "Schicke {{count}} Karten aus {{source}} ins Exil"
     },
+    "craft": {
+      "title": "Herstellen",
+      "subtitle_one": "Schicke {{count}} Material zum Herstellen ins Exil",
+      "subtitle_other": "Schicke {{count}} Materialien zum Herstellen ins Exil",
+      "subtitleRange": "Schicke {{min}} bis {{count}} Materialien zum Herstellen ins Exil"
+    },
     "behold": {
       "title": "Erblicken",
       "subtitleExile": "Schicke eine passende bleibende Karte oder Karte ins Exil",
@@ -1062,6 +1127,16 @@
       "subtitle": "Wähle, welche Manakombination erzeugt wird"
     }
   },
+  "specializeColor": {
+    "title": "Spezialisierung wählen",
+    "subtitle": "Wähle eine Farbe, die zur abgeworfenen Karte passt",
+    "confirm": "Spezialisieren",
+    "white": "Weiß",
+    "blue": "Blau",
+    "black": "Schwarz",
+    "red": "Rot",
+    "green": "Grün"
+  },
   "dialogShell": {
     "eyebrow": "Spielentscheidung",
     "restoreDialog": "Dialog wiederherstellen",
@@ -1105,6 +1180,18 @@
     "bestowNormalLabel": "Als Kreatur wirken",
     "bestowAltLabel": "Mit Verleihen wirken",
     "bestowSubtitle": "Wirke {{name}} normal als Kreatur oder zahle seine Verleihen-Kosten, um es als Aura zu wirken.",
+    "awakenEyebrow": "Erwecken",
+    "awakenNormalLabel": "Normal wirken",
+    "awakenAltLabel": "Mit Erwecken wirken",
+    "awakenSubtitle": "Wirke {{name}} normal oder zahle seine Erwecken-Kosten, um außerdem +1/+1-Marken auf ein Land deiner Wahl zu legen und es in eine 0/0 Elementarwesen-Kreatur mit Eile zu verwandeln.",
+    "cleaveEyebrow": "Abspalten",
+    "cleaveNormalLabel": "Normal wirken",
+    "cleaveAltLabel": "Mit Abspalten wirken",
+    "cleaveSubtitle": "Wirke {{name}} normal oder zahle seine Abspaltungskosten, um den Text in eckigen Klammern zu entfernen.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Eine Karte ins Exil schicken",
     "additionalSacrifice": "+ Eine bleibende Karte opfern",
     "additionalPayLife": "+ Leben bezahlen",
@@ -1116,6 +1203,10 @@
     "title": "Beschützer wählen",
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
+  },
+  "clashOpponent": {
+    "title": "Kampf-Gegner wählen",
+    "subtitle": "Wähle, welcher Gegner mit dir kämpft."
   },
   "cardDataMissing": {
     "title": "Kartendaten fehlen",
@@ -1163,8 +1254,8 @@
   },
   "categoryChoice": {
     "title": "Bleibende Karten zum Behalten wählen",
-    "subtitleOpponent": "Wähle eine bleibende Karte jedes Typs unter den bleibenden Nichtländer-Karten, die {{name}} kontrolliert; der Rest wird geopfert.",
-    "subtitleSelf": "Wähle eine bleibende Karte jedes Typs unter den bleibenden Nichtländer-Karten, die du kontrollierst; der Rest wird geopfert.",
+    "subtitleOpponent": "Wähle eine bleibende Karte für jede Kategorie für {{name}}.",
+    "subtitleSelf": "Wähle eine bleibende Karte für jede Kategorie.",
     "noneToKeep": "Kein {{category}} — keine zum Behalten",
     "objectFallback": "Objekt {{id}}"
   },
@@ -1268,7 +1359,9 @@
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
-    "buttonSubtitle": "Wähle eine Option"
+    "buttonSubtitle": "Wähle eine Option",
+    "filterPlaceholder": "Optionen filtern...",
+    "noOptionsMatch": "Keine Option passt"
   },
   "nonFatalPanic": {
     "heading": "Engine-Warnung (nicht fatal)",
@@ -1405,5 +1498,21 @@
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
+  },
+  "coinFlip": {
+    "keep": {
+      "title": "Krark's Thumb",
+      "subtitle": "Flip two coins and ignore one — choose which result to keep.",
+      "heads": "Heads",
+      "tails": "Tails"
+    },
+    "buttons": {
+      "keep": "Keep this"
+    }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

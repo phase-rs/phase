@@ -866,6 +866,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -882,6 +883,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
             vec![],
             source_id,
@@ -904,6 +906,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1197,6 +1200,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -1213,6 +1217,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
             vec![],
             enchantment_id,
@@ -1269,6 +1274,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1830,6 +1836,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         from: Zone::Graveyard,
         to: Zone::Battlefield,
         cause: None,
+        attach_to: None,
         enter_tapped: EtbTapState::Tapped,
         enter_with_counters: Vec::new(),
         controller_override: Some(P0),
@@ -1903,6 +1910,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         from: Zone::Hand,
         to: Zone::Battlefield,
         cause: None,
+        attach_to: None,
         enter_tapped: EtbTapState::Unspecified,
         enter_with_counters: Vec::new(),
         controller_override: None,
@@ -2064,6 +2072,7 @@ fn cast_synthetic_earthbend(
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(state, entry, &mut vec![]);
@@ -2231,6 +2240,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::SpecificObject { id: land_id },
+            enters_under: None,
             enter_tapped: false,
         },
         vec![TargetRef::Object(land_id)],
@@ -2251,6 +2261,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(runner.state_mut(), entry, &mut vec![]);

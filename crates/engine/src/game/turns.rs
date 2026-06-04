@@ -83,6 +83,46 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, next, events);
 }
 
+/// CR 724.1d: End the current turn by skipping straight to the cleanup step.
+/// Discards any extra phases/steps scheduled for this turn (they are skipped)
+/// and enters a fresh cleanup step — per CR 724.1d, even if the turn is ended
+/// during the cleanup step, a new cleanup step begins. Drives `Effect::EndTheTurn`
+/// (Time Stop, Sundial of the Infinite, Obeka, Glorious End, Discontinuity).
+pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.1d: "skip any phases or steps between this phase or step and the
+    // cleanup step" — drop scheduled extra phases for this (now-ending) turn.
+    state.extra_phases.clear();
+    enter_phase(state, Phase::Cleanup, events);
+}
+
+/// CR 724.2d: End the current combat phase by removing everything from combat,
+/// expiring "until end of combat" effects, and skipping straight to the
+/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
+/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
+/// the intervening end-of-combat step so its "at end of combat" triggers do not
+/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
+pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+    state.combat = None;
+    // CR 724.2d: Effects that last "until end of combat" expire — continuous
+    // effects, replacement definitions, and pending damage replacements alike,
+    // matching the normal end-of-combat prune.
+    super::layers::prune_end_of_combat_effects(state);
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.replacement_definitions
+            .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+    }
+    state
+        .pending_damage_replacements
+        .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+
+    // CR 724.2d: Skip straight to the postcombat main phase, skipping any
+    // intervening steps (including the end-of-combat step — CR 724.2e). Any
+    // extra combat phases scheduled for this turn are also skipped.
+    state.extra_phases.clear();
+    enter_phase(state, Phase::PostCombatMain, events);
+}
+
 /// Enter a phase directly: set phase, run the CR 703.4q step-end empty
 /// unspent mana event for each player in APNAP order through the replacement
 /// pipeline, then (when the queue empties) reset priority (CR 117.3a),
@@ -169,7 +209,27 @@ pub(super) fn drain_pending_phase_transition_progress(
         let scan_entries = scan_step_end_mana_handlers(state, player_id);
         state.pending_step_end_mana_handlers = scan_entries;
 
-        // Build per-unit decision payload from the player's surviving (non-expiry) pool.
+        // Build per-unit decision payload from the player's surviving pool.
+        //
+        // CR 500.5 + CR 703.4q (H2 invariant): expiry-bound units (e.g.
+        // Klauth's "you don't lose this mana as steps and phases end",
+        // Firebending's "Until end of combat, you don't lose this mana as
+        // steps and phases end" — CR 702.189a) have *already* had their fate
+        // decided by `clear_expiring_at_step_end` above — they were either
+        // dropped (their rule fired) or deliberately retained.
+        //
+        // CR 614.17 + CR 614.17c: "you don't lose this mana …" is a "can't"
+        // effect, not a replacement effect. It prevents the CR 106.4 /
+        // CR 703.4q lose-mana event for the protected units, and per
+        // CR 614.17c, once that event can't happen no other replacement
+        // effect — including a step-end mana handler (Upwelling, Horizon
+        // Stone, Kruphix) — can modify or replace it. So such units must NOT
+        // enter the empty-pool replacement pipeline at all; emitting a `Drop`
+        // decision here would empty the very mana the card promises to keep.
+        // Only `None`-expiry units flow into the pipeline as Drop-disposition
+        // decisions. The `enumerate` runs over the full pool so `pool_index`
+        // stays aligned with the retained expiry units that remain in
+        // `mana_pool.mana`.
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -179,6 +239,7 @@ pub(super) fn drain_pending_phase_transition_progress(
                     .mana
                     .iter()
                     .enumerate()
+                    .filter(|(_, u)| u.expiry.is_none())
                     .map(|(idx, u)| crate::types::mana::UnitDecision {
                         pool_index: idx,
                         color: u.color,
@@ -493,6 +554,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_attacked_this_step.clear();
     state.players_attacked_this_turn.clear();
     state.attacking_creatures_this_turn.clear();
+    state.attacked_defenders_this_turn.clear();
+    state.creature_attacked_defenders_this_turn.clear();
     state.combat_phases_started_this_turn = 0;
     state.creatures_attacked_this_turn.clear();
     state.creatures_blocked_this_turn.clear();
@@ -1292,18 +1355,27 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///   `state.waiting_for`. Returning `Priority` here would overwrite the prompt
 ///   and strand the queued triggers in `pending_trigger_order` forever (they
 ///   never reach the stack). Single-trigger steps take the `NoChoiceNeeded`
-///   path with no prompt and fall through to the normal priority grant.
+///   path with no prompt and fall through to the normal priority grant. The
+///   prompt is rebuilt from the AUTHORITATIVE `pending_trigger_order` state via
+///   `build_next_order_triggers_prompt_public`, not cloned from
+///   `state.waiting_for` — so a stale `waiting_for` left by an upstream
+///   phase-advance can't re-surface and hang, and already-corrupted saves
+///   recover by surfacing the real ordering prompt.
 fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
     let stack_before = state.stack.len();
     super::triggers::process_triggers(state, &phase_event);
     // CR 603.3b: an unresolved ordering pass keeps its triggers in
-    // `pending_trigger_order` (not on the stack, not in `pending_trigger`), so
-    // it must count toward `fired` and surface its prompt.
-    let ordering_prompt = state
-        .pending_trigger_order
-        .is_some()
-        .then(|| state.waiting_for.clone());
+    // `pending_trigger_order` (not on the stack, not in `pending_trigger`), so it
+    // must count toward `fired` and surface its prompt. Reconstruct the prompt
+    // from the AUTHORITATIVE source (`pending_trigger_order`) rather than cloning
+    // `state.waiting_for`: if an upstream phase-advance orphaned the pass and left
+    // `waiting_for` stale, cloning it would re-surface the stale state and hang.
+    // Reading the canonical pending state also RECOVERS already-corrupted saves by
+    // surfacing the real ordering prompt. Note `pending_trigger_order.is_some()` no
+    // longer blindly implies `waiting_for == OrderTriggers`, which is exactly why
+    // the prior `.then(|| clone)` idiom was unsafe.
+    let ordering_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
     let fired = state.stack.len() > stack_before
         || state.pending_trigger.is_some()
         || ordering_prompt.is_some();
@@ -1405,6 +1477,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // to each Saga the active player controls (turn-based action).
                 if state.phase == Phase::PreCombatMain {
                     add_lore_counters_to_sagas(state, events);
+                    super::attractions::perform_roll_to_visit_turn_based_action(state, events);
                     // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
                     // the start of the active player's first precombat main
                     // phase: offer to cast a copy of each exiled paradigm
@@ -1512,6 +1585,23 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
                     state.waiting_for = waiting.clone();
                     return waiting;
+                }
+                // CR 603.3b: combat-damage triggers ran inside resolve_combat_damage
+                // (process_combat_damage_triggers -> process_triggers). If 2+ triggers
+                // controlled by the same player fired simultaneously, process_triggers
+                // populated `pending_trigger_order` and set `waiting_for` to the
+                // OrderTriggers prompt. Those triggers sit in `pending_trigger_order`, NOT
+                // on the stack, so the `!state.stack.is_empty()` guard below would advance
+                // past the prompt and strand them forever (the turn-18 hang). Surface the
+                // ordering prompt now, mirroring finish_declare_attackers (engine_combat.rs).
+                // NOTE: a first-strike sub-step OrderTriggers prompt is surfaced earlier,
+                // via the `Some(waiting)` return from resolve_combat_damage above (CR 510.4
+                // Part A in combat_damage.rs); the mandatory regular sub-step is then resumed
+                // by the empty-stack completeness gate in priority.rs. This guard handles the
+                // regular-step case, where resolve_combat_damage returns None but set
+                // `waiting_for` to the OrderTriggers prompt internally.
+                if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+                    return state.waiting_for.clone();
                 }
                 // CR 704.3 / CR 800.4: SBAs may have ended the game during combat damage.
                 if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -2054,6 +2144,89 @@ mod tests {
         );
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
         assert_eq!(state.players[1].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn advance_phase_keeps_end_of_turn_mana_until_cleanup() {
+        // CR 500.5 + CR 703.4q (H2 invariant, Klauth, Unrivaled Ancient):
+        // "Until end of turn, you don't lose this mana as steps and phases
+        // end." A unit carrying `ManaExpiry::EndOfTurn` must survive every
+        // non-cleanup phase/step transition and only drain when the turn
+        // actually ends. A plain `None`-expiry unit drains on the very first
+        // transition. RUNTIME test driving `advance_phase` through the live
+        // empty-pool pipeline — guards the payload builder that previously
+        // emitted a `Drop` decision for retained expiry-bound units.
+        use crate::types::mana::{ManaExpiry, ManaType, ManaUnit};
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+
+        let mut klauth_mana = ManaUnit::new(ManaType::Red, ObjectId(10), false, Vec::new());
+        klauth_mana.expiry = Some(ManaExpiry::EndOfTurn);
+        state.players[0].mana_pool.add(klauth_mana);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        // First transition (PreCombatMain → next step, not cleanup): the
+        // plain Blue mana drains; the EndOfTurn Red mana is retained.
+        advance_phase(&mut state, &mut Vec::new());
+        assert_ne!(state.phase, Phase::Cleanup);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+
+        // Drive forward until cleanup; the EndOfTurn mana survives each
+        // intermediate step and only drains once the turn ends.
+        while state.phase != Phase::Cleanup {
+            assert_eq!(
+                state.players[0].mana_pool.count_color(ManaType::Red),
+                1,
+                "EndOfTurn mana must persist through {:?}",
+                state.phase
+            );
+            advance_phase(&mut state, &mut Vec::new());
+        }
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+    }
+
+    #[test]
+    fn advance_phase_keeps_end_of_combat_mana_until_combat_ends() {
+        // CR 500.5 + CR 703.4q + CR 702.189a: Firebending mana says "Until
+        // end of combat, you don't lose this mana as steps and phases end."
+        // It must survive combat step transitions through the live empty-pool
+        // pipeline, then drain when the game leaves combat.
+        use crate::types::mana::{ManaExpiry, ManaType, ManaUnit};
+
+        let mut state = setup();
+        state.phase = Phase::BeginCombat;
+
+        let mut firebending_mana = ManaUnit::new(ManaType::Red, ObjectId(10), false, Vec::new());
+        firebending_mana.expiry = Some(ManaExpiry::EndOfCombat);
+        state.players[0].mana_pool.add(firebending_mana);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        while state.phase != Phase::PostCombatMain {
+            assert_eq!(
+                state.players[0].mana_pool.count_color(ManaType::Red),
+                1,
+                "EndOfCombat mana must persist through {:?}",
+                state.phase
+            );
+            advance_phase(&mut state, &mut Vec::new());
+            assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+        }
+
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
     }
 
     #[test]

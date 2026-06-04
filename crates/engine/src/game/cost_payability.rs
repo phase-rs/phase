@@ -16,8 +16,6 @@
 //! the enumerations.
 
 use crate::types::ability::{AbilityCost, TargetFilter};
-#[cfg(test)]
-use crate::types::ability::{FilterProp, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -52,9 +50,17 @@ impl AbilityCost {
                     &excluded_sources,
                 )
             }
-            AbilityCost::Composite { costs } => costs
-                .iter()
-                .all(|c| c.is_payable_for_mana_ability(state, player, source)),
+            // Same {T}+TapCreatures source-exclusion logic as `is_payable`'s
+            // Composite arm, but Mana sub-costs use the mana-specific check.
+            AbilityCost::Composite { costs } => {
+                let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
+                costs.iter().all(|c| match c {
+                    AbilityCost::TapCreatures { count, filter } if has_tap => {
+                        has_enough_tap_creatures(state, player, source, *count, filter, true)
+                    }
+                    other => other.is_payable_for_mana_ability(state, player, source),
+                })
+            }
             // Every other kind has no mana-pool component — defer to the
             // generic 601.2b gate, which already handles it correctly.
             other => other.is_payable(state, player, source),
@@ -102,8 +108,10 @@ impl AbilityCost {
                             state, player, source,
                         );
                 }
-                super::casting::find_eligible_sacrifice_targets(state, player, source, target).len()
-                    >= *count as usize
+                let eligible =
+                    super::casting::find_eligible_sacrifice_targets(state, player, source, target);
+                let (min_count, _) = super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                eligible.len() >= min_count
             }
             // CR 119.4 + CR 119.8 + CR 903.4: Life cost is payable iff life >= amount
             // and "can't lose life" locks do not apply. `amount` is a QuantityExpr
@@ -156,13 +164,29 @@ impl AbilityCost {
                 filter,
             } => {
                 if matches!(filter, Some(TargetFilter::SelfRef)) {
-                    let zone = zone.unwrap_or(Zone::Hand);
-                    return state.objects.get(&source).is_some_and(|o| o.zone == zone);
+                    // CR 118.3 + CR 602.1a: "Exile this <self>" as an
+                    // activation cost needs the source available to pay that
+                    // cost. An explicit zone ("from your graveyard/hand")
+                    // gates payability on that zone; a missing zone means the
+                    // source's current zone — the ability is only active where
+                    // the source functions (e.g. a land's "Exile this land"
+                    // is paid from the battlefield), NOT the hand.
+                    return match zone {
+                        Some(z) => state.objects.get(&source).is_some_and(|o| o.zone == *z),
+                        None => state.objects.contains_key(&source),
+                    };
                 }
                 let zone = exile_cost_effective_zone(*zone, filter.as_ref());
                 eligible_exile_cost_objects(state, player, source, zone, filter.as_ref(), *count)
                     .len()
                     >= *count as usize
+            }
+            // CR 702.167a/b: Craft's materials cost — payable iff enough
+            // eligible objects exist across the battlefield/graveyard union
+            // (excluding the source, whose self-exile is a separate cost).
+            AbilityCost::ExileMaterials { materials, count } => {
+                eligible_craft_materials(state, player, source, materials).len()
+                    >= count.min_count()
             }
             // CR 701.59b: Can't collect evidence if graveyard total mana value
             // is less than N.
@@ -170,46 +194,41 @@ impl AbilityCost {
                 super::effects::collect_evidence::can_collect_evidence(state, player, *amount)
             }
             // CR 601.2b: Tapping N creatures requires N untapped creatures
-            // matching the filter (excluding the source).
+            // matching the filter. The source is excluded only when a {T} cost
+            // is also present (handled by the Composite arm); otherwise the
+            // source is a valid choice (e.g. Morcant's "Tap three untapped
+            // Elves" has no {T}, so Morcant herself is eligible).
             AbilityCost::TapCreatures { count, filter } => {
-                let ctx = FilterContext::from_source(state, source);
-                state
-                    .battlefield
-                    .iter()
-                    .copied()
-                    .filter(|&id| {
-                        if id == source {
-                            return false;
-                        }
-                        state.objects.get(&id).is_some_and(|o| {
-                            o.controller == player
-                                && !o.tapped
-                                && matches_target_filter(state, id, filter, &ctx)
-                        })
-                    })
-                    .count()
-                    >= *count as usize
+                has_enough_tap_creatures(state, player, source, *count, filter, false)
             }
             // CR 601.2b: RemoveCounter requires counters on the implied target.
             // If `target` is None, the source must have the required counters.
             // Otherwise, at least one matching permanent must carry N counters.
+            // CR 107.2: `u32::MAX` encodes "any number of" — the player chooses
+            // how many counters to remove (including zero), so the cost is always
+            // payable regardless of the current counter count.
             AbilityCost::RemoveCounter {
                 count,
                 counter_type,
                 target,
-            } => match target {
-                None => counter_on_object(state, source, counter_type) >= *count,
-                Some(tf) => {
-                    let ctx = FilterContext::from_source(state, source);
-                    state.battlefield.iter().any(|&id| {
-                        state.objects.get(&id).is_some_and(|o| {
-                            o.controller == player
-                                && matches_target_filter(state, id, tf, &ctx)
-                                && counter_on_object(state, id, counter_type) >= *count
-                        })
-                    })
+            } => {
+                if *count == u32::MAX {
+                    return true;
                 }
-            },
+                match target {
+                    None => counter_on_object(state, source, counter_type) >= *count,
+                    Some(tf) => {
+                        let ctx = FilterContext::from_source(state, source);
+                        state.battlefield.iter().any(|&id| {
+                            state.objects.get(&id).is_some_and(|o| {
+                                o.controller == player
+                                    && matches_target_filter(state, id, tf, &ctx)
+                                    && counter_on_object(state, id, counter_type) >= *count
+                            })
+                        })
+                    }
+                }
+            }
             // CR 107.14: A player can pay {E} only if they have enough energy.
             // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
             // state. `Variable("X")` resolves to 0 — always payable, which
@@ -299,9 +318,18 @@ impl AbilityCost {
                 super::casting_costs::eligible_behold_choices(state, player, source, filter).len()
                     >= *count as usize
             }
-            // CR 601.2b: Every sub-cost must be payable.
+            // CR 601.2b: Every sub-cost must be payable. When the composite
+            // includes {T}, the source is committed to the tap cost and must be
+            // excluded from any TapCreatures eligibility count — it will be
+            // tapped before TapCreatures is paid.
             AbilityCost::Composite { costs } => {
-                costs.iter().all(|c| c.is_payable(state, player, source))
+                let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
+                costs.iter().all(|c| match c {
+                    AbilityCost::TapCreatures { count, filter } if has_tap => {
+                        has_enough_tap_creatures(state, player, source, *count, filter, true)
+                    }
+                    other => other.is_payable(state, player, source),
+                })
             }
             // CR 118.12a: Disjunctive — payable if **any** sub-cost is
             // payable. The interactive choice is surfaced at resolution via
@@ -342,6 +370,33 @@ impl AbilityCost {
             AbilityCost::PerCounter { .. } => true,
         }
     }
+}
+
+fn has_enough_tap_creatures(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    count: u32,
+    filter: &TargetFilter,
+    exclude_source: bool,
+) -> bool {
+    let ctx = FilterContext::from_source(state, source);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            if exclude_source && id == source {
+                return false;
+            }
+            state.objects.get(&id).is_some_and(|o| {
+                o.controller == player
+                    && !o.tapped
+                    && matches_target_filter(state, id, filter, &ctx)
+            })
+        })
+        .count()
+        >= count as usize
 }
 
 /// CR 117.1 + CR 118.3: Infer the source zone for a non-self
@@ -414,6 +469,46 @@ pub(super) fn eligible_exile_cost_objects(
     .collect()
 }
 
+/// CR 702.167a/b: Objects eligible to be exiled as the materials of a craft
+/// ability — the union of (a) permanents on the battlefield the player controls
+/// and (b) cards in the player's graveyard, in both cases matching `materials`
+/// and excluding `source` (whose self-exile is a separate cost component;
+/// excluding it is required for "craft with artifact" on an artifact source).
+///
+/// `materials` is the dual-zone `TargetFilter::Or` produced by
+/// `craft_materials_filter`; the battlefield leg is evaluated with the normal
+/// filter evaluator while the graveyard leg uses the owner-zone evaluator so
+/// `InZone`/`Owned` predicates resolve against non-battlefield cards. Returns
+/// every eligible object; the caller enforces the materials count via
+/// `len() >= count`.
+pub(crate) fn eligible_craft_materials(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    materials: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = FilterContext::from_source(state, source);
+    let mut out: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            id != source
+                && state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|o| o.controller == player)
+                && matches_target_filter(state, id, materials, &ctx)
+        })
+        .collect();
+    if let Some(p) = state.players.get(player.0 as usize) {
+        out.extend(p.graveyard.iter().copied().filter(|&id| {
+            id != source && matches_target_filter_in_owner_zone(state, id, materials, &ctx)
+        }));
+    }
+    out
+}
+
 /// Count counters of the given kind on an object.
 /// CR 117.1 + CR 400.6: Decide whether a `TargetFilter` for an `AbilityCost::Exile`
 /// without an explicit `zone` implies the battlefield. True when the filter has
@@ -471,13 +566,33 @@ fn counter_on_object(
 mod tests {
     use super::*;
     use crate::game::scenario::GameScenario;
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    };
     use crate::types::mana::ManaCost;
 
     const P0: PlayerId = PlayerId(0);
 
     fn new_state() -> GameState {
         GameScenario::new().state
+    }
+
+    fn mark_elf(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+    }
+
+    fn elf_filter() -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .with_type(TypeFilter::Subtype("Elf".to_string()))
+                .controller(ControllerRef::You),
+        )
     }
 
     #[test]
@@ -522,6 +637,106 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 4 }
         }
         .is_payable(&state, P0, ObjectId(0)));
+    }
+
+    /// CR 118.3 + CR 602.1a: a self-exile cost with no explicit zone ("Exile
+    /// this land") is paid from the source's current zone — the battlefield —
+    /// not the hand. This previously defaulted to `Zone::Hand`, so a
+    /// permanent's "Exile this <self>" activated-ability cost was wrongly
+    /// reported unpayable from play.
+    #[test]
+    fn self_exile_cost_without_zone_payable_from_battlefield() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Ominous Cemetery", 0, 0).id();
+        let self_exile = AbilityCost::Exile {
+            count: 1,
+            zone: None,
+            filter: Some(TargetFilter::SelfRef),
+        };
+        assert!(
+            self_exile.is_payable(&scenario.state, P0, src),
+            "self-exile cost with no zone must be payable from the battlefield"
+        );
+        // Within the Ominous Cemetery composite ({5}, {T}, Exile this land) the
+        // exile component stays payable.
+        assert!(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_exile],
+        }
+        .is_payable(&scenario.state, P0, src));
+        // An EXPLICIT zone still gates: a battlefield source cannot pay a
+        // "from your graveyard" self-exile cost (Scavenge class).
+        assert!(!AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::SelfRef),
+        }
+        .is_payable(&scenario.state, P0, src));
+    }
+
+    /// CR 601.2b: Standalone TapCreatures (no {T}) includes the source itself
+    /// in the eligible count. Morcant shape: "Tap three untapped Elves you control"
+    /// — the card itself counts as one of the three.
+    #[test]
+    fn tap_creatures_standalone_includes_source() {
+        let mut scenario = GameScenario::new();
+        let cost = AbilityCost::TapCreatures {
+            count: 3,
+            filter: elf_filter(),
+        };
+        // Place exactly 3 Elves controlled by P0 — including the source.
+        let src = scenario.add_creature(P0, "Morcant", 4, 4).id();
+        mark_elf(&mut scenario.state, src);
+        let elf_a = scenario.add_creature(P0, "Elf A", 1, 1).id();
+        mark_elf(&mut scenario.state, elf_a);
+        let elf_b = scenario.add_creature(P0, "Elf B", 1, 1).id();
+        mark_elf(&mut scenario.state, elf_b);
+        // 3 Elves total including source → payable.
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "source counts among the 3 Elves"
+        );
+        // With 2 OTHER Elves + source, must still be payable (source is the 3rd).
+        // Remove elf_b — now only source + elf_a = 2 Elves → unpayable.
+        scenario.state.battlefield.retain(|id| *id != elf_b);
+        scenario.state.objects.remove(&elf_b);
+        assert!(
+            !cost.is_payable(&scenario.state, P0, src),
+            "only 2 Elves (source + elf_a) < 3"
+        );
+    }
+
+    /// CR 601.2b: Composite({T}, TapCreatures) still excludes the source from
+    /// TapCreatures eligibility — source is committed to {T}.
+    #[test]
+    fn tap_creatures_composite_with_tap_excludes_source() {
+        let mut scenario = GameScenario::new();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::TapCreatures {
+                    count: 2,
+                    filter: elf_filter(),
+                },
+            ],
+        };
+        let src = scenario.add_creature(P0, "Lathril", 2, 2).id();
+        mark_elf(&mut scenario.state, src);
+        let elf_a = scenario.add_creature(P0, "Elf A", 1, 1).id();
+        mark_elf(&mut scenario.state, elf_a);
+        let elf_b = scenario.add_creature(P0, "Elf B", 1, 1).id();
+        mark_elf(&mut scenario.state, elf_b);
+        // Source committed to {T} — 2 OTHER Elves available → payable.
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "2 other Elves satisfy TapCreatures(2)"
+        );
+        // Remove elf_b — only 1 other Elf → unpayable.
+        scenario.state.battlefield.retain(|id| *id != elf_b);
+        scenario.state.objects.remove(&elf_b);
+        assert!(
+            !cost.is_payable(&scenario.state, P0, src),
+            "only 1 other Elf < 2"
+        );
     }
 
     #[test]
@@ -586,6 +801,29 @@ mod tests {
         scenario.add_creature(P0, "Bear", 2, 2);
         assert!(cost.is_payable(&scenario.state, P0, src));
         assert!(another_cost.is_payable(&scenario.state, P0, src));
+    }
+
+    #[test]
+    fn variable_sacrifice_cost_is_payable_with_zero_or_more_matches() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Chatterfang", 3, 3).id();
+        let cost = AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Squirrel".into()))),
+            count: u32::MAX,
+        };
+
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "X sacrifice costs should be payable at X=0 even with no eligible permanents"
+        );
+
+        scenario
+            .add_creature(P0, "Squirrel Token", 1, 1)
+            .with_subtypes(vec!["Squirrel"]);
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "X sacrifice costs should stay payable once eligible permanents exist"
+        );
     }
 
     #[test]
@@ -673,6 +911,39 @@ mod tests {
         assert!(
             !cost.is_payable(&scenario.state, P0, src),
             "untyped 'remove a counter' must be unpayable when no counters of any kind are present",
+        );
+    }
+
+    /// CR 107.2: "Remove any number of" counters is always payable — the
+    /// player may choose zero, so no minimum counter count is required.
+    #[test]
+    fn remove_counter_any_number_always_payable() {
+        use crate::types::counter::CounterType;
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Mage-Ring Network", 0, 0).id();
+        let cost = AbilityCost::RemoveCounter {
+            count: u32::MAX,
+            counter_type: crate::types::counter::CounterMatch::OfType(CounterType::Generic(
+                "storage".to_string(),
+            )),
+            target: None,
+        };
+        // Payable even with zero counters.
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "'remove any number of' must be payable even with zero counters",
+        );
+        // Still payable with some counters.
+        scenario
+            .state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("storage".to_string()), 3);
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "'remove any number of' must be payable with counters present",
         );
     }
 }
