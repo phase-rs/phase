@@ -1038,8 +1038,7 @@ mod tests {
         let (controller_actions, _, _) = legal_actions_for_viewer(&state, controller);
         let full = legal_actions_full(&state);
         assert_eq!(
-            controller_actions.len(),
-            full.0.len(),
+            controller_actions, full.0,
             "CR 723.5: the controller must receive the controlled player's legal actions"
         );
     }

@@ -56,12 +56,11 @@ fn controller_receives_controlled_turns_legal_actions() {
     let (controller_actions, controller_costs, controller_by_object) =
         legal_actions_for_viewer(runner.state(), P0);
     assert_eq!(
-        controller_actions.len(),
-        full.0.len(),
+        controller_actions, full.0,
         "CR 723.5: the controller must receive the controlled player's legal actions"
     );
-    assert_eq!(controller_costs.len(), full.1.len());
-    assert_eq!(controller_by_object.len(), full.2.len());
+    assert_eq!(controller_costs, full.1);
+    assert_eq!(controller_by_object, full.2);
 
     // The controlled seat (P1) is not the authorized submitter under turn
     // control, so it receives no actions of its own.
@@ -94,11 +93,7 @@ fn no_turn_control_preserves_viewer_gating() {
 
     let full = legal_actions_full(runner.state());
     let (acting, _, _) = legal_actions_for_viewer(runner.state(), P0);
-    assert_eq!(
-        acting.len(),
-        full.0.len(),
-        "acting player sees the full set"
-    );
+    assert_eq!(acting, full.0, "acting player sees the full set");
 
     let (other, _, _) = legal_actions_for_viewer(runner.state(), P1);
     assert!(other.is_empty(), "non-acting player sees no actions");
