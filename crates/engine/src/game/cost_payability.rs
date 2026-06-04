@@ -181,6 +181,13 @@ impl AbilityCost {
                     .len()
                     >= *count as usize
             }
+            // CR 702.167a/b: Craft's materials cost — payable iff enough
+            // eligible objects exist across the battlefield/graveyard union
+            // (excluding the source, whose self-exile is a separate cost).
+            AbilityCost::ExileMaterials { materials, count } => {
+                eligible_craft_materials(state, player, source, materials).len()
+                    >= count.min_count()
+            }
             // CR 701.59b: Can't collect evidence if graveyard total mana value
             // is less than N.
             AbilityCost::CollectEvidence { amount } => {
@@ -460,6 +467,46 @@ pub(super) fn eligible_exile_cost_objects(
             && filter.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
     })
     .collect()
+}
+
+/// CR 702.167a/b: Objects eligible to be exiled as the materials of a craft
+/// ability — the union of (a) permanents on the battlefield the player controls
+/// and (b) cards in the player's graveyard, in both cases matching `materials`
+/// and excluding `source` (whose self-exile is a separate cost component;
+/// excluding it is required for "craft with artifact" on an artifact source).
+///
+/// `materials` is the dual-zone `TargetFilter::Or` produced by
+/// `craft_materials_filter`; the battlefield leg is evaluated with the normal
+/// filter evaluator while the graveyard leg uses the owner-zone evaluator so
+/// `InZone`/`Owned` predicates resolve against non-battlefield cards. Returns
+/// every eligible object; the caller enforces the materials count via
+/// `len() >= count`.
+pub(crate) fn eligible_craft_materials(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    materials: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = FilterContext::from_source(state, source);
+    let mut out: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            id != source
+                && state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|o| o.controller == player)
+                && matches_target_filter(state, id, materials, &ctx)
+        })
+        .collect();
+    if let Some(p) = state.players.get(player.0 as usize) {
+        out.extend(p.graveyard.iter().copied().filter(|&id| {
+            id != source && matches_target_filter_in_owner_zone(state, id, materials, &ctx)
+        }));
+    }
+    out
 }
 
 /// Count counters of the given kind on an object.

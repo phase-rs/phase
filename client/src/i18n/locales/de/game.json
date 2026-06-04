@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Wähle ein neues Ziel für die Kopie",
     "chooseTargetForCopy": "Wähle ein Ziel für die Kopie",
     "chooseCreatureToExplore": "Wähle, welche Kreatur als Nächstes erkundet",
+    "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} hat den Gefährten aufgedeckt: {{cardName}}",
     "companionMovedToHand": "{{player}} hat den Gefährten {{cardName}} auf die Hand genommen",
     "powerToughnessChanged": "Objekt {{objectId}} ist jetzt {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Ereignis: {{type}}"
+    "genericEvent": "Ereignis: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Engine-Werkzeuge",
@@ -892,6 +912,7 @@
       "titleSacrifice": "Opfern",
       "titleTopdeck": "Auf die Bibliothek legen",
       "titleBattlefield": "Auf das Schlachtfeld legen",
+      "titleHand": "Zurückgeben",
       "subtitleSacrificeExact_one": "Wähle {{count}} bleibende Karte zum Opfern",
       "subtitleSacrificeExact_other": "Wähle {{count}} bleibende Karten zum Opfern",
       "subtitleSacrificeUpTo_one": "Wähle bis zu {{count}} bleibende Karte zum Opfern",
@@ -910,12 +931,19 @@
       "subtitleBattlefieldUpTo_other": "Wähle bis zu {{count}} Karten, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldRange_one": "Wähle {{min}}-{{count}} Karte, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldRange_other": "Wähle {{min}}-{{count}} Karten, um sie auf das Schlachtfeld zu legen",
+      "subtitleHandExact_one": "Wähle {{count}} bleibende Karte, um sie in die Hand ihres Besitzers zurückzugeben",
+      "subtitleHandExact_other": "Wähle {{count}} bleibende Karten, um sie in die Hand ihrer Besitzer zurückzugeben",
+      "subtitleHandUpTo_one": "Wähle bis zu {{count}} bleibende Karte, um sie in die Hand ihres Besitzers zurückzugeben",
+      "subtitleHandUpTo_other": "Wähle bis zu {{count}} bleibende Karten, um sie in die Hand ihrer Besitzer zurückzugeben",
+      "subtitleHandRange_one": "Wähle {{min}}-{{count}} bleibende Karte, um sie in die Hand ihres Besitzers zurückzugeben",
+      "subtitleHandRange_other": "Wähle {{min}}-{{count}} bleibende Karten, um sie in die Hand ihrer Besitzer zurückzugeben",
       "labelSkip": "Überspringen",
       "labelDecline": "Ablehnen",
       "labelPutOnTop": "Oben drauflegen ({{order}})",
       "labelConfirm": "Bestätigen ({{selected}}/{{count}})",
       "labelTop": "Oben ({{selected}}/{{count}})",
       "labelPut": "Legen ({{selected}}/{{count}})",
+      "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "orderTop": "Oben"
     },
     "drawnThisTurn": {
@@ -1010,6 +1038,12 @@
       "sourceGraveyard": "deinem Friedhof",
       "subtitle_one": "Schicke {{count}} Karte aus {{source}} ins Exil",
       "subtitle_other": "Schicke {{count}} Karten aus {{source}} ins Exil"
+    },
+    "craft": {
+      "title": "Herstellen",
+      "subtitle_one": "Schicke {{count}} Material zum Herstellen ins Exil",
+      "subtitle_other": "Schicke {{count}} Materialien zum Herstellen ins Exil",
+      "subtitleRange": "Schicke {{min}} bis {{count}} Materialien zum Herstellen ins Exil"
     },
     "behold": {
       "title": "Erblicken",
@@ -1475,5 +1509,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

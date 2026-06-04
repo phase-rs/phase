@@ -1,4 +1,4 @@
-export type DeckBuilderSurface = "deck" | "info";
+export type DeckBuilderSurface = "deck" | "info" | "playtest";
 
 // Shared id scheme so the tabs (DeckBuilderTabBar) and the panels (DeckBuilder)
 // can cross-reference via aria-controls / aria-labelledby. Kept in a non-

@@ -15,7 +15,9 @@ use nom::combinator::value;
 use nom::Parser;
 
 use super::error::OracleResult;
-use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter, TypedFilter};
+use crate::types::ability::{
+    AttachmentKind, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+};
 
 /// CR 702.5a: One enchantable core-type or land-subtype token. Driven by
 /// `value()` + `alt()` so additional types slot in as one-line extensions.
@@ -92,6 +94,38 @@ pub(crate) fn parse_enchant_controller_suffix(input: &str) -> OracleResult<'_, C
     .parse(input)
 }
 
+/// CR 303.4 + CR 702.5a + CR 301.5: Optional trailing attachment qualifier on an
+/// "Enchant <type>" line — "with another Aura attached to it" (Daybreak Coronet)
+/// further restricts the legal target set to objects that already carry an
+/// attachment of the named kind. "Another" is material once SBA attachment
+/// legality rechecks the Aura already attached to its host, so preserve it as a
+/// source-exclusion axis on the `HasAttachment` filter prop. The leading space
+/// ensures the qualifier only matches after a preceding type leg (never as a
+/// standalone clause).
+pub(crate) fn parse_enchant_attachment_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
+    let (input, _) = tag(" with ").parse(input)?;
+    let (input, exclude_source) = alt((
+        value(true, tag("another ")),
+        value(false, tag("an ")),
+        value(false, tag("a ")),
+    ))
+    .parse(input)?;
+    let (input, kind) = alt((
+        value(AttachmentKind::Aura, tag("aura")),
+        value(AttachmentKind::Equipment, tag("equipment")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" attached to it").parse(input)?;
+    Ok((
+        input,
+        FilterProp::HasAttachment {
+            kind,
+            controller: None,
+            exclude_source,
+        },
+    ))
+}
+
 /// CR 702.5d: "Enchant player" / "Enchant opponent" — the player-axis Aura.
 /// The two legs yield the typed `TargetFilter` the rest of the cast pipeline
 /// expects. "Enchant player" → `TargetFilter::Player` (any player at the
@@ -122,6 +156,7 @@ pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetF
 
     let (input, type_legs) = parse_enchant_type_list(input)?;
     let (input, controller) = opt(parse_enchant_controller_suffix).parse(input)?;
+    let (input, attachment) = opt(parse_enchant_attachment_qualifier).parse(input)?;
 
     let mut typed = TypedFilter {
         type_filters: type_legs,
@@ -129,6 +164,9 @@ pub(crate) fn parse_enchant_target_full(input: &str) -> OracleResult<'_, TargetF
     };
     if let Some(c) = controller {
         typed.controller = Some(c);
+    }
+    if let Some(prop) = attachment {
+        typed.properties.push(prop);
     }
     Ok((input, TargetFilter::Typed(typed)))
 }

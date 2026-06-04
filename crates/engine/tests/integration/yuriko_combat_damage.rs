@@ -166,8 +166,8 @@ fn yuriko_attacks_loses_opponent_life_equal_to_revealed_card_mana_value() {
 }
 
 /// Secondary regression — a *different* Ninja deals the combat damage. The
-/// CMC of the attacking Ninja must NOT be read; the revealed card is what
-/// counts.
+/// mana value of the attacking Ninja must NOT be read; the revealed card is
+/// what counts.
 ///
 /// Discriminator: the attacker is Thousand-Faced Shadow (a 1/1 Ninja, mana
 /// value 1), and the revealed library top is a 2-CMC `Counterspell`. Combat

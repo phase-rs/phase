@@ -4,11 +4,10 @@ use std::collections::HashMap;
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, ChosenAttribute, ControllerRef,
-    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
-    EffectOutcomeSignal, FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink,
-    TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
+    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, FilterProp,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -82,6 +81,7 @@ pub mod explore;
 pub mod extra_turn;
 pub mod fight;
 pub mod flip_coin;
+pub mod force_attack;
 pub mod force_block;
 pub mod gain_control;
 pub mod gift_delivery;
@@ -1732,6 +1732,7 @@ pub fn resolve_effect(
         Effect::PhaseOut { .. } => phase_out::resolve(state, ability, events),
         Effect::PhaseIn { .. } => phase_out::resolve_phase_in(state, ability, events),
         Effect::ForceBlock { .. } => force_block::resolve(state, ability, events),
+        Effect::ForceAttack { .. } => force_attack::resolve(state, ability, events),
         Effect::SolveCase => solve_case::resolve(state, ability, events),
         Effect::BecomePrepared { .. } => prepare::resolve_become_prepared(state, ability, events),
         Effect::BecomeUnprepared { .. } => {
@@ -1759,8 +1760,8 @@ pub fn resolve_effect(
         Effect::CreateDamageReplacement { .. } => {
             create_damage_replacement::resolve(state, ability, events)
         }
-        Effect::LoseTheGame => win_lose::resolve_lose(state, ability, events),
-        Effect::WinTheGame => win_lose::resolve_win(state, ability, events),
+        Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
+        Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
         Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
         Effect::FlipCoins { .. } => flip_coin::resolve_flip_coins(state, ability, events),
@@ -2481,7 +2482,9 @@ pub(crate) fn resolve_player_for_context_ref(
     if matches!(target_filter, TargetFilter::SourceChosenPlayer) {
         // CR 607.2d + CR 608.2c: Resolve "the chosen player" from the
         // source's linked persisted choice.
-        if let Some(player) = source_chosen_player(state, ability.source_id) {
+        if let Some(player) =
+            crate::game::game_object::source_chosen_player(state, ability.source_id)
+        {
             return player;
         }
     }
@@ -2522,30 +2525,6 @@ pub(crate) fn resolve_player_for_context_ref(
         }
     }
     ability.controller
-}
-
-/// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's
-/// linked persisted choice. Triggered abilities may resolve after the source
-/// left the battlefield; in that case the LKI cache carries the source choices
-/// as they last existed in the public zone.
-pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
-    state
-        .objects
-        .get(&source_id)
-        .and_then(|obj| {
-            obj.chosen_attributes.iter().find_map(|attr| match attr {
-                ChosenAttribute::Player(player) => Some(*player),
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            state.lki_cache.get(&source_id).and_then(|lki| {
-                lki.chosen_attributes.iter().find_map(|attr| match attr {
-                    ChosenAttribute::Player(player) => Some(*player),
-                    _ => None,
-                })
-            })
-        })
 }
 
 /// CR 117.3a: Determine which player receives the "may" prompt for an optional
@@ -2673,6 +2652,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target, .. }
         | Effect::ForceBlock { target, .. }
+        | Effect::ForceAttack { target, .. }
         | Effect::PutAtLibraryPosition { target, .. }
         | Effect::PutOnTopOrBottom { target, .. }
         | Effect::ChangeTargets { target, .. }
@@ -2743,6 +2723,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
 }
 
 fn previous_effect_amount_from_events(
+    state: &GameState,
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
@@ -2803,22 +2784,12 @@ fn previous_effect_amount_from_events(
                 _ => None,
             })
             .sum(),
-        // CR 706.2 + CR 608.2c: A die roll's *actual* result (natural + modifier,
-        // clamped at 0) is the numeric value a follow-up `PreviousEffectAmount`
-        // condition reads. Unlike damage/life amounts, the relevant amount is
-        // always defined — even a clamped-to-zero result is a valid
-        // sub-ability gate (Deck of Many Things' "if the result is 0 or less,
-        // discard your hand"). We short-circuit on the first DieRolled event
-        // (the one this RollDie effect emitted; any nested rolls happen inside
-        // a deeper chain that clears `last_effect_amount` on entry, but their
-        // events still appear later in the slice and must be ignored here so
-        // the OUTER RollDie's actual is what the OUTER sub_ability sees).
-        Effect::RollDie { .. } => {
-            return events.iter().find_map(|event| match event {
-                GameEvent::DieRolled { result, .. } => Some(*result as i32),
-                _ => None,
-            });
-        }
+        // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
+        // authority for the scalar value a follow-up `PreviousEffectAmount` or
+        // `EventContextAmount` consumer reads. That avoids re-deriving from an
+        // event slice that may contain result-table branch effects or nested
+        // rolls interleaved with the outer dice.
+        Effect::RollDie { .. } => return state.die_result_this_resolution,
         _ => 0,
     };
 
@@ -3147,7 +3118,7 @@ fn resolve_chain_body(
             state.last_effect_amount = state.last_effect_count;
             state.last_effect_counts_by_player = counts_by_player;
         } else if let Some(amount) =
-            previous_effect_amount_from_events(&scoped_template, scoped_events)
+            previous_effect_amount_from_events(state, &scoped_template, scoped_events)
         {
             state.last_effect_amount = Some(amount);
         }
@@ -3917,7 +3888,9 @@ fn resolve_chain_body(
     // counters and also deals damage, but "damage dealt this way" must read only
     // `DamageDealt`; Coalition Relic's "counter removed this way" must read only
     // `CounterRemoved`.
-    if let Some(amount) = previous_effect_amount_from_events(ability, &events[events_before..]) {
+    if let Some(amount) =
+        previous_effect_amount_from_events(state, ability, &events[events_before..])
+    {
         state.last_effect_amount = Some(amount);
     }
 
@@ -5346,7 +5319,7 @@ mod tests {
         );
 
         assert_eq!(
-            source_chosen_player(&state, ability.source_id),
+            crate::game::game_object::source_chosen_player(&state, ability.source_id),
             Some(PlayerId(1))
         );
 
@@ -5373,7 +5346,7 @@ mod tests {
         );
 
         assert_eq!(
-            source_chosen_player(&state, ability.source_id),
+            crate::game::game_object::source_chosen_player(&state, ability.source_id),
             Some(PlayerId(1))
         );
     }
@@ -5565,6 +5538,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -5636,6 +5610,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -5712,6 +5687,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             )
             .optional(),
@@ -5801,6 +5777,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             )
             .optional(),
@@ -6849,6 +6826,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(creature)],
             ObjectId(100),
@@ -6914,6 +6892,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -7023,6 +7002,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -7536,6 +7516,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )),
                 uses_tracked_set: true,
@@ -7556,6 +7537,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj1), TargetRef::Object(obj2)],
             ObjectId(100),
@@ -7605,6 +7587,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )),
                 uses_tracked_set: false,
@@ -7625,6 +7608,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj)],
             ObjectId(100),
@@ -7700,6 +7684,7 @@ mod tests {
                     target: TargetFilter::Any,
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(900),
@@ -7960,6 +7945,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )),
                 uses_tracked_set: true,
@@ -7980,6 +7966,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![], // no targets
             ObjectId(100),
@@ -8145,6 +8132,7 @@ mod tests {
                     },
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(900),
@@ -8235,6 +8223,7 @@ mod tests {
                     },
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(901),
@@ -8299,6 +8288,7 @@ mod tests {
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(902),
@@ -9353,6 +9343,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(9000),
@@ -9561,6 +9552,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(9000),
@@ -10093,6 +10085,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -10154,6 +10147,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -10230,6 +10224,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -10253,6 +10248,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -12200,6 +12196,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -12451,6 +12448,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(permanent)],
             ObjectId(100),
@@ -13511,8 +13509,12 @@ mod tests {
 
         // WIN scenario: library = 1, devotion = 2 → 2 >= 1 → true.
         let state_win = build_state(1);
-        let ability_win =
-            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9001), PlayerId(0));
+        let ability_win = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(9001),
+            PlayerId(0),
+        );
         assert!(
             evaluate_condition(&condition, &state_win, &ability_win),
             "WIN scenario: devotion=2, library=1 should satisfy GE",
@@ -13520,8 +13522,12 @@ mod tests {
 
         // NO-WIN scenario: library = 50, devotion = 2 → 2 >= 50 → false.
         let state_no_win = build_state(50);
-        let ability_no_win =
-            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9002), PlayerId(0));
+        let ability_no_win = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(9002),
+            PlayerId(0),
+        );
         assert!(
             !evaluate_condition(&condition, &state_no_win, &ability_no_win),
             "NO-WIN scenario: devotion=2, library=50 must NOT satisfy GE",

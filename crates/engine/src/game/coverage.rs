@@ -73,9 +73,17 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the attacker that must be blocked (Provoke). Enforced by direct
             // match in combat.rs declare-blockers validation.
             | StaticMode::MustBlockAttacker { .. }
+            // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
+            // attacked (Alluring Siren). Enforced by direct match in combat.rs
+            // declare-attackers validation.
+            | StaticMode::MustAttackPlayer { .. }
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
+            // CR 301.5 + CR 303.4 + CR 701.3a: AttachmentRestriction carries the
+            // `TargetFilter` of legal hosts (Strata Scythe, Konda's Banner).
+            // Enforced via active static definitions in effects/attach.rs::attachment_illegality.
+            | StaticMode::AttachmentRestriction { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
@@ -109,6 +117,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // support via is_data_carrying_static() because the variant is
             // parameterized.
             | StaticMode::RevealTopOfLibrary { .. }
+            // CR 614.1c + CR 122.1: EntersWithAdditionalCounters carries the
+            // CounterType + fixed count. Runtime enforcement is in the
+            // battlefield-entry counter hook in effects/change_zone.rs, which
+            // scans active statics whose `affected` filter matches the entering
+            // object. Parameterized — no registry entry; coverage support here.
+            | StaticMode::EntersWithAdditionalCounters { .. }
     )
 }
 
@@ -475,14 +489,22 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
             FilterProp::Unpaired => parts.push("unpaired".into()),
-            FilterProp::HasAttachment { kind, controller } => {
+            FilterProp::HasAttachment {
+                kind,
+                controller,
+                exclude_source,
+            } => {
                 let kind_s = match kind {
                     crate::types::ability::AttachmentKind::Aura => "aura",
                     crate::types::ability::AttachmentKind::Equipment => "equipment",
                 };
+                let qualifier = if *exclude_source { " another" } else { "" };
                 match controller {
-                    None => parts.push(format!("attached by {kind_s}")),
-                    Some(c) => parts.push(format!("attached by {kind_s} ({})", fmt_controller(c))),
+                    None => parts.push(format!("attached by{qualifier} {kind_s}")),
+                    Some(c) => parts.push(format!(
+                        "attached by{qualifier} {kind_s} ({})",
+                        fmt_controller(c)
+                    )),
                 }
             }
             FilterProp::HasAnyAttachmentOf { kinds, controller } => {
@@ -552,6 +574,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::DefendingPlayer => "defending player's",
+                    ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
                     ControllerRef::TriggeringPlayer => "triggering player's",
                 };
@@ -652,6 +675,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::DefendingPlayer => "defending player",
+                ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
                 ControllerRef::TriggeringPlayer => "triggering player",
             };
@@ -719,6 +743,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::DefendingPlayer => "defending player controls",
+        ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
         ControllerRef::TriggeringPlayer => "triggering player controls",
     }
@@ -841,6 +866,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
+        PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -1170,6 +1196,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             let scope_s = match scope {
                 CountScope::Controller | CountScope::Owner => "you have",
                 CountScope::ScopedPlayer => "the scoped player has",
+                CountScope::SourceChosenPlayer => "the chosen player has",
                 CountScope::Opponents => "each opponent has",
                 CountScope::All => "each player has",
             };
@@ -1485,6 +1512,7 @@ fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
         CountScope::Controller | CountScope::Owner => "your",
         CountScope::ScopedPlayer => "their",
+        CountScope::SourceChosenPlayer => "the chosen player's",
         CountScope::All => "all",
         CountScope::Opponents => "opponents'",
     }
@@ -1600,6 +1628,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Transform { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
@@ -2008,10 +2037,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
         }
         Effect::RollDie {
+            count,
             sides,
             results,
             modifier,
         } => {
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
+            }
             d.push(("sides".into(), sides.to_string()));
             if !results.is_empty() {
                 d.push(("branches".into(), results.len().to_string()));
@@ -2378,8 +2411,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
-        | Effect::LoseTheGame
-        | Effect::WinTheGame
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
         | Effect::RingTemptsYou
         | Effect::GrantCastingPermission { .. }
         | Effect::Manifest { .. }
@@ -2573,6 +2606,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::SetBasicLandType { land_type } => {
             format!("set land type {}", land_type.as_subtype_str())
         }
+        ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
@@ -5548,6 +5582,7 @@ fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) ->
         | CounterType::Lore
         | CounterType::Time
         | CounterType::Age
+        | CounterType::Shield
         | CounterType::Generic(_) => {
             let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
             lower.contains(&needle)
@@ -6595,6 +6630,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            StaticMode::CantCrew => {
+                effective_lower.contains("can't crew") || effective_lower.contains("cannot crew")
+            }
             StaticMode::CastWithFlash => {
                 effective_lower.contains("as though it had flash")
                     || effective_lower.contains("as though they had flash")
@@ -6628,6 +6666,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 301.5 + CR 303.4: positive "can be attached only to {filter}"
+            // restriction. Anchor on the verb phrase; the filter half is the
+            // reused TargetFilter and is validated by parser tests.
+            StaticMode::AttachmentRestriction { .. } => {
+                effective_lower.contains("can be attached only to")
+            }
             StaticMode::StepEndUnspentMana { action, .. } => match action {
                 crate::types::mana::StepEndManaAction::Retain => {
                     effective_lower.contains("don't lose unspent")
@@ -6722,7 +6766,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         || effective_lower.contains("gift wasn't promised")
                 }
                 Effect::GenericEffect { .. } => false,
-                Effect::LoseTheGame => {
+                Effect::LoseTheGame { .. } => {
                     // "You don't lose the game for ..." parsed as LoseTheGame prevention
                     effective_lower.contains("don't lose the game")
                         || effective_lower.contains("can't lose the game")
@@ -7841,6 +7885,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "investigate",
         "food ",
         "squad ",
+        "replicate ",
         "backup ",
         "devour ",
         "modular ",

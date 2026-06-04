@@ -1678,10 +1678,11 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// (`quantity::resolve_quantity_for_trigger_check`). CR 603.4 covers the
 /// intervening-if recheck at resolution.
 ///
-/// Currently covers the hand-size suffix family used by Ghirapur Orrery and
-/// related "if that player has no cards in hand" / "N or more / N or fewer"
-/// patterns; life-total / graveyard variants will compose in here as more
-/// cards exercise them.
+/// Covers the hand-size suffix family used by Ghirapur Orrery and related
+/// "if that player has no cards in hand" / "N or more / N or fewer" patterns,
+/// plus the life-total suffix family ("N or less life" / "N or more life")
+/// used by Ezio Auditore da Firenze's combat-damage trigger. Graveyard
+/// variants will compose in here as more cards exercise them.
 fn parse_that_player_has_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     // CR 115.1 + CR 603.4: "that/target player/opponent has" decomposes the
     // reference axis ("that" vs. "target") from the subject noun
@@ -1701,13 +1702,66 @@ fn parse_that_player_has_conditions(input: &str) -> OracleResult<'_, StaticCondi
     ))
     .parse(rest)?;
 
-    if let Some((rest, cond)) = parse_hand_size_predicate(rest, player) {
+    if let Some((rest, cond)) = parse_hand_size_predicate(rest, player.clone()) {
+        return Ok((rest, cond));
+    }
+    // CR 119 + CR 603.4: life-total intervening-if predicates for the scoped
+    // player ("if that player has 10 or less life"). The aggregate-less
+    // `PlayerScope::ScopedPlayer` / `PlayerScope::Target` already names a
+    // single player, so the comparison is a direct scalar (no existential
+    // aggregate needed). Canonical card: Ezio Auditore da Firenze.
+    if let Some((rest, cond)) = parse_life_predicate(rest, player) {
         return Ok((rest, cond));
     }
     Err(nom::Err::Error(nom::error::Error::new(
         input,
         nom::error::ErrorKind::Fail,
     )))
+}
+
+/// Parse life-total predicates after a `<subject> has ` prefix has been
+/// consumed. Returns `Some(condition)` on match.
+///
+/// Mirrors `parse_hand_size_predicate`: the only axis that varies is the
+/// `PlayerScope` of the resulting `LifeTotal` ref. Used by
+/// `parse_that_player_has_conditions` so any single-player subject ("that
+/// player", "target player") composes with these life-total tails.
+///
+/// CR 119 (Life), CR 603.4 (intervening-if), CR 603.7c ("that player" anaphora
+/// binds to the player event-context for damage triggers).
+fn parse_life_predicate(rest: &str, player: PlayerScope) -> Option<(&str, StaticCondition)> {
+    // CR 119: "no life" → LifeTotal EQ 0 (defensive, mirrors hand-size's
+    // "no cards in hand"). Not currently printed on cards but kept symmetric
+    // so the predicate covers the full grammatical family.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no life").parse(rest) {
+        return Some((
+            rest,
+            make_quantity_comparison(QuantityRef::LifeTotal { player }, Comparator::EQ, 0),
+        ));
+    }
+
+    // CR 119 + CR 603.4: "N or less life" / "N or more life" → scalar
+    // comparison against the scoped player's life total. Ezio Auditore da
+    // Firenze canonical for the LE arm.
+    let (after_n, n) = parse_number(rest).ok()?;
+    if let Ok((rest, comparator)) = alt((
+        value(
+            Comparator::LE,
+            tag::<_, _, OracleError<'_>>(" or less life"),
+        ),
+        value(
+            Comparator::GE,
+            tag::<_, _, OracleError<'_>>(" or more life"),
+        ),
+    ))
+    .parse(after_n)
+    {
+        return Some((
+            rest,
+            make_quantity_comparison(QuantityRef::LifeTotal { player }, comparator, n),
+        ));
+    }
+    None
 }
 
 /// Build a QuantityComparison: qty [comparator] n.
@@ -3053,6 +3107,26 @@ fn parse_discard_history_condition(input: &str) -> OracleResult<'_, StaticCondit
                 tag("any opponent discarded a card this turn"),
             )),
         ),
+        // CR 701.9 + CR 603.4: "a player discarded a card this turn" — any
+        // player, including you (The Raven Man). Summing discards across all
+        // players makes the threshold true whenever anyone discarded; without
+        // this arm the intervening-if is dropped and the trigger fires even
+        // when no discard occurred.
+        value(
+            make_quantity_ge(
+                QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Sum,
+                        exclude: None,
+                    },
+                },
+                1,
+            ),
+            alt((
+                tag("a player discarded a card this turn"),
+                tag("any player discarded a card this turn"),
+            )),
+        ),
         parse_you_discarded_card_this_turn,
     ))
     .parse(input)
@@ -3251,12 +3325,10 @@ fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, 
 /// Recognizes "the amount of mana you spent is [comparator] this creature's
 /// power or toughness" (SOS Increment reminder text). The natural-language
 /// "or" means *either* threshold — `A > (P or T)` is satisfied when `A > P`
-/// **or** `A > T`. Produces `StaticCondition::Or` over two
-/// `QuantityComparison`s so the existing `Or`/`QuantityComparison` bridge in
-/// `static_condition_to_trigger_condition` carries it directly to
-/// `TriggerCondition::Or`. Also accepts the single-property forms
-/// ("greater than this creature's power", "greater than this creature's
-/// toughness") so future cards using only one side compose cleanly.
+/// **or** `A > T`. The "this creature's" subject, including the normalized
+/// "~'s" self-reference form, carries Increment's implicit source-is-creature
+/// intervening-if; "this permanent's" stays as a plain P/T comparison for
+/// non-Increment siblings.
 fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticCondition> {
     // Subject: "the amount of mana you spent is "
     let (rest, _) = tag("the amount of mana you spent is ").parse(input)?;
@@ -3268,10 +3340,10 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
     ))
     .parse(rest)?;
     // Object: subject × property, with optional "or [other property]" disjunction.
-    let (rest, _) = alt((
-        tag("this creature's "),
-        tag("this permanent's "),
-        tag("~'s "),
+    let (rest, requires_creature_source) = alt((
+        value(true, tag("this creature's ")),
+        value(false, tag("this permanent's ")),
+        value(true, tag("~'s ")),
     ))
     .parse(rest)?;
     let (rest, first) = alt((
@@ -3322,11 +3394,23 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
         comparator,
         rhs: QuantityExpr::Ref { qty },
     };
-    let result = match second {
+    let comparison = match second {
         Some(second) if second != first => StaticCondition::Or {
             conditions: vec![build(first), build(second)],
         },
         _ => build(first),
+    };
+    let result = if requires_creature_source {
+        StaticCondition::And {
+            conditions: vec![
+                StaticCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                comparison,
+            ],
+        }
+    } else {
+        comparison
     };
     Ok((rest, result))
 }
@@ -5360,6 +5444,64 @@ mod tests {
                 );
                 assert_eq!(comparator, Comparator::LE);
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 119 + CR 603.4 + CR 603.7c: "if that player has N or less life"
+    /// intervening-if predicate on a combat-damage trigger. Canonical card:
+    /// Ezio Auditore da Firenze. "That player" resolves to the damaged
+    /// player (the event-context player), not the source's controller.
+    #[test]
+    fn test_parse_condition_that_player_n_or_less_life() {
+        let (rest, c) = parse_condition("if that player has 10 or less life").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::LE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 10 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 119 + CR 603.4: sibling for the GE arm of the life-predicate
+    /// combinator. Not yet printed on a known card with the "that player"
+    /// subject, but kept to cover the full grammatical family alongside the
+    /// hand-size N-or-more test.
+    #[test]
+    fn test_parse_condition_that_player_n_or_more_life() {
+        let (rest, c) = parse_condition("if that player has 20 or more life").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 20 });
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
         }
@@ -8361,6 +8503,36 @@ mod tests {
         );
     }
 
+    /// Issue #551 — The Raven Man: "if a player discarded a card this turn".
+    /// "A player" means any player (including you), so the discards are summed
+    /// across all players; the intervening-if is true whenever anyone discarded.
+    #[test]
+    fn a_player_discarded_a_card_this_turn_counts_all_players() {
+        for text in [
+            "a player discarded a card this turn",
+            "any player discarded a card this turn",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "leftover for {text:?}");
+            assert_eq!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsDiscardedThisTurn {
+                            player: PlayerScope::AllPlayers {
+                                aggregate: AggregateFunction::Sum,
+                                exclude: None,
+                            },
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                "condition mismatch for {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn you_created_a_token_this_turn_counts_controller_tokens() {
         let (rest, c) = parse_inner_condition("you created a token this turn").unwrap();
@@ -9024,8 +9196,8 @@ mod tests {
         ));
     }
 
-    /// CR 601.2h + CR 603.4: Increment intervening-if parses as `Or` over two
-    /// `QuantityComparison`s — mana spent vs self power, mana spent vs self toughness.
+    /// CR 601.2h + CR 603.4 + CR 702.191a: Increment intervening-if parses as
+    /// `And { SourceMatchesFilter(creature), Or { mana spent > self P/T } }`.
     #[test]
     fn test_parse_condition_increment_mana_spent_vs_self_pt() {
         let (rest, c) = parse_condition(
@@ -9034,8 +9206,17 @@ mod tests {
         .unwrap();
         assert_eq!(rest, "");
         match c {
-            StaticCondition::Or { conditions } => {
-                assert_eq!(conditions.len(), 2, "expected two disjuncts");
+            StaticCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2, "expected two conjuncts");
+                assert!(matches!(
+                    &conditions[0],
+                    StaticCondition::SourceMatchesFilter {
+                        filter: TargetFilter::Typed(tf),
+                    } if tf.type_filters.contains(&TypeFilter::Creature)
+                ));
+                let StaticCondition::Or { conditions } = &conditions[1] else {
+                    panic!("expected P/T disjunction, got {:?}", conditions[1]);
+                };
                 let expected_lhs = QuantityExpr::Ref {
                     qty: QuantityRef::ManaSpentToCast {
                         scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
@@ -9067,7 +9248,7 @@ mod tests {
                     scope: crate::types::ability::ObjectScope::Source
                 }));
             }
-            other => panic!("expected Or, got {other:?}"),
+            other => panic!("expected And, got {other:?}"),
         }
     }
 
@@ -9199,32 +9380,91 @@ mod tests {
         .unwrap();
         assert_eq!(rest, "");
         match c {
-            StaticCondition::QuantityComparison {
-                lhs,
-                comparator,
-                rhs,
-            } => {
+            StaticCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    &conditions[0],
+                    StaticCondition::SourceMatchesFilter {
+                        filter: TargetFilter::Typed(tf),
+                    } if tf.type_filters.contains(&TypeFilter::Creature)
+                ));
+                let StaticCondition::QuantityComparison {
+                    lhs,
+                    comparator,
+                    rhs,
+                } = &conditions[1]
+                else {
+                    panic!("expected QuantityComparison, got {:?}", conditions[1]);
+                };
                 assert_eq!(
                     lhs,
-                    QuantityExpr::Ref {
+                    &QuantityExpr::Ref {
                         qty: QuantityRef::ManaSpentToCast {
                             scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
                             metric: crate::types::ability::CastManaSpentMetric::Total
                         }
                     }
                 );
-                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(*comparator, Comparator::GT);
                 assert_eq!(
                     rhs,
-                    QuantityExpr::Ref {
+                    &QuantityExpr::Ref {
                         qty: QuantityRef::Power {
                             scope: crate::types::ability::ObjectScope::Source
                         }
                     }
                 );
             }
-            other => panic!("expected QuantityComparison, got {other:?}"),
+            other => panic!("expected And, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_condition_mana_spent_vs_this_permanent_pt_has_no_creature_gate() {
+        let (rest, c) = parse_condition(
+            "if the amount of mana you spent is greater than this permanent's power",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source
+                    }
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_condition_mana_spent_vs_normalized_self_pt_has_creature_gate() {
+        let (rest, c) =
+            parse_condition("if the amount of mana you spent is greater than ~'s power").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::And {
+                conditions,
+            } if matches!(
+                conditions.as_slice(),
+                [
+                    StaticCondition::SourceMatchesFilter {
+                        filter: TargetFilter::Typed(tf),
+                    },
+                    StaticCondition::QuantityComparison {
+                        rhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source
+                            },
+                        },
+                        ..
+                    },
+                ] if tf.type_filters.contains(&TypeFilter::Creature)
+            )
+        ));
     }
 
     /// CR 601.2h: "N or more mana was spent to cast that spell" — threshold
