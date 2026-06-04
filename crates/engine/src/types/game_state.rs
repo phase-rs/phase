@@ -1419,6 +1419,11 @@ pub enum CombatTaxContext {
 pub enum CombatTaxPending {
     Attack {
         attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+        /// CR 702.22c: attacking-band declarations captured alongside the
+        /// attacks so the resume path (after combat-tax payment) stamps
+        /// `band_id` via `declare_attackers_with_bands` and groups the band for
+        /// blocking (CR 702.22h).
+        bands: Vec<Vec<ObjectId>>,
     },
     Block {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -3090,6 +3095,19 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pw_controller: Option<PlayerId>,
     },
+    /// CR 510.1d + CR 702.22k: A blocking creature is blocking a creature with
+    /// banding (or, in the deferred "bands with other" form, the relevant
+    /// quality pair), so the ACTIVE player — rather than the blocker's
+    /// controller — chooses how the blocker's combat damage is divided among the
+    /// attackers it is blocking. Unlike `AssignCombatDamage`, a blocker's damage
+    /// has no lethal, trample, or planeswalker dimension; it is divided freely
+    /// among the blocked attackers (CR 510.1d).
+    AssignBlockerDamage {
+        player: PlayerId,
+        blocker_id: ObjectId,
+        total_damage: u32,
+        attackers: Vec<ObjectId>,
+    },
     /// CR 601.2d: Distribute N among targets at casting time ("divide N damage among").
     /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
     /// TODO: Wire trigger in casting.rs when a "divide/distribute" ability is being cast.
@@ -3358,6 +3376,7 @@ impl WaitingFor {
             | WaitingFor::CategoryChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
+            | WaitingFor::AssignBlockerDamage { player, .. }
             | WaitingFor::DistributeAmong { player, .. }
             | WaitingFor::MoveCountersDistribution { player, .. }
             | WaitingFor::PayAmountChoice { player, .. }
@@ -3540,6 +3559,16 @@ impl WaitingFor {
     /// submissions. The server bypasses its enumeration gate for these.
     pub fn accepts_freeform_combat_damage_assignment(&self) -> bool {
         matches!(self, WaitingFor::AssignCombatDamage { .. })
+    }
+
+    /// CR 510.1d + CR 702.22k: A blocker's free division of its combat damage
+    /// among the attackers it blocks cannot be captured by the candidate
+    /// enumerator (the combinatorial space of legal divisions is too large to
+    /// enumerate), so the server bypasses its enumeration gate for this state
+    /// and `apply()` (handle_assign_blocker_damage) is the real validation
+    /// boundary: it enforces total conservation and blocked-attacker membership.
+    pub fn accepts_freeform_blocker_damage_assignment(&self) -> bool {
+        matches!(self, WaitingFor::AssignBlockerDamage { .. })
     }
 }
 

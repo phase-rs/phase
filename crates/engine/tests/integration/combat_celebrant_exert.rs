@@ -41,6 +41,7 @@ fn exert_offered_and_fires_extra_combat_when_chosen() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(celebrant, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -83,6 +84,7 @@ fn declining_exert_does_nothing() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(celebrant, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
     assert_eq!(runner.waiting_for_kind(), "ExertChoice");
@@ -115,6 +117,7 @@ fn non_exert_attacker_is_not_prompted() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(bear, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 

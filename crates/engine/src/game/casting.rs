@@ -15989,8 +15989,14 @@ mod tests {
                         .expect("priority pass to advance the turn");
                 }
                 WaitingFor::DeclareAttackers { .. } => {
-                    apply_as_current(&mut state, GameAction::DeclareAttackers { attacks: vec![] })
-                        .expect("declare no attackers");
+                    apply_as_current(
+                        &mut state,
+                        GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        },
+                    )
+                    .expect("declare no attackers");
                 }
                 WaitingFor::DeclareBlockers { .. } => {
                     apply_as_current(
@@ -16158,8 +16164,14 @@ mod tests {
                         .expect("priority pass to advance the turn");
                 }
                 WaitingFor::DeclareAttackers { .. } => {
-                    apply_as_current(&mut state, GameAction::DeclareAttackers { attacks: vec![] })
-                        .expect("declare no attackers");
+                    apply_as_current(
+                        &mut state,
+                        GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        },
+                    )
+                    .expect("declare no attackers");
                 }
                 WaitingFor::DeclareBlockers { .. } => {
                     apply_as_current(

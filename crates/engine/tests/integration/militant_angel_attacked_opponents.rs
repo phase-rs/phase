@@ -45,6 +45,7 @@ fn opponents_attacked_this_turn_counts_declared_defender() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -126,6 +127,7 @@ fn opponents_attacked_this_turn_counts_multiple_defenders() {
                 (attacker_vs_p1, AttackTarget::Player(P1)),
                 (attacker_vs_p2, AttackTarget::Player(P2)),
             ],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -330,6 +332,7 @@ fn opponents_attacked_this_turn_excludes_eliminated_defender() {
                 (attacker_vs_p1, AttackTarget::Player(P1)),
                 (attacker_vs_p2, AttackTarget::Player(P2)),
             ],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
