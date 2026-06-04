@@ -1757,9 +1757,6 @@ pub(super) fn match_counter_player_added_all(
         GameEvent::EnergyChanged { player, delta } if *delta > 0 => {
             valid_player_matches(trigger, state, *player, source_id)
         }
-        GameEvent::PlayerCounterChanged { player, delta, .. } if *delta > 0 => {
-            valid_player_matches(trigger, state, *player, source_id)
-        }
         _ => false,
     }
 }
