@@ -84,8 +84,22 @@ impl TacticalPolicy for LandAnimationPolicy {
         };
 
         // Check if the ability adds Creature type (animation)
-        // Simplified: assume any ability with AddType modification is animation
-        let adds_creature_type = true;
+        let adds_creature_type = match &*ability_def.effect {
+            engine::types::ability::Effect::Animate { .. } => true,
+            engine::types::ability::Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.iter().any(|s| {
+                s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        engine::types::ability::ContinuousModification::AddType {
+                            core_type: engine::types::card_type::CoreType::Creature
+                        }
+                    )
+                })
+            }),
+            _ => false,
+        };
 
         if !adds_creature_type {
             return PolicyVerdict::Score {
@@ -177,16 +191,38 @@ fn colors_produced_by_land(land: &game_object::GameObject) -> Vec<engine::types:
     use engine::types::ability::ManaProduction;
     let mut colors = Vec::new();
     for ability in land.abilities.iter() {
-        if let engine::types::ability::Effect::Mana {
-            produced:
+        if let engine::types::ability::Effect::Mana { produced, .. } = &*ability.effect {
+            match produced {
                 ManaProduction::Fixed {
                     colors: produced_colors,
                     ..
-                },
-            ..
-        } = &*ability.effect
-        {
-            colors.extend(produced_colors.clone());
+                } => {
+                    colors.extend(produced_colors.clone());
+                }
+                ManaProduction::Mixed {
+                    colors: produced_colors,
+                    ..
+                } => {
+                    colors.extend(produced_colors.clone());
+                }
+                ManaProduction::AnyOneColor { color_options, .. } => {
+                    colors.extend(color_options.clone());
+                }
+                ManaProduction::AnyCombination { color_options, .. } => {
+                    colors.extend(color_options.clone());
+                }
+                ManaProduction::ChosenColor {
+                    fixed_alternative, ..
+                } => {
+                    if let Some(c) = land.chosen_color() {
+                        colors.push(c);
+                    }
+                    if let Some(c) = fixed_alternative {
+                        colors.push(*c);
+                    }
+                }
+                _ => {}
+            }
         }
     }
     colors

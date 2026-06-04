@@ -80,9 +80,10 @@ impl TacticalPolicy for MillTargetingPolicy {
             }
 
             // Check if target's library is empty
-            let library_size = ctx.state.players[player.0 as usize].library.len();
-            if library_size == 0 {
-                delta += EMPTY_LIBRARY_PENALTY;
+            if let Some(player_state) = ctx.state.players.get(player.0 as usize) {
+                if player_state.library.is_empty() {
+                    delta += EMPTY_LIBRARY_PENALTY;
+                }
             }
         }
 
@@ -100,15 +101,16 @@ fn has_mill_with_conditional_payoff(ctx: &PolicyContext<'_>) -> bool {
     ctx.source_object()
         .map(|obj| {
             obj.abilities.iter().any(|ability| {
-                // Check if the ability has a mill effect
-                let has_mill = matches!(*ability.effect, Effect::Mill { .. });
-
-                // Check if there's a sub-ability that retrieves cards from the milled zone
-                // This checks for patterns like "put card from among cards milled this way"
-                let has_retrieval = ability.sub_ability.as_ref().is_some_and(|sub| {
-                    matches!(*sub.effect, Effect::Draw { .. } | Effect::ChangeZone { .. })
+                let effects = crate::cast_facts::collect_definition_effects(ability);
+                let has_mill = effects.iter().any(|e| matches!(e, Effect::Mill { .. }));
+                let has_retrieval = effects.iter().any(|e| {
+                    matches!(
+                        e,
+                        Effect::Draw { .. }
+                            | Effect::ChangeZone { .. }
+                            | Effect::ChooseFromZone { .. }
+                    )
                 });
-
                 has_mill && has_retrieval
             })
         })

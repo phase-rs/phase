@@ -72,21 +72,29 @@ impl TacticalPolicy for ControlChangeAwarenessPolicy {
         };
 
         // Check if the ability effect involves control change
-        let effect = &ability_def.effect;
-        let (control_change_effect, target_filter) = match &**effect {
-            Effect::GainControl { target } => (true, Some(target)),
-            Effect::ExchangeControl { target_a, target_b } => {
-                // ExchangeControl has two targets; check if either could hit AI's permanents
-                if would_target_own_permanent(ctx, *source_id, target_a)
-                    || would_target_own_permanent(ctx, *source_id, target_b)
-                {
-                    (true, None)
-                } else {
-                    (false, None)
+        let effects = crate::cast_facts::collect_definition_effects(ability_def);
+        let mut control_change_effect = false;
+        let mut gives_away_permanent = false;
+
+        for effect in effects {
+            match effect {
+                Effect::GainControl { target } => {
+                    control_change_effect = true;
+                    if would_target_own_permanent(ctx, *source_id, target) {
+                        gives_away_permanent = true;
+                    }
                 }
+                Effect::ExchangeControl { target_a, target_b } => {
+                    control_change_effect = true;
+                    if would_target_own_permanent(ctx, *source_id, target_a)
+                        || would_target_own_permanent(ctx, *source_id, target_b)
+                    {
+                        gives_away_permanent = true;
+                    }
+                }
+                _ => {}
             }
-            _ => (false, None),
-        };
+        }
 
         if !control_change_effect {
             return PolicyVerdict::Score {
@@ -95,20 +103,17 @@ impl TacticalPolicy for ControlChangeAwarenessPolicy {
             };
         }
 
-        // For GainControl, check if the target would hit AI's own permanents
-        if let Some(target) = target_filter {
-            if !would_target_own_permanent(ctx, *source_id, target) {
-                return PolicyVerdict::Score {
-                    delta: 0.0,
-                    reason: PolicyReason::new("control_change_ok"),
-                };
+        if gives_away_permanent {
+            // Apply severe penalty for giving away own permanents
+            PolicyVerdict::Score {
+                delta: CONTROL_CHANGE_PENALTY,
+                reason: PolicyReason::new("control_change_gives_away_permanent"),
             }
-        }
-
-        // Apply severe penalty for giving away own permanents
-        PolicyVerdict::Score {
-            delta: CONTROL_CHANGE_PENALTY,
-            reason: PolicyReason::new("control_change_gives_away_permanent"),
+        } else {
+            PolicyVerdict::Score {
+                delta: 0.0,
+                reason: PolicyReason::new("control_change_ok"),
+            }
         }
     }
 }
@@ -132,6 +137,14 @@ fn would_target_own_permanent(
             false
         }
         TargetFilter::Typed(typed) => {
+            // If the filter explicitly restricts targets to opponents, it cannot hit our own permanents
+            if matches!(
+                typed.controller,
+                Some(engine::types::ability::ControllerRef::Opponent)
+            ) {
+                return false;
+            }
+
             // Check if the typed filter could match the source
             let Some(obj) = ctx.state.objects.get(&source_id) else {
                 return false;
@@ -143,6 +156,19 @@ fn would_target_own_permanent(
                 engine::types::ability::TypeFilter::Creature => {
                     obj.card_types.core_types.contains(&CoreType::Creature)
                 }
+                engine::types::ability::TypeFilter::Artifact => {
+                    obj.card_types.core_types.contains(&CoreType::Artifact)
+                }
+                engine::types::ability::TypeFilter::Enchantment => {
+                    obj.card_types.core_types.contains(&CoreType::Enchantment)
+                }
+                engine::types::ability::TypeFilter::Land => {
+                    obj.card_types.core_types.contains(&CoreType::Land)
+                }
+                engine::types::ability::TypeFilter::Planeswalker => {
+                    obj.card_types.core_types.contains(&CoreType::Planeswalker)
+                }
+                engine::types::ability::TypeFilter::Any => true,
                 _ => false,
             });
 
