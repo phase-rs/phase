@@ -2721,6 +2721,40 @@ mod tests {
 
         let action = fallback_action(&state).expect("fallback returns an action");
         assert_eq!(action, GameAction::KeepAllCopyTargets);
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn copy_retarget_fallback_keeps_current_slot_before_later_empty_slot() {
+        let mut state = make_state();
+        let current_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![
+                engine::types::game_state::CopyTargetSlot {
+                    current: Some(current_target),
+                    legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
+                },
+                engine::types::game_state::CopyTargetSlot {
+                    current: None,
+                    legal_alternatives: vec![TargetRef::Object(ObjectId(12))],
+                },
+            ],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(action, GameAction::ChooseTarget { target: None });
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CopyRetarget {
+                current_slot: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2744,6 +2778,8 @@ mod tests {
                 target: Some(first_target),
             }
         );
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     /// A classic vote (`actor == player`) keeps the pre-existing "first
