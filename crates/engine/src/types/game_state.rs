@@ -4032,6 +4032,10 @@ pub struct StackPaidSnapshot {
     pub additional_cost_paid: bool,
     #[serde(default, skip_serializing_if = "CastingVariant::is_normal")]
     pub casting_variant: CastingVariant,
+    /// CR 310.11b + CR 712.14a: Exile alt-cost casts that were explicitly cast
+    /// transformed resolve onto the battlefield back face up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cast_transformed: bool,
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub convoked_creatures: usize,
 }

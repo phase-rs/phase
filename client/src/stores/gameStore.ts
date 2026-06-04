@@ -51,8 +51,7 @@ export type GameMode =
   | "p2p-host"
   | "p2p-join"
   | "draft-match"
-  | "spectate"
-  | "playtest";
+  | "spectate";
 
 /** True for modes where the engine state is shared across the wire —
  * undo/rewind would desync from the authoritative game, so the client

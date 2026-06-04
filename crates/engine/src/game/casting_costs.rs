@@ -3500,16 +3500,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .objects
         .get(&object_id)
         .map(|obj| obj.mana_cost.mana_value() + ability.chosen_x.unwrap_or(0));
+    let mut cascade_cast_transformed = false;
     if let Some(resulting_mv) = cascade_resulting_mv {
-        let cascade_accepted = match evaluate_cascade_constraint_with_resulting_mv(
+        let cascade_check = match evaluate_cascade_constraint_with_resulting_mv(
             state,
             object_id,
             player,
             resulting_mv,
             events,
         ) {
-            CascadeCheck::NotApplicable => false,
-            CascadeCheck::Accepted => true,
+            CascadeCheck::NotApplicable => None,
+            CascadeCheck::Accepted { cast_transformed } => Some(cast_transformed),
             CascadeCheck::Rejected {
                 exiled_misses,
                 reject_action,
@@ -3524,7 +3525,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
                 );
             }
         };
-        if !cascade_accepted
+        if cascade_check.is_none()
             && !super::casting::selected_exile_alt_cost_permission_accepts_resulting_mv(
                 state,
                 object_id,
@@ -3538,7 +3539,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
                 "Spell mana value does not satisfy the cast permission".to_string(),
             ));
         }
-        if !cascade_accepted
+        if cascade_check.is_none()
             && !super::casting::exile_alt_cost_permissions_accept_resulting_mv(
                 state,
                 object_id,
@@ -3552,6 +3553,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
                 "Spell mana value does not satisfy the cast permission".to_string(),
             ));
         }
+        cascade_cast_transformed = cascade_check == Some(true);
     }
 
     // CR 700.14: Snapshot pool size before payment to compute actual mana spent.
@@ -3561,6 +3563,10 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .find(|p| p.id == player)
         .map(|p| p.mana_pool.produced_mana_total())
         .unwrap_or(0);
+    let cast_transformed = cascade_cast_transformed
+        || super::casting::selected_exile_alt_cost_permission_casts_transformed(
+            state, object_id, player,
+        );
 
     super::casting::pay_mana_cost_with_choices(
         state,
@@ -3771,6 +3777,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             additional_cost_payment_count,
             additional_cost_paid,
             casting_variant,
+            cast_transformed,
             convoked_creatures: convoked_creature_count,
         },
     );
@@ -3893,7 +3900,7 @@ enum CascadeCheck {
     /// The constraint passed (Cascade: resulting MV < source MV; Discover:
     /// resulting MV <= N). The cast proceeds; the misses have already been
     /// bottom-shuffled as a side effect.
-    Accepted,
+    Accepted { cast_transformed: bool },
     /// The constraint failed. The cast must be aborted; the caller should
     /// unwind the announcement stack entry and route through
     /// `handle_resolution_cast_rejection`, which sends the hit to its
@@ -3958,12 +3965,18 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         .expect("object present above")
         .casting_permissions
         .remove(index);
-    let (constraint, exiled_misses, reject_action) = match permission {
+    let (constraint, cast_transformed, exiled_misses, reject_action) = match permission {
         CastingPermission::ExileWithAltCost {
             constraint,
+            cast_transformed,
             resolution_cleanup: Some(cleanup),
             ..
-        } => (constraint, cleanup.exiled_misses, cleanup.reject_action),
+        } => (
+            constraint,
+            cast_transformed,
+            cleanup.exiled_misses,
+            cleanup.reject_action,
+        ),
         _ => unreachable!("position() already filtered to this variant"),
     };
 
@@ -3981,7 +3994,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         // CR 702.85a: "cards exiled this way that weren't cast" — the hit is
         // being cast, so only the misses bottom-shuffle.
         crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
-        CascadeCheck::Accepted
+        CascadeCheck::Accepted { cast_transformed }
     } else {
         CascadeCheck::Rejected {
             exiled_misses,
@@ -4024,6 +4037,11 @@ fn handle_resolution_cast_rejection(
             crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
             super::zones::move_to_zone(state, object_id, Zone::Hand, events);
         }
+        // CR 702.62a / CR 702.88a: Suspend / Rebound — no dig misses and no
+        // resulting-MV gate, so this path is unreachable in practice. "If you
+        // don't [cast it], it remains exiled": the card simply stays in exile
+        // (the announcement-time stack entry was already removed above).
+        ResolutionMvRejectAction::RemainExiled => {}
     }
 
     // CR 601.2a: Priority returns to the would-be caster.
@@ -8500,7 +8518,12 @@ mod tests {
                 resulting_mv,
                 &mut events,
             );
-            assert!(matches!(outcome, CascadeCheck::Accepted));
+            assert!(matches!(
+                outcome,
+                CascadeCheck::Accepted {
+                    cast_transformed: false
+                }
+            ));
 
             let hit_obj = state.objects.get(&hit).unwrap();
             assert!(
@@ -8932,7 +8955,7 @@ mod tests {
         fn matches_name(check: &CascadeCheck) -> &'static str {
             match check {
                 CascadeCheck::NotApplicable => "NotApplicable",
-                CascadeCheck::Accepted => "Accepted",
+                CascadeCheck::Accepted { .. } => "Accepted",
                 CascadeCheck::Rejected { .. } => "Rejected",
             }
         }

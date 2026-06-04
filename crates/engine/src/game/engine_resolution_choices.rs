@@ -412,6 +412,7 @@ pub(super) fn handle_resolution_choice(
                             value: discover_value as i32,
                         },
                     }),
+                    false,
                     cleanup,
                     events,
                 )?;
@@ -544,6 +545,7 @@ pub(super) fn handle_resolution_choice(
                             value: source_mv as i32,
                         },
                     }),
+                    false,
                     cleanup,
                     events,
                 )?;

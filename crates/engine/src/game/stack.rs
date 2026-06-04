@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    CastingPermission, ContinuousModification, Duration, Effect, EffectKind, KeywordAction,
-    ResolvedAbility, TargetFilter, TargetRef,
+    ContinuousModification, Duration, Effect, EffectKind, KeywordAction, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -100,7 +100,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         Some(e) => e,
         None => return,
     };
-    state.stack_paid_facts.remove(&entry.id);
+    let paid_snapshot = state.stack_paid_facts.remove(&entry.id);
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -458,21 +458,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     *enter_tapped = crate::types::proposed_event::EtbTapState::Tapped;
                 }
             }
-            // CR 712.14a + CR 310.11b: If this spell was cast via an
-            // ExileWithAltCost permission with `cast_transformed`, the
-            // permanent enters the battlefield transformed (resolving to its
-            // back face). Used by the Siege victory trigger.
+            // CR 712.14a + CR 310.11b: If this spell was finalized from an
+            // ExileWithAltCost permission with `cast_transformed`, the permanent
+            // enters the battlefield transformed (resolving to its back face).
+            // The finalized stack-paid snapshot is authoritative here; the
+            // mutable permission list is casting-time authorization, not
+            // resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
-                let cast_transformed = obj.casting_permissions.iter().any(|p| {
-                    matches!(
-                        p,
-                        CastingPermission::ExileWithAltCost {
-                            cast_transformed: true,
-                            ..
-                        }
-                    )
-                });
-                if cast_transformed {
+                if paid_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.cast_transformed)
+                {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         enter_transformed,
                         ..

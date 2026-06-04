@@ -10880,6 +10880,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
 
@@ -10914,6 +10915,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
     // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
@@ -10935,6 +10937,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
     if scan_contains_phrase(rest, "from among them")
@@ -10950,6 +10953,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
 
@@ -11002,6 +11006,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
 
@@ -11028,6 +11033,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
 
@@ -11040,6 +11046,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         alt_ability_cost: None,
         constraint,
         duration: None,
+        driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
     })
 }
 
