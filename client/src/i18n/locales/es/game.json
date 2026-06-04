@@ -354,6 +354,8 @@
     "expandHud": "Expandir HUD de oponente. Muestra la mano y el desglose del campo de batalla de cada oponente."
   },
   "combat": {
+    "band": "Bandada",
+    "banded": "Bandada ✓",
     "attackAll": "Atacar a todos",
     "skip": "Omitir",
     "confirmAttackers": "Confirmar atacantes ({{count}})",

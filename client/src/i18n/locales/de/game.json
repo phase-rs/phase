@@ -354,6 +354,8 @@
     "expandHud": "Gegner-HUD erweitern. Zeigt die Handkarten und die Spielfeldaufschlüsselung jedes Gegners."
   },
   "combat": {
+    "band": "Bande",
+    "banded": "Bande ✓",
     "attackAll": "Alle angreifen",
     "skip": "Überspringen",
     "confirmAttackers": "Angreifer bestätigen ({{count}})",

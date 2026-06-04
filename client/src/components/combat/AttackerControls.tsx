@@ -7,6 +7,11 @@ interface AttackerControlsProps {
   onSkip: () => void;
   onConfirm: () => void;
   attackerCount: number;
+  /** CR 702.22c: toggle the current attacker selection into a band. */
+  onToggleBand: () => void;
+  isBanded: boolean;
+  /** True when the current selection forms a legal band (offers the toggle). */
+  canBand: boolean;
 }
 
 export function AttackerControls({
@@ -14,6 +19,9 @@ export function AttackerControls({
   onSkip,
   onConfirm,
   attackerCount,
+  onToggleBand,
+  isBanded,
+  canBand,
 }: AttackerControlsProps) {
   const { t } = useTranslation("game");
   return (
@@ -25,6 +33,14 @@ export function AttackerControls({
       >
         {t("combat.attackAll")}
       </button>
+      {(canBand || isBanded) && (
+        <button
+          onClick={onToggleBand}
+          className={gameButtonClass({ tone: "indigo", size: "md", className: "w-full sm:w-auto sm:min-w-[10.5rem]" })}
+        >
+          {isBanded ? t("combat.banded") : t("combat.band")}
+        </button>
+      )}
       <button
         onClick={onSkip}
         className={gameButtonClass({ tone: "slate", size: "md", className: "w-full sm:w-auto sm:min-w-[10.5rem]" })}

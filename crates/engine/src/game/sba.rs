@@ -2673,6 +2673,50 @@ mod tests {
         id
     }
 
+    fn add_creature_token(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        legendary: bool,
+    ) -> ObjectId {
+        let id = create_creature(state, CardId(300), owner, name, 1, 1);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_token = true;
+        if legendary {
+            obj.card_types.supertypes.push(Supertype::Legendary);
+        }
+        id
+    }
+
+    #[test]
+    fn sba_legend_rule_suppressed_for_creature_tokens_scope() {
+        // CR 704.5j: The Master, Multiplied — duplicate legendary creature tokens
+        // controlled by the exemption source's controller are not grouped.
+        use crate::types::ability::FilterProp;
+        let mut state = setup();
+        let id1 = add_creature_token(&mut state, PlayerId(0), "The Doctor", true);
+        let id2 = add_creature_token(&mut state, PlayerId(0), "The Doctor", true);
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::Token])
+                    .controller(ControllerRef::You),
+            )),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "creature-token legend-rule exemption must suppress the choice"
+        );
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
+    }
+
     #[test]
     fn sba_legend_rule_suppressed_by_global_exemption() {
         // CR 704.5j: Mirror Gallery — "The legend rule doesn't apply." (global).

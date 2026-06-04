@@ -91,7 +91,10 @@ fn advance_to_choice(runner: &mut GameRunner) {
             }
             WaitingFor::DeclareAttackers { .. } => {
                 if runner
-                    .act(GameAction::DeclareAttackers { attacks: vec![] })
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
                     .is_err()
                 {
                     return;

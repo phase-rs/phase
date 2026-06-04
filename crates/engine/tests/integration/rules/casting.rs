@@ -979,9 +979,9 @@ fn raise_cost_from_exile_does_not_tax_hand_cast() {
 
 // --- Graveyard land play permission tests ---
 
-use engine::types::ability::{CardPlayMode, StaticDefinition, TypeFilter};
+use engine::types::ability::{CardPlayMode, StaticDefinition, TypeFilter, TypedFilter};
 use engine::types::card_type::CoreType;
-use engine::types::statics::{CastFrequency, StaticMode};
+use engine::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
 
 /// CR 604.2 + CR 305.1: A permanent with GraveyardCastPermission { play_mode: Play }
 /// allows playing lands from the graveyard.
@@ -1422,10 +1422,9 @@ fn zaffai_once_per_turn_hand_free_casts_with_no_mana() {
         .with_static_definition(
             StaticDefinition::new(StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
             })
-            .affected(TargetFilter::Typed(
-                engine::types::ability::TypedFilter::new(TypeFilter::Instant),
-            )),
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
         )
         .id();
     let bolt_id = scenario.add_bolt_to_hand(P0);
@@ -1515,10 +1514,9 @@ fn zaffai_second_cast_is_suppressed_same_turn() {
         .with_static_definition(
             StaticDefinition::new(StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
             })
-            .affected(TargetFilter::Typed(
-                engine::types::ability::TypedFilter::new(TypeFilter::Instant),
-            )),
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
         )
         .id();
     let _bolt_id = scenario.add_bolt_to_hand(P0);
@@ -1537,6 +1535,190 @@ fn zaffai_second_cast_is_suppressed_same_turn() {
     assert!(
         !found,
         "consumed once-per-turn slot must suppress further CastSpellForFree candidates"
+    );
+}
+
+/// CR 601.2b + CR 118.9a: When multiple once-per-turn sources admit the same
+/// hand spell, the selected `CastSpellForFree` action must validate that named
+/// source directly rather than re-deriving the first matching source.
+#[test]
+fn cast_spell_for_free_uses_the_named_permission_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let first_source = scenario
+        .add_creature(P0, "First Zaffai Stand-In", 0, 0)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CastFromHandFree {
+                frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
+            })
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+        )
+        .id();
+    let second_source = scenario
+        .add_creature(P0, "Second Zaffai Stand-In", 0, 0)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CastFromHandFree {
+                frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
+            })
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))),
+        )
+        .id();
+    let bolt_id = scenario.add_bolt_to_hand(P0);
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&bolt_id].card_id;
+    let actions = engine::ai_support::legal_actions(runner.state());
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            GameAction::CastSpellForFree {
+                object_id,
+                source_id,
+                ..
+            } if *object_id == bolt_id && *source_id == first_source
+        )),
+        "first source should be advertised"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            GameAction::CastSpellForFree {
+                object_id,
+                source_id,
+                ..
+            } if *object_id == bolt_id && *source_id == second_source
+        )),
+        "second source should be advertised"
+    );
+
+    let result = runner
+        .act(GameAction::CastSpellForFree {
+            object_id: bolt_id,
+            card_id,
+            source_id: second_source,
+        })
+        .expect("selected second source should authorize the free cast");
+    handle_target_selection(&mut runner, &result);
+
+    assert!(
+        runner
+            .state()
+            .hand_cast_free_permissions_used
+            .contains(&second_source),
+        "selected source should be the consumed source"
+    );
+    assert!(
+        !runner
+            .state()
+            .hand_cast_free_permissions_used
+            .contains(&first_source),
+        "earlier matching source must not be consumed"
+    );
+}
+
+fn add_expensive_dragon_commander(scenario: &mut GameScenario) -> ObjectId {
+    let commander_id = scenario
+        .add_creature_to_hand(P0, "Niv-Mizzet, Dragon Commander", 5, 5)
+        .with_subtypes(vec!["Dragon"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Blue,
+                ManaCostShard::Blue,
+                ManaCostShard::Red,
+                ManaCostShard::Red,
+            ],
+            generic: 2,
+        })
+        .id();
+    scenario.with_commander(commander_id);
+    commander_id
+}
+
+/// CR 601.2a + CR 118.9a + CR 903.8: A hand-qualified free-cast static
+/// (Omniscience class) does not replace the mana cost for a commander cast from
+/// the command zone.
+#[test]
+fn hand_only_free_cast_source_does_not_apply_to_command_zone_commander() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Omniscience Stand-In", 0, 0)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
+            })
+            .affected(TargetFilter::Any),
+        );
+    let commander_id = add_expensive_dragon_commander(&mut scenario);
+
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let card_id = runner.state().objects[&commander_id].card_id;
+
+    assert!(
+        runner
+            .act(GameAction::CastSpell {
+                object_id: commander_id,
+                card_id,
+                targets: vec![],
+            })
+            .is_err(),
+        "hand-only free-cast source must not waive a command-zone commander's mana cost"
+    );
+}
+
+/// CR 601.2a + CR 118.9a + CR 903.8: An unqualified free-cast static
+/// (Dracogenesis class) applies to a Dragon commander that is already castable
+/// from the command zone. A hand-only source that appears earlier on the
+/// battlefield must not mask the later command-zone-capable source.
+#[test]
+fn unqualified_free_cast_source_applies_to_dragon_commander_after_hand_only_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario
+        .add_creature(P0, "Omniscience Stand-In", 0, 0)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
+            })
+            .affected(TargetFilter::Any),
+        );
+    scenario
+        .add_creature(P0, "Dracogenesis Stand-In", 0, 0)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::DefaultCastPermission,
+            })
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                "Dragon".to_string(),
+            )))),
+        );
+
+    let commander_id = add_expensive_dragon_commander(&mut scenario);
+
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    let card_id = runner.state().objects[&commander_id].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: commander_id,
+            card_id,
+            targets: vec![],
+        })
+        .expect("Dragon commander should cast without mana through Dracogenesis-class source");
+
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Dragon commander should be on the stack after the free cast"
     );
 }
 

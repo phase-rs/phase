@@ -354,6 +354,8 @@
     "statOther": "Inne"
   },
   "combat": {
+    "band": "Banda",
+    "banded": "Banda ✓",
     "attackAll": "Atakuj wszystkich",
     "skip": "Pomiń",
     "confirmAttackers": "Potwierdź atakujących ({{count}})",

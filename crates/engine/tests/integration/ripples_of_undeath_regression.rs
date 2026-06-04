@@ -244,7 +244,10 @@ fn ripples_of_undeath_triggers_after_being_cast_and_next_turn() {
                 let _ = runner.act(GameAction::PassPriority);
             }
             WaitingFor::DeclareAttackers { .. } => {
-                let _ = runner.act(GameAction::DeclareAttackers { attacks: vec![] });
+                let _ = runner.act(GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                });
             }
             WaitingFor::DeclareBlockers { .. } => {
                 let _ = runner.act(GameAction::DeclareBlockers {

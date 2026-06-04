@@ -1419,6 +1419,11 @@ pub enum CombatTaxContext {
 pub enum CombatTaxPending {
     Attack {
         attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+        /// CR 702.22c: attacking-band declarations captured alongside the
+        /// attacks so the resume path (after combat-tax payment) stamps
+        /// `band_id` via `declare_attackers_with_bands` and groups the band for
+        /// blocking (CR 702.22h).
+        bands: Vec<Vec<ObjectId>>,
     },
     Block {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -3090,6 +3095,19 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pw_controller: Option<PlayerId>,
     },
+    /// CR 510.1d + CR 702.22k: A blocking creature is blocking a creature with
+    /// banding (or, in the deferred "bands with other" form, the relevant
+    /// quality pair), so the ACTIVE player — rather than the blocker's
+    /// controller — chooses how the blocker's combat damage is divided among the
+    /// attackers it is blocking. Unlike `AssignCombatDamage`, a blocker's damage
+    /// has no lethal, trample, or planeswalker dimension; it is divided freely
+    /// among the blocked attackers (CR 510.1d).
+    AssignBlockerDamage {
+        player: PlayerId,
+        blocker_id: ObjectId,
+        total_damage: u32,
+        attackers: Vec<ObjectId>,
+    },
     /// CR 601.2d: Distribute N among targets at casting time ("divide N damage among").
     /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
     /// TODO: Wire trigger in casting.rs when a "divide/distribute" ability is being cast.
@@ -3358,6 +3376,7 @@ impl WaitingFor {
             | WaitingFor::CategoryChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
+            | WaitingFor::AssignBlockerDamage { player, .. }
             | WaitingFor::DistributeAmong { player, .. }
             | WaitingFor::MoveCountersDistribution { player, .. }
             | WaitingFor::PayAmountChoice { player, .. }
@@ -3540,6 +3559,16 @@ impl WaitingFor {
     /// submissions. The server bypasses its enumeration gate for these.
     pub fn accepts_freeform_combat_damage_assignment(&self) -> bool {
         matches!(self, WaitingFor::AssignCombatDamage { .. })
+    }
+
+    /// CR 510.1d + CR 702.22k: A blocker's free division of its combat damage
+    /// among the attackers it blocks cannot be captured by the candidate
+    /// enumerator (the combinatorial space of legal divisions is too large to
+    /// enumerate), so the server bypasses its enumeration gate for this state
+    /// and `apply()` (handle_assign_blocker_damage) is the real validation
+    /// boundary: it enforces total conservation and blocked-attacker membership.
+    pub fn accepts_freeform_blocker_damage_assignment(&self) -> bool {
+        matches!(self, WaitingFor::AssignBlockerDamage { .. })
     }
 }
 
@@ -4581,6 +4610,10 @@ pub struct GameState {
         with = "tuple_key_map"
     )]
     pub trigger_fire_counts_this_turn: HashMap<(ObjectId, usize), u32>,
+    /// CR 603.2: Tracks per-opponent-per-turn firing for
+    /// OncePerOpponentPerTurn. Keyed by (object_id, trigger_index, opponent_id).
+    #[serde(default)]
+    pub triggers_fired_this_turn_per_opponent: HashSet<(ObjectId, usize, PlayerId)>,
     #[serde(default)]
     pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
     #[serde(
@@ -5525,6 +5558,7 @@ impl GameState {
             sideboard_submitted: Vec::new(),
             triggers_fired_this_turn: HashSet::new(),
             trigger_fire_counts_this_turn: HashMap::new(),
+            triggers_fired_this_turn_per_opponent: HashSet::new(),
             triggers_fired_this_game: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
@@ -5822,6 +5856,7 @@ impl PartialEq for GameState {
             && self.sideboard_submitted == other.sideboard_submitted
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
+            && self.triggers_fired_this_turn_per_opponent == other.triggers_fired_this_turn_per_opponent
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
