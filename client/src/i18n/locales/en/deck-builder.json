@@ -33,7 +33,22 @@
   "tabs": {
     "ariaLabel": "Deck builder surface",
     "deck": "Deck",
-    "info": "Info"
+    "info": "Info",
+    "playtest": "Playtest"
+  },
+  "playtest": {
+    "title": "Goldfish playtest",
+    "subtitle": "Sample opening hands or launch a solo game against the AI with this list — no deck save required.",
+    "sampleHand": "Sample opening hand",
+    "sampleHandHint": "Random seven from your main deck (display preview only).",
+    "reshuffle": "Reshuffle",
+    "goldfish": "Launch goldfish game",
+    "goldfishHint": "Starts a local {{count}}-card game vs AI using your current list and format.",
+    "difficulty": "AI difficulty",
+    "difficultyEasy": "Easy",
+    "difficultyMedium": "Medium",
+    "difficultyHard": "Hard",
+    "launch": "Launch game"
   },
   "toolbar": {
     "menu": "Menu",

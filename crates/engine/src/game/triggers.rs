@@ -82,7 +82,7 @@ pub struct PendingTrigger {
     /// on its own stack entry (in a later apply(), after the original
     /// resolution scope cleared) can re-stamp `die_result_this_resolution`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub die_result: Option<u8>,
+    pub die_result: Option<i32>,
 }
 
 pub(super) struct TriggerEventContextSnapshot {
@@ -327,9 +327,19 @@ fn collect_matching_triggers(
             Vec::new()
         };
 
+    let source_phase_out_event = matches!(
+        event,
+        GameEvent::PermanentPhasedOut { object_id, .. } if *object_id == obj_id
+    );
+
     // CR 702.26b + CR 114.4: `active_trigger_definitions` owns the phased-out /
     // command-zone gate. CR 603.4 intervening-if is still the two-point check
     // inside this function (condition block below) and at resolution.
+    //
+    // CR 702.26b: a permanent's own "phases out" trigger is checked for the
+    // phase-out event that made it phased out. `phase_out_object` emits the event
+    // after the status flip, so this one event must read only PhaseOut definitions
+    // directly from the source while leaving all other phased-out abilities inert.
     //
     // Synthesized off-zone granted-keyword triggers are appended after the
     // printed set with indices offset past `obj.trigger_definitions.len()` so
@@ -339,9 +349,21 @@ fn collect_matching_triggers(
         usize,
         &TriggerDefinition,
         Option<crate::types::keywords::KeywordKind>,
-    )> = super::functioning_abilities::active_trigger_definitions(state, source_obj)
-        .map(|(idx, def)| (idx, def, None))
-        .collect();
+    )> = if source_phase_out_event {
+        source_obj
+            .trigger_definitions
+            .iter_all()
+            .enumerate()
+            .filter(|(_, def)| {
+                matches!(&def.mode, TriggerMode::PhaseOut | TriggerMode::PhaseOutAll)
+            })
+            .map(|(idx, def)| (idx, def, None))
+            .collect()
+    } else {
+        super::functioning_abilities::active_trigger_definitions(state, source_obj)
+            .map(|(idx, def)| (idx, def, None))
+            .collect()
+    };
     let all_triggers = printed_triggers.into_iter().chain(
         granted_off_zone_triggers
             .iter()
@@ -3686,7 +3708,7 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::EchoDue => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
-        // CR 508.1a: Count co-attackers excluding the source creature.
+        // CR 508.1a + CR 603.2c: Count co-attackers excluding the source creature.
         TriggerCondition::MinCoAttackers { minimum } => {
             state.combat.as_ref().is_some_and(|combat| {
                 let co_attacker_count = combat
@@ -3705,20 +3727,36 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 508.1 + CR 603.2c: Count attackers in the triggering AttackersDeclared
         // batch whose controller matches `scope` relative to the trigger controller.
-        TriggerCondition::AttackersDeclaredMin { scope, minimum } => {
+        TriggerCondition::AttackersDeclaredMin {
+            scope,
+            minimum,
+            filter,
+        } => {
             let Some(GameEvent::AttackersDeclared { attacker_ids, .. }) = trigger_event else {
                 return false;
             };
             let count = attacker_ids
                 .iter()
                 .filter(|id| {
-                    state.objects.get(id).is_some_and(|obj| match scope {
+                    let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
                         ControllerRef::You => obj.controller == controller,
                         ControllerRef::Opponent => obj.controller != controller,
                         // Other ControllerRef variants are not used by the attacks-with-N
                         // combinator; treat as permissive to avoid silently dropping matches.
                         _ => true,
-                    })
+                    });
+                    // CR 508.1: only attackers matching the filtered class count
+                    // toward the typed minimum, preventing "attack with two or more
+                    // Dinosaurs" from over-firing on mixed attacker batches.
+                    scope_ok
+                        && filter.as_ref().is_none_or(|f| {
+                            crate::game::trigger_matchers::target_filter_matches_object(
+                                state,
+                                **id,
+                                f,
+                                source_id.unwrap_or(ObjectId(0)),
+                            )
+                        })
                 })
                 .count();
             count >= *minimum as usize
@@ -7138,6 +7176,7 @@ pub mod tests {
                                 enters_attacking: false,
                                 up_to: false,
                                 enter_with_counters: vec![],
+                                face_down_profile: None,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -7427,6 +7466,7 @@ pub mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
@@ -7532,6 +7572,7 @@ pub mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         );
         execute.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
@@ -7729,6 +7770,7 @@ pub mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
@@ -7842,6 +7884,7 @@ pub mod tests {
                                 enters_attacking: false,
                                 up_to: false,
                                 enter_with_counters: vec![],
+                                face_down_profile: None,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -7916,6 +7959,7 @@ pub mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            face_down_profile: None,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -7976,6 +8020,7 @@ pub mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            face_down_profile: None,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -8126,6 +8171,7 @@ pub mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -8199,6 +8245,7 @@ pub mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -8471,6 +8518,7 @@ pub mod tests {
                                     enters_attacking: false,
                                     up_to: false,
                                     enter_with_counters: vec![],
+                                    face_down_profile: None,
                                 },
                             )
                             .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -9390,6 +9438,7 @@ pub mod tests {
                 FilterProp::HasAttachment {
                     kind: crate::types::ability::AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 },
             ])),
         };
@@ -9697,6 +9746,7 @@ pub mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -9719,6 +9769,7 @@ pub mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -9998,6 +10049,56 @@ pub mod tests {
             crate::game::game_object::PhaseOutCause::Directly,
             &mut events,
         );
+    }
+
+    #[test]
+    fn phase_out_self_trigger_is_collected_after_status_flip() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let source = make_creature(&mut state, PlayerId(0), "Teferi's Imp Stand-In", 1, 1);
+        let trigger = TriggerDefinition::new(TriggerMode::PhaseOut)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.trigger_definitions.push(trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+
+        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            &mut state,
+            source,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+        assert!(
+            state.objects.get(&source).unwrap().is_phased_out(),
+            "producer must flip phase status before emitting PermanentPhasedOut"
+        );
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let source_triggers: Vec<_> = pending
+            .iter()
+            .filter(|context| context.pending.source_id == source)
+            .collect();
+        assert_eq!(
+            source_triggers.len(),
+            1,
+            "the source's own PhaseOut trigger must survive the post-flip candidate and \
+             definition gates"
+        );
+        assert!(matches!(
+            &source_triggers[0].pending.trigger_event,
+            Some(GameEvent::PermanentPhasedOut { object_id, .. }) if *object_id == source
+        ));
     }
 
     #[test]
@@ -10524,6 +10625,7 @@ pub mod tests {
             false, // effect_enter_tapped
             None,  // controller_override
             &[],   // effect_enter_with_counters
+            None,  // face_down_profile
             false, // track_exiled_by_source
             &mut events,
         );
@@ -11107,6 +11209,68 @@ pub mod tests {
         assert!(
             !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
             "Topiary Lecturer: 1 mana spent must not exceed power (1) or toughness (2)"
+        );
+    }
+
+    /// CR 601.2h + CR 603.4 + CR 202.3: Tokka & Rahzar's intervening-if
+    /// condition compares the mana actually spent on the triggering spell
+    /// against that same spell's mana value. This pins the detection-time
+    /// trigger-event plumbing for `ManaSpentToCast { TriggeringSpell }` and
+    /// `ObjectManaValue { EventSource }`.
+    #[test]
+    fn mana_spent_less_than_mana_value_condition_uses_triggering_spell() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Tokka & Rahzar", 3, 2);
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Test Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.mana_cost = ManaCost::generic(4);
+        }
+
+        let condition = TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: crate::types::ability::ObjectScope::EventSource,
+                },
+            },
+        };
+        let event = GameEvent::SpellCast {
+            card_id: CardId(2),
+            controller: PlayerId(1),
+            object_id: spell,
+        };
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 4;
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "spent 4 on mana value 4 must not satisfy a strict less-than condition"
+        );
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 3;
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "spent 3 on mana value 4 must satisfy a strict less-than condition"
         );
     }
 
@@ -11824,6 +11988,7 @@ pub mod tests {
         let cond = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::You,
             minimum: 2,
+            filter: None,
         };
         assert!(check_trigger_condition(
             &state,
@@ -11837,6 +12002,7 @@ pub mod tests {
         let cond3 = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::You,
             minimum: 3,
+            filter: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -11877,6 +12043,7 @@ pub mod tests {
         let cond = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::Opponent,
             minimum: 2,
+            filter: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -11885,6 +12052,104 @@ pub mod tests {
             None,
             Some(&event),
         ));
+    }
+
+    // CR 508.1 + CR 603.2c: Over-fire guard for the condition-level type axis on
+    // `AttackersDeclaredMin` ("you attack with two or more Dinosaurs"). The
+    // count must include ONLY attackers matching `filter` — so 1 Dinosaur + 1
+    // non-Dinosaur attacker must NOT satisfy `minimum: 2`, but 2 Dinosaurs must.
+    #[test]
+    fn attackers_declared_min_typed_filter_no_over_fire() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let dino1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dino1".to_string(),
+            Zone::Battlefield,
+        );
+        let dino2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dino2".to_string(),
+            Zone::Battlefield,
+        );
+        let goblin = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, subtype) in [(dino1, "Dinosaur"), (dino2, "Dinosaur"), (goblin, "Goblin")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec![subtype.to_string()];
+        }
+
+        let dino_filter =
+            TargetFilter::Typed(TypedFilter::creature().subtype("Dinosaur".to_string()));
+        let cond = TriggerCondition::AttackersDeclaredMin {
+            scope: ControllerRef::You,
+            minimum: 2,
+            filter: Some(dino_filter),
+        };
+
+        // 1 Dinosaur attacking → only 1 matching attacker → must NOT fire.
+        let lone_dino = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                dino1,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&lone_dino)),
+            "1 Dinosaur must NOT satisfy minimum=2 Dinosaurs (off-by-one guard)"
+        );
+
+        // 1 Dinosaur + 1 Goblin attacking → only 1 matching attacker → must NOT fire.
+        let mixed = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1, goblin],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (
+                    dino1,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    goblin,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&mixed)),
+            "1 Dinosaur + 1 Goblin must NOT satisfy minimum=2 Dinosaurs (over-fire guard)"
+        );
+
+        // 2 Dinosaurs attacking → 2 matching attackers → must fire.
+        let both_dinos = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1, dino2],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (
+                    dino1,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    dino2,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, trigger_controller, None, Some(&both_dinos)),
+            "2 Dinosaurs must satisfy minimum=2 Dinosaurs"
+        );
     }
 
     // CR 506.2 + CR 508.1b: Unit tests for `NoneOfAttackersTargetedYou`.
@@ -15871,6 +16136,7 @@ pub mod tests {
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             Vec::new(),
             ObjectId(9002),
@@ -16251,6 +16517,7 @@ pub mod tests {
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             Vec::new(),
             ObjectId(9100),
@@ -16490,6 +16757,7 @@ pub mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .valid_card(valid_card)
@@ -16616,6 +16884,7 @@ pub mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .valid_card(valid_card)
@@ -18715,6 +18984,7 @@ mod push_first_contract_tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)

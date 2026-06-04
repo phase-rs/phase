@@ -755,6 +755,10 @@ pub enum CountScope {
     /// from "your library" (always caster). Falls back to `Controller`
     /// outside iteration.
     ScopedPlayer,
+    /// CR 607.2d + CR 608.2c: The source's linked persisted chosen player —
+    /// "the chosen player's <zone>" on cards whose source stored
+    /// `ChosenAttribute::Player`.
+    SourceChosenPlayer,
     All,
     Opponents,
 }
@@ -1886,6 +1890,16 @@ pub enum ControllerRef {
     ChosenPlayer {
         index: u8,
     },
+    /// CR 613.1 + CR 109.4: Filter controller is the player PERSISTED on the
+    /// source via `ChosenAttribute::Player` — the player chosen by an
+    /// "as ~ enters the battlefield, choose a player" replacement. Read at
+    /// filter / layer-evaluation time from the source's `chosen_attributes`
+    /// (mirrors `GameObject::protector`). Distinct from `ChosenPlayer { index }`,
+    /// which is resolution-scoped (valid only mid-resolution); this is a durable
+    /// characteristic readable continuously, as a CDA requires. Powers
+    /// "~'s power and toughness are each equal to the number of <X> the chosen
+    /// player controls" (Skyshroud War Beast, Lost Order of Jarkeld).
+    SourceChosenPlayer,
     /// CR 603.2 + CR 109.4: Filter controller is the player identified by the
     /// triggering event (the drawer, life-gainer, attacker, etc.). Resolved
     /// against `state.current_trigger_event` via `extract_player_from_event`.
@@ -2064,8 +2078,11 @@ pub enum FilterProp {
     /// CR 303.4 + CR 301.5: Matches objects that have at least one attachment of the
     /// given kind whose controller matches `controller`. Unlike `EnchantedBy`/`EquippedBy`
     /// (which are source-relative — match when THIS source is attached to the object),
-    /// this predicate is non-source-relative: it matches any object with a qualifying
-    /// attachment. `controller = None` means "any controller".
+    /// this predicate is non-source-relative by default: it matches any object with a
+    /// qualifying attachment. `exclude_source` preserves "another Aura/Equipment"
+    /// semantics for Aura legality so the source attachment cannot satisfy its own
+    /// "another" restriction after it becomes attached. `controller = None` means
+    /// "any controller".
     ///
     /// Covers:
     /// - "enchanted creature" when the ability source is not the Aura itself
@@ -2076,6 +2093,8 @@ pub enum FilterProp {
         kind: AttachmentKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        exclude_source: bool,
     },
     /// CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches objects that
     /// have at least one attachment whose subtype is in `kinds` and whose controller
@@ -2752,6 +2771,13 @@ pub enum PlayerScope {
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
+    /// CR 613.1 + CR 109.4: The player PERSISTED on the source via
+    /// `ChosenAttribute::Player` (an "as ~ enters the battlefield, choose a
+    /// player" replacement). The player-scalar-axis analogue of
+    /// `ControllerRef::SourceChosenPlayer`, read continuously from the source's
+    /// `chosen_attributes` so a CDA P/T can track e.g. the chosen player's hand
+    /// or graveyard size (Entropic Specter, Sewer Nemesis).
+    SourceChosenPlayer,
 }
 
 /// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
@@ -4482,6 +4508,10 @@ pub enum CastTimingPermission {
     /// The spell was cast using an effect that allowed it to be cast as though
     /// it had flash.
     AsThoughHadFlash,
+    /// CR 702.48a: The spell was cast at instant speed by paying an Offering
+    /// additional cost. When this permission is set, the Offering sacrifice is
+    /// required (the player used the offering to unlock instant-speed timing).
+    Offering,
 }
 
 impl From<NinjutsuVariant> for CastVariantPaid {
@@ -4507,6 +4537,48 @@ pub enum RuntimeHandler {
 pub enum BeholdCostAction {
     ChooseOrReveal,
     ExileChosen,
+}
+
+/// CR 702.167a: Object-count requirement for costs whose text may ask for an
+/// exact number ("two creatures") or a minimum ("one or more creatures").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CostObjectCount {
+    Exactly { count: u32 },
+    AtLeast { count: u32 },
+}
+
+impl Default for CostObjectCount {
+    fn default() -> Self {
+        Self::exactly(1)
+    }
+}
+
+impl CostObjectCount {
+    pub fn exactly(count: u32) -> Self {
+        Self::Exactly {
+            count: count.max(1),
+        }
+    }
+
+    pub fn at_least(count: u32) -> Self {
+        Self::AtLeast {
+            count: count.max(1),
+        }
+    }
+
+    pub fn min_count(self) -> usize {
+        match self {
+            Self::Exactly { count } | Self::AtLeast { count } => count.max(1) as usize,
+        }
+    }
+
+    pub fn max_count(self, eligible_count: usize) -> usize {
+        match self {
+            Self::Exactly { count } => count.max(1) as usize,
+            Self::AtLeast { .. } => eligible_count,
+        }
+    }
 }
 
 /// Cost to activate an ability.
@@ -4562,6 +4634,18 @@ pub enum AbilityCost {
         zone: Option<Zone>,
         #[serde(default)]
         filter: Option<TargetFilter>,
+    },
+    /// CR 702.167a/b: Craft's "Exile [materials] from among permanents you
+    /// control and/or cards in your graveyard" component. Distinct from
+    /// `Exile` (single zone, optional filter): the materials are chosen across
+    /// the *union* of the battlefield (permanents you control) and your
+    /// graveyard, so `materials` carries the dual-zone `TargetFilter::Or` built
+    /// by `craft_materials_filter`. The interactive `PayCostKind::ExileMaterials`
+    /// detour exiles objects satisfying `count`; this auto-payment arm is a no-op.
+    ExileMaterials {
+        materials: TargetFilter,
+        #[serde(default)]
+        count: CostObjectCount,
     },
     /// CR 701.59a / CR 702.163a: Exile cards from your graveyard with total mana value
     /// at least N as a collect evidence cost.
@@ -4764,6 +4848,8 @@ impl AbilityCost {
             AbilityCost::PayLife { .. } => vec![CostCategory::PaysLife],
             AbilityCost::Discard { .. } => vec![CostCategory::Discards],
             AbilityCost::Exile { .. } => vec![CostCategory::ExilesCards],
+            // CR 702.167a: Craft's materials component exiles other objects.
+            AbilityCost::ExileMaterials { .. } => vec![CostCategory::ExilesCards],
             AbilityCost::CollectEvidence { .. } => vec![CostCategory::ExilesCards],
             AbilityCost::TapCreatures { .. } => vec![CostCategory::TapsOtherCreatures],
             AbilityCost::RemoveCounter { .. } => vec![CostCategory::RemovesCounters],
@@ -4858,6 +4944,9 @@ impl AbilityCost {
             | AbilityCost::Sacrifice { .. }
             | AbilityCost::PayLife { .. }
             | AbilityCost::Exile { .. }
+            // CR 702.167a: Craft's materials exile OTHER objects; the source's
+            // own exile is the separate `Exile { filter: SelfRef }` sub-cost.
+            | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::RemoveCounter { .. }
@@ -5239,6 +5328,44 @@ impl BounceSelection {
     }
 }
 
+/// CR 708.2a: Characteristics an effect specifies for a permanent it puts onto
+/// the battlefield face down ("...unless otherwise specified by the effect that
+/// put it onto the battlefield face down"). When an effect lists no
+/// characteristics, the permanent defaults to a vanilla 2/2 with no name,
+/// subtypes, or mana cost (CR 708.2a). When the effect *does* specify
+/// characteristics ("They're 2/2 Cyberman artifact creatures."), those override
+/// the defaults. Parts-built — no card-named hardcode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaceDownProfile {
+    /// CR 708.2a: Power override. `None` defaults to 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power: Option<i32>,
+    /// CR 708.2a: Toughness override. `None` defaults to 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toughness: Option<i32>,
+    /// CR 205.1a: Additional core card types beyond Creature (always present per
+    /// CR 708.2a), e.g. Artifact for "artifact creatures".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_core_types: Vec<CoreType>,
+    /// CR 205.1a: Creature subtypes the effect grants ("Cyberman").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtypes: Vec<String>,
+}
+
+impl FaceDownProfile {
+    /// CR 708.2a: The default face-down characteristics — a vanilla 2/2 creature
+    /// with no extra types or subtypes. Used when an effect puts a card onto the
+    /// battlefield face down without specifying characteristics.
+    pub fn vanilla_2_2() -> Self {
+        Self {
+            power: None,
+            toughness: None,
+            extra_core_types: vec![],
+            subtypes: vec![],
+        }
+    }
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
 // clippy::large_enum_variant: `Effect` is the engine's central 100+ variant
@@ -5584,6 +5711,11 @@ pub enum Effect {
         /// with three egg counters on it" (Darigaaz Reincarnated).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 708.2a + CR 708.3: when `Some`, the object that enters the
+        /// battlefield via this move is turned face down (before entry, CR
+        /// 708.3) with these characteristics. `None` = normal face-up entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<FaceDownProfile>,
     },
     ChangeZoneAll {
         #[serde(default)]
@@ -5600,6 +5732,11 @@ pub enum Effect {
         /// a mass zone move.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_tapped: bool,
+        /// CR 708.2a + CR 708.3: when `Some`, each object that enters the
+        /// battlefield via this move is turned face down (before entry, CR
+        /// 708.3) with these characteristics. `None` = normal face-up entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<FaceDownProfile>,
     },
     /// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
     /// select some to keep per the effect's instructions, rest go elsewhere.
@@ -6314,6 +6451,15 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 508.1d: Target creature must attack the required player this turn/combat if able.
+    ForceAttack {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default = "default_target_filter_controller")]
+        required_player: TargetFilter,
+        #[serde(default = "default_duration_until_end_of_turn")]
+        duration: Duration,
+    },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
     /// CR 702.xxx: Prepare (Strixhaven) — mark the target creature as prepared.
@@ -6544,9 +6690,16 @@ pub enum Effect {
     WinTheGame,
     /// CR 706: Roll a die with the given number of sides.
     /// If `results` is non-empty, execute the matching branch.
+    /// CR 706.1: `count` is how many dice of this kind to roll ("roll two
+    /// six-sided dice", "roll X d12"). Each die is rolled independently with
+    /// the same `sides`/`modifier`/`results`. Defaults to one for back-compat
+    /// with cards printed in the single-die JSON shape. Mirrors the
+    /// `FlipCoins.count` precedent (CR 705).
     /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
     /// `None` means the natural result is used unchanged.
     RollDie {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         sides: u8,
         #[serde(default)]
         results: Vec<DieResultBranch>,
@@ -7139,6 +7292,10 @@ fn default_player_filter_controller() -> PlayerFilter {
 
 fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
+}
+
+fn default_duration_until_end_of_turn() -> Duration {
+    Duration::UntilEndOfTurn
 }
 
 fn default_comparator_ge() -> Comparator {
@@ -7753,6 +7910,7 @@ impl Effect {
             | Effect::PhaseOut { target, .. }
             | Effect::PhaseIn { target, .. }
             | Effect::ForceBlock { target, .. }
+            | Effect::ForceAttack { target, .. }
             | Effect::BecomePrepared { target, .. }
             | Effect::BecomeUnprepared { target, .. }
             | Effect::CastFromZone { target, .. }
@@ -8072,6 +8230,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PhaseOut { .. } => "PhaseOut",
         Effect::PhaseIn { .. } => "PhaseIn",
         Effect::ForceBlock { .. } => "ForceBlock",
+        Effect::ForceAttack { .. } => "ForceAttack",
         Effect::SolveCase => "SolveCase",
         Effect::BecomePrepared { .. } => "BecomePrepared",
         Effect::BecomeUnprepared { .. } => "BecomeUnprepared",
@@ -8254,6 +8413,7 @@ pub enum EffectKind {
     PhaseOut,
     PhaseIn,
     ForceBlock,
+    ForceAttack,
     SolveCase,
     /// CR 702.xxx: Prepare (Strixhaven) — mark target creature as prepared.
     BecomePrepared,
@@ -8447,6 +8607,7 @@ impl From<&Effect> for EffectKind {
             Effect::PhaseOut { .. } => EffectKind::PhaseOut,
             Effect::PhaseIn { .. } => EffectKind::PhaseIn,
             Effect::ForceBlock { .. } => EffectKind::ForceBlock,
+            Effect::ForceAttack { .. } => EffectKind::ForceAttack,
             Effect::SolveCase => EffectKind::SolveCase,
             Effect::BecomePrepared { .. } => EffectKind::BecomePrepared,
             Effect::BecomeUnprepared { .. } => EffectKind::BecomeUnprepared,
@@ -9936,7 +10097,7 @@ pub enum TriggerCondition {
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
-    /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
+    /// CR 508.1a + CR 603.2c: "Whenever ~ and at least N other creatures attack".
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
     MinCoAttackers { minimum: u32 },
@@ -10169,8 +10330,20 @@ pub enum TriggerCondition {
     ///     CR 506.2), so counting "≠ trigger controller" is equivalent to counting the
     ///     triggering player's creatures.
     ///
+    /// `filter` is the condition-level type axis (CR 508.1): when `Some(f)`,
+    /// only attackers whose object matches `f` are counted, so "you attack with
+    /// two or more Dinosaurs" fires only on ≥2 Dinosaurs — not on one Dinosaur
+    /// plus an unrelated attacker. When `None`, every attacker in the scoped
+    /// batch is counted (the untyped "attack with two or more creatures"
+    /// behavior, preserved byte-for-byte).
+    ///
     /// True when the count meets or exceeds `minimum`.
-    AttackersDeclaredMin { scope: ControllerRef, minimum: u32 },
+    AttackersDeclaredMin {
+        scope: ControllerRef,
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 506.2 + CR 603.4: Intervening-if "if none of those creatures attacked you".
     /// Reads the triggering `AttackersDeclared` event's per-attacker `AttackTarget` tuples
     /// (CR 508.1b) and returns true iff no attacker in the batch targeted the trigger's
@@ -11598,6 +11771,18 @@ pub enum ContinuousModification {
     SetBasicLandType {
         land_type: BasicLandType,
     },
+    /// CR 305.7 + CR 305.6: Sets a land's subtype to the basic land type CHOSEN
+    /// by the granting source (e.g. Phantasmal Terrain, Convincing Mirage:
+    /// "As this Aura enters, choose a basic land type." + "Enchanted land is the
+    /// chosen type."). Mirrors `SetBasicLandType`'s replacement semantics —
+    /// removes the land's old land subtypes and clears the abilities generated
+    /// from its rules text — but reads the concrete subtype from the source
+    /// object's `chosen_attributes` (`ChosenSubtypeKind::BasicLandType`) at layer
+    /// evaluation time rather than carrying a fixed type. Unit variant: the kind
+    /// is implicitly `BasicLandType`. The intrinsic mana ability for the new type
+    /// is derived from the subtype in `mana_sources.rs` (CR 305.6), so no explicit
+    /// mana grant is needed here.
+    SetChosenBasicLandType,
     /// CR 707.9a: Retain a printed triggered ability from the source object's
     /// printed trigger list at the given index. Used by "becomes a copy of <X>,
     /// except it has this ability" patterns (Irma Part-Time Mutant, Cryptoplasm,
@@ -12508,6 +12693,7 @@ mod tests {
                     FilterProp::HasAttachment {
                         kind: AttachmentKind::Aura,
                         controller: None,
+                        exclude_source: false,
                     },
                 ])),
                 TargetFilter::Typed(TypedFilter::creature()),
@@ -12523,6 +12709,7 @@ mod tests {
                 properties: vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 }],
             })
         );
@@ -13382,6 +13569,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(1),
@@ -13415,6 +13603,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
@@ -13459,6 +13648,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         }
     }
 

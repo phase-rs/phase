@@ -16,7 +16,8 @@ the Cloudflare plumbing end-to-end before the real broker lands. See
 ## Prerequisites
 
 - Node 18+ and a Cloudflare account.
-- `npm install` here (pulls `wrangler`, `@cloudflare/workers-types`, `typescript`).
+- `npm install` here (pulls `wrangler`, `@cloudflare/workers-types`, `typescript`, `tsx`).
+- `npm test` runs the `.mjs` suite against `src/*.ts` via `tsx` (Node’s test runner cannot load `.ts` directly).
 
 ## Deploy (you run these — they need interactive CF auth)
 

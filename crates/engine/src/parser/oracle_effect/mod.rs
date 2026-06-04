@@ -734,6 +734,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     );
     let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -811,6 +812,7 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         ));
 
@@ -1430,13 +1432,15 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
         }));
     }
 
-    // "can be cast without paying its mana cost" — requires casting infrastructure
-    // changes (alternative cost injection during casting). Deferred.
+    // CR 118.9a: "can be cast without paying its mana cost"
     if tag::<_, _, OracleError<'_>>("can be cast without paying its mana cost")
         .parse(ability_text)
         .is_ok()
     {
-        return None; // Falls through to Unimplemented
+        return Some(parsed_clause(Effect::GrantNextSpellAbility {
+            modifier: NextSpellModifier::WithoutPayingManaCost,
+            spell_filter,
+        }));
     }
 
     // CR 601.2f: "has [keyword]"
@@ -1829,6 +1833,7 @@ fn try_parse_self_name_exile(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         }));
     }
     None
@@ -1882,6 +1887,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             target: mass_target,
             enters_under: None,
             enter_tapped: false,
+            face_down_profile: None,
         }
     } else {
         Effect::ChangeZone {
@@ -1895,6 +1901,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         }
     };
 
@@ -1969,6 +1976,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     );
 
@@ -3096,6 +3104,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         ))),
         distribute: None,
@@ -5051,6 +5060,7 @@ fn try_parse_owner_of_target_shuffle(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        face_down_profile: None,
     }))
 }
 
@@ -7071,6 +7081,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     )));
     Some(clause)
@@ -8664,6 +8675,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        face_down_profile: None,
     };
     let mut sub_def = AbilityDefinition::new(AbilityKind::Spell, sub_effect);
     sub_def.sub_ability = Some(Box::new(shuffle_def));
@@ -8680,6 +8692,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        face_down_profile: None,
     };
 
     Some(ParsedEffectClause {
@@ -9070,6 +9083,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
         {
             *target = TargetFilter::ParentTarget;
@@ -10173,6 +10187,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Suspect { target }
         | Effect::Goad { target }
         | Effect::Mill { target, .. }
@@ -10553,6 +10568,17 @@ fn cast_filter_has_typed_leaf(filter: &TargetFilter) -> bool {
     }
 }
 
+fn cast_filter_has_meaningful_typed_leaf(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(cast_filter_has_meaningful_typed_leaf)
+        }
+        TargetFilter::Not { filter } => cast_filter_has_meaningful_typed_leaf(filter),
+        _ => false,
+    }
+}
+
 fn add_cast_target_props(
     filter: &mut TargetFilter,
     props: &[FilterProp],
@@ -10645,17 +10671,17 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     // `cast_filter_has_typed_leaf` would treat `[Card]` as non-empty;
     // `TypedFilter::has_meaningful_type_constraint` is the canonical
     // accessor that excludes Card/Any noise.
-    let meaningful = match &typed_filter {
-        TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
-        _ => cast_filter_has_typed_leaf(&typed_filter),
-    };
+    let meaningful = cast_filter_has_meaningful_typed_leaf(&typed_filter);
 
-    Some(if meaningful {
+    Some(if !meaningful {
+        TargetFilter::ExiledBySource
+    } else if typed_filter.references_exiled_by_source() {
+        typed_filter.normalized()
+    } else {
         TargetFilter::And {
             filters: vec![TargetFilter::ExiledBySource, typed_filter],
         }
-    } else {
-        TargetFilter::ExiledBySource
+        .normalized()
     })
 }
 
@@ -12217,6 +12243,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
         | Effect::PutCounter { target, .. }
@@ -12443,6 +12470,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. }
@@ -13225,6 +13253,7 @@ fn try_parse_for_each_attacker_copy_blocker(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         );
         def.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -13280,6 +13309,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     );
     def.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -13298,6 +13328,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
             ])),
             enters_under: None,
             enter_tapped,
+            face_down_profile: None,
         },
     )));
     Some(def)
@@ -15724,6 +15755,7 @@ fn try_parse_put_zone_change_parts(
                     enters_attacking,
                     up_to,
                     enter_with_counters,
+                    face_down_profile: None,
                 },
                 choice_count,
             ));
@@ -20139,6 +20171,7 @@ mod tests {
                     target: TargetFilter::Player,
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 }
             ),
             "exile target player's graveyard should be ChangeZoneAll with origin=Graveyard, target=Player, got {e:?}"
@@ -20200,6 +20233,7 @@ mod tests {
                     target: TargetFilter::ExiledBySource,
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 }
             ),
             "should produce ChangeZoneAll from Exile to Graveyard with ExiledBySource, got {e:?}"
@@ -22417,6 +22451,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             }
         ));
 
@@ -22432,6 +22467,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             }
         ));
 
@@ -23876,6 +23912,63 @@ mod tests {
             clause.multi_target,
             Some(MultiTargetSpec::bounded_expr(
                 QuantityExpr::Fixed { value: 0 },
+                QuantityExpr::Fixed { value: 2 },
+            ))
+        );
+        assert_eq!(
+            clause.distribute,
+            Some(DistributionUnit::Counters("P1P1".to_string()))
+        );
+    }
+
+    #[test]
+    fn distribute_x_counters_among_any_number_allows_zero_targets() {
+        let clause = parse_effect_clause(
+            "distribute X +1/+1 counters among any number of target creatures you control",
+            &mut ParseContext::default(),
+        );
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::bounded_expr(
+                QuantityExpr::Fixed { value: 0 },
+                x.clone(),
+            ))
+        );
+        assert_eq!(
+            clause.distribute,
+            Some(DistributionUnit::Counters("P1P1".to_string()))
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ref count,
+                    target: TargetFilter::Typed(_),
+                } if *count == x
+            ),
+            "Expected X-count targeted PutCounter with multi_target, got {:?}",
+            clause.effect
+        );
+    }
+
+    #[test]
+    fn distribute_fixed_counters_among_any_number_requires_one_target() {
+        let clause = parse_effect_clause(
+            "distribute two +1/+1 counters among any number of target creatures you control",
+            &mut ParseContext::default(),
+        );
+
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::bounded_expr(
+                QuantityExpr::Fixed { value: 1 },
                 QuantityExpr::Fixed { value: 2 },
             ))
         );
@@ -26853,6 +26946,23 @@ mod tests {
     }
 
     #[test]
+    fn force_attack_you_this_combat_targets_creature() {
+        let e = parse_effect("Target creature attacks you this combat if able");
+        assert!(
+            matches!(
+                e,
+                Effect::ForceAttack {
+                    target: TargetFilter::Typed(_),
+                    required_player: TargetFilter::Controller,
+                    duration: Duration::UntilEndOfCombat,
+                }
+            ),
+            "Expected ForceAttack with typed target and controller requirement, got {:?}",
+            e
+        );
+    }
+
+    #[test]
     fn force_block_blocks_it_this_combat() {
         // "target creature blocks it this combat if able" (e.g., Avalanche Tusker)
         let e = parse_effect("Target creature blocks it this combat if able");
@@ -27387,6 +27497,48 @@ mod tests {
             }
         );
         assert!(*tapped);
+    }
+
+    /// Issue #1696 — Myrkul, Lord of Bones full chain: an exile that publishes a
+    /// tracked set, followed by "create a token that's a copy of that card,
+    /// except it's an enchantment and loses all other card types." The copy
+    /// clause must (a) rebind its `that card` anaphor to the tracked set
+    /// (CR 603.7) and (b) carry the `SetCardTypes` exception so the token is an
+    /// enchantment, not a creature (CR 205.1a + CR 707.9d). Uses an explicit
+    /// exile target so the chain stitches without trigger-subject context.
+    #[test]
+    fn exile_then_copy_that_card_as_enchantment_uses_tracked_set_and_set_card_types() {
+        let def = parse_effect_chain(
+            "Exile target creature card from a graveyard, then create a token that's a copy of that card, except it's an enchantment and loses all other card types.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChangeZone { destination, .. } = def.effect.as_ref() else {
+            panic!("expected ChangeZone, got {:?}", def.effect);
+        };
+        assert_eq!(*destination, Zone::Exile);
+
+        let copy = def.sub_ability.as_deref().expect("copy sub-ability");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = copy.effect.as_ref()
+        else {
+            panic!("expected CopyTokenOf, got {:?}", copy.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(
+            *additional_modifications,
+            vec![ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Enchantment],
+            }]
+        );
     }
 
     /// CR 205.3e + CR 607.2d: "Choose a creature type other than Wall. Target
@@ -36012,6 +36164,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_next_spell_without_paying_mana_cost() {
+        let def = parse_effect_chain(
+            "The next instant or sorcery spell you cast this turn can be cast without paying its mana cost",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::WithoutPayingManaCost,
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(WithoutPayingManaCost), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
     fn parse_cast_spells_this_turn_as_though_flash() {
         // Emergence Zone (issue #1542): "this turn" is part of the permission
         // phrase, not a separate duration prefix — must not fall through to
@@ -38840,6 +39011,56 @@ mod tests {
             .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })));
     }
 
+    /// CR 400.1 + CR 108.3 — Aether Vial class: "put a creature card ... from
+    /// your hand onto the battlefield" must scope the candidate set to the
+    /// controller's hand (`controller == Some(ControllerRef::You)`), not to
+    /// every player's hand. Without the controller scope the resolver collects
+    /// hand cards from both players, letting you put an opponent's creatures
+    /// onto the battlefield and revealing their hand (issue #1980).
+    ///
+    /// This is a building-block assertion on the produced `ChangeZone` target
+    /// filter, not a single-card check: every "<filter> from your hand onto the
+    /// battlefield" effect shares this code path. The dynamic interior clause
+    /// ("with mana value equal to the number of charge counters on this
+    /// artifact") is what previously displaced the "from your hand" zone suffix
+    /// past the contiguous type-phrase parse, dropping the controller scope.
+    #[test]
+    fn put_zone_change_from_your_hand_scopes_to_controller() {
+        // Self-references ("this artifact") are normalized to `~` before the
+        // effect parser runs, so the dynamic mana-value clause reaches this
+        // path as "the number of charge counters on ~ from your hand".
+        let text = "put a creature card with mana value equal to the number of charge counters on ~ from your hand onto the battlefield";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for Aether Vial put-from-hand");
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = effect
+        else {
+            panic!("expected ChangeZone, got {effect:?}");
+        };
+        assert_eq!(destination, Zone::Battlefield);
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected typed hand filter, got {target:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InZone { zone: Zone::Hand })),
+            "filter must restrict to the hand zone, got {:?}",
+            typed.properties
+        );
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::You),
+            "\"from your hand\" must scope candidates to the controller's hand, got {:?}",
+            typed.controller
+        );
+    }
+
     /// CR 508.4 + CR 614.1 — Kaalia of the Vast: "put X from your hand onto
     /// the battlefield tapped and attacking that opponent." The inline-tail
     /// patcher in `try_parse_put_zone_change` must set both `enter_tapped`
@@ -40524,6 +40745,7 @@ mod snapshot_tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         };
         // Non-delayed top-level ParentTarget return.
         stamp_delayed_returns(&mut prev, Zone::Exile);
@@ -40576,6 +40798,7 @@ mod snapshot_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         );
         let mut delayed = Effect::CreateDelayedTrigger {
@@ -40678,6 +40901,7 @@ mod snapshot_tests {
             target,
             enters_under,
             enter_tapped,
+            face_down_profile: None,
         } = &*same_name.effect
         else {
             panic!("expected ChangeZoneAll tail, got {:?}", same_name.effect);

@@ -11,6 +11,8 @@ pub(crate) enum RuleStaticPredicate {
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
+    CantCrew,
+    CantBeActivated,
     CantBeSacrificed,
     MustAttack,
     MustBlock,

@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Scegli un nuovo bersaglio per la copia",
     "chooseTargetForCopy": "Scegli il bersaglio per la copia",
     "chooseCreatureToExplore": "Scegli quale creatura esplora dopo",
+    "chooseCreatureTokenToPopulate": "Scegli una pedina creatura da popolare",
     "chooseReturnAsAuraTarget": "Scegli un permanente da incantare",
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} ha rivelato il compagno: {{cardName}}",
     "companionMovedToHand": "{{player}} ha messo il compagno {{cardName}} in mano",
     "powerToughnessChanged": "L'oggetto {{objectId}} è ora {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Evento: {{type}}"
+    "genericEvent": "Evento: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Strumenti del motore",
@@ -892,6 +912,7 @@
       "titleSacrifice": "Sacrifica",
       "titleTopdeck": "Metti nel grimorio",
       "titleBattlefield": "Metti sul campo di battaglia",
+      "titleHand": "Restituisci",
       "subtitleSacrificeExact_one": "Scegli {{count}} permanente da sacrificare",
       "subtitleSacrificeExact_other": "Scegli {{count}} permanenti da sacrificare",
       "subtitleSacrificeUpTo_one": "Scegli fino a {{count}} permanente da sacrificare",
@@ -910,12 +931,19 @@
       "subtitleBattlefieldUpTo_other": "Scegli fino a {{count}} carte da mettere sul campo di battaglia",
       "subtitleBattlefieldRange_one": "Scegli {{min}}-{{count}} carta da mettere sul campo di battaglia",
       "subtitleBattlefieldRange_other": "Scegli {{min}}-{{count}} carte da mettere sul campo di battaglia",
+      "subtitleHandExact_one": "Scegli {{count}} permanente da restituire nella mano del suo proprietario",
+      "subtitleHandExact_other": "Scegli {{count}} permanenti da restituire nella mano del loro proprietario",
+      "subtitleHandUpTo_one": "Scegli fino a {{count}} permanente da restituire nella mano del suo proprietario",
+      "subtitleHandUpTo_other": "Scegli fino a {{count}} permanenti da restituire nella mano del loro proprietario",
+      "subtitleHandRange_one": "Scegli {{min}}-{{count}} permanente da restituire nella mano del suo proprietario",
+      "subtitleHandRange_other": "Scegli {{min}}-{{count}} permanenti da restituire nella mano del loro proprietario",
       "labelSkip": "Salta",
       "labelDecline": "Rifiuta",
       "labelPutOnTop": "Metti in cima ({{order}})",
       "labelConfirm": "Conferma ({{selected}}/{{count}})",
       "labelTop": "Cima ({{selected}}/{{count}})",
       "labelPut": "Metti ({{selected}}/{{count}})",
+      "labelReturn": "Restituisci ({{selected}}/{{count}})",
       "orderTop": "Cima"
     },
     "drawnThisTurn": {
@@ -1010,6 +1038,12 @@
       "sourceGraveyard": "il tuo cimitero",
       "subtitle_one": "Esilia {{count}} carta da {{source}}",
       "subtitle_other": "Esilia {{count}} carte da {{source}}"
+    },
+    "craft": {
+      "title": "Fabbricare",
+      "subtitle_one": "Esilia {{count}} materiale per fabbricare",
+      "subtitle_other": "Esilia {{count}} materiali per fabbricare",
+      "subtitleRange": "Esilia da {{min}} a {{count}} materiali per fabbricare"
     },
     "behold": {
       "title": "Contemplare",
@@ -1475,5 +1509,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }
