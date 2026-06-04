@@ -18,6 +18,8 @@ interface DraftSpectatorState {
   leave: () => void;
 }
 
+let draftSpectatorRequestId = 0;
+
 export const useDraftSpectatorStore = create<DraftSpectatorState>((set, get) => ({
   draftCode: null,
   view: null,
@@ -27,17 +29,23 @@ export const useDraftSpectatorStore = create<DraftSpectatorState>((set, get) => 
 
   watchDraft: async (draftCode) => {
     get().leave();
+    const requestId = ++draftSpectatorRequestId;
     set({ draftCode, status: "connecting", error: null, view: null });
     try {
       const serverUrl = import.meta.env.VITE_WS_URL ?? (await detectServerUrl());
       const session = await connectDraftSpectator(serverUrl, draftCode);
+      if (requestId !== draftSpectatorRequestId || get().draftCode !== draftCode) {
+        session.close();
+        return;
+      }
       const unsub = session.onEvent((event) => {
+        if (requestId !== draftSpectatorRequestId || get().draftCode !== draftCode) return;
         if (event.type === "view") {
           set({ view: event.view, status: "connected" });
         } else if (event.type === "error") {
           set({ status: "error", error: event.message });
         } else if (event.type === "disconnected") {
-          set({ status: "error", error: "Disconnected" });
+          set({ status: "error", error: null });
         }
       });
       set({
@@ -50,6 +58,7 @@ export const useDraftSpectatorStore = create<DraftSpectatorState>((set, get) => 
         },
       });
     } catch (err) {
+      if (requestId !== draftSpectatorRequestId || get().draftCode !== draftCode) return;
       set({
         status: "error",
         error: err instanceof Error ? err.message : String(err),
@@ -58,6 +67,7 @@ export const useDraftSpectatorStore = create<DraftSpectatorState>((set, get) => 
   },
 
   leave: () => {
+    draftSpectatorRequestId += 1;
     const { session } = get();
     session?.close();
     set({

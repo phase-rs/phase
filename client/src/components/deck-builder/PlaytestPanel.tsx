@@ -10,6 +10,9 @@ import { FORMAT_DEFAULTS } from "../../stores/multiplayerStore";
 import { sampleOpeningHand } from "../../viewmodel/deckSample";
 import { menuButtonClass } from "../menu/buttonStyles";
 
+const DIFFICULTY_OPTIONS = ["Easy", "Medium", "Hard"] as const;
+type PlaytestDifficulty = (typeof DIFFICULTY_OPTIONS)[number];
+
 interface PlaytestPanelProps {
   deck: ParsedDeck;
   format: GameFormat;
@@ -20,7 +23,7 @@ export function PlaytestPanel({ deck, format, mainCount }: PlaytestPanelProps) {
   const { t } = useTranslation("deck-builder");
   const navigate = useNavigate();
   const [sampleHand, setSampleHand] = useState<string[]>(() => sampleOpeningHand(deck.main));
-  const [difficulty, setDifficulty] = useState<"Easy" | "Medium" | "Hard">("Medium");
+  const [difficulty, setDifficulty] = useState<PlaytestDifficulty>("Medium");
 
   const handEntries = useMemo(
     () =>
@@ -83,9 +86,11 @@ export function PlaytestPanel({ deck, format, mainCount }: PlaytestPanelProps) {
               onChange={(e) => setDifficulty(e.target.value as typeof difficulty)}
               className="rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-sm"
             >
-              <option value="Easy">Easy</option>
-              <option value="Medium">Medium</option>
-              <option value="Hard">Hard</option>
+              {DIFFICULTY_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {t(`playtest.difficulty${option}`)}
+                </option>
+              ))}
             </select>
           </label>
           <button type="button" className={menuButtonClass({ tone: "cyan", size: "sm" })} onClick={launchGoldfish}>

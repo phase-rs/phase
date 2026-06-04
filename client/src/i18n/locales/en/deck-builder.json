@@ -45,6 +45,9 @@
     "goldfish": "Launch goldfish game",
     "goldfishHint": "Starts a local {{count}}-card game vs AI using your current list and format.",
     "difficulty": "AI difficulty",
+    "difficultyEasy": "Easy",
+    "difficultyMedium": "Medium",
+    "difficultyHard": "Hard",
     "launch": "Launch game"
   },
   "toolbar": {
