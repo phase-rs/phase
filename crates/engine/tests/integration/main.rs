@@ -99,6 +99,7 @@ mod morophon_chosen_type_1653;
 mod multi_upkeep_triggers_suspend;
 mod mycoloth_upkeep_trigger;
 mod mystic_forge_regression;
+mod ob_nixilis_captive_kingpin_life_loss;
 mod obeka_splitter_additional_phases;
 mod obliterate_regression;
 mod old_growth_troll_return_as_aura;
