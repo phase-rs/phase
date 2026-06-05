@@ -188,6 +188,49 @@ pub(crate) fn parse_zone_names_from_tp(tp: &TextPair) -> Vec<Zone> {
     zones
 }
 
+/// CR 601.3 + CR 601.2a: Parse a "from anywhere other than <zone>" casting
+/// restriction into the explicit list of *prohibited* zones.
+///
+/// "Anywhere other than [hand]" is the inverse of `parse_zone_names_from_tp`'s
+/// "from [zone-list]" form: it names the single zone a spell *may* be cast from,
+/// so the prohibited set is "every cast-capable zone except that one". The only
+/// zones a spell can be cast from are Hand, Graveyard, Library, Exile, and
+/// Command (Stack/Battlefield are never cast-from zones — CR 601.2a moves a card
+/// "from where it is to the stack"), so the complement of `allowed` over that set
+/// is the prohibited list. Drannith Magistrate ("anywhere other than their
+/// hands") and the static half of the Avatar's Wrath class collapse here.
+///
+/// Returns `None` when the restriction is not of the "anywhere other than" form,
+/// so the caller falls back to the explicit zone-list parser.
+pub(crate) fn parse_cast_from_anywhere_other_than_tp(tp: &TextPair) -> Option<Vec<Zone>> {
+    if !nom_primitives::scan_contains(tp.lower, "from anywhere other than") {
+        return None;
+    }
+    // CR 601.2a: The full set of zones a spell can be cast from.
+    const CAST_CAPABLE_ZONES: [Zone; 5] = [
+        Zone::Hand,
+        Zone::Graveyard,
+        Zone::Library,
+        Zone::Exile,
+        Zone::Command,
+    ];
+    // Currently only the "their hand(s)" allowed-zone phrasing is printed. The
+    // allowed zone is the hand; the prohibited set is its complement.
+    let allowed = if nom_primitives::scan_contains(tp.lower, "their hand")
+        || nom_primitives::scan_contains(tp.lower, "your hand")
+    {
+        Zone::Hand
+    } else {
+        return None;
+    };
+    Some(
+        CAST_CAPABLE_ZONES
+            .into_iter()
+            .filter(|zone| *zone != allowed)
+            .collect(),
+    )
+}
+
 /// Parse a color name from Oracle text, delegating to the shared nom color combinator.
 ///
 /// Accepts leading/trailing whitespace and requires complete consumption (no trailing text
