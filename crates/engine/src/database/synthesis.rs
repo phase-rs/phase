@@ -21170,11 +21170,68 @@ mod absorb_synthesis_tests {
     //! for free from `Minus`; CR 702.64c (each instance separate) is one
     //! replacement per instance.
     use super::*;
+    use crate::game::effects::deal_damage;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ResolvedAbility, TargetRef};
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
 
     fn absorb_face(n: u32) -> CardFace {
         let mut face = CardFace::default();
         face.keywords.push(Keyword::Absorb(n));
         face
+    }
+
+    fn absorb_creature_face(name: &str, keywords: Vec<Keyword>) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(3)),
+            toughness: Some(PtValue::Fixed(3)),
+            keywords,
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    fn marked_damage_after_absorb_damage(keywords: Vec<Keyword>, damage: u32) -> u32 {
+        let face = absorb_creature_face("Absorb Test", keywords);
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        apply_card_face_to_object(state.objects.get_mut(&target).unwrap(), &face);
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed {
+                    value: damage as i32,
+                },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        deal_damage::resolve(&mut state, &ability, &mut events).unwrap();
+
+        state.objects[&target].damage_marked
     }
 
     #[test]
@@ -21241,5 +21298,23 @@ mod absorb_synthesis_tests {
             .replacements
             .iter()
             .all(|r| !is_absorb_replacement(r, 1)));
+    }
+
+    #[test]
+    fn absorb_runtime_prevents_damage_to_absorb_creature() {
+        assert_eq!(
+            marked_damage_after_absorb_damage(vec![Keyword::Absorb(2)], 5),
+            3,
+            "CR 702.64a: Absorb 2 prevents 2 damage from the event"
+        );
+    }
+
+    #[test]
+    fn absorb_runtime_applies_multiple_instances_separately() {
+        assert_eq!(
+            marked_damage_after_absorb_damage(vec![Keyword::Absorb(1), Keyword::Absorb(1)], 3),
+            1,
+            "CR 702.64c: two Absorb 1 instances each prevent 1 damage"
+        );
     }
 }
