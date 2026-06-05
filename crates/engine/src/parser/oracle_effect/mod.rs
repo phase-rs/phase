@@ -41534,6 +41534,56 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn put_land_cards_that_player_owns_from_exile_scopes_owner_and_type() {
+        // CR 108.3 + CR 109.4 + CR 110.2a: Oblivion Sower — "you may put any
+        // number of land cards that player owns from exile onto the battlefield
+        // under your control." The candidate pool must be the LAND cards owned
+        // by the *target* player, pulled from exile, entering under YOUR control.
+        // Regression for issue #1998: the "that player owns" owner restriction
+        // was dropped, so the put-step offered every land in exile (including
+        // the controller's own exiled cards) rather than only the target
+        // opponent's lands.
+        let effect = parse_effect(
+            "you may put any number of land cards that player owns from exile onto the battlefield under your control",
+        );
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            enters_under,
+            up_to,
+            ..
+        } = effect
+        else {
+            panic!("expected ChangeZone, got {effect:#?}");
+        };
+        assert_eq!(origin, Some(Zone::Exile), "candidates come from exile");
+        assert_eq!(destination, Zone::Battlefield);
+        // CR 110.2a: "under your control" routes the entering object to the caster.
+        assert_eq!(enters_under, Some(ControllerRef::You));
+        // CR 608.2d: "any number of" is an optional, variable-count selection.
+        assert!(up_to, "any number of => up_to selection");
+
+        let TargetFilter::Typed(typed) = &target else {
+            panic!("expected a Typed land filter, got {target:#?}");
+        };
+        // CR 305.1: the type filter restricts the pool to land cards.
+        assert_eq!(typed.type_filters, vec![TypeFilter::Land]);
+        // CR 108.3 + CR 109.4: the owner restriction must scope to the target
+        // player, not to every owner. Without it the put-step would offer the
+        // controller's own exiled lands and any third player's lands.
+        assert!(
+            typed.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::TargetPlayer
+                }
+            )),
+            "target filter must restrict ownership to the target player, got {typed:#?}",
+        );
+    }
 }
 
 /// Snapshot tests locking current `parse_effect_chain` behavior before the

@@ -3686,6 +3686,23 @@ fn parse_ownership_or_controller_suffix(
             return own_ctrl_offset + phrase.len();
         }
     }
+    // CR 108.3 + CR 109.4: "that player owns" — the card belongs to the player
+    // chosen as the enclosing ability's target. Anaphoric reference to a player
+    // named earlier in the same clause (Oblivion Sower: "target opponent exiles
+    // ... then you may put any number of land cards that player owns from exile
+    // ..."). Resolved at runtime against the first `TargetRef::Player` in
+    // `ability.targets` (see `FilterProp::Owned` / `ControllerRef::TargetPlayer`
+    // in `game/filter.rs`), so the candidate pool is the lands that the *target*
+    // player owns — not every land in exile, and not the controller's own cards.
+    if tag::<_, _, OracleError<'_>>("that player owns")
+        .parse(own_ctrl)
+        .is_ok()
+    {
+        properties.push(FilterProp::Owned {
+            controller: ControllerRef::TargetPlayer,
+        });
+        return own_ctrl_offset + "that player owns".len();
+    }
 
     let (ctrl, ctrl_len) =
         parse_controller_suffix(text, ctx).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
