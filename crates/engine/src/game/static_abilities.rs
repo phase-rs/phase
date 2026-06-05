@@ -235,10 +235,13 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
 
     // CR 614.1d: Zone-based restriction handlers.
     // Enforcement happens in zones.rs (CantEnterBattlefieldFrom) and casting.rs (CantCastFrom),
-    // not through the standard handler flow, but we register them as rule_mod so that
-    // `check_static_ability` queries work.
+    // not through the standard handler flow, but we register CantEnterBattlefieldFrom as
+    // rule_mod so that `check_static_ability` queries work.
     registry.insert(StaticMode::CantEnterBattlefieldFrom, handle_rule_mod);
-    registry.insert(StaticMode::CantCastFrom, handle_rule_mod);
+    // Note: CantCastFrom is a data-carrying variant (carries `who` + the prohibited-zone
+    // list on `affected`) — parameterized, so no registry entry. Runtime enforcement is in
+    // casting.rs::is_blocked_from_casting_from_zone(). Coverage support is via
+    // is_data_carrying_static().
     // Note: CantCastDuring is a data-carrying variant — runtime enforcement will be in
     // casting.rs. Coverage support is via is_data_carrying_static().
     // Note: CantActivateDuring is a data-carrying variant — runtime enforcement is in

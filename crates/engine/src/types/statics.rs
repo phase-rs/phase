@@ -886,8 +886,28 @@ pub enum StaticMode {
     CantBeCopied,
     /// CR 604.3: Cards in specified zones can't enter the battlefield.
     CantEnterBattlefieldFrom,
-    /// CR 604.3: Players can't cast spells from specified zones.
-    CantCastFrom,
+    /// CR 601.3 + CR 101.2 + CR 109.5: The scoped player(s) can't cast spells from
+    /// the zones encoded in `StaticDefinition::affected` (via `FilterProp::InAnyZone`).
+    /// CR 601.3: a player can cast a spell only if no effect prohibits it; CR 101.2:
+    /// this "can't" overrides any cast-from-zone permission (escape, flashback,
+    /// foretell, commander).
+    ///
+    /// Two phrasings collapse onto this one variant:
+    /// - Grafdigger's Cage ("Players can't cast spells from graveyards or
+    ///   libraries"): `who = AllPlayers`, `affected = InAnyZone { [Graveyard, Library] }`.
+    /// - Drannith Magistrate ("Your opponents can't cast spells from anywhere
+    ///   other than their hands"): `who = Opponents`, `affected = InAnyZone {
+    ///   [Graveyard, Library, Exile, Command] }` — every cast-capable zone except
+    ///   the hand. The parser inverts "anywhere other than [hand]" into the
+    ///   explicit prohibited-zone list so the runtime check stays a single
+    ///   `InAnyZone` membership test.
+    ///
+    /// `who` rides the player axis (CR 109.5); the prohibited zones ride the
+    /// `affected` filter. Enforcement is in
+    /// `casting.rs::is_blocked_from_casting_from_zone`.
+    CantCastFrom {
+        who: ProhibitionScope,
+    },
     /// CR 101.2: Continuous casting prohibition — prevents players from casting
     /// spells under specified conditions (turn/phase-scoped).
     /// E.g., "Your opponents can't cast spells during your turn."
@@ -1464,7 +1484,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
             StaticMode::CantEnterBattlefieldFrom => write!(f, "CantEnterBattlefieldFrom"),
-            StaticMode::CantCastFrom => write!(f, "CantCastFrom"),
+            StaticMode::CantCastFrom { who } => write!(f, "CantCastFrom({who})"),
             StaticMode::CantCastDuring { who, when } => {
                 write!(f, "CantCastDuring({who},{when})")
             }
@@ -1847,7 +1867,6 @@ impl FromStr for StaticMode {
             "CantBeCountered" => StaticMode::CantBeCountered,
             "CantBeCopied" => StaticMode::CantBeCopied,
             "CantEnterBattlefieldFrom" => StaticMode::CantEnterBattlefieldFrom,
-            "CantCastFrom" => StaticMode::CantCastFrom,
             // Tier 1
             "CantBeBlocked" => StaticMode::CantBeBlocked,
             "Protection" => StaticMode::Protection,
@@ -1918,6 +1937,16 @@ impl FromStr for StaticMode {
                 {
                     if let Ok(who) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantBeCast { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CantCastFrom(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 601.3 + CR 109.5: Round-trip of the scope identifier;
+                    // the prohibited-zone list is data-carrying (`affected`).
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantCastFrom { who });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other

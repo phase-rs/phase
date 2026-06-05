@@ -10503,7 +10503,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         } if *fight_subject == TargetFilter::SelfRef => {
             *fight_subject = subject_filter;
         }
-        // CR 613.3 + CR 110.2: "[Player] gains control of [object]" — when the
+        // CR 613.1b + CR 110.2: "[Player] gains control of [object]" — when the
         // acting subject is a non-controller player (e.g. "an opponent of your
         // choice gains control of it"), the semantics are GIVE (the current
         // controller transfers the object to that player), not TAKE (the
@@ -31330,6 +31330,44 @@ mod tests {
         }
     }
 
+    /// Issue #2016: Bonder's Ornament — "each player who controls a permanent
+    /// named Bonder's Ornament draws a card" must produce ControlsCount with a
+    /// Named filter and deconjugated result "draw a card".
+    #[test]
+    fn strip_each_player_subject_named_permanent() {
+        use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
+        let (scope, result) = strip_each_player_subject(
+            "each player who controls a permanent named Bonder's Ornament draws a card",
+        );
+        assert_eq!(result, "draw a card");
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                filter,
+                comparator,
+                count,
+            }) => {
+                assert_eq!(relation, PlayerRelation::All);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                match &filter {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::Named { name }
+                                    if name == "Bonder's Ornament"
+                            )),
+                            "filter must contain Named prop, got {tf:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ControlsCount{{GE,Fixed(1)}}, got {other:?}"),
+        }
+    }
+
     /// CR 109.4 + CR 109.5: building-block coverage for the shared control
     /// predicate `parse_controls_permanent_object` — the comparator/count pair,
     /// the delegated object filter, the consumed-remainder shape, and the
@@ -31410,6 +31448,32 @@ mod tests {
         // Missing the "who …" lead → no predicate.
         let mut ctx = ParseContext::default();
         assert!(parse_controls_permanent_object("draws a card", &mut ctx).is_none());
+
+        // Issue #2016: "who controls a permanent named Bonder's Ornament draws
+        // a card" — the "named" suffix must terminate at the verb "draws" so
+        // the remainder carries the verb phrase.
+        let mut ctx = ParseContext::default();
+        let (comparator, count, filter, remainder) = parse_controls_permanent_object(
+            "who controls a permanent named Bonder's Ornament draws a card",
+            &mut ctx,
+        )
+        .expect("named-permanent control predicate must parse");
+        assert_eq!(comparator, Comparator::GE);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        match &filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Named { name }
+                            if name == "Bonder's Ornament"
+                    )),
+                    "filter must contain Named prop, got {tf:?}"
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+        assert_eq!(remainder.trim_start(), "draws a card");
     }
 
     #[test]
