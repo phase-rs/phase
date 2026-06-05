@@ -26571,7 +26571,7 @@ mod slicer_control_handoff_tests {
         out
     }
 
-    /// CR 613.3 + CR 110.2 (issue #2032): Slicer, Hired Muscle's attack trigger
+    /// CR 613.1b + CR 110.2 (issue #2032): Slicer, Hired Muscle's attack trigger
     /// is "you may pay {2}. If you do, untap it, goad it, and an opponent of your
     /// choice gains control of it." Before the fix the chunk splitter failed to
     /// recognize the trailing "an opponent of your choice gains control of it"

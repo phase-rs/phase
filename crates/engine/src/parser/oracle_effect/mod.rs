@@ -10503,7 +10503,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         } if *fight_subject == TargetFilter::SelfRef => {
             *fight_subject = subject_filter;
         }
-        // CR 613.3 + CR 110.2: "[Player] gains control of [object]" — when the
+        // CR 613.1b + CR 110.2: "[Player] gains control of [object]" — when the
         // acting subject is a non-controller player (e.g. "an opponent of your
         // choice gains control of it"), the semantics are GIVE (the current
         // controller transfers the object to that player), not TAKE (the

@@ -1042,7 +1042,7 @@ fn starts_you_control_subject_predicate(s: &str) -> bool {
     .is_ok()
 }
 
-/// CR 613.3 + CR 110.2: True when `s` is a "<player-subject> gains control of …"
+/// CR 613.1b + CR 110.2: True when `s` is a "<player-subject> gains control of …"
 /// clause — i.e. the control-handoff predicate where a *player* (not the acting
 /// controller) takes control of an object. The subject axis is the full set of
 /// player-noun phrases (`an opponent`, `an opponent of your choice`, `target
@@ -1058,7 +1058,7 @@ fn starts_you_control_subject_predicate(s: &str) -> bool {
 /// it"). Scoped to the "gains control of" verb so plain GainControl (the acting
 /// controller steals) stays on the un-split imperative path.
 fn starts_player_gains_control_clause(s: &str) -> bool {
-    let Ok((predicate, subject)) =
+    let Ok((_predicate, subject)) =
         take_until::<_, _, OracleError<'_>>(" gains control of ").parse(s)
     else {
         return false;
@@ -1067,13 +1067,10 @@ fn starts_player_gains_control_clause(s: &str) -> bool {
         return false;
     }
     // The span before the predicate must be a recognized player-subject phrase.
-    // `starts_with_subject_prefix` expects a trailing space, so re-attach the
-    // boundary consumed by `take_until` before validating.
-    let subject_phrase = format!("{} ", subject.trim_start());
-    super::subject::starts_with_subject_prefix(&subject_phrase)
-        && tag::<_, _, OracleError<'_>>(" gains control of ")
-            .parse(predicate)
-            .is_ok()
+    // Include the boundary space consumed by `take_until`; the predicate match
+    // above guarantees the next byte is the ASCII space before "gains".
+    let subject_phrase = &s[..subject.len() + 1];
+    super::subject::starts_with_subject_prefix(subject_phrase)
 }
 
 /// Inner implementation operating on pre-lowercased input.
@@ -1082,7 +1079,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         return false;
     }
 
-    // CR 613.3 + CR 110.2: "<player-subject> gains control of …" control-handoff
+    // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
     // clause (Slicer, Hired Muscle). A player subject + "gains control of"
     // predicate is never a noun-phrase continuation, so it must split off as its
     // own clause to reach the GiveControl subject-rewrite path.
@@ -1245,7 +1242,7 @@ pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
 
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
-    // CR 613.3 + CR 110.2: "<player-subject> gains control of …" control-handoff
+    // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
     // clause (Slicer, Hired Muscle: "untap it, goad it, and an opponent of your
     // choice gains control of it"). A player subject + "gains control of"
     // predicate is always a standalone subject-predicate clause, never a
