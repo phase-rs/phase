@@ -1430,6 +1430,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Emerge(_) => "emerge".to_string(),
         Keyword::Escape { .. } => "escape".to_string(),
         Keyword::Harmonize(_) => "harmonize".to_string(),
+        Keyword::Mayhem(_) => "mayhem".to_string(),
         Keyword::Evoke(_) => "evoke".to_string(),
         Keyword::Foretell(_) => "foretell".to_string(),
         Keyword::Mutate(_) => "mutate".to_string(),

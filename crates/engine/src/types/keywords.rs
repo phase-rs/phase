@@ -171,6 +171,7 @@ pub enum KeywordKind {
     Dash,
     Craft,
     Harmonize,
+    Mayhem,
     Warp,
     Devour,
     Offspring,
@@ -563,6 +564,11 @@ pub enum Keyword {
     /// CR 702.180: Harmonize {cost} — cast from graveyard for harmonize cost,
     /// tap up to one creature to reduce cost by its power, exile on resolution.
     Harmonize(ManaCost),
+    /// CR 702.187b: Mayhem {cost} — "As long as you discarded this card this
+    /// turn, you may cast it from your graveyard by paying [cost] rather than
+    /// paying its mana cost." Unlike Flashback/Harmonize, the spell is NOT
+    /// exiled on resolution — it resolves normally (like Escape).
+    Mayhem(ManaCost),
     /// CR 702.74a + CR 118.9: see `EvokeCost` for the mana / non-mana split.
     /// Pure-mana evoke (Lorwyn cycle) is `EvokeCost::Mana`; MH2 Incarnations
     /// (Solitude et al.) carry `EvokeCost::NonMana(AbilityCost::Exile { .. })`.
@@ -1021,6 +1027,7 @@ impl Keyword {
             Keyword::Dash(_) => KeywordKind::Dash,
             Keyword::Craft { .. } => KeywordKind::Craft,
             Keyword::Harmonize(_) => KeywordKind::Harmonize,
+            Keyword::Mayhem(_) => KeywordKind::Mayhem,
             Keyword::Warp(_) => KeywordKind::Warp,
             Keyword::Devour(_) => KeywordKind::Devour,
             Keyword::Offspring(_) => KeywordKind::Offspring,
@@ -1619,6 +1626,9 @@ impl FromStr for Keyword {
                 "dash" => return Ok(Keyword::Dash(parse_keyword_mana_cost(p))),
                 "emerge" => return Ok(Keyword::Emerge(parse_keyword_mana_cost(p))),
                 "harmonize" => return Ok(Keyword::Harmonize(parse_keyword_mana_cost(p))),
+                // CR 702.187b: Mayhem {cost} — cast from graveyard if discarded
+                // this turn for the mayhem (mana) cost.
+                "mayhem" => return Ok(Keyword::Mayhem(parse_keyword_mana_cost(p))),
                 "escape" => {
                     return Ok(Keyword::Escape {
                         cost: parse_keyword_mana_cost(p),
@@ -2313,6 +2323,9 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.138: MTGJSON provides bare "Escape" with no structured cost data.
         // Placeholder values — the Oracle parser overwrites with real cost/exile_count.
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
+        // CR 702.187b: MTGJSON may provide bare "Mayhem"; the Oracle parser
+        // overwrites with the real mana cost extracted from reminder text.
+        "Mayhem" => Ok(Keyword::Mayhem(mana(data)?)),
         "Escape" => Ok(Keyword::Escape {
             cost: ManaCost::default(),
             exile_count: 0,

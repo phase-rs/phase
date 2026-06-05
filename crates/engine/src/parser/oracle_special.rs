@@ -409,6 +409,25 @@ pub(super) fn parse_harmonize_keyword(line: &str) -> Option<Keyword> {
     Some(Keyword::Harmonize(cost))
 }
 
+/// CR 702.187b: Parse a "Mayhem {cost}" Oracle line into `Keyword::Mayhem`.
+/// MTGJSON's keywords array carries only the bare "Mayhem" name, so the mana
+/// cost is extracted here from the card's Oracle text (the cost precedes the
+/// parenthesized reminder text). Mirrors `parse_harmonize_keyword`.
+pub(super) fn parse_mayhem_keyword(line: &str) -> Option<Keyword> {
+    let lower = line.to_lowercase();
+    let ((), rest) = nom_on_lower(line, &lower, |i| value((), tag("mayhem ")).parse(i))?;
+    let cost_str = if let Some(paren_start) = rest.find('(') {
+        rest[..paren_start].trim()
+    } else {
+        rest.trim()
+    };
+    if cost_str.is_empty() {
+        return None;
+    }
+    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+    Some(Keyword::Mayhem(cost))
+}
+
 /// CR 702.24a: Dispatch a cumulative-upkeep cost text into a typed
 /// `AbilityCost`. Tries disjunctive mana (`"{G} or {W}"`), then pure mana
 /// (`"{1}"`), then falls back to the generic single-cost parser (which handles
