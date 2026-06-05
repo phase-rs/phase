@@ -308,6 +308,7 @@
     "convokeHint": "Tap creatures to help pay.",
     "improviseHint": "Tap artifacts to help pay.",
     "convokeOrImproviseHint": "Tap creatures or artifacts to help pay.",
+    "convokeStaged": "Tapped:",
     "lifeAmount": "2 life",
     "lifeCostSummary": "({{count}} life)",
     "paymentPending": "Payment is still pending. Tap permanents or cancel this action.",

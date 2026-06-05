@@ -1164,6 +1164,12 @@ fn detect_dynamic_qty(
         // iteration-source QuantityRef driving `repeat_for`, not a swallowed
         // count.
         "DistinctCounterKindsAmong",
+        // CR 701.34a + CR 122.1: Skyship Plunderer / Maulfist Revolutionary —
+        // "for each kind of counter on target permanent or player, give that
+        // permanent or player another counter of that kind" is captured whole by
+        // `Effect::ProliferateTarget`. The counter-kind iteration is intrinsic to
+        // the proliferate operation, not a swallowed `QuantityExpr` count.
+        "\"type\":\"ProliferateTarget\"",
         // CR 702.122: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.
@@ -2730,6 +2736,39 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// Issue #2233: Condition_Unless — representative cards from the drilldown.
+    #[test]
+    fn condition_unless_accepts_representative_cards() {
+        for (oracle, name, types) in [
+            (
+                "Creatures can't attack a player unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn.",
+                "Arboria",
+                &["Enchantment"][..],
+            ),
+            (
+                "Enchanted creature can't be blocked unless defending player pays {3} for each creature they control that's blocking it.",
+                "Awesome Presence",
+                &["Enchantment"][..],
+            ),
+            (
+                "Blazing Salvo deals 3 damage to target creature unless that creature's controller has Blazing Salvo deal 5 damage to them.",
+                "Blazing Salvo",
+                &["Instant"][..],
+            ),
+            (
+                "This creature can't attack unless defending player is poisoned.",
+                "Chained Throatseeker",
+                &["Creature"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                !has_swallowed_detector(&parsed, "Condition_Unless"),
+                "{name} should not swallow unless clause"
+            );
+        }
     }
 
     /// CR 707.10c: Thousand-Year Storm exercises the triggered-ability context

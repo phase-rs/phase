@@ -3436,6 +3436,17 @@ fn mana_payment_actions(
     ));
     if let Some(mode) = convoke_mode {
         // CR 702.51a + CR 302.6: Summoning sickness does not restrict tapping for convoke.
+        // CR 702.51a: a Convoke tap reduces the cost by {1} (a Colorless marker) or by one
+        // mana of the creature's color (a colored marker, which pays ONLY a matching colored
+        // pip — see `mana_payment`). Capture the locked spell cost's shards so a colored tap
+        // is offered only when the cost actually contains a pip of that color; tapping for a
+        // color the cost can't use spends the creature for nothing. Unavailable cost ⇒ offer
+        // every color (never prune a possibly-useful option on missing information).
+        let convoke_cost_shards: Option<&[crate::types::mana::ManaCostShard]> =
+            state.pending_cast.as_ref().and_then(|pc| match &pc.cost {
+                crate::types::mana::ManaCost::Cost { shards, .. } => Some(shards.as_slice()),
+                _ => None,
+            });
         for (obj_id, obj) in &state.objects {
             match mode {
                 ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
@@ -3470,8 +3481,17 @@ fn mana_payment_actions(
                         TacticalClass::Mana,
                         Some(player),
                     ));
-                    // Plus one per color the creature has
+                    // CR 702.51a: one colored tap per color the creature has — but only
+                    // colors the cost can actually use. A colored convoke marker pays only a
+                    // matching colored pip, so a color absent from the cost is a wasted tap.
+                    // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
+                    // unavailable, offer every color rather than risk pruning a useful option.
                     for color in &obj.color {
+                        if let Some(shards) = convoke_cost_shards {
+                            if !shards.iter().any(|shard| shard.contributes_to(*color)) {
+                                continue;
+                            }
+                        }
                         actions.push(candidate(
                             GameAction::TapForConvoke {
                                 object_id: *obj_id,
@@ -4532,6 +4552,101 @@ mod tests {
                 GameAction::TapLandForMana { object_id } if object_id == blank_land
             )
         }));
+    }
+
+    #[test]
+    fn convoke_offers_only_cost_relevant_colored_taps() {
+        // CR 702.51a: a Convoke tap reduces the cost by {1} (Colorless marker) or by one
+        // mana of the creature's color (a colored marker that pays ONLY a matching colored
+        // pip). For a {4}{W} cost, a green creature can only help via the generic {1} — a
+        // green colored tap pays nothing and wastes the creature. The generator must offer
+        // the Colorless tap for every eligible creature, suppress the green colored tap, and
+        // still offer the white creature's white tap (the cost contains a {W} pip).
+        let mut state = GameState::new_two_player(42);
+
+        // Lock in a {4}{W} pending cast — the convoke spell being paid.
+        let spell = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Venerated Loxodon".to_string(),
+            Zone::Stack,
+        );
+        state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast::new(
+            spell,
+            CardId(400),
+            crate::types::ability::ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "test".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                spell,
+                PlayerId(0),
+            ),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 4,
+            },
+        )));
+
+        // Mono-green creature: its color is absent from the cost.
+        let green = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&green).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color = vec![ManaColor::Green];
+        }
+        // Mono-white creature: its color is present in the cost.
+        let white = create_object(
+            &mut state,
+            CardId(402),
+            PlayerId(0),
+            "Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&white).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color = vec![ManaColor::White];
+        }
+
+        let actions = mana_payment_actions(&state, PlayerId(0), Some(ConvokeMode::Convoke));
+        let has = |object_id, mana_type| {
+            actions.iter().any(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::TapForConvoke { object_id: o, mana_type: m }
+                        if o == object_id && m == mana_type
+                )
+            })
+        };
+
+        // Generic tap: always available for any convoke-eligible creature.
+        assert!(
+            has(green, ManaType::Colorless),
+            "green creature must offer the generic convoke tap"
+        );
+        assert!(
+            has(white, ManaType::Colorless),
+            "white creature must offer the generic convoke tap"
+        );
+        // Green is absent from {4}{W} → no green colored tap (the wasted-tap bug).
+        assert!(
+            !has(green, ManaType::Green),
+            "green convoke must NOT be offered for a cost with no green pip"
+        );
+        // White is present in {4}{W} → the white creature's colored tap is offered.
+        assert!(
+            has(white, ManaType::White),
+            "white convoke must be offered when the cost contains a white pip"
+        );
     }
 
     #[test]

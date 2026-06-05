@@ -8,9 +8,12 @@ pub mod mtgjson;
 pub mod oracle_loader;
 pub mod search;
 pub mod synthesis;
+pub mod unearth;
 
 #[cfg(test)]
 mod embalm_eternalize_tests;
+#[cfg(test)]
+mod unearth_tests;
 
 pub use bracket_lists::{BracketLists, BracketSignals};
 pub use card_db::CardDatabase;

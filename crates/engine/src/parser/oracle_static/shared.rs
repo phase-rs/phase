@@ -1019,14 +1019,18 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
 /// layer and the `parse_condition` "unless " dispatch share one polarity rule.
 pub(crate) fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
     let (_, unless_text) = tp.split_around(" unless ")?;
-    let lower = unless_text
-        .original
-        .trim()
-        .trim_end_matches('.')
-        .to_lowercase();
-    nom_condition::parse_unless_condition(&lower)
-        .ok()
-        .map(|(_, c)| c)
+    let original = unless_text.original.trim().trim_end_matches('.');
+    let lower = original.to_lowercase();
+    if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
+        return Some(condition);
+    }
+    // Preserve the Oracle unless rider in the AST so swallow/coverage see a
+    // `condition` slot even when the inner clause is not yet decomposed.
+    Some(StaticCondition::Not {
+        condition: Box::new(StaticCondition::Unrecognized {
+            text: format!("unless {original}"),
+        }),
+    })
 }
 
 /// CR 508.1 / CR 509.1c: Parse the trailing " if [condition]" clause of a
@@ -2340,6 +2344,13 @@ pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
     let (rest, _) = tag("can't attack").parse(input)?;
     let (rest, _) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
+    let (rest, a_player) = opt(preceded(space1, tag("a player"))).parse(rest)?;
     let (rest, defended) = parse_cant_attack_defended_scope_nom(rest)?;
+    use crate::types::triggers::AttackTargetFilter;
+    let defended = if a_player.is_some() {
+        Some(AttackTargetFilter::Player)
+    } else {
+        defended
+    };
     Ok((rest, defended))
 }
