@@ -1256,12 +1256,11 @@ fn effect_consumes_parent_object_referent(effect: &Effect) -> bool {
     // An anaphoric consumer reads the parent's per-player object either as a
     // quantity ("loses life equal to that card's mana value") or as a target
     // ("then puts it into their hand" → `ChangeZone { target: ParentTarget }`).
-    let amount_is_anaphoric = match effect {
-        Effect::LoseLife { amount, .. }
-        | Effect::GainLife { amount, .. }
-        | Effect::DealDamage { amount, .. } => quantity_expr_references_demonstrative(amount),
-        _ => false,
-    };
+    let mut quantities = Vec::new();
+    collect_effect_quantity_exprs(effect, &mut quantities);
+    let amount_is_anaphoric = quantities
+        .iter()
+        .any(|qty| quantity_expr_references_demonstrative(qty));
     let target_is_anaphoric = match effect {
         Effect::ChangeZone { target, .. } => filter_is_parent_object_anaphor(target),
         _ => false,
@@ -11282,6 +11281,88 @@ mod tests {
         assert!(
             put_in_scope.player_scope.is_none(),
             "the kept ChangeZone's redundant player_scope is cleared too"
+        );
+
+        // Reveal -> Draw(that card's MV), all scope=All. This is a latent
+        // sibling of the Duskmantle shape: no current card prints this exact
+        // per-player draw form, but it consumes the same per-iteration
+        // demonstrative quantity and must stay in the scoped template.
+        let mut draw_anaphoric = make_reveal();
+        draw_anaphoric.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        draw_anaphoric.sub_ability = Some(Box::new(draw));
+
+        let (scoped_draw, tail_draw) =
+            split_player_scope_chain(&draw_anaphoric, &PlayerFilter::All);
+        assert!(
+            tail_draw.is_none(),
+            "an anaphoric Draw quantity stays inside the reveal iteration"
+        );
+        let draw_in_scope = scoped_draw
+            .sub_ability
+            .as_ref()
+            .expect("Draw stays attached");
+        assert!(
+            matches!(draw_in_scope.effect, Effect::Draw { .. }),
+            "Draw is the kept sub-clause"
+        );
+        assert!(
+            draw_in_scope.player_scope.is_none(),
+            "the kept Draw's redundant player_scope is cleared"
+        );
+
+        // Reveal -> PutCounter(that card's MV counters), all scope=All. The
+        // target is deliberately non-anaphoric here; the quantity alone must be
+        // enough to keep the consumer in the scoped iteration.
+        let mut counter_anaphoric = make_reveal();
+        counter_anaphoric.player_scope = Some(PlayerFilter::All);
+        let mut put_counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        put_counter.player_scope = Some(PlayerFilter::All);
+        counter_anaphoric.sub_ability = Some(Box::new(put_counter));
+
+        let (scoped_counter, tail_counter) =
+            split_player_scope_chain(&counter_anaphoric, &PlayerFilter::All);
+        assert!(
+            tail_counter.is_none(),
+            "an anaphoric PutCounter quantity stays inside the reveal iteration"
+        );
+        let counter_in_scope = scoped_counter
+            .sub_ability
+            .as_ref()
+            .expect("PutCounter stays attached");
+        assert!(
+            matches!(counter_in_scope.effect, Effect::PutCounter { .. }),
+            "PutCounter is the kept sub-clause"
+        );
+        assert!(
+            counter_in_scope.player_scope.is_none(),
+            "the kept PutCounter's redundant player_scope is cleared"
         );
 
         // Reveal → Draw(PreviousEffectAmount): cross-player aggregate, scope=All.
