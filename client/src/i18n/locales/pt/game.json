@@ -308,6 +308,7 @@
     "convokeHint": "Vire criaturas para ajudar a pagar.",
     "improviseHint": "Vire artefatos para ajudar a pagar.",
     "convokeOrImproviseHint": "Vire criaturas ou artefatos para ajudar a pagar.",
+    "convokeStaged": "Viradas:",
     "lifeAmount": "2 de vida",
     "lifeCostSummary": "({{count}} de vida)",
     "paymentPending": "O pagamento ainda está pendente. Vire permanentes ou cancele esta ação.",

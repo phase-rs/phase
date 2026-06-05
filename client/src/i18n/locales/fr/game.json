@@ -308,6 +308,7 @@
     "convokeHint": "Engagez des créatures pour aider à payer.",
     "improviseHint": "Engagez des artefacts pour aider à payer.",
     "convokeOrImproviseHint": "Engagez des créatures ou des artefacts pour aider à payer.",
+    "convokeStaged": "Engagés :",
     "lifeAmount": "2 points de vie",
     "lifeCostSummary": "({{count}} points de vie)",
     "paymentPending": "Le paiement est toujours en attente. Engagez des permanents ou annulez cette action.",

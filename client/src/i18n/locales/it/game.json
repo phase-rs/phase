@@ -308,6 +308,7 @@
     "convokeHint": "TAPpa le creature per aiutare a pagare.",
     "improviseHint": "TAPpa gli artefatti per aiutare a pagare.",
     "convokeOrImproviseHint": "TAPpa creature o artefatti per aiutare a pagare.",
+    "convokeStaged": "TAPpate:",
     "lifeAmount": "2 punti vita",
     "lifeCostSummary": "({{count}} punti vita)",
     "paymentPending": "Il pagamento è ancora in sospeso. TAPpa i permanenti o annulla questa azione.",
