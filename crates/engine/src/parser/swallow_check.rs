@@ -28,6 +28,7 @@ use crate::types::ability::{
     FilterProp, ModalSelectionConstraint, OpponentMayScope, PlayerFilter, QuantityExpr,
     ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
 };
+use crate::types::keywords::{ActivationCadence, Keyword};
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -1006,10 +1007,27 @@ fn def_has_activation_restriction(def: &AbilityDefinition) -> bool {
     !def.activation_restrictions.is_empty() || def.sorcery_speed
 }
 
+fn keyword_has_activation_limit(keyword: &Keyword) -> bool {
+    matches!(
+        keyword,
+        Keyword::Crew {
+            once_per_turn: ActivationCadence::OncePerTurn,
+            ..
+        }
+    )
+}
+
+fn any_keyword_has_activation_limit(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .extracted_keywords
+        .iter()
+        .any(keyword_has_activation_limit)
+}
+
 fn any_ability_has_limit(parsed: &ParsedAbilities) -> bool {
     // For Phase 1, treat presence of any non-trivial `constraint` as
     // covering activation limits too. Phase 2 will split these.
-    any_ability_has_constraint(parsed)
+    any_ability_has_constraint(parsed) || any_keyword_has_activation_limit(parsed)
 }
 
 fn any_text_field_contains(parsed: &ParsedAbilities, needle: &str) -> bool {
@@ -3032,6 +3050,22 @@ mod tests {
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
             "draw a card for each creature you control."
         ));
+    }
+
+    // ── ActivateLimit regressions (#2240) ──────────────────────────────────
+
+    #[test]
+    fn activate_limit_accepts_crew_once_per_turn_cadence() {
+        // CR 702.122 + CR 602.5b: Luxurious Locomotive — "Crew 1. Activate only
+        // once each turn." The cadence sentence is represented on the Crew
+        // keyword's `once_per_turn` field, not on an activated ability.
+        let parsed = parse_named(
+            "Crew 1. Activate only once each turn. (Tap any number of creatures you control with total power 1 or more: This Vehicle becomes an artifact creature until end of turn.)\n\
+             Whenever a creature attacks, create a Treasure token for each creature and Vehicle that attacked this turn.",
+            "Luxurious Locomotive",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "ActivateLimit"));
     }
 
     // ── Optional_MayHave regressions (#2237) ───────────────────────────────
