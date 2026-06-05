@@ -331,8 +331,14 @@ pub(crate) fn parse_cast_as_though_flash_static(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
-    let type_text = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
+    let (type_text, all_players) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, all_players) = alt((
+            value(false, tag::<_, _, OracleError<'_>>("you may ")),
+            value(true, tag("players may ")),
+            value(true, tag("any player may ")),
+            value(false, tag("")),
+        ))
+        .parse(i)?;
         let (i, _) = tag("cast ").parse(i)?;
         // "[type] spells as though they had flash" — the bare "spells" form
         // (no type prefix) grants flash to every spell (Leyline of Anticipation).
@@ -349,26 +355,25 @@ pub(crate) fn parse_cast_as_though_flash_static(
         .parse(i)?;
         let (i, _) = opt(tag(".")).parse(i)?;
         let (i, _) = eof.parse(i)?;
-        Ok((i, type_part.to_string()))
+        Ok((i, (type_part.to_string(), all_players)))
     })?
     .0;
 
     // CR 601.3b: scope the grant to the spell class. A bare "spells" grant
-    // applies to every spell the controller casts (TargetFilter::Any); a typed
-    // grant ("creature spells") constrains to that type and is scoped to spells
-    // the controller casts (ControllerRef::You), matching the casting-grant
-    // semantics of `parse_spells_have_keyword`.
-    let affected = if type_text.is_empty() {
-        TargetFilter::Any
+    // applies to every spell the controller casts; a typed grant ("creature
+    // spells") constrains to that type. "Players may" / "Any player may" forms
+    // intentionally remain unscoped, while "you may" forms recurse through
+    // `TargetFilter::Or` via `apply_spell_keyword_subject_constraints`.
+    let base_filter = if type_text.is_empty() {
+        TargetFilter::Typed(TypedFilter::card())
     } else {
         let phrase = format!("{type_text} spells");
-        let mut filter = parse_type_phrase(&phrase).0;
-        if let TargetFilter::Typed(ref mut tf) = filter {
-            if tf.controller.is_none() {
-                tf.controller = Some(ControllerRef::You);
-            }
-        }
-        filter
+        parse_type_phrase(&phrase).0
+    };
+    let affected = if all_players {
+        base_filter
+    } else {
+        apply_spell_keyword_subject_constraints(base_filter, None, None, Vec::new())
     };
 
     Some(

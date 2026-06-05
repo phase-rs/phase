@@ -39,7 +39,12 @@ expression: "&ir"
           }
         },
         "affected": {
-          "type": "Any"
+          "type": "Typed",
+          "type_filters": [
+            "Card"
+          ],
+          "controller": "You",
+          "properties": []
         },
         "modifications": [],
         "condition": null,
