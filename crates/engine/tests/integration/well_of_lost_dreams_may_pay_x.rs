@@ -73,9 +73,9 @@ fn advance_until_choice(runner: &mut engine::game::scenario::GameRunner) {
                 return;
             }
             _ => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    return;
-                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass while advancing to a choice must succeed");
             }
         }
     }
@@ -105,7 +105,6 @@ fn well_of_lost_dreams_yes_then_pay_three_draws_three() {
     }
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-    runner.state_mut().debug_mode = true;
     // 5 mana available — distinguishes the life-gained cap (3) from the
     // mana cap (5). A regression that collapses max to player-mana would
     // surface as max=5 and a 5-card draw.
@@ -218,7 +217,6 @@ fn well_of_lost_dreams_no_does_nothing() {
     }
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-    runner.state_mut().debug_mode = true;
     add_colorless_mana(&mut runner, 5);
 
     let hand_before = runner.state().players[0].hand.len();
