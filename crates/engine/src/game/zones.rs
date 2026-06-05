@@ -345,6 +345,19 @@ pub fn move_to_zone(
 
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
+
+    // CR 603.2g + CR 603.6a: A Battlefield → Battlefield no-op does not put a
+    // permanent onto the battlefield, so no trigger event occurs and no ETB
+    // ability can trigger. No new object is created and no ZoneChanged event is
+    // emitted.
+    // Without this guard, move_to_zone(coiling_id, Battlefield) while Coiling
+    // Oracle is already on the battlefield removes then re-adds it, emits a
+    // spurious ZoneChanged{from:Battlefield, to:Battlefield} event, and fires
+    // its own ETB trigger again — causing an infinite loop.
+    if from == Zone::Battlefield && to == Zone::Battlefield {
+        return;
+    }
+
     let owner = obj.owner;
     let redirect_attraction_to_command = super::attractions::is_attraction_card(obj)
         && !matches!(to, Zone::Battlefield | Zone::Exile | Zone::Command);
@@ -967,6 +980,30 @@ mod tests {
             }
             _ => panic!("expected ZoneChanged event"),
         }
+    }
+
+    /// CR 603.2g + CR 603.6a: a no-op Battlefield → Battlefield move does not
+    /// create a zone-change event, so ETB triggers have no event to observe.
+    #[test]
+    fn move_battlefield_to_battlefield_is_no_op() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coiling Oracle".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        assert!(state.battlefield.contains(&id));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert!(
+            events.is_empty(),
+            "same-zone battlefield move must not emit ZoneChanged events"
+        );
     }
 
     #[test]

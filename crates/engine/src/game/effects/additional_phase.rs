@@ -134,6 +134,7 @@ mod tests {
             controller,
             original_controller: None,
             scoped_player: None,
+            target_chooser: None,
             source_id: ObjectId(1),
             targets: vec![],
             kind: AbilityKind::Spell,

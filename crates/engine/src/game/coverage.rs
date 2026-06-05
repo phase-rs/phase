@@ -3,7 +3,9 @@ use crate::database::CardDatabase;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
-use crate::parser::oracle::is_commander_permission_sentence;
+use crate::parser::oracle::{
+    is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
+};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
@@ -4426,6 +4428,9 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
         if is_commander_permission_sentence(&lower) {
             continue;
         }
+        if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
 
         // Check if this line contains a modal header ("choose one —", "choose two.", etc.)
         // Handles standalone headers, triggered modals ("when enters, choose one —"),
@@ -6421,6 +6426,17 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         }
         let lower = stripped.to_lowercase();
         if is_commander_permission_sentence(&lower) {
+            continue;
+        }
+
+        // CR 100.2a / CR 903.5b: Deck-construction copy-limit lines ("A deck can
+        // have any number of cards named X.", "...up to seven cards named Seven
+        // Dwarves.", the Megalegendary line, etc.) are consumed by the parser as
+        // typed `DeckCopyLimit` metadata (see `compute_deck_copy_limit_from_text`,
+        // read by `deck_validation`), not as a resolvable ability — they
+        // legitimately produce no `ParsedElement`. Skip them so they are not
+        // falsely reported as `SilentDrop`.
+        if is_deck_construction_copy_limit_sentence(stripped) {
             continue;
         }
 
@@ -10082,6 +10098,40 @@ mod tests {
         face.oracle_text = Some(oracle.to_string());
 
         assert!(audit_card_lines(oracle, &face).is_empty());
+    }
+
+    #[test]
+    fn deck_construction_copy_limit_line_does_not_count_as_silent_drop() {
+        // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
+        // (and the "up to N" / bare-Megalegendary variants) is consumed by the
+        // parser as typed DeckCopyLimit metadata, not a resolvable ability, so
+        // it must not be flagged as a SilentDrop. Covers the class, not one card.
+        let mut face = make_face();
+        for oracle in [
+            "A deck can have any number of cards named Relentless Rats.",
+            "A deck can have up to seven cards named Seven Dwarves.",
+            "A deck can have up to nine cards named Nazgûl.",
+            "Megalegendary",
+            "Megalegendary (Your deck can have any number of cards named Vazal, the Compleat.)",
+        ] {
+            face.oracle_text = Some(oracle.to_string());
+            assert!(
+                audit_card_lines(oracle, &face).is_empty(),
+                "deck-construction line falsely flagged as a finding: {oracle}"
+            );
+
+            let mut missing = Vec::new();
+            check_silent_drops(&Some(oracle.to_string()), &[], &mut missing);
+            assert!(
+                missing.is_empty(),
+                "deck-construction line falsely counted as SilentDrop: {oracle} -> {missing:?}"
+            );
+            assert_eq!(
+                count_effective_oracle_lines(oracle),
+                0,
+                "deck-construction line should not count as a runtime oracle line: {oracle}"
+            );
+        }
     }
 
     #[test]

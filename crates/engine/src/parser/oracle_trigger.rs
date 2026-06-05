@@ -1135,7 +1135,28 @@ fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefin
 /// than the trigger event? True for player-selected object filters (`Typed`,
 /// and `Or`/`And` combinations of them); false for anaphoric/contextual refs
 /// (`ParentTarget`, `TriggeringSource`, `SelfRef`, …) and untargeted effects.
+///
+/// Effects that write `state.last_revealed_ids` also return `true`: sub-abilities
+/// that follow them bind `ParentTarget` to those revealed objects — NOT to the
+/// trigger event source. Allowing the lift to descend past a `RevealTop` would
+/// rewrite the sub-ability's `ChangeZone.target` from `ParentTarget` to
+/// `TriggeringSource`, causing the engine to put the *trigger source* (e.g.,
+/// Coiling Oracle) onto the battlefield instead of the revealed land card,
+/// which then re-emits a `ZoneChanged` event and loops the ETB trigger
+/// (CR 603.2g: triggers fire only when their specific event occurs — the
+/// trigger source must be the entering object).
 fn introduces_chosen_object_target(effect: &Effect) -> bool {
+    // CR 608.2c + CR 603.2g: Effects that populate state.last_revealed_ids
+    // introduce revealed objects. Sub-ability ParentTarget binds to those
+    // objects, not to the trigger event source. Stopping the lift here prevents
+    // TriggeringSource from overriding the injected last_revealed_ids targets
+    // in downstream ChangeZone sub-abilities.
+    if matches!(
+        effect,
+        Effect::RevealTop { .. } | Effect::Dig { .. } | Effect::RevealUntil { .. } | Effect::Clash
+    ) {
+        return true;
+    }
     fn is_chosen(filter: &TargetFilter) -> bool {
         match filter {
             TargetFilter::Typed(_) => true,
@@ -22441,6 +22462,7 @@ mod tests {
                 special,
                 source_text: String::new(),
                 target_selection_mode: Default::default(),
+                target_chooser: None,
             }
         }
 
@@ -26359,6 +26381,73 @@ mod snapshot_tests {
                 "chain link {i} should be TriggeringSource, got {t:?}",
             );
         }
+    }
+
+    /// CR 603.2 + CR 608.2c: Coiling Oracle's self-ETB trigger reveals the top
+    /// card and conditionally puts a land onto the battlefield.  The `ChangeZone`
+    /// sub-ability that follows `RevealTop` must keep `target: ParentTarget`
+    /// (resolved at runtime to `state.last_revealed_ids[0]`, i.e., the revealed
+    /// land card) — NOT `TriggeringSource` (the Coiling Oracle object itself).
+    ///
+    /// Before the fix, `introduces_chosen_object_target` returned `false` for
+    /// `RevealTop`, so `lift_parent_target_to_triggering_source_in_ability`
+    /// descended past the RevealTop and rewrote the sub-ability's `ChangeZone`
+    /// target to `TriggeringSource`.  At runtime that caused `move_to_zone` to
+    /// be called with Coiling Oracle's own ID, which removed and re-added it to
+    /// the battlefield, emitted a new `ZoneChanged` ETB event, and looped
+    /// indefinitely.
+    ///
+    /// This test locks the correct `ParentTarget` parse output so the anaphor
+    /// binds to the revealed card, not the trigger source.  Covers the
+    /// Coiling-Oracle / Explore / Animist's Awakening class of self-ETB RevealTop
+    /// triggers.
+    #[test]
+    fn reveal_top_sub_ability_target_stays_parent_not_triggering_source() {
+        let def = parse_trigger_line(
+            "When this creature enters, reveal the top card of your library. If it's a land card, put it onto the battlefield. Otherwise, put that card into your hand.",
+            "Coiling Oracle",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+
+        let execute = def.execute.as_deref().expect("trigger has execute body");
+
+        // Top-level effect must be RevealTop.
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::RevealTop { .. }),
+            "expected RevealTop as top-level effect, got {:?}",
+            execute.effect
+        );
+
+        // Walk sub_ability chain to find the ChangeZone (land → battlefield).
+        let mut found_change_zone = false;
+        let mut next = execute.sub_ability.as_deref();
+        while let Some(child) = next {
+            if let Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } = child.effect.as_ref()
+            {
+                if *destination == Zone::Battlefield {
+                    assert!(
+                        matches!(target, TargetFilter::ParentTarget),
+                        "ChangeZone(→Battlefield) sub-ability target must be ParentTarget \
+                         (resolved to the revealed card at runtime via last_revealed_ids), \
+                         but got {target:?}. \
+                         TriggeringSource here would put Coiling Oracle itself onto the \
+                         battlefield again, causing an infinite ETB loop (issue #2395).",
+                    );
+                    found_change_zone = true;
+                }
+            }
+            next = child.sub_ability.as_deref();
+        }
+
+        assert!(
+            found_change_zone,
+            "expected a ChangeZone(→Battlefield) sub-ability in the trigger chain"
+        );
     }
 
     // CR 701.3d: "Whenever ~ becomes unattached from a permanent" trigger

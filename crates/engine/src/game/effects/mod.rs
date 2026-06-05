@@ -1081,6 +1081,13 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
     )
 }
 
+fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::RevealTop { .. } | Effect::Dig { .. } | Effect::RevealUntil { .. } | Effect::Clash
+    )
+}
+
 fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> bool {
     match ability.condition {
         Some(AbilityCondition::Not { ref condition })
@@ -4446,21 +4453,12 @@ fn resolve_chain_body(
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {
                     let mut else_resolved = else_branch.as_ref().clone();
-                    // Inject revealed card IDs as targets for else branches following RevealTop
-                    // or a pure-peek Dig (reveal: false, keep_count: 0), so "Otherwise, put
-                    // that card on the bottom of your library" knows which card to move.
+                    // Inject revealed card IDs as targets for else branches following
+                    // effects that write last_revealed_ids, so "Otherwise, put that
+                    // card on the bottom of your library" knows which card to move.
                     if else_resolved.targets.is_empty()
                         && !state.last_revealed_ids.is_empty()
-                        && matches!(
-                            ability.effect,
-                            Effect::RevealTop { .. }
-                                | Effect::Dig { reveal: true, .. }
-                                | Effect::Dig {
-                                    reveal: false,
-                                    keep_count: Some(0),
-                                    ..
-                                }
-                        )
+                        && effect_writes_last_revealed_ids(&ability.effect)
                     {
                         else_resolved.targets = state
                             .last_revealed_ids
@@ -4728,13 +4726,11 @@ fn resolve_chain_body(
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
-            && matches!(
-                ability.effect,
-                Effect::RevealTop { .. } | Effect::Dig { reveal: true, .. }
-            )
+            && effect_writes_last_revealed_ids(&ability.effect)
         {
-            // Inject revealed card IDs as targets for sub_abilities following RevealTop/Dig(reveal).
-            // Parallel to how continuations inject chosen cards as targets.
+            // Inject revealed card IDs as targets for sub_abilities following
+            // effects that write last_revealed_ids. Parallel to how
+            // continuations inject chosen cards as targets.
             let mut sub_with_targets = sub.as_ref().clone();
             sub_with_targets.targets = state
                 .last_revealed_ids

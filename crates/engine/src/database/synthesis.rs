@@ -12,13 +12,14 @@ use crate::types::ability::{
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
     AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration,
-    Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
-    StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter,
+    DamageModification, Duration, Effect, FilterProp, KickerVariant, ManaContribution,
+    ManaProduction, ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant,
+    ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -2785,6 +2786,67 @@ pub fn synthesize_riot(face: &mut CardFace) {
         .collect();
     for filter in static_grants {
         add_riot_replacements(face, filter, 1);
+    }
+}
+
+/// CR 702.64a: Absorb N — "If a source would deal damage to this creature,
+/// prevent N of that damage." A continuous, self-recipient damage replacement:
+/// `DamageModification::Minus { value: N }` saturating-subtracts N from each
+/// damage event whose recipient is this creature (`valid_card: SelfRef`). It is
+/// NOT a consumed shield, so it re-applies to every source and every event
+/// independently (CR 702.64b). No new variant — mirrors the continuous
+/// damage-prevention statics (Benevolent Unicorn class) and the self-scoped
+/// `valid_card(SelfRef)` damage replacements (persistent prevention shields).
+fn build_absorb_replacement(n: u32) -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .valid_card(TargetFilter::SelfRef)
+        .damage_modification(DamageModification::Minus { value: n })
+        .description(format!(
+            "CR 702.64a: Absorb {n} — if a source would deal damage to this creature, \
+             prevent {n} of that damage."
+        ))
+}
+
+/// CR 702.64a: Identity predicate for an Absorb `n` replacement — a self-recipient
+/// `DamageDone` replacement that subtracts `n` from the damage. Parameterized by
+/// `n` for count-based idempotency and so a granted-then-removed Absorb strips
+/// exactly its own replacement.
+fn is_absorb_replacement(r: &ReplacementDefinition, n: u32) -> bool {
+    matches!(r.event, ReplacementEvent::DamageDone)
+        && matches!(r.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            r.damage_modification,
+            Some(DamageModification::Minus { value }) if value == n
+        )
+}
+
+/// CR 702.64a/c: Synthesize Absorb into a continuous self-recipient damage
+/// replacement. CR 702.64c: multiple instances apply separately, so one
+/// replacement is installed per `Keyword::Absorb` instance (grouped by N).
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Absorb(n)`, so every printed
+/// Absorb creature and every creature granted Absorb at runtime gets identical
+/// prevention. Idempotent across repeated invocations via per-N count matching
+/// (mirrors `add_riot_replacements`).
+pub fn synthesize_absorb(face: &mut CardFace) {
+    let mut counts: Vec<(u32, usize)> = Vec::new();
+    for kw in &face.keywords {
+        if let Keyword::Absorb(n) = kw {
+            match counts.iter_mut().find(|(value, _)| value == n) {
+                Some((_, c)) => *c += 1,
+                None => counts.push((*n, 1)),
+            }
+        }
+    }
+    for (n, desired) in counts {
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_absorb_replacement(r, n))
+            .count();
+        for _ in existing..desired {
+            face.replacements.push(build_absorb_replacement(n));
+        }
     }
 }
 
@@ -7501,6 +7563,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // haste. Static grants of Riot synthesize matching ETB replacements from
     // their affected filters.
     synthesize_riot(face);
+    // CR 702.64a: Absorb N — continuous self-recipient damage replacement that
+    // prevents N from each source each time.
+    synthesize_absorb(face);
     // CR 702.98a: Unleash — optional ETB +1/+1 counter plus a "can't block while
     // it has a +1/+1 counter" static. Sibling of Riot's optional-counter shape.
     synthesize_unleash(face);
@@ -8968,6 +9033,64 @@ mod evoke_synthesis_tests {
         face.keywords.push(Keyword::Flying);
         synthesize_evoke(&mut face);
         assert!(face.triggers.is_empty());
+    }
+
+    /// Issue #580: MTGJSON's bare "Evoke" keyword must be replaced by the
+    /// parser-extracted non-mana cost from the Oracle evoke line.
+    #[test]
+    fn build_oracle_face_solitude_evoke_merges_to_non_mana() {
+        use crate::types::keywords::EvokeCost;
+
+        let mtgjson = AtomicCard {
+            name: "Solitude".to_string(),
+            mana_cost: Some("{3}{W}{W}".to_string()),
+            colors: vec!["W".to_string()],
+            color_identity: vec!["W".to_string()],
+            power: Some("3".to_string()),
+            toughness: Some("2".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some(
+                "Flash\nLifelink\nWhen this creature enters, exile up to one other target creature. That creature's controller gains life equal to its power.\nEvoke\u{2014}Exile a white card from your hand.".to_string(),
+            ),
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Elemental Incarnation".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elemental".to_string(), "Incarnation".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec![
+                "Flash".to_string(),
+                "Lifelink".to_string(),
+                "Evoke".to_string(),
+            ]),
+            side: None,
+            face_name: None,
+            mana_value: 5.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+        let evoke = face
+            .keywords
+            .iter()
+            .find_map(|k| match k {
+                Keyword::Evoke(cost) => Some(cost),
+                _ => None,
+            })
+            .expect("Solitude must carry Evoke after synthesis");
+        assert!(
+            matches!(evoke, EvokeCost::NonMana(AbilityCost::Exile { .. })),
+            "MTGJSON bare Evoke must merge to NonMana(Exile), got {evoke:?}"
+        );
     }
 }
 
@@ -21228,5 +21351,164 @@ mod demonstrate_synthesis_tests {
         face.keywords.push(Keyword::Flying);
         synthesize_demonstrate(&mut face);
         assert!(face.triggers.iter().all(|t| !is_demonstrate_trigger(t)));
+    }
+}
+
+#[cfg(test)]
+mod absorb_synthesis_tests {
+    //! CR 702.64a shape tests: Absorb was parsed/typed but had no runtime.
+    //! `synthesize_absorb` installs a continuous self-recipient `DamageDone`
+    //! replacement that subtracts N from each incoming damage event
+    //! (`DamageModification::Minus { value: N }`, `valid_card: SelfRef`). The
+    //! continuous, non-consumed, per-source/per-event semantics (CR 702.64b) come
+    //! for free from `Minus`; CR 702.64c (each instance separate) is one
+    //! replacement per instance.
+    use super::*;
+    use crate::game::effects::deal_damage;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ResolvedAbility, TargetRef};
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    fn absorb_face(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Absorb(n));
+        face
+    }
+
+    fn absorb_creature_face(name: &str, keywords: Vec<Keyword>) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(3)),
+            toughness: Some(PtValue::Fixed(3)),
+            keywords,
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    fn marked_damage_after_absorb_damage(keywords: Vec<Keyword>, damage: u32) -> u32 {
+        let face = absorb_creature_face("Absorb Test", keywords);
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        apply_card_face_to_object(state.objects.get_mut(&target).unwrap(), &face);
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed {
+                    value: damage as i32,
+                },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        deal_damage::resolve(&mut state, &ability, &mut events).unwrap();
+
+        state.objects[&target].damage_marked
+    }
+
+    #[test]
+    fn absorb_synthesizes_self_damage_prevention() {
+        let mut face = absorb_face(2);
+        synthesize_absorb(&mut face);
+        let r = face
+            .replacements
+            .iter()
+            .find(|r| is_absorb_replacement(r, 2))
+            .expect("Absorb should add a self-recipient damage replacement");
+        assert!(matches!(r.event, ReplacementEvent::DamageDone));
+        assert!(
+            matches!(r.valid_card, Some(TargetFilter::SelfRef)),
+            "CR 702.64a: only damage to THIS creature is prevented"
+        );
+        assert!(
+            matches!(
+                r.damage_modification,
+                Some(DamageModification::Minus { value: 2 })
+            ),
+            "CR 702.64a: prevent N (=2) of the damage"
+        );
+    }
+
+    #[test]
+    fn absorb_is_idempotent() {
+        let mut face = absorb_face(1);
+        synthesize_absorb(&mut face);
+        synthesize_absorb(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_absorb_replacement(r, 1))
+                .count(),
+            1,
+            "repeated synthesis must not duplicate the Absorb replacement"
+        );
+    }
+
+    #[test]
+    fn absorb_multiple_instances_apply_separately() {
+        // CR 702.64c: two instances of Absorb 1 prevent 1 each (2 total per source).
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Absorb(1));
+        face.keywords.push(Keyword::Absorb(1));
+        synthesize_absorb(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_absorb_replacement(r, 1))
+                .count(),
+            2,
+            "CR 702.64c: each Absorb instance installs its own prevention replacement"
+        );
+    }
+
+    #[test]
+    fn absorb_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_absorb(&mut face);
+        assert!(face
+            .replacements
+            .iter()
+            .all(|r| !is_absorb_replacement(r, 1)));
+    }
+
+    #[test]
+    fn absorb_runtime_prevents_damage_to_absorb_creature() {
+        assert_eq!(
+            marked_damage_after_absorb_damage(vec![Keyword::Absorb(2)], 5),
+            3,
+            "CR 702.64a: Absorb 2 prevents 2 damage from the event"
+        );
+    }
+
+    #[test]
+    fn absorb_runtime_applies_multiple_instances_separately() {
+        assert_eq!(
+            marked_damage_after_absorb_damage(vec![Keyword::Absorb(1), Keyword::Absorb(1)], 3),
+            1,
+            "CR 702.64c: two Absorb 1 instances each prevent 1 damage"
+        );
     }
 }

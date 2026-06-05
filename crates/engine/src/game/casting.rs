@@ -262,7 +262,10 @@ fn spell_record_for_restrictions(spell_obj: &super::game_object::GameObject) -> 
         subtypes: spell_obj.card_types.subtypes.clone(),
         keywords: spell_obj.keywords.clone(),
         colors: spell_obj.color.clone(),
-        mana_value: spell_obj.mana_cost.mana_value(),
+        // CR 202.3e: While on the stack, X equals the announced value, not 0.
+        mana_value: spell_obj
+            .mana_cost
+            .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
         has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
         cast_variant: crate::types::game_state::CastingVariant::Normal,
@@ -9491,6 +9494,8 @@ fn find_eligible_hand_cost_targets(
     source: ObjectId,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
+    let effective_filter = super::cost_payability::exile_cost_effective_filter(filter);
+    let filter_ref = effective_filter.as_ref();
     let ctx = super::filter::FilterContext::from_source(state, source);
     state
         .players
@@ -9502,7 +9507,7 @@ fn find_eligible_hand_cost_targets(
                 .copied()
                 .filter(|&id| {
                     id != source
-                        && filter.is_none_or(|f| {
+                        && filter_ref.is_none_or(|f| {
                             super::filter::matches_target_filter(state, id, f, &ctx)
                         })
                 })
@@ -9532,8 +9537,12 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     zone: ExileCostSourceZone,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
+    let effective_filter = super::cost_payability::exile_cost_effective_filter(filter);
+    let filter_ref = effective_filter.as_ref();
     match zone {
-        ExileCostSourceZone::Hand => find_eligible_hand_cost_targets(state, player, source, filter),
+        ExileCostSourceZone::Hand => {
+            find_eligible_hand_cost_targets(state, player, source, filter_ref)
+        }
         ExileCostSourceZone::Graveyard => {
             let ctx = super::filter::FilterContext::from_source(state, source);
             state
@@ -9545,7 +9554,7 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
                         .copied()
                         .filter(|&id| {
                             id != source
-                                && filter.is_none_or(|f| {
+                                && filter_ref.is_none_or(|f| {
                                     super::filter::matches_target_filter(state, id, f, &ctx)
                                 })
                         })

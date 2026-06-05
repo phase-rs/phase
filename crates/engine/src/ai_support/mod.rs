@@ -5,6 +5,8 @@ pub mod filter;
 
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
+
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
@@ -766,6 +768,48 @@ pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalAct
     }
 }
 
+/// Non-fatal diagnostic describing a wedged decision point.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StuckDecisionDiagnostic {
+    pub waiting_for_kind: &'static str,
+    pub stuck_players: Vec<PlayerId>,
+}
+
+/// Detects an engine-level progress wedge: a decision is owed but no authorized
+/// submitter can produce any legal action, so the game cannot advance. This is
+/// an engine anomaly detector (a misrouted/unsatisfiable `WaitingFor`), NOT a
+/// rules implementation, so it carries no CR citation. Surfaced as a non-fatal
+/// diagnostic; does NOT mutate state.
+///
+/// Returns `None` for `Priority` (passing priority is always legal) and for
+/// states with no acting player (e.g. `GameOver`), and only fires when *every*
+/// authorized submitter has an empty legal-action set.
+pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagnostic> {
+    // Cheap pre-gate: `Priority` (passing is always legal) and states with no
+    // acting player are never wedged, and this branch enumerates no actions.
+    if state.waiting_for.acting_players().is_empty()
+        || matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        return None;
+    }
+    let submitters = crate::game::turn_control::authorized_submitters(state);
+    if submitters.is_empty() {
+        return None;
+    }
+    // Every authorized submitter resolves to the same global legal-action set
+    // (`legal_actions_for_viewer` returns `legal_actions_full` for any of them),
+    // so compute the emptiness once rather than per submitter. When empty, no
+    // submitter can act and all submitter seats are stuck.
+    if !legal_actions_full(state).0.is_empty() {
+        return None;
+    }
+    Some(StuckDecisionDiagnostic {
+        waiting_for_kind: state.waiting_for.variant_name(),
+        stuck_players: submitters,
+    })
+}
+
 fn mana_action_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
         WaitingFor::Priority { player }
@@ -887,20 +931,21 @@ mod tests {
 
     use super::{
         candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_for_viewer,
-        legal_actions_full, validated_candidate_actions,
+        legal_actions_full, stuck_decision_diagnostic, validated_candidate_actions,
     };
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
-        ManaProduction, QuantityExpr, ResolvedAbility, SearchSelectionConstraint, TargetFilter,
-        TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect,
+        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, SearchSelectionConstraint,
+        TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        CastingVariant, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
+        CastingVariant, GameState, MulliganDecisionEntry, PendingCast, StackEntry, StackEntryKind,
+        WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
@@ -2348,5 +2393,220 @@ mod tests {
             state.players[0].mana_pool.total() >= 1,
             "mana should be added to pool"
         );
+    }
+
+    /// Progress-wedge detection: a `NamedChoice` owed by a player with zero
+    /// legal options is a wedged decision — `named_choice_actions` yields no
+    /// candidates so the only authorized submitter (P0) has an empty
+    /// legal-action set. The diagnostic must fire, naming the variant and the
+    /// stuck player.
+    #[test]
+    fn stuck_diagnostic_fires_on_unsatisfiable_named_choice() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        // A "choose a player" prompt (CR 601.2b) with NO offered options — the
+        // engine can produce no legal `ChooseOption`, so no submitter can act.
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::Labeled { options: vec![] },
+            options: vec![],
+            source_id: None,
+        };
+
+        // Precondition: this state really has no legal action for P0.
+        assert!(
+            legal_actions_for_viewer(&state, PlayerId(0)).0.is_empty(),
+            "test premise: the unsatisfiable NamedChoice must offer no legal action"
+        );
+
+        let diag = stuck_decision_diagnostic(&state)
+            .expect("an owed decision with no legal action must report a stuck diagnostic");
+        assert_eq!(diag.waiting_for_kind, "NamedChoice");
+        assert_eq!(diag.stuck_players, vec![PlayerId(0)]);
+    }
+
+    /// CR 117.1: A normal `Priority` window is never "stuck" — passing priority
+    /// is always legal, and the diagnostic explicitly excludes `Priority`.
+    #[test]
+    fn stuck_diagnostic_none_on_priority() {
+        let state = setup_priority();
+        assert!(stuck_decision_diagnostic(&state).is_none());
+    }
+
+    /// After the game is over there is no acting player, so there is nothing to
+    /// be stuck on — the diagnostic returns `None`.
+    #[test]
+    fn stuck_diagnostic_none_on_game_over() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        assert!(stuck_decision_diagnostic(&state).is_none());
+    }
+
+    /// False-positive sweep: a NORMAL non-`Priority` decision that legitimately
+    /// offers actions must NOT trip the progress-wedge detector. `ManaPayment`
+    /// always offers `PassPriority` to finalize payment, so it is never stuck.
+    #[test]
+    fn stuck_diagnostic_none_on_normal_mana_payment() {
+        let mut state = setup_priority();
+        let rock = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rock)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        add_fixed_mana_ability(&mut state, rock, ManaColor::Green);
+        set_dummy_pending_cast(&mut state);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        // Premise: a normal ManaPayment offers at least one legal action.
+        assert!(
+            !legal_actions_for_viewer(&state, PlayerId(0)).0.is_empty(),
+            "ManaPayment must offer at least PassPriority"
+        );
+        assert!(
+            stuck_decision_diagnostic(&state).is_none(),
+            "a normal ManaPayment decision must not be flagged stuck"
+        );
+    }
+
+    /// False-positive sweep (CR 103.5): a normal `MulliganDecision` always
+    /// offers Keep/Mulligan to each pending player, so the detector must not
+    /// fire.
+    #[test]
+    fn stuck_diagnostic_none_on_normal_mulligan_decision() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 0,
+            }],
+            free_first_mulligan: false,
+        };
+
+        assert!(
+            !legal_actions_for_viewer(&state, PlayerId(0)).0.is_empty(),
+            "MulliganDecision must offer Keep/Mulligan"
+        );
+        assert!(
+            stuck_decision_diagnostic(&state).is_none(),
+            "a normal MulliganDecision must not be flagged stuck"
+        );
+    }
+
+    /// False-positive sweep (CR 601.2c): a normal `TargetSelection` step that
+    /// presents at least one legal target offers a `ChooseTarget` action, so the
+    /// detector must not fire. Exercises the resolution-time decision class (as
+    /// opposed to the priority / mulligan classes covered above).
+    #[test]
+    fn stuck_diagnostic_none_on_normal_target_selection() {
+        let mut state = setup_priority();
+        // A creature on the battlefield to serve as the single legal target.
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let target = crate::types::ability::TargetRef::Object(creature);
+        set_dummy_pending_cast(&mut state);
+        let pending_cast = state.pending_cast.clone().unwrap();
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast,
+            target_slots: vec![crate::types::game_state::TargetSelectionSlot {
+                legal_targets: vec![target.clone()],
+                optional: false,
+            }],
+            mode_labels: Vec::new(),
+            selection: crate::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: vec![target],
+            },
+        };
+
+        assert!(
+            !legal_actions_for_viewer(&state, PlayerId(0)).0.is_empty(),
+            "TargetSelection with a legal target must offer ChooseTarget"
+        );
+        assert!(
+            stuck_decision_diagnostic(&state).is_none(),
+            "a normal TargetSelection decision must not be flagged stuck"
+        );
+    }
+
+    /// False-positive sweep (CR 103.5 / TL:R 906.6a): the simultaneous
+    /// bottom-cards classes (`MulliganBottomCards`, `OpeningHandBottomCards`)
+    /// always offer each pending player a `SelectCards` action, so the detector
+    /// must not fire. Both share the `MulliganBottomEntry` shape and the
+    /// `bottom_card_actions` generator, so one representative of each is covered
+    /// here. The pending player is given enough hand cards to satisfy the owed
+    /// bottom `count`.
+    #[test]
+    fn stuck_diagnostic_none_on_normal_bottom_cards() {
+        use crate::types::game_state::{MulliganBottomEntry, OpeningHandBottomReason};
+
+        for waiting_for in [
+            WaitingFor::MulliganBottomCards {
+                pending: vec![MulliganBottomEntry {
+                    player: PlayerId(0),
+                    count: 1,
+                }],
+            },
+            WaitingFor::OpeningHandBottomCards {
+                pending: vec![MulliganBottomEntry {
+                    player: PlayerId(0),
+                    count: 1,
+                }],
+                reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+            },
+        ] {
+            let mut state = GameState::new_two_player(42);
+            // Two cards in hand so the owed single-card bottom is satisfiable.
+            for _ in 0..2 {
+                create_object(
+                    &mut state,
+                    CardId(9),
+                    PlayerId(0),
+                    "Forest".to_string(),
+                    Zone::Hand,
+                );
+            }
+            state.waiting_for = waiting_for;
+
+            assert!(
+                !legal_actions_for_viewer(&state, PlayerId(0)).0.is_empty(),
+                "{} must offer SelectCards",
+                state.waiting_for.variant_name()
+            );
+            assert!(
+                stuck_decision_diagnostic(&state).is_none(),
+                "a normal {} decision must not be flagged stuck",
+                state.waiting_for.variant_name()
+            );
+        }
     }
 }

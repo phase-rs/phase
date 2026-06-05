@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AdditionalCost, BeholdCostAction, CastTimingPermission,
     CostPaidObjectSnapshot, Effect, KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility,
-    SpellCastingOptionKind, TargetFilter, TypedFilter,
+    SpellCastingOptionKind, StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -15,6 +15,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
+use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::casting::emit_targeting_events;
@@ -1054,6 +1055,21 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // CR 601.2f: "for each [object] sacrificed this way" reductions depend on
+    // the actual cost-payment selection. Count the chosen objects while they are
+    // still permanents on the battlefield (CR 403.3), before sacrifice moves them.
+    if pending.activation_ability_index.is_none()
+        && pending.ability.context.additional_cost_paid
+        && !chosen.is_empty()
+    {
+        apply_sacrificed_this_way_cost_reduction(
+            state,
+            pending.object_id,
+            chosen,
+            &mut pending.cost,
+        );
+    }
+
     // Boundary of the cost-payment events THIS handler produces — captured
     // before the sacrifice so the death/leaves-the-battlefield `ZoneChanged`
     // records (and their producer co-departed stamp, below) can be scanned for
@@ -1493,6 +1509,17 @@ fn finish_exile_selection_for_cost(
     // `TargetFilter::CostPaidObject` resolves during ability resolution.
     if let Some(&first) = chosen.first() {
         if let Some(obj) = state.objects.get(&first) {
+            // CR 107.3a + CR 118.9: Shoal-style alternative costs ("exile a
+            // [color] card with mana value X") define X from the pitched card's
+            // mana value rather than a prior announcement.
+            if pending.ability.chosen_x.is_none()
+                && pending.cost == crate::types::mana::ManaCost::NoCost
+                && pending.base_cost.as_ref().is_some_and(cost_has_x)
+            {
+                pending
+                    .ability
+                    .set_chosen_x_recursive(obj.mana_cost.mana_value());
+            }
             pending
                 .ability
                 .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
@@ -3286,6 +3313,116 @@ pub(super) fn apply_offering_cost_reduction(
 
     // CR 702.48c: Generic in sacrificed cost reduces generic in spell cost.
     *spell_generic = spell_generic.saturating_sub(sac_generic);
+}
+
+fn apply_sacrificed_this_way_cost_reduction(
+    state: &GameState,
+    spell_id: ObjectId,
+    sacrificed: &[ObjectId],
+    spell_cost: &mut ManaCost,
+) {
+    let Some(spell_obj) = state.objects.get(&spell_id) else {
+        return;
+    };
+    let ManaCost::Cost {
+        generic: ref mut spell_generic,
+        ..
+    } = spell_cost
+    else {
+        return;
+    };
+
+    for def in spell_obj.static_definitions.iter_all() {
+        let StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount,
+            dynamic_count: Some(dynamic_count),
+            ..
+        } = &def.mode
+        else {
+            continue;
+        };
+        if !matches!(def.affected, Some(TargetFilter::SelfRef)) {
+            continue;
+        }
+        let Some(condition) = def.condition.as_ref() else {
+            continue;
+        };
+        if !sacrificed_this_way_condition_matches(state, condition, spell_obj.controller, spell_id)
+        {
+            continue;
+        }
+        let ManaCost::Cost { generic: per, .. } = amount else {
+            continue;
+        };
+        let Some(sacrifice_count) =
+            sacrificed_this_way_count(state, spell_id, sacrificed, dynamic_count)
+        else {
+            continue;
+        };
+        *spell_generic = spell_generic.saturating_sub(per.saturating_mul(sacrifice_count));
+    }
+}
+
+fn sacrificed_this_way_count(
+    state: &GameState,
+    spell_id: ObjectId,
+    sacrificed: &[ObjectId],
+    dynamic_count: &QuantityRef,
+) -> Option<u32> {
+    match dynamic_count {
+        QuantityRef::TrackedSetSize => Some(sacrificed.len().try_into().unwrap_or(u32::MAX)),
+        QuantityRef::FilteredTrackedSetSize { filter } => {
+            let ctx = super::filter::FilterContext::from_source(state, spell_id);
+            Some(
+                sacrificed
+                    .iter()
+                    .filter(|&&id| super::filter::matches_target_filter(state, id, filter, &ctx))
+                    .count()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn sacrificed_this_way_condition_matches(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    spell_id: ObjectId,
+) -> bool {
+    condition_requires_additional_cost_paid(condition)
+        && condition_matches_with_additional_cost_paid(state, condition, controller, spell_id)
+}
+
+fn condition_requires_additional_cost_paid(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::AdditionalCostPaid => true,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(condition_requires_additional_cost_paid),
+        _ => false,
+    }
+}
+
+fn condition_matches_with_additional_cost_paid(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    spell_id: ObjectId,
+) -> bool {
+    match condition {
+        StaticCondition::AdditionalCostPaid => true,
+        StaticCondition::And { conditions } => conditions.iter().all(|condition| {
+            condition_matches_with_additional_cost_paid(state, condition, controller, spell_id)
+        }),
+        StaticCondition::Or { conditions } => conditions.iter().any(|condition| {
+            condition_matches_with_additional_cost_paid(state, condition, controller, spell_id)
+        }),
+        _ => super::layers::evaluate_condition(state, condition, controller, spell_id),
+    }
 }
 
 pub(super) fn retrace_discard_land_cost() -> AbilityCost {
@@ -11329,6 +11466,95 @@ its replicate cost was paid.)\nDraw a card.";
                 generic: 1,
             },
             "{{3}}{{W}} reduced by {{1}}{{G}} must equal {{W}}{{1}}"
+        );
+    }
+
+    /// CR 601.2f: A "for each [filter] sacrificed this way" reduction counts
+    /// only selected cost-payment objects that match the parsed dynamic filter.
+    #[test]
+    fn sacrificed_this_way_reduction_filters_selected_objects() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let spell = create_object(
+            &mut state,
+            CardId(30),
+            caster,
+            "Filtered Sacrifice Spell".to_string(),
+            Zone::Hand,
+        );
+        let static_def = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            },
+            spell_filter: None,
+            dynamic_count: Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            }),
+        })
+        .affected(TargetFilter::SelfRef)
+        .condition(StaticCondition::And {
+            conditions: vec![StaticCondition::None, StaticCondition::AdditionalCostPaid],
+        });
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .static_definitions
+            .push(static_def);
+
+        let creature = create_object(
+            &mut state,
+            CardId(31),
+            caster,
+            "Creature Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let artifact = create_object(
+            &mut state,
+            CardId(32),
+            caster,
+            "Artifact Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let mut spell_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 5,
+        };
+        apply_sacrificed_this_way_cost_reduction(
+            &state,
+            spell,
+            &[creature, artifact],
+            &mut spell_cost,
+        );
+
+        assert_eq!(
+            spell_cost,
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 4,
+            },
+            "only the sacrificed creature should count for the filtered reduction"
+        );
+        assert!(
+            state.tracked_object_sets.is_empty(),
+            "cost-time sacrificed-this-way reduction must not publish a stale tracked set"
         );
     }
 

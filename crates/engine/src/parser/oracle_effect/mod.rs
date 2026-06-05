@@ -14024,6 +14024,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: None,
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -14062,6 +14063,7 @@ pub(crate) fn parse_effect_chain_ir(
                 special: Some(SpecialClause::AltCostRider(cost)),
                 source_text: normalized_text.to_string(),
                 target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             });
             continue;
         }
@@ -14092,6 +14094,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: Some(SpecialClause::ManaRetention(expiry)),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -14135,6 +14138,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: Some(SpecialClause::Otherwise(Box::new(else_def))),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -14192,6 +14196,7 @@ pub(crate) fn parse_effect_chain_ir(
                 special: Some(special),
                 source_text: normalized_text.to_string(),
                 target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             });
             continue;
         }
@@ -14227,6 +14232,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: Some(SpecialClause::SameIsTrueFor(keywords)),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -14263,6 +14269,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: Some(SpecialClause::RepeatProcessForKeywords(keywords)),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -14374,6 +14381,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: Some(SpecialClause::DieExileRider(Box::new(rider_def))),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -14407,6 +14415,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: Some(SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment }),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -14457,6 +14466,7 @@ pub(crate) fn parse_effect_chain_ir(
                         special: Some(SpecialClause::DigInsteadAlt(Box::new(alt_def))),
                         source_text: normalized_text.to_string(),
                         target_selection_mode: TargetSelectionMode::Chosen,
+                        target_chooser: None,
                     });
                     continue;
                 }
@@ -14501,6 +14511,7 @@ pub(crate) fn parse_effect_chain_ir(
                 special: None,
                 source_text: normalized_text.to_string(),
                 target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             });
             continue;
         }
@@ -14536,6 +14547,7 @@ pub(crate) fn parse_effect_chain_ir(
                 special: None,
                 source_text: normalized_text.to_string(),
                 target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             });
             continue;
         }
@@ -14564,6 +14576,7 @@ pub(crate) fn parse_effect_chain_ir(
                 special: None,
                 source_text: normalized_text.to_string(),
                 target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             });
             continue;
         }
@@ -14597,6 +14610,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: Some(SpecialClause::InsteadClause(Box::new(instead_def))),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -14840,6 +14854,7 @@ pub(crate) fn parse_effect_chain_ir(
                             special: Some(SpecialClause::EntersTappedAttacking),
                             source_text: normalized_text.to_string(),
                             target_selection_mode: TargetSelectionMode::Chosen,
+                            target_chooser: None,
                         });
                         continue;
                     }
@@ -15210,6 +15225,7 @@ pub(crate) fn parse_effect_chain_ir(
                 special: None,
                 source_text: normalized_text.to_string(),
                 target_selection_mode: chunk_ctx.target_selection_mode,
+                target_chooser: chunk_ctx.target_chooser.clone(),
             });
             continue;
         }
@@ -15270,6 +15286,7 @@ pub(crate) fn parse_effect_chain_ir(
                 special: None,
                 source_text: normalized_text.to_string(),
                 target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             });
             continue;
         }
@@ -15603,6 +15620,7 @@ pub(crate) fn parse_effect_chain_ir(
                 special: Some(SpecialClause::KeywordInsteadOverride),
                 source_text: normalized_text.to_string(),
                 target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             });
             continue;
         }
@@ -15663,6 +15681,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: Some(SpecialClause::AdditionalCostInsteadSearch),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
+                    target_chooser: None,
                 });
                 continue;
             }
@@ -15921,6 +15940,7 @@ pub(crate) fn parse_effect_chain_ir(
                     special: None,
                     source_text: normalized_text.to_string(),
                     target_selection_mode: chunk_ctx.target_selection_mode,
+                    target_chooser: chunk_ctx.target_chooser.clone(),
                 });
             }
             continue;
@@ -15958,6 +15978,7 @@ pub(crate) fn parse_effect_chain_ir(
             // mode. Set to `Random` by `parse_target_with_ctx` when "random "
             // was stripped from this chunk's target phrase.
             target_selection_mode: chunk_ctx.target_selection_mode,
+            target_chooser: chunk_ctx.target_chooser.clone(),
         });
 
         // Drain chunk-ctx diagnostics into the accumulator (the outer `ctx` is

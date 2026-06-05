@@ -47,13 +47,13 @@ export function PayAmountChoiceUI() {
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4"
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4"
         initial={{ y: 80, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         exit={{ y: 80, opacity: 0 }}
         transition={{ duration: 0.25 }}
       >
-        <div className="min-w-[320px] max-w-[420px] rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
+        <div className="pointer-events-auto min-w-[320px] max-w-[420px] rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
             {t("mana.chooseAmountTitle")}
             {sourceName && (

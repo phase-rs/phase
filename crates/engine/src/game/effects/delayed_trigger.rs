@@ -366,10 +366,11 @@ fn snapshot_quantity_ref(
             scope: ObjectScope::Demonstrative,
         } => {
             // Read live state first, LKI as fallback, 0 if neither.
+            // CR 202.3e: include cost_x_paid for on-stack spells.
             let value = state
                 .objects
                 .get(&target_object_id)
-                .map(|obj| obj.mana_cost.mana_value() as i32)
+                .map(|obj| obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32)
                 .or_else(|| {
                     state
                         .lki_cache

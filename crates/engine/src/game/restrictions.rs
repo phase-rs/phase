@@ -196,7 +196,8 @@ pub fn record_spell_cast_from_zone(
         subtypes: obj.card_types.subtypes.clone(),
         keywords: obj.keywords.clone(),
         colors: obj.color.clone(),
-        mana_value: obj.mana_cost.mana_value(),
+        // CR 202.3e: While on the stack, X equals the announced value, not 0.
+        mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
         // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
         // trigger-filter evaluation (e.g. "your first spell with {X} in its
         // mana cost each turn") does not need to re-examine the spell object.

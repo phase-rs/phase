@@ -172,4 +172,18 @@ describe("DialogHost", () => {
     });
     expect(screen.queryByLabelText("Restore dialog")).not.toBeInTheDocument();
   });
+
+  it("does not apply a peek slide transform while the dialog is visible but un-peeked (#2427)", () => {
+    // Framer-motion keeps a residual CSS transform whenever `animate` is set —
+    // even at `{ x: 0, y: 0 }` — which breaks range inputs in bottom panels.
+    // The slide transform must only be active while `peeked` is true.
+    setWaitingFor({ type: "ChooseXValue", data: { player: 0, max: 3 } } as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.style.transform ?? "").toBe("");
+  });
 });

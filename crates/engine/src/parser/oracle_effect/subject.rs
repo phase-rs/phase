@@ -344,6 +344,34 @@ fn try_parse_subject_restriction_clause(
     // Handled separately because "must be blocked" isn't a "can't X" restriction pattern
     // and needs AddStaticMode for transient effect propagation through the layer system.
     let tp = TextPair::new(text, &lower);
+
+    // CR 119.7 + CR 608.2c + CR 104.1: Screaming Nemesis's rider — "If a player
+    // is dealt damage this way, they can't gain life for the rest of the game."
+    // This sentence chains after the redirect sub-ability ("it deals that much
+    // damage to any other target"); its anaphor ("a player ... this way" /
+    // "they") refers to that redirect's TARGET, but CR 119.7 governs only
+    // players, not creatures/planeswalkers. Bind the restriction's `affected`
+    // to `ParentTarget`: at resolution `register_transient_effect` maps a
+    // parent `TargetRef::Player` to a `SpecificPlayer` TCE (locking that
+    // player) and a `TargetRef::Object` to a `SpecificObject` TCE — which the
+    // player-scoped `player_has_cant_gain_life` query never reads — so the lock
+    // correctly no-ops when the redirect struck a creature or planeswalker.
+    // The recognizer consumes the anaphoric head; the residual "can't gain
+    // life for the rest of the game" predicate (CR 104.1 permanence via "for
+    // the rest of the game") flows into the shared restriction builder.
+    if let Some(rest) = strip_dealt_damage_this_way_player_anaphor(&lower) {
+        let offset = lower.len() - rest.len();
+        let predicate = text[offset..].trim();
+        let application = SubjectApplication {
+            affected: TargetFilter::ParentTarget,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+        };
+        return build_restriction_clause(application, predicate);
+    }
+
     if let Some((before, _)) = tp.split_around(" must be blocked") {
         let subject = before.original.trim();
         let application = parse_subject_application(subject, ctx)?;
@@ -2855,6 +2883,27 @@ fn parse_cant_be_regenerated_predicate(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 608.2c + CR 119.7: Recognize the anaphoric head of Screaming Nemesis's
+/// life-lock rider — "if a player is dealt damage this way, they " — and
+/// return the residual predicate ("can't gain life for the rest of the game")
+/// for the shared restriction builder. Decomposed into independent pieces per
+/// the combinator rule: the leading "if" glue, the "a/any player ... dealt
+/// damage this way" anaphor (CR 608.2c "this way" back-reference to the
+/// redirect's damage event), and the trailing "they " pronoun. Returns `None`
+/// when the head is absent, so the caller falls through to the generic
+/// subject/predicate split. The returned slice borrows from `lower`.
+fn strip_dealt_damage_this_way_player_anaphor(lower: &str) -> Option<&str> {
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>("if "),
+        alt((tag("a player"), tag("any player"))),
+        tag(" is dealt damage this way, "),
+        tag("they "),
+    )
+        .parse(lower)
+        .ok()?;
+    Some(rest)
+}
+
 fn extract_pump_modifiers(
     modifications: &[crate::types::ability::ContinuousModification],
 ) -> Option<(PtValue, PtValue)> {
@@ -3643,6 +3692,52 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::Opponent)
             ))
         );
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantGainLife
+            }
+        )));
+    }
+
+    /// CR 119.7 + CR 608.2c + CR 104.1: Screaming Nemesis's rider. The
+    /// anaphoric head ("If a player is dealt damage this way, they") binds the
+    /// `can't gain life for the rest of the game` restriction to the redirect's
+    /// parent target via `ParentTarget` (so it no-ops for non-player targets),
+    /// with permanent duration and the `AddStaticMode` grant propagation that
+    /// the runtime `player_has_cant_gain_life` query relies on.
+    #[test]
+    fn dealt_damage_this_way_player_cant_gain_life_builds_permanent_restriction() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "If a player is dealt damage this way, they can't gain life for the rest of the game",
+            &mut ctx,
+        )
+        .expect("dealt-damage-this-way life-lock rider should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        // No new target slot: the rider reuses the redirect's target anaphorically.
+        assert_eq!(target, None);
+        // CR 104.1: "for the rest of the game" -> Permanent.
+        assert_eq!(duration, Some(Duration::Permanent));
+        assert_eq!(static_abilities.len(), 1);
+        let def = &static_abilities[0];
+        assert_eq!(def.mode, StaticMode::CantGainLife);
+        // CR 119.7 player-gating: ParentTarget binds Player->SpecificPlayer and
+        // Object->SpecificObject at resolution, so a creature/planeswalker hit
+        // never locks a player.
+        assert_eq!(def.affected, Some(TargetFilter::ParentTarget));
         assert!(def.modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddStaticMode {

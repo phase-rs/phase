@@ -244,9 +244,9 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((u32::MAX, counter_type));
     }
-    // CR 107.2: "any number of" — variable removal; the player chooses how
-    // many counters to remove (including zero). u32::MAX lets the runtime
-    // clamp to the actual count via saturating subtraction.
+    // CR 601.2b / CR 602.2b: "any number of" is a casting/activation-time
+    // variable choice. u32::MAX lets the runtime clamp to the actual count via
+    // saturating subtraction.
     if let Ok((_, counter_type)) = all_consuming(preceded(
         tag::<_, _, E<'_>>("any number of "),
         parse_remove_counter_kind,
@@ -330,6 +330,21 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 target: TargetFilter::SelfRef,
                 count: 1,
             };
+        }
+        // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
+        // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
+        if let Some(((), rest_after_any)) = nom_on_lower(rest, &rest_lower, |i| {
+            value((), tag("any number of ")).parse(i)
+        }) {
+            let filter_text = rest_after_any.trim().trim_end_matches('.');
+            let target_phrase = format!("target {filter_text}");
+            let (filter, remainder) = parse_target(&target_phrase);
+            if remainder.trim().is_empty() {
+                return AbilityCost::Sacrifice {
+                    target: filter,
+                    count: u32::MAX,
+                };
+            }
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
         // CR 107.3a: `X` in an activation or additional cost is chosen as part
@@ -1319,6 +1334,21 @@ mod tests {
     }
 
     #[test]
+    fn cost_sacrifice_any_number_nonland_permanents() {
+        match parse_oracle_cost("Sacrifice any number of nonland permanents") {
+            AbilityCost::Sacrifice { target, count } => {
+                assert_eq!(count, u32::MAX);
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed(ref tf)
+                        if tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Non(_)))
+                ));
+            }
+            other => panic!("Expected Sacrifice any number nonland, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn cost_sacrifice_x_squirrels() {
         match parse_oracle_cost("Sacrifice X Squirrels") {
             AbilityCost::Sacrifice { target, count } => {
@@ -1555,6 +1585,37 @@ mod tests {
                 assert!(matches!(costs[1], AbilityCost::Exile { .. }));
             }
             other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_exile_colored_card_with_mana_value_x_from_hand() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Exile a green card with mana value X from your hand") {
+            AbilityCost::Exile {
+                zone,
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => {
+                assert_eq!(zone, Some(Zone::Hand));
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Green
+                    }
+                )));
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name }
+                        }
+                    } if name == "X"
+                )));
+            }
+            other => panic!("Expected Exile with green + CmcEQ(X), got {:?}", other),
         }
     }
 

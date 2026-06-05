@@ -242,14 +242,14 @@ fn resolve_copy_controller(state: &GameState, ability: &ResolvedAbility) -> Play
     copy_controller(ability)
 }
 
-/// CR 702.144a + CR 102.1: Resolve a `copier` `ControllerRef` to a concrete
-/// player relative to the copy's controller. Only the variants meaningful as a
-/// copier are handled: `You` (the controller) and `Opponent` (the controller's
-/// opponent). Other refs return `None`, so the caller falls back to the default
-/// controller. NOTE: with multiple opponents, "choose an opponent" (CR 702.144a)
-/// resolves to the first opponent in turn order; an interactive multiplayer
-/// choice is left as a follow-up. In two-player games (the common case) this is
-/// exact, since there is a single opponent.
+/// CR 702.144a + CR 102.2 / CR 102.3: Resolve a `copier` `ControllerRef` to a
+/// concrete player relative to the copy's controller. Only the variants
+/// meaningful as a copier are handled: `You` (the controller) and `Opponent`
+/// (the controller's opponent). Other refs return `None`, so the caller falls
+/// back to the default controller. NOTE: with multiple opponents, "choose an
+/// opponent" (CR 702.144a) resolves to the first opponent in turn order; an
+/// interactive multiplayer choice is left as a follow-up. In two-player games
+/// (the common case) this is exact, since there is a single opponent.
 fn resolve_copier_player(
     state: &GameState,
     cref: &ControllerRef,
@@ -260,7 +260,13 @@ fn resolve_copier_player(
         ControllerRef::Opponent => crate::game::players::opponents(state, controller)
             .into_iter()
             .next(),
-        _ => None,
+        ControllerRef::ScopedPlayer
+        | ControllerRef::TargetPlayer
+        | ControllerRef::ParentTargetController
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer => None,
     }
 }
 
@@ -624,6 +630,89 @@ mod tests {
         } else {
             panic!("copy should be a Spell with an ability");
         }
+    }
+
+    /// CR 702.144a + CR 608.2c: Demonstrate's opponent copy is conditional on
+    /// the controller accepting the optional self-copy. A declined optional
+    /// self-copy must not run the opponent sub-copy.
+    #[test]
+    fn demonstrate_decline_skips_opponent_subcopy() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Creative Technique",
+            original_ability,
+            CastingVariant::Normal,
+        );
+
+        let opponent_copy = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: Some(ControllerRef::Opponent),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let mut demonstrate = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        )
+        .sub_ability(opponent_copy);
+        demonstrate.optional = true;
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &demonstrate, &mut events, 0)
+            .unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "Demonstrate self-copy should pause for the optional choice"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "declining Demonstrate must not put either copy onto the stack"
+        );
+        assert!(
+            state.pending_continuation.is_none(),
+            "declining Demonstrate must not leave the opponent copy queued"
+        );
+        assert!(
+            state
+                .objects
+                .values()
+                .all(|obj| !obj.is_token || obj.zone != Zone::Stack),
+            "declining Demonstrate must not create a spell-copy token"
+        );
     }
 
     /// CR 707.10: `copier: None` (the default for Twincast/Casualty/Replicate)

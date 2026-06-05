@@ -1378,6 +1378,14 @@
     "reportTitle": "Niekrytyczna awaria silnika: {{summary}}",
     "reportWhatHappened": "**Co się stało**\n_opisz krótko, co robiłeś_\n\n**Diagnostyka**\n```\n{{diagnostic}}\n```"
   },
+  "stuckDecision": {
+    "heading": "Game appears stuck",
+    "dismiss": "Dismiss",
+    "body": "phase.rs is waiting on a decision that has no available action, so the game can’t continue. This is a bug. Please <report>report it</report> so we can investigate.",
+    "dontShowAgain": "Don’t show again this session",
+    "reportTitle": "Stuck decision: {{kind}}",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
   "optionalEffect": {
     "sourceFallback": "Efekt",
     "title": "{{name}} - Efekt opcjonalny",

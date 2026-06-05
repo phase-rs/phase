@@ -608,6 +608,60 @@ fn def_tree_has_exile_parent_rider(def: &AbilityDefinition) -> bool {
         .any(def_tree_has_exile_parent_rider)
 }
 
+/// CR 119.7 + CR 608.2c: True when any ability/trigger tree contains a
+/// `CantGainLife` grant scoped to `ParentTarget` — the structural encoding of
+/// Screaming Nemesis's "If a player is dealt damage this way, they can't gain
+/// life for the rest of the game" rider. The `ParentTarget` affected filter IS
+/// the "dealt damage this way" anaphor (it binds to the redirect's target only
+/// when that target is a player), so the leading "if" is represented, not
+/// swallowed. The match is deliberately narrow (mode + ParentTarget affected)
+/// so unrelated player-scoped life-locks (e.g. "Players can't gain life")
+/// remain subject to their own condition detectors.
+fn def_tree_has_parent_target_cant_gain_life(def: &AbilityDefinition) -> bool {
+    if let Effect::GenericEffect {
+        ref static_abilities,
+        ..
+    } = *def.effect
+    {
+        if static_abilities
+            .iter()
+            .any(static_def_is_parent_target_cant_gain_life)
+        {
+            return true;
+        }
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_parent_target_cant_gain_life(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_parent_target_cant_gain_life(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_parent_target_cant_gain_life)
+}
+
+fn static_def_is_parent_target_cant_gain_life(static_def: &StaticDefinition) -> bool {
+    matches!(static_def.mode, StaticMode::CantGainLife)
+        && matches!(static_def.affected, Some(TargetFilter::ParentTarget))
+}
+
+fn any_ability_has_dealt_damage_this_way_life_lock(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_parent_target_cant_gain_life)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_parent_target_cant_gain_life)
+        })
+}
+
 fn any_ability_has_exile_parent_rider(parsed: &ParsedAbilities) -> bool {
     parsed.abilities.iter().any(def_tree_has_exile_parent_rider)
         || parsed.triggers.iter().any(|t| {
@@ -1473,6 +1527,17 @@ fn detect_condition_if(
     // your graveyard") implicit in the sub_ability's relationship to the
     // parent effect.
     if any_ability_has_exile_parent_rider(parsed) {
+        return;
+    }
+    // CR 119.7 + CR 608.2c: Screaming Nemesis's "If a player is dealt damage
+    // this way, they can't gain life for the rest of the game" rider. The
+    // "this way" anaphor is not an independent game-state condition — it is
+    // the CR 608.2c back-reference that scopes the life-lock to the redirect's
+    // damaged player. That scoping is encoded structurally as a
+    // `CantGainLife` grant whose `affected` is `ParentTarget` (so it binds
+    // only when the redirect's target was a player), making the leading "if"
+    // a representation marker rather than a swallowed condition.
+    if any_ability_has_dealt_damage_this_way_life_lock(parsed) {
         return;
     }
     // CR 614.1a + CR 701.5: The imperative CastFromZone resolver grants

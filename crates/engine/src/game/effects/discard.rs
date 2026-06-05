@@ -58,12 +58,18 @@ pub fn resolve(
         _ => (1, false, None, TargetFilter::Any, false),
     };
 
-    // Check if targets specify specific cards to discard
+    // Check if targets specify specific cards to discard. Parent chain
+    // propagation can inherit non-hand object targets (e.g. Traumatic Critique's
+    // damage recipient) — those must not short-circuit the hand-choice path.
     let specific_targets: Vec<_> = ability
         .targets
         .iter()
         .filter_map(|t| {
-            if let TargetRef::Object(obj_id) = t {
+            let TargetRef::Object(obj_id) = t else {
+                return None;
+            };
+            let obj = state.objects.get(obj_id)?;
+            if obj.zone == Zone::Hand {
                 Some(*obj_id)
             } else {
                 None
@@ -1001,6 +1007,53 @@ mod tests {
         assert!(
             state.cost_payment_failed_flag,
             "cost_payment_failed_flag should be set when discard count is 0 (empty hand)"
+        );
+    }
+
+    #[test]
+    fn controller_filter_ignores_inherited_non_hand_object_targets() {
+        // CR 115.1 regression — Traumatic Critique: damage target is an
+        // inherited Object target, but "discard a card" is a hand choice for
+        // the spell's controller.
+        use crate::types::ability::QuantityExpr;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_card_a = create_object(&mut state, CardId(1), PlayerId(0), "A".into(), Zone::Hand);
+        let _p0_card_b = create_object(&mut state, CardId(3), PlayerId(0), "B".into(), Zone::Hand);
+        let damage_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Creature".into(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Object(damage_target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::DiscardChoice { player: PlayerId(0), count: 1, .. }
+            ),
+            "must prompt controller to discard from hand, not silently skip inherited battlefield target"
+        );
+        assert!(
+            state.players[0].hand.contains(&p0_card_a),
+            "no discard should happen before the player chooses"
         );
     }
 
