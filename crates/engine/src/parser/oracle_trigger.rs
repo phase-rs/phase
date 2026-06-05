@@ -16124,6 +16124,35 @@ mod tests {
         assert_eq!(def.valid_card, Some(expected));
     }
 
+    // CR 701.60b: "suspected creatures" as a type-phrase subject in a batched attack
+    // trigger. Covers Clandestine Meddler, Frantic Scapegoat, and any card that
+    // watches for one or more suspected creatures attacking.
+    #[test]
+    fn trigger_one_or_more_suspected_creatures_attack_clandestine_meddler() {
+        let def = parse_trigger_line(
+            "Whenever one or more suspected creatures you control attack, surveil 1.",
+            "Clandestine Meddler",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert!(def.batched, "expected batched trigger");
+        let filter = def.valid_card.as_ref().expect("valid_card set");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter; got {:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Suspected),
+                    "expected Suspected property; got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
     // CR 303.4: "Creatures that are enchanted by an Aura you control" subject filter.
     #[test]
     fn trigger_one_or_more_enchanted_creatures_attack_killian() {

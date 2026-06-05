@@ -2819,9 +2819,10 @@ fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
     Some((prop, text.len() - rest.len()))
 }
 
-/// CR 509.1h / CR 302.6: Parse status prefixes from type phrases.
+/// CR 509.1h / CR 302.6 / CR 701.60b: Parse status prefixes from type phrases.
 /// Called in a loop to consume multiple prefixes (e.g. "unblocked attacking ").
-/// Handles combat status (attacking, unblocked) and tap status (tapped, untapped).
+/// Handles combat status (attacking, unblocked), tap status (tapped, untapped),
+/// and designation status (suspected — CR 701.60b).
 ///
 /// Delegates to `nom_filter::parse_property_filter` for the common property keywords,
 /// then handles "face-down " (hyphenated variant not in the nom combinator).
@@ -2837,6 +2838,9 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::Tapped
                 | FilterProp::Untapped
                 | FilterProp::FaceDown
+                // CR 701.60b: "suspected" is a battlefield designation that appears
+                // as an adjective prefix in type phrases ("suspected creatures").
+                | FilterProp::Suspected
         ) {
             // Must be followed by space (prefix, not standalone)
             if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
@@ -5429,6 +5433,23 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::Attacking])
+            )
+        );
+        assert_eq!(rest, "");
+    }
+
+    // CR 701.60b: "suspected" is a battlefield designation usable as a type-phrase
+    // prefix, parallel to "attacking"/"tapped". Covers Clandestine Meddler, Frantic
+    // Scapegoat, Deadly Complication, and the broader suspected-creature filter class.
+    #[test]
+    fn suspected_creatures_you_control() {
+        let (f, rest) = parse_type_phrase("suspected creatures you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Suspected])
             )
         );
         assert_eq!(rest, "");
