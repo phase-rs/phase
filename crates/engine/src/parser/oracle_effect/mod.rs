@@ -41607,8 +41607,7 @@ mod tests {
         // by the *target* player, pulled from exile, entering under YOUR control.
         // Regression for issue #1998: the "that player owns" owner restriction
         // was dropped, so the put-step offered every land in exile (including
-        // the controller's own exiled cards) rather than only the target
-        // opponent's lands.
+        // the controller's own exiled cards) rather than only the target's.
         let effect = parse_effect(
             "you may put any number of land cards that player owns from exile onto the battlefield under your control",
         );
@@ -41635,9 +41634,8 @@ mod tests {
         };
         // CR 305.1: the type filter restricts the pool to land cards.
         assert_eq!(typed.type_filters, vec![TypeFilter::Land]);
-        // CR 108.3 + CR 109.4: the owner restriction must scope to the target
-        // player, not to every owner. Without it the put-step would offer the
-        // controller's own exiled lands and any third player's lands.
+        // CR 108.3 + CR 109.4: "that player owns" scopes ownership to the
+        // ability's target player, not every owner and not the controller.
         assert!(
             typed.properties.iter().any(|prop| matches!(
                 prop,
@@ -41646,6 +41644,32 @@ mod tests {
                 }
             )),
             "target filter must restrict ownership to the target player, got {typed:#?}",
+        );
+    }
+
+    #[test]
+    fn they_own_ownership_suffix_scopes_to_iterating_player() {
+        // CR 109.5: the composed ownership suffix also handles "they own" — the
+        // third-person-plural form used by each-player effects — binding to the
+        // iterating `ScopedPlayer` rather than a target player. Locks in the
+        // subject × action combinator's second subject (review feedback on #1998).
+        let effect = parse_effect(
+            "you may put any number of land cards they own from exile onto the battlefield",
+        );
+        let Effect::ChangeZone { target, .. } = effect else {
+            panic!("expected ChangeZone, got {effect:#?}");
+        };
+        let TargetFilter::Typed(typed) = &target else {
+            panic!("expected a Typed land filter, got {target:#?}");
+        };
+        assert!(
+            typed.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer
+                }
+            )),
+            "\"they own\" must scope ownership to the iterating player, got {typed:#?}",
         );
     }
 }

@@ -3723,22 +3723,38 @@ fn parse_ownership_or_controller_suffix(
             return own_ctrl_offset + phrase.len();
         }
     }
-    // CR 108.3 + CR 109.4: "that player owns" — the card belongs to the player
-    // chosen as the enclosing ability's target. Anaphoric reference to a player
-    // named earlier in the same clause (Oblivion Sower: "target opponent exiles
-    // ... then you may put any number of land cards that player owns from exile
-    // ..."). Resolved at runtime against the first `TargetRef::Player` in
-    // `ability.targets` (see `FilterProp::Owned` / `ControllerRef::TargetPlayer`
-    // in `game/filter.rs`), so the candidate pool is the lands that the *target*
-    // player owns — not every land in exile, and not the controller's own cards.
-    if tag::<_, _, OracleError<'_>>("that player owns")
-        .parse(own_ctrl)
-        .is_ok()
-    {
+    // CR 108.3 + CR 109.4: anaphoric ownership suffix, composed as subject ×
+    // action so the whole class is one combinator rather than a per-phrase tag.
+    // Each subject `tag` maps directly to its owner scope:
+    //   "that player owns" → the player chosen as the enclosing ability's target
+    //     (Oblivion Sower: "target opponent exiles ... then you may put any
+    //     number of land cards that player owns from exile ..."), resolved at
+    //     runtime against the first `TargetRef::Player` in `ability.targets`, so
+    //     the pool is the cards the *target* player owns — not every card, and
+    //     not the controller's own;
+    //   "they own"        → the iterating player in each-player effects.
+    // Actions are matched longest-first ("own and control" before "owns" before
+    // "own"); the trailing "and control" maps to `true` and additionally pins
+    // the resolved player as the `*controller` of the filtered objects.
+    let subject = alt((
+        tag("that player").map(|_| ControllerRef::TargetPlayer),
+        tag("they").map(|_| ControllerRef::ScopedPlayer),
+    ));
+    let action = alt((
+        tag("own and control").map(|_| true),
+        tag("owns").map(|_| false),
+        tag("own").map(|_| false),
+    ));
+    let parsed: nom::IResult<&str, (ControllerRef, &str, bool), OracleError<'_>> =
+        (subject, space1, action).parse(own_ctrl);
+    if let Ok((rest, (owner, _, also_control))) = parsed {
         properties.push(FilterProp::Owned {
-            controller: ControllerRef::TargetPlayer,
+            controller: owner.clone(),
         });
-        return own_ctrl_offset + "that player owns".len();
+        if also_control {
+            *controller = Some(owner);
+        }
+        return own_ctrl_offset + (own_ctrl.len() - rest.len());
     }
 
     let (ctrl, ctrl_len) =
