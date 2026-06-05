@@ -871,6 +871,95 @@ mod auto_pass_decision_tests {
         ));
     }
 
+    /// CR 732.2: the halt helper pauses a runaway cascade to a settled Priority
+    /// for the active player, emits exactly one `ResolutionHalted` carrying the
+    /// deduped+sorted stack-source ids, and resets consecutive-pass tracking.
+    #[test]
+    fn emit_resolution_halt_settles_priority_and_emits_event() {
+        let mut state = priority_state();
+        state.active_player = PlayerId(0);
+        state.priority_passes.insert(PlayerId(1));
+        // Two entries share source 7 (must dedup to one), one distinct source 3.
+        for (entry_id, source) in [(1u64, 7u64), (2, 7), (3, 3)] {
+            state.stack.push_back(StackEntry {
+                id: ObjectId(entry_id),
+                source_id: ObjectId(source),
+                controller: PlayerId(0),
+                kind: StackEntryKind::KeywordAction {
+                    action: KeywordAction::Crew {
+                        vehicle_id: ObjectId(entry_id),
+                        paid_creature_ids: Vec::new(),
+                    },
+                },
+            });
+        }
+
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for: state.waiting_for.clone(),
+            log_entries: Vec::new(),
+        };
+        emit_resolution_halt(&mut state, &mut result);
+
+        // Settled to the active player's priority, pass-tracking reset.
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.priority_player, PlayerId(0));
+        assert!(state.priority_passes.is_empty());
+
+        // Exactly one halt event, involved ids deduped (7 once) and sorted.
+        let involved: Vec<Vec<ObjectId>> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ResolutionHalted { involved } => Some(involved.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(involved.len(), 1);
+        assert_eq!(involved[0], vec![ObjectId(3), ObjectId(7)]);
+    }
+
+    /// CR 732.2 regression: a large but TERMINATING stack must resolve fully
+    /// without tripping the runaway backstop — the growth ceilings are sized
+    /// far above honest wide play (a 264-deep stack is nowhere near them).
+    #[test]
+    fn large_terminating_stack_does_not_halt() {
+        let mut state = priority_state();
+        for idx in 0..264 {
+            push_simple_stack_entry(&mut state, 30_000 + idx, PlayerId(0));
+        }
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilStackEmpty,
+            },
+        )
+        .unwrap();
+
+        assert!(state.stack.is_empty());
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ResolutionHalted { .. })),
+            "a terminating stack must not trip the runaway-resolution backstop"
+        );
+    }
+
     #[test]
     fn until_stack_empty_stops_on_stack_growth() {
         let mut state = priority_state();
@@ -947,7 +1036,46 @@ mod auto_pass_decision_tests {
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
-    for _ in 0..auto_pass_loop_max_iterations(state) {
+    // CR 732.2: per-dispatch resource ceilings for a runaway mandatory cascade.
+    // Sized above the largest legitimate single-dispatch burst (a Scute Swarm
+    // landfall copies every Scute in one resolution — tested boards reach ~2,936
+    // permanents) yet far below the WASM linear-memory exhaustion threshold
+    // (hundreds of thousands of objects). The iteration cap below is the
+    // sustained-growth backstop; these deltas catch heavy-per-iteration loops.
+    const MAX_EVENT_GROWTH: usize = 50_000;
+    const MAX_OBJECT_GROWTH: usize = 16_000;
+    let events_baseline = result.events.len();
+    let objects_baseline = state.objects.len();
+
+    // CR 104.4b: bounded-state mandatory-loop detection. Fingerprinting starts
+    // only after this many mandatory iterations (normal resolution settles far
+    // sooner, so it pays nothing); stored normalized snapshots are capped so a
+    // non-repeating mandatory sequence falls through to the Phase-1 backstop.
+    const FINGERPRINT_AFTER_ITERS: usize = 32;
+    const MAX_LOOP_WINDOW: usize = 128;
+    let mut mandatory_iters = 0usize;
+    let mut loop_window: Vec<(u64, GameState)> = Vec::new();
+
+    let max_iterations = auto_pass_loop_max_iterations(state);
+    let mut iteration = 0usize;
+    loop {
+        // CR 732.2: the iteration cap was exhausted while a mandatory cascade is
+        // still in flight (priority unsettled, non-empty stack, no meaningful
+        // action) — halt gracefully, the same way the growth ceilings do, rather
+        // than fall through and leave the game mid-cascade. Reached ONLY on true
+        // exhaustion: every productive exit below uses `break`, leaving the loop
+        // without passing this guard, so a normal short resolution never trips it.
+        if iteration >= max_iterations {
+            if matches!(result.waiting_for, WaitingFor::Priority { .. })
+                && !state.stack.is_empty()
+                && !priority_player_has_meaningful_action(state)
+            {
+                emit_resolution_halt(state, result);
+            }
+            break;
+        }
+        iteration += 1;
+
         match &result.waiting_for {
             WaitingFor::Priority { player } => {
                 let player = *player;
@@ -981,6 +1109,52 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                             finish_completed_or_interrupted_until_stack_empty_sessions(state);
                         result.events.extend(events);
                         result.waiting_for = wf;
+                        // CR 732.2: a mandatory cascade growing the board or
+                        // event stream past the resource ceiling cannot settle —
+                        // halt gracefully rather than exhaust WASM memory.
+                        if result.events.len() - events_baseline > MAX_EVENT_GROWTH
+                            || state.objects.len().saturating_sub(objects_baseline)
+                                > MAX_OBJECT_GROWTH
+                        {
+                            emit_resolution_halt(state, result);
+                            return;
+                        }
+
+                        // CR 104.4b: detect a repeating mandatory loop. Every
+                        // iteration here is mandatory by construction (a
+                        // meaningful action would have broken the loop), so the
+                        // window never spans an optional action. A cheap
+                        // fingerprint pre-filters; a true repeat is CONFIRMED by
+                        // deep state equality before any draw, so a fingerprint
+                        // collision can never cause a wrongful draw.
+                        mandatory_iters += 1;
+                        if mandatory_iters >= FINGERPRINT_AFTER_ITERS
+                            && matches!(result.waiting_for, WaitingFor::Priority { .. })
+                        {
+                            let fingerprint = state.loop_fingerprint();
+                            let normalized = state.normalize_for_loop();
+                            if loop_window.iter().any(|(fp, prior)| {
+                                *fp == fingerprint
+                                    && crate::types::game_state::loop_states_equal(
+                                        &normalized,
+                                        prior,
+                                    )
+                            }) {
+                                // CR 104.4b + CR 732.4: a mandatory action
+                                // repeated a prior state with no way to stop — a
+                                // draw. CR 801.16: limited-range partial draw N/A
+                                // while format_config.range_of_influence is None.
+                                result.events.push(GameEvent::GameOver { winner: None });
+                                result.waiting_for = WaitingFor::GameOver { winner: None };
+                                state.waiting_for = WaitingFor::GameOver { winner: None };
+                                match_flow::handle_game_over_transition(state);
+                                return;
+                            }
+                            if loop_window.len() < MAX_LOOP_WINDOW {
+                                loop_window.push((fingerprint, normalized));
+                            }
+                        }
+
                         if stack_empty_or_grew {
                             break;
                         }
@@ -1033,6 +1207,28 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
             _ => break,
         }
     }
+}
+
+/// CR 732.2: settle a runaway mandatory cascade gracefully. Pauses resolution,
+/// returns priority to the active player, and emits a non-fatal `ResolutionHalted`
+/// log event so the UI/log explains why the cascade stopped. Reached three ways:
+/// the event-growth ceiling, the object-growth ceiling, and iteration-cap
+/// exhaustion. NOT a draw — a net-progress loop is a CR 732.2 shortcut the engine
+/// cannot infer an iteration count for; a *repeating* state is a separate CR
+/// 104.4b draw.
+fn emit_resolution_halt(state: &mut GameState, result: &mut ActionResult) {
+    // Diagnostic-only: the in-flight cascade's distinct stack-source ids.
+    let mut involved: Vec<ObjectId> = state.stack.iter().map(|e| e.source_id).collect();
+    involved.sort_unstable_by_key(|id| id.0);
+    involved.dedup();
+    result.events.push(GameEvent::ResolutionHalted { involved });
+
+    priority::reset_priority(state);
+    let wf = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    state.waiting_for = wf.clone();
+    result.waiting_for = wf;
 }
 
 /// CR 707.10c: Finalize a `CopyRetarget` flow — write the slot-derived targets
