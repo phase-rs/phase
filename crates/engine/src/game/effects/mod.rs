@@ -5399,6 +5399,8 @@ fn resolve_add_pending_etb_counters(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::synthesis::synthesize_extort;
+    use crate::game::ability_utils::build_resolved_from_def;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
@@ -5409,6 +5411,7 @@ mod tests {
         UntilCondition,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::CardFace;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
@@ -5418,10 +5421,11 @@ mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::{ManaColor, ManaCost};
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::{PlayerCounterKind, PlayerId};
     use crate::types::statics::CastFrequency;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     #[test]
@@ -13274,6 +13278,110 @@ mod tests {
             "After discarding 1 of 2 and drawing 2, hand should have 3 cards, got {}. \
              IfYouDo sub-ability likely did not fire.",
             hand_after,
+        );
+    }
+
+    /// Issue #1972: Extort must prompt before draining, then pay {W/B}, drain each
+    /// opponent, and gain life equal to the total life lost.
+    #[test]
+    fn issue_1972_extort_optional_accept_drains_all_opponents_and_gains() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        synthesize_extort(&mut face);
+        let execute = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::SpellCast)
+                    && matches!(t.execute.as_deref().map(|e| e.optional), Some(true))
+            })
+            .and_then(|t| t.execute.as_deref())
+            .expect("synthesized extort trigger");
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source_id = ObjectId(100);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::White,
+            ObjectId(200),
+            false,
+            Vec::new(),
+        ));
+        let resolved = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "extort must prompt before draining, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            (state.players[1].life, state.players[2].life),
+            (20, 20),
+            "opponents must not lose life before the may-pay decision"
+        );
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 19);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    }
+
+    /// Accept extort with no {W/B} available — drain must not run (CR 702.101a).
+    #[test]
+    fn issue_1972_extort_accept_without_payable_mana_does_not_drain() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        synthesize_extort(&mut face);
+        let execute = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::SpellCast)
+                    && matches!(t.execute.as_deref().map(|e| e.optional), Some(true))
+            })
+            .and_then(|t| t.execute.as_deref())
+            .expect("synthesized extort trigger");
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source_id = ObjectId(100);
+        assert!(
+            state.players[0].mana_pool.mana.is_empty(),
+            "controller must have no mana to pay W/B"
+        );
+        let resolved = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "extort must prompt before draining, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            state.cost_payment_failed_flag,
+            "PayCost with no W/B must set cost_payment_failed_flag"
+        );
+        assert_eq!(
+            (
+                state.players[0].life,
+                state.players[1].life,
+                state.players[2].life
+            ),
+            (20, 20, 20),
+            "accepting without payable mana must not drain opponents or grant life"
         );
     }
 

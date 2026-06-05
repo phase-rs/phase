@@ -12,7 +12,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{
     parse_cda_quantity, parse_cda_quantity_with_context, parse_for_each_clause,
-    parse_for_each_clause_expr,
+    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
@@ -2345,7 +2345,7 @@ fn target_relative_clause_owns_suffix(input: &str) -> bool {
     else {
         return false;
     };
-    let Some((_, consumed)) = parse_that_clause_suffix(relative_clause) else {
+    let Some((_, consumed)) = parse_that_clause_suffix(relative_clause, None) else {
         return false;
     };
     let remaining = &relative_clause[consumed..];
@@ -4052,13 +4052,21 @@ pub(crate) fn try_parse_pump(lower: &str, _text: &str) -> Option<Effect> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Duration>)> {
+    parse_pump_clause_with_context(predicate, &ParseContext::default())
+}
+
+pub(crate) fn parse_pump_clause_with_context(
+    predicate: &str,
+    ctx: &ParseContext,
+) -> Option<(PtValue, PtValue, Option<Duration>)> {
     let predicate_lower = predicate.to_lowercase();
     let predicate_tp = TextPair::new(predicate, &predicate_lower);
     let (without_where, where_x_expression) = strip_trailing_where_x(predicate_tp);
     // Strip "for each [clause]" suffix before duration extraction.
     let (without_for_each, for_each_qty) =
-        strip_trailing_for_each_clause_expr(without_where.original);
+        strip_trailing_for_each_clause_expr(without_where.original, ctx);
     let (without_duration, duration) = strip_trailing_duration(without_for_each);
     let lower = without_duration.to_lowercase();
 
@@ -4098,11 +4106,14 @@ pub(crate) fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Op
 /// Strip a trailing "for each [clause]" from pump text, returning the remaining text
 /// and the parsed QuantityExpr (if any). Handles both "until end of turn for each X"
 /// (duration already stripped) and bare "for each X".
-fn strip_trailing_for_each_clause_expr(text: &str) -> (&str, Option<QuantityExpr>) {
+fn strip_trailing_for_each_clause_expr<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> (&'a str, Option<QuantityExpr>) {
     let lower = text.to_lowercase();
     if let Some(pos) = lower.rfind(" for each ") {
         let clause_text = lower[pos + " for each ".len()..].trim_end_matches('.');
-        if let Some(quantity) = parse_for_each_clause_expr(clause_text) {
+        if let Some(quantity) = parse_for_each_clause_expr_with_context(clause_text, ctx) {
             return (text[..pos].trim(), Some(quantity));
         }
     }
@@ -4179,8 +4190,10 @@ pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Opt
         if let Some((before, after)) = tp.split_around(needle) {
             // CR 608.2c: A where-X binding can precede further instructions in the
             // same resolution ("..., where X is N. Put that card ..."). Truncate on
-            // the TextPair before materializing a String (Halana and Alena, Partners:
-            // "... where X is ~'s power. That creature gains haste ...").
+            // the TextPair before materializing a String. Examples: Eldritch Evolution
+            // ("... where X is 2 plus the sacrificed creature's mana value. Put ...")
+            // and Halana and Alena, Partners ("... where X is ~'s power. That creature
+            // gains haste ...").
             let mut after_clause = after;
             if let Some((clause, _)) = after.split_around(". ") {
                 after_clause = clause;
@@ -4549,21 +4562,19 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
-        // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
-        // is …" binds the search count to the defining clause (Oreskos
-        // Explorer: "search your library for up to X Plains cards, where X is
-        // the number of players who control more lands than you"). The count is
-        // an `UpTo` wrapper whose inner `Variable("X")` is rewritten by the
-        // recursion arm; the where-clause population is a control comparison
-        // (CR 109.4) relative to "you" (CR 109.5).
-        | Effect::SearchLibrary { count: amount, .. }
-        | Effect::Seek { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
         }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+        }
+        // CR 107.3i + CR 109.4 + CR 109.5: "search/seek for up to X …, where X
+        // is …" binds the search count (Oreskos Explorer). Eldritch Evolution
+        // binds the filter's `Cmc` bound when X appears in the card filter.
+        Effect::SearchLibrary { filter, count, .. } | Effect::Seek { filter, count, .. } => {
+            *filter = apply_where_x_to_filter(filter.clone(), where_x_expression);
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
         }
         Effect::Scry { count, .. } => {
             *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
@@ -5111,6 +5122,18 @@ mod where_x_tests {
                 comparator: Comparator::LE,
                 value: QuantityExpr::Fixed { value: 6 },
             })
+        );
+    }
+
+    #[test]
+    fn strip_trailing_where_x_stops_at_following_sentence() {
+        let (_, expr) = super::strip_trailing_where_x(crate::parser::oracle_util::TextPair::new(
+            "creature card with mana value X or less, where X is 2 plus the sacrificed creature's mana value. Put that card onto the battlefield",
+            "creature card with mana value x or less, where x is 2 plus the sacrificed creature's mana value. put that card onto the battlefield",
+        ));
+        assert_eq!(
+            expr.as_deref(),
+            Some("2 plus the sacrificed creature's mana value")
         );
     }
 

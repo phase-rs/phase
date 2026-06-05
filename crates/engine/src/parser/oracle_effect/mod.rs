@@ -18,14 +18,14 @@ pub(crate) use lower::{
 // pub(super) re-exports used by sibling submodules via `super::fn_name()`.
 pub(super) use lower::{
     apply_where_x_to_filter, extract_exact_target_multi_target, parse_dynamic_counter_suffix_body,
-    parse_multi_target_count_expr, parse_pump_clause, parse_where_x_quantity_expression,
-    strip_exact_target_prefix, strip_optional_target_prefix, try_parse_pump,
+    parse_multi_target_count_expr, parse_where_x_quantity_expression, strip_exact_target_prefix,
+    strip_optional_target_prefix, try_parse_pump,
 };
 // Test-only re-exports from lower module.
 #[cfg(test)]
 pub(super) use lower::{
-    parse_damage_each_player_scope, rewrite_token_created_this_way_unimplemented,
-    target_filter_is_single_object_target,
+    parse_damage_each_player_scope, parse_pump_clause,
+    rewrite_token_created_this_way_unimplemented, target_filter_is_single_object_target,
 };
 // Shared utilities from the lowering module used by the parse phase above.
 // Using local `use` bindings avoids updating call sites in this file.
@@ -6220,7 +6220,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // thread subject through for effects that carry a target.
     if let Some(ast) = imperative::parse_numeric_imperative_ast(numeric_base, &numeric_base_lower) {
         let effect = imperative::lower_numeric_imperative_ast(ast.with_for_each_quantity(quantity));
-        let effect = thread_for_each_subject(effect, base_no_duration);
+        let effect = thread_for_each_subject(effect, base_no_duration, ctx);
         return Some(parsed_for_each_quantity_effect(
             effect,
             duration,
@@ -6242,7 +6242,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         ) {
             let effect =
                 imperative::lower_targeted_action_ast(ast.with_for_each_quantity(quantity.clone()));
-            let effect = thread_for_each_subject(effect, base_no_duration);
+            let effect = thread_for_each_subject(effect, base_no_duration, ctx);
             return Some(ParsedEffectClause {
                 effect,
                 duration,
@@ -6644,7 +6644,10 @@ fn parse_energy_gain_continuation(rest: &str) -> Option<&str> {
 /// Thread subject through for-each effects that carry a `target` field.
 /// Locates the predicate verb, extracts subject text before it, and replaces
 /// default targets (Any/Controller) with the parsed subject filter.
-fn for_each_subject_application(original: &str) -> Option<SubjectApplication> {
+fn for_each_subject_application(
+    original: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
     let lower = original.to_lowercase();
     // Predicate verbs that the for-each base parsers recognize — find the earliest one.
     // Note: uses str::find (not nom) because this is positional splitting on already-dispatched
@@ -6683,13 +6686,14 @@ fn for_each_subject_application(original: &str) -> Option<SubjectApplication> {
         return None;
     }
 
-    parse_subject_application(subject_text, &mut ParseContext::default())
+    parse_subject_application(subject_text, ctx)
 }
 
 fn for_each_quantity_context(original: &str, ctx: &ParseContext) -> ParseContext {
     let mut quantity_ctx = ctx.clone();
+    let mut subject_ctx = ctx.clone();
     if quantity_ctx.third_person_player_controller_ref().is_none()
-        && for_each_subject_application(original)
+        && for_each_subject_application(original, &mut subject_ctx)
             .is_some_and(|app| app.target.is_some() && is_player_filter(&app.affected))
     {
         quantity_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
@@ -6709,8 +6713,8 @@ fn is_player_filter(filter: &TargetFilter) -> bool {
         )
 }
 
-fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
-    let application = match for_each_subject_application(original) {
+fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContext) -> Effect {
+    let application = match for_each_subject_application(original, ctx) {
         Some(application) => application,
         None => return effect,
     };
@@ -10110,6 +10114,7 @@ fn rebind_anaphoric_ref(qty: &mut QuantityRef, target: ObjectScope) {
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
         | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. }
         | QuantityRef::CountersOn { scope, .. } => scope,
         _ => return,
@@ -24554,6 +24559,46 @@ mod tests {
     // `apply_where_x_effect_expression` → `apply_where_x_quantity_expression`
     // UpTo recursion that routes the where-clause through the shared
     // `ControlsCount` quantity combinator.
+    /// Issue #1965 — Eldritch Evolution: "creature card with mana value X or
+    /// less, where X is 2 plus the sacrificed creature's mana value" must bind
+    /// the search filter's `Cmc` bound to the cost-paid sacrifice, not leave
+    /// `Variable("X")` (which resolves to 0 and skips the search).
+    #[test]
+    fn eldritch_evolution_search_binds_sacrificed_creature_mana_value_plus_two() {
+        let def = parse_effect_chain_with_context(
+            "Search your library for a creature card with mana value X or less, where X is 2 plus the sacrificed creature's mana value. Put that card onto the battlefield, then shuffle. Exile Eldritch Evolution.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let Effect::SearchLibrary { filter, .. } = &*def.effect else {
+            panic!("expected SearchLibrary, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        let cmc = typed
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+                _ => None,
+            })
+            .expect("expected Cmc bound");
+        assert_eq!(*cmc.0, Comparator::LE);
+        assert_eq!(
+            *cmc.1,
+            QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                }),
+                offset: 2,
+            }
+        );
+    }
+
     #[test]
     fn search_up_to_x_where_x_is_players_who_control_more_lands_binds_controls_count() {
         use crate::types::ability::PlayerRelation;

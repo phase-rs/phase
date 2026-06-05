@@ -1893,7 +1893,9 @@ impl FromStr for Keyword {
             "livingweapon" => Ok(Keyword::LivingWeapon),
             "jobselect" => Ok(Keyword::JobSelect),
             "formirrodin!" => Ok(Keyword::ForMirrodin),
-            "totemarmor" => Ok(Keyword::TotemArmor),
+            // CR 702.89a/b: "umbra armor" is the current name; "totem armor" is the
+            // obsolete printing both Oracle text and MTGJSON may still carry.
+            "totemarmor" | "totem armor" | "umbra armor" | "umbraarmor" => Ok(Keyword::TotemArmor),
             "evolve" => Ok(Keyword::Evolve),
             "extort" => Ok(Keyword::Extort),
             "increment" => Ok(Keyword::Increment),

@@ -5,9 +5,9 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect,
-    ObjectProperty, PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation,
-    TypeFilter, ZoneRef,
+    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
+    Duration, Effect, ObjectProperty, PlayerScope, PtStat, PtValueScope, SharedQuality,
+    SharedQualityRelation, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -171,6 +171,82 @@ fn cant_block_static_splits_self_reference() {
         .find(|d| d.mode == StaticMode::CantBlock)
         .expect("expected a CantBlock static");
     assert_eq!(cant.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 502.3: Flood the Engine — "Enchanted permanent loses all abilities and
+/// doesn't untap during its controller's untap step." must decompose into BOTH
+/// the loses-all-abilities grant AND a `CantUntap` static affecting the
+/// enchanted permanent. Previously the untap restriction was dropped, so the
+/// permanent untapped normally and the lock did nothing.
+#[test]
+fn doesnt_untap_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step.",
+    );
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantUntap),
+        "expected a CantUntap static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the loses-all-abilities grant must be preserved"
+    );
+}
+
+/// CR 502.3: A P/T pump compounded with the untap restriction also splits, with
+/// the `CantUntap` static affecting the same subject.
+#[test]
+fn doesnt_untap_static_splits_from_pump() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantUntap)
+        .expect("expected a CantUntap static");
+    assert!(
+        cant.affected.is_some(),
+        "CantUntap companion must share the grant's affected set"
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +1/+1 grant must be preserved"
+    );
+}
+
+/// CR 502.3: A trailing "as long as …" rider on the untap clause attaches to
+/// the `CantUntap` companion, not the grant.
+#[test]
+fn doesnt_untap_static_split_keeps_trailing_condition() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step as long as you control a Swamp.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantUntap)
+        .expect("expected a CantUntap static");
+    assert!(
+        cant.condition.is_some(),
+        "the 'as long as …' rider must attach to the CantUntap companion"
+    );
+}
+
+/// CR 502.3: The split declines (rather than silently dropping a clause) when
+/// an unrecognized clause trails the untap-step phrase — parity with the
+/// sibling `try_split_and_cant_block` terminal guard.
+#[test]
+fn doesnt_untap_static_split_declines_unknown_tail() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step, then its controller loses 1 life.",
+    );
+    assert!(
+        !defs.iter().any(|d| d.mode == StaticMode::CantUntap),
+        "unrecognized trailing clause must make the split decline, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
 }
 
 /// CR 508.1c: Cagemail — "Enchanted creature gets +2/+2 and can't attack." must
@@ -1272,6 +1348,42 @@ fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
             ..
         }
     ));
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        vec![Zone::Hand, Zone::Stack, Zone::Command]
+    );
+}
+
+#[test]
+fn chandras_incinerator_self_cost_reduction_uses_noncombat_damage_to_opponents() {
+    let def = parse_static_line(
+        "This spell costs {X} less to cast, where X is the total amount of noncombat damage dealt to your opponents this turn.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        dynamic_count:
+            Some(QuantityRef::DamageDealtThisTurn {
+                damage_kind: DamageKindFilter::NoncombatOnly,
+                target,
+                ..
+            }),
+        ..
+    } = def.mode
+    else {
+        panic!("expected dynamic self-spell ReduceCost, got {:?}", def.mode);
+    };
+    let TargetFilter::And { filters } = target.as_ref() else {
+        panic!("expected opponent player target filter, got {target:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    assert!(matches!(filters[0], TargetFilter::Player));
+    let TargetFilter::Typed(typed) = &filters[1] else {
+        panic!("expected opponent typed filter, got {:?}", filters[1]);
+    };
+    assert_eq!(typed.controller, Some(ControllerRef::Opponent));
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
