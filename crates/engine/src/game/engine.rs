@@ -153,6 +153,10 @@ pub fn apply(
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
     reconcile_terminal_result(state, &mut result);
+    // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
+    // pool that a spend during this action depleted, before public state is
+    // finalized and the next affordability probe runs. No-op when none flagged.
+    super::mana_payment::refill_infinite_mana(state);
     remember_public_reveals(state, &result.events);
     // Targeted public-state dirty marking over the full accumulated event set
     // (the auto-pass loop appends events). `finalize_public_state` is the only

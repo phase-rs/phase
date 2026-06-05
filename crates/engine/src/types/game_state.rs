@@ -4600,6 +4600,16 @@ pub struct GameState {
     #[serde(default)]
     pub debug_permitted: BTreeSet<PlayerId>,
 
+    /// Set of players for whom the "infinite mana" debug toggle is active. While
+    /// a player is in this set, their mana pool is topped up after every action
+    /// (`mana_payment::refill_infinite_mana`) and is NOT emptied at end of
+    /// step/phase — CR 500.5 is deliberately suppressed for this player only.
+    /// This is a debug-only departure from the rules, gated behind the same
+    /// debug-action permission as every other `DebugAction`. Toggled via
+    /// `DebugAction::SetInfiniteMana`; empty by default.
+    #[serde(default)]
+    pub debug_infinite_mana: BTreeSet<PlayerId>,
+
     #[serde(default)]
     pub match_config: MatchConfig,
     #[serde(default)]
@@ -5762,6 +5772,7 @@ impl GameState {
             commander_declined_zone_return: HashSet::new(),
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
+            debug_infinite_mana: BTreeSet::new(),
         }
     }
 
