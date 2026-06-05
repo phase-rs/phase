@@ -1,4 +1,5 @@
 use rand::Rng;
+use std::collections::VecDeque;
 use thiserror::Error;
 
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
@@ -1054,7 +1055,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
     const FINGERPRINT_AFTER_ITERS: usize = 32;
     const MAX_LOOP_WINDOW: usize = 128;
     let mut mandatory_iters = 0usize;
-    let mut loop_window: Vec<(u64, GameState)> = Vec::new();
+    let mut loop_window: VecDeque<(u64, GameState)> = VecDeque::new();
 
     let max_iterations = auto_pass_loop_max_iterations(state);
     let mut iteration = 0usize;
@@ -1112,7 +1113,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                         // CR 732.2: a mandatory cascade growing the board or
                         // event stream past the resource ceiling cannot settle —
                         // halt gracefully rather than exhaust WASM memory.
-                        if result.events.len() - events_baseline > MAX_EVENT_GROWTH
+                        if result.events.len().saturating_sub(events_baseline) > MAX_EVENT_GROWTH
                             || state.objects.len().saturating_sub(objects_baseline)
                                 > MAX_OBJECT_GROWTH
                         {
@@ -1150,9 +1151,20 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                                 match_flow::handle_game_over_transition(state);
                                 return;
                             }
-                            if loop_window.len() < MAX_LOOP_WINDOW {
-                                loop_window.push((fingerprint, normalized));
+                            // CR 104.4b: a sliding window of the most recent
+                            // MAX_LOOP_WINDOW distinct states. A fill-once-and-stop
+                            // buffer never records the cycle of a loop whose
+                            // repeating phase begins after a long mandatory preamble
+                            // (more than MAX_LOOP_WINDOW transient states), silently
+                            // downgrading that bounded-state draw to a Phase-1 halt.
+                            // Evicting the oldest keeps any period <= MAX_LOOP_WINDOW
+                            // detectable regardless of when the cycle starts; the
+                            // deep loop_states_equal confirmation above still gates
+                            // every draw, so eviction never risks a wrongful draw.
+                            if loop_window.len() == MAX_LOOP_WINDOW {
+                                loop_window.pop_front();
                             }
+                            loop_window.push_back((fingerprint, normalized));
                         }
 
                         if stack_empty_or_grew {

@@ -5905,17 +5905,22 @@ impl GameState {
             player.library.len().hash(&mut h);
             player.graveyard.len().hash(&mut h);
         }
-        // Per-object tapped/damage rollup (id-sorted) cheaply distinguishes
-        // tap/untap and damage-ping states without a full content hash.
-        let mut ids: Vec<ObjectId> = self.objects.keys().copied().collect();
-        ids.sort_unstable_by_key(|id| id.0);
-        for id in &ids {
-            if let Some(object) = self.objects.get(id) {
-                id.0.hash(&mut h);
-                object.tapped.hash(&mut h);
-                object.damage_marked.hash(&mut h);
-            }
+        // Per-object tapped/damage rollup cheaply distinguishes tap/untap and
+        // damage-ping states without a full content hash. Folded together with XOR
+        // so the rollup is order-independent (im::HashMap iteration order is not
+        // stable across states) in O(N) with zero allocation — sorting the id set
+        // on every call was the hot-path cost on large boards (~2,936 permanents).
+        // Each per-object hash folds in the unique id, so equal (tapped, damage)
+        // on different objects never cancels.
+        let mut objects_rollup = 0u64;
+        for (id, object) in &self.objects {
+            let mut object_hash = rustc_hash::FxHasher::default();
+            id.0.hash(&mut object_hash);
+            object.tapped.hash(&mut object_hash);
+            object.damage_marked.hash(&mut object_hash);
+            objects_rollup ^= object_hash.finish();
         }
+        objects_rollup.hash(&mut h);
         // Any randomness consumed ⇒ different stream position ⇒ no collision.
         self.rng.get_word_pos().hash(&mut h);
         h.finish()
@@ -5962,6 +5967,11 @@ fn objects_content_eq(
                     && x.face_down == y.face_down
                     && x.flipped == y.flipped
                     && x.transformed == y.transformed
+                    // CR 702.26: phasing is mutable per-object status that leaves
+                    // zone and objects.len() unchanged, so two states differing only
+                    // in phased-in/out must not compare equal — else a loop that
+                    // phases a permanent in and out is a wrongful CR 104.4b draw.
+                    && x.phase_status == y.phase_status
                     && x.damage_marked == y.damage_marked
                     && x.dealt_deathtouch_damage == y.dealt_deathtouch_damage
                     && x.attached_to == y.attached_to
