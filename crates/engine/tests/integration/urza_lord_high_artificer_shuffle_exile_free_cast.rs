@@ -18,11 +18,7 @@
 //! ABSENCE of a tutor prompt is the rules-correct behavior. CR 118.9 + CR 601.2a:
 //! the exiled card is then castable for free until end of turn.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use engine::ai_support::legal_actions;
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::Effect;
@@ -33,14 +29,7 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Find the index (into `obj.abilities`) of Urza's `{5}` ability — the only one
 /// whose top-level effect is `Effect::Shuffle`. Robust against ability ordering.

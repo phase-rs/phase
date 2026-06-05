@@ -6,6 +6,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 use super::resolve_ability_chain;
+use crate::game::ability_utils::build_resolved_from_def_with_targets;
 
 /// CR 706.2: Roll a die using the game's seeded RNG and emit the authoritative
 /// die-roll event consumed by die-roll triggers and "the result" effects.
@@ -99,11 +100,15 @@ pub fn resolve(
         // CR 706.3a: Find the matching result branch and resolve its effect.
         // Each die consults the same table independently.
         if let Some(branch) = results.iter().find(|b| actual >= b.min && actual <= b.max) {
-            let sub = ResolvedAbility::new(
-                *branch.effect.effect.clone(),
-                ability.targets.clone(),
+            // CR 608.2c: Branch bodies are full `AbilityDefinition`s (player_scope,
+            // sub_abilities, conditions, etc.). `ResolvedAbility::new` with only the
+            // effect drops `player_scope`, so "each opponent loses N life" on a d20
+            // table (Herald of Hadar) incorrectly hit the controller (#2026).
+            let sub = build_resolved_from_def_with_targets(
+                &branch.effect,
                 ability.source_id,
                 ability.controller,
+                ability.targets.clone(),
             );
             resolve_ability_chain(state, &sub, events, 0)?;
         }
@@ -851,6 +856,53 @@ mod tests {
             state.players[0].hand.len(),
             0,
             "zero dice must not leak a stale die result into the sub_ability"
+        );
+    }
+
+    /// Issue #2026 (Herald of Hadar): d20 table branches with `player_scope:
+    /// Opponent` must drain opponents, not the activator.
+    #[test]
+    fn roll_die_result_branch_preserves_opponent_player_scope() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::PlayerFilter;
+        use crate::types::format::FormatConfig;
+
+        let branch_def = parse_effect_chain("each opponent loses 2 life", AbilityKind::Spell);
+        assert_eq!(
+            branch_def.player_scope,
+            Some(PlayerFilter::Opponent),
+            "parser must stamp Opponent scope on each-opponent lose life"
+        );
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let branch = DieResultBranch {
+            min: 1,
+            max: 20,
+            effect: Box::new(branch_def),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![branch],
+                modifier: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].life, 20,
+            "activator must not lose life from opponent-scoped branch"
+        );
+        assert_eq!(
+            (state.players[1].life, state.players[2].life),
+            (18, 18),
+            "each opponent must lose 2 life"
         );
     }
 

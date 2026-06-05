@@ -308,6 +308,7 @@
     "convokeHint": "Tappe Kreaturen, um die Bezahlung zu unterstützen.",
     "improviseHint": "Tappe Artefakte, um die Bezahlung zu unterstützen.",
     "convokeOrImproviseHint": "Tappe Kreaturen oder Artefakte, um die Bezahlung zu unterstützen.",
+    "convokeStaged": "Getappt:",
     "lifeAmount": "2 Leben",
     "lifeCostSummary": "({{count}} Leben)",
     "paymentPending": "Die Bezahlung steht noch aus. Tappe bleibende Karten oder brich diese Aktion ab.",

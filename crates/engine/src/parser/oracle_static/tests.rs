@@ -12706,6 +12706,62 @@ fn parse_unless_condition_excludes_unless_pay_from_not_wrap() {
     );
 }
 
+/// CR 509.1c: Awesome Presence — block tax with defending-player payer and
+/// per-blocking-creature scaling.
+#[test]
+fn awesome_presence_block_tax_unless_pay() {
+    let def = parse_static_line(
+        "Enchanted creature can't be blocked unless defending player pays {3} for each creature they control that's blocking it.",
+    )
+    .expect("Awesome Presence should parse");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    let Some(StaticCondition::UnlessPay { scaling, .. }) = def.condition.as_ref() else {
+        panic!("expected UnlessPay, got {:?}", def.condition);
+    };
+    assert_eq!(
+        *scaling,
+        crate::types::ability::UnlessPayScaling::PerAffectedCreature
+    );
+}
+
+/// Chained Throatseeker's defending-player poison gate is preserved as an
+/// undecomposed unless rider until attack legality can evaluate the candidate
+/// defending player before attackers are committed.
+#[test]
+fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
+    let def = parse_static_line("This creature can't attack unless defending player is poisoned.")
+        .expect("Chained Throatseeker should parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+        panic!("expected Not(Unrecognized), got {:?}", def.condition);
+    };
+    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
+        panic!("expected preserved unrecognized rider, got {condition:?}");
+    };
+    assert_eq!(text, "unless defending player is poisoned");
+}
+
+/// Arboria's turn-history rider is preserved in the AST, but not yet decomposed
+/// into runtime semantics.
+#[test]
+fn arboria_cant_attack_player_unless_rider_preserved_not_decomposed() {
+    let def = parse_static_line(
+        "Creatures can't attack a player unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn.",
+    )
+    .expect("Arboria should parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+        panic!("expected Not(Unrecognized), got {:?}", def.condition);
+    };
+    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
+        panic!("expected preserved unrecognized rider, got {condition:?}");
+    };
+    assert_eq!(
+        text,
+        "unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn"
+    );
+}
+
 /// CR 113.6 + CR 113.6b: Anger (Onslaught / Incarnation cycle). The static
 /// "As long as this card is in your graveyard and you control a Mountain,
 /// creatures you control have haste" must parse with

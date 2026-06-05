@@ -141,7 +141,6 @@
 //! granularity — not as per-card annotations.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
 use serde_json::Value;
 
@@ -464,14 +463,10 @@ fn observed_scope_set<'a>(
 
 #[test]
 fn anaphoric_scope_set_is_frozen() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
+    let Some(cards) = crate::support::shared_card_export_json() else {
         eprintln!("skipping: client/public/card-data.json not generated");
         return;
-    }
-    let raw = std::fs::read_to_string(&path).expect("export should be readable");
-    let cards: Value = serde_json::from_str(&raw).expect("export should be valid JSON");
-    let cards = cards.as_object().expect("export root should be an object");
+    };
 
     let observed = observed_scope_set(cards, "Anaphoric");
     let allowed: BTreeSet<&str> = ANAPHORIC_SCOPE_CARDS.iter().copied().collect();
@@ -527,14 +522,10 @@ fn anaphoric_scope_set_is_frozen() {
 /// guard: a new leak or count change forces a human classification.
 #[test]
 fn demonstrative_scope_set_is_frozen() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
+    let Some(cards) = crate::support::shared_card_export_json() else {
         eprintln!("skipping: client/public/card-data.json not generated");
         return;
-    }
-    let raw = std::fs::read_to_string(&path).expect("export should be readable");
-    let cards: Value = serde_json::from_str(&raw).expect("export should be valid JSON");
-    let cards = cards.as_object().expect("export root should be an object");
+    };
 
     let observed = observed_scope_set(cards, "Demonstrative");
     let allowed: BTreeSet<&str> = DEMONSTRATIVE_SCOPE_CARDS.iter().copied().collect();

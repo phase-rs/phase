@@ -503,6 +503,10 @@ fn parse_speed_threshold_condition(input: &str) -> OracleResult<'_, StaticCondit
 }
 
 fn parse_opponent_poison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    parse_opponent_poison_at_least(input)
+}
+
+fn parse_opponent_poison_at_least(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("an opponent has ").parse(input)?;
     let (rest, count) = parse_number(rest)?;
     let (rest, _) = tag(" or more poison counters").parse(rest)?;
@@ -4947,20 +4951,35 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
 /// Handles "you pay {N}", "their controller pays {N}", "its controller pays {N}".
 /// Used inside "unless" conditions for tax effects (Ghostly Prison, Propaganda, etc.).
 fn parse_unless_pay_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    use crate::types::ability::UnlessPayScaling;
+
     // Consume the payer prefix (all variants lead to the same semantic: paying a cost).
     let (rest, _) = alt((
         tag("you pay "),
         tag("its controller pays "),
         tag("their controller pays "),
         tag("that player pays "),
+        // CR 509.1c: block-tax payer on the defending player (Awesome Presence).
+        tag("defending player pays "),
     ))
     .parse(input)?;
     let (rest, cost) = parse_mana_cost(rest)?;
+    let (rest, scaling) = opt(alt((
+        value(
+            UnlessPayScaling::PerAffectedCreature,
+            tag(" for each creature they control that's blocking it"),
+        ),
+        value(
+            UnlessPayScaling::PerAffectedCreature,
+            tag(" for each creature they control that is blocking it"),
+        ),
+    )))
+    .parse(rest)?;
     Ok((
         rest,
         StaticCondition::UnlessPay {
             cost,
-            scaling: crate::types::ability::UnlessPayScaling::Flat,
+            scaling: scaling.unwrap_or_default(),
             // CR 506.3 + CR 508.1d: Generic "unless [player] pays" condition
             // outside the combat-tax dispatcher carries no defender scope —
             // dispatcher-specific paths (`parse_combat_tax_body`) populate it

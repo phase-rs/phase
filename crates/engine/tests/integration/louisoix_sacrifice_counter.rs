@@ -23,9 +23,6 @@
 //!   - `counter::resolve` to confirm each legal target type is actually
 //!     countered (CR 701.6a).
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use engine::database::card_db::CardDatabase;
 use engine::game::targeting::find_legal_targets;
 use engine::game::zones::create_object;
@@ -39,14 +36,7 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::zones::Zone;
 use engine::types::PlayerId;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Extract the `Effect::Counter` target filter from Louisoix's Sacrifice's
 /// parsed card definition.

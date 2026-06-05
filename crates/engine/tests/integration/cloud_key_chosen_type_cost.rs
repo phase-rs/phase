@@ -14,10 +14,6 @@
 //! CR 601.2f: cost reductions apply only to spells matching the effect's filter.
 //! A spell that is not of the chosen type must NOT be reduced.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::ChoiceType;
@@ -29,14 +25,7 @@ use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// With Cloud Key on the battlefield and NO card type chosen, a non-artifact
 /// spell (Cultivate, {2}{G}) must not receive any cost reduction.

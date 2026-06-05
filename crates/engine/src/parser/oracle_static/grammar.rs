@@ -545,20 +545,24 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     }
 
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature
-    let (body_tp, suffix_condition) =
-        if let Some((body_tp, condition_tp)) = pred_tp.split_around(" as long as ") {
-            let condition_text = condition_tp.original.trim().trim_end_matches('.');
-            (
-                body_tp,
-                Some(parse_attached_static_condition(condition_text).unwrap_or(
-                    StaticCondition::Unrecognized {
-                        text: condition_text.to_string(),
-                    },
-                )),
-            )
-        } else {
-            (pred_tp, None)
-        };
+    let (body_tp, suffix_condition) = if let Some((body_tp, _)) = pred_tp.split_around(" unless ") {
+        (
+            body_tp,
+            super::shared::parse_unless_static_condition(&pred_tp),
+        )
+    } else if let Some((body_tp, condition_tp)) = pred_tp.split_around(" as long as ") {
+        let condition_text = condition_tp.original.trim().trim_end_matches('.');
+        (
+            body_tp,
+            Some(parse_attached_static_condition(condition_text).unwrap_or(
+                StaticCondition::Unrecognized {
+                    text: condition_text.to_string(),
+                },
+            )),
+        )
+    } else {
+        (pred_tp, None)
+    };
     let body_lower = body_tp.lower;
 
     if nom_tag_lower(body_lower, body_lower, "can't be blocked").is_some() {
