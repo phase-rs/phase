@@ -1387,6 +1387,487 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.mana.len(), 1);
     }
 
+    /// CR 603.2 + CR 603.5 + CR 107.3a + CR 608.2c + CR 119.3 + CR 121.1:
+    /// Well of Lost Dreams production-shape end-to-end. Triggered ability shape
+    /// `optional PayCost { Mana { X } } → IfYouDo SequentialSibling Draw { X }`
+    /// where X is capped by the life-gained amount (CR 118.1). Reproduces issue
+    /// #270: clicking "Yes" then submitting X=3 must (a) deduct 3 mana,
+    /// (b) draw 3 cards, (c) leave no residual `waiting_for`. The existing
+    /// `pay_x_mana_from_life_gain_trigger_draws_chosen_x_cards` test
+    /// intentionally elides the `optional=true` + `IfYouDo` + `SequentialSibling`
+    /// wrappers, so it cannot catch regressions in the optional-Yes →
+    /// PayAmountChoice → continuation glue path.
+    #[test]
+    fn pay_x_optional_may_pay_with_if_you_do_draw_full_chain() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::actions::GameAction;
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Well of Lost Dreams".to_string(),
+            Zone::Battlefield,
+        );
+        // CR 121.1: Five library cards available to draw.
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        // CR 107.3a: Five generic mana to spend (X is capped by life gained,
+        // not by mana — verifying max=3 not max=5 distinguishes link (b) from
+        // link (a) in the four-link diagnostic ladder).
+        for _ in 0..5 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        // CR 119.3: Three life gained — this is the `EventContextAmount` cap.
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 3,
+        });
+
+        // CR 608.2c: Build the IfYouDo SequentialSibling Draw rider — exact
+        // production AST shape from `card-data.json` for Well of Lost Dreams.
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        // CR 603.5 + CR 107.3a: Outer optional PayCost{Mana{X}} with the
+        // IfYouDo Draw attached as `sub_ability`.
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+
+        // Step A: resolve_ability_chain → OptionalEffectChoice.
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice (link a — optional prompt), got {:?}",
+            state.waiting_for
+        );
+
+        // Step B: Accept "Yes" → PayAmountChoice with max=3 (capped by
+        // life-gained=3, NOT mana=5). Fingerprint distinguishes:
+        //   max=5  → trigger_event_amount() lost the cap (link b);
+        //   max=3  → cap intact, continue;
+        //   Priority → cost_has_x not detected (link b alt).
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        match &waiting {
+            WaitingFor::PayAmountChoice { resource, max, .. } => {
+                assert_eq!(*resource, PayableResource::ManaGeneric { per_x: 1 });
+                assert_eq!(
+                    *max, 3,
+                    "PayAmountChoice max must be capped by life gained (3), got {max} \
+                     — regression in trigger_event_amount cap or X detection"
+                );
+            }
+            other => panic!(
+                "expected PayAmountChoice after Yes (link c — deferred-stash sub_ability), \
+                 got {other:?}"
+            ),
+        }
+
+        // Step C: pending_continuation must hold the Draw rider with
+        // optional_effect_performed=true. Link (c) regression: continuation None.
+        // Link (d) regression: continuation present but performed flag false.
+        let cont = state
+            .pending_continuation
+            .as_ref()
+            .expect("pending_continuation must be stashed (link c)");
+        assert!(
+            matches!(cont.chain.effect, Effect::Draw { .. }),
+            "pending continuation must wrap the Draw rider, got {:?}",
+            cont.chain.effect
+        );
+        assert!(
+            cont.chain.context.optional_effect_performed,
+            "pending_continuation.chain.context.optional_effect_performed must be true \
+             after Yes (link d — set_optional_effect_performed_recursive regression)"
+        );
+
+        // Step D: Submit X=3 → 3 mana spent, 3 cards drawn, no residue.
+        handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitPayAmount { amount: 3 },
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(
+            state.players[0].hand.len(),
+            3,
+            "IfYouDo Draw{{X=3}} must draw 3 cards after Yes + Submit 3"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            2,
+            "3 of 5 mana must be spent on X cost"
+        );
+        // (c) No residual choice: the chain fully resolved back to priority.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "after the Draw resolves, no residual waiting_for must remain, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// CR 608.2c: Declining the outer "may pay {X}" leaves the
+    /// `IfYouDo`-gated Draw sub-ability with `optional_effect_performed=false`;
+    /// the gate evaluates false and nothing happens — no mana spent, no cards
+    /// drawn, no residual `waiting_for`.
+    #[test]
+    fn pay_x_optional_may_pay_decline_does_not_draw_or_pay() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Well of Lost Dreams".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        for _ in 0..5 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 3,
+        });
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        handle_optional_effect_choice(&mut state, false, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "decline must not draw any cards"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            5,
+            "decline must not spend any mana"
+        );
+    }
+
+    /// CR 107.3a: Accepting the optional, then submitting amount=0, is a
+    /// legal payment of zero mana (the controller chooses X for the {X} cost,
+    /// and 0 is legal since the trigger sets no positive lower bound). The `IfYouDo` Draw fires — the effect WAS
+    /// performed (the optional was accepted and the X cost was satisfied at
+    /// zero mana) — but with X=0 the Draw quantity is 0, so no cards are
+    /// drawn. The performed signal must NOT be conflated with "X > 0".
+    #[test]
+    fn pay_x_optional_may_pay_submit_zero_pays_zero_draws_zero() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::actions::GameAction;
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Well of Lost Dreams".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        for _ in 0..5 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 3,
+        });
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        let waiting = handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+        let _ = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SubmitPayAmount { amount: 0 },
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "X=0 must draw 0 cards (the Draw count IS X)"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            5,
+            "X=0 must spend 0 mana"
+        );
+    }
+
+    /// CR 118.1 + CR 107.3a: PayAmountChoice `max` for the Well of Lost
+    /// Dreams shape is the MIN of (player mana, life-gained). With 10 mana
+    /// and only 2 life gained, max must be 2 — not 10. This pins the
+    /// trigger-event-amount cap independently from the X-payable cap, so a
+    /// regression that drops the event cap surfaces as max=10 here even when
+    /// the basic mana check still passes.
+    #[test]
+    fn pay_x_optional_max_capped_by_event_amount_not_player_mana() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_payment_choices::handle_optional_effect_choice;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{AbilityCondition, SubAbilityLink};
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Well of Lost Dreams".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..3 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        // Plenty of mana — 10 generic available.
+        for _ in 0..10 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        // Only 2 life gained.
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 2,
+        });
+
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        draw.condition = Some(AbilityCondition::effect_performed());
+        draw.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+        pay.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        handle_optional_effect_choice(&mut state, true, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => assert_eq!(
+                *max, 2,
+                "max must be capped by life gained (2), NOT player mana (10)"
+            ),
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+    }
+
     #[test]
     fn player_scope_pay_any_mana_accumulates_chosen_x_for_tail() {
         use crate::game::effects::resolve_ability_chain;

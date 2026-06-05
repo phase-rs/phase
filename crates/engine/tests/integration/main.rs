@@ -162,6 +162,7 @@ mod vigor_regression;
 mod virulent_emissary_trigger;
 mod volatile_fault_that_player_search;
 mod wedding_ring_etb_token_copy;
+mod well_of_lost_dreams_may_pay_x;
 mod wernog_riders_chaplain_investigate_count;
 mod wise_mothman_milled_trigger;
 mod wise_mothman_target_distinctness;
