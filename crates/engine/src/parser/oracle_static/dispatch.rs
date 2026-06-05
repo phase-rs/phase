@@ -1825,15 +1825,12 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "as though it/they had flash" (CR 702.8a) ---
-    if nom_primitives::scan_contains(tp.lower, "as though it had flash")
-        || nom_primitives::scan_contains(tp.lower, "as though they had flash")
-    {
-        return Some(
-            StaticDefinition::new(StaticMode::CastWithFlash)
-                .description(text.to_string())
-                .active_zones(vec![Zone::Battlefield]),
-        );
+    // --- "You may cast [type] spells as though they had flash" (CR 601.3b / CR 702.8a) ---
+    // Emits `CastWithKeyword { Flash }` with the spell-type filter — the only
+    // static mode the flash-timing path (granted_spell_keywords) reads, and the
+    // one that preserves the "creature spells" restriction (issue #1957).
+    if let Some(def) = parse_cast_as_though_flash_static(&tp, &text) {
+        return Some(def);
     }
 
     // --- "[Type] spells you cast [from zone] have [keyword]" (CR 702.51a) ---

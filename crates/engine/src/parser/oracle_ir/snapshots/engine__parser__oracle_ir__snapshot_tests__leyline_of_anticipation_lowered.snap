@@ -33,8 +33,14 @@ expression: "&lowered"
   "triggers": [],
   "statics": [
     {
-      "mode": "CastWithFlash",
-      "affected": null,
+      "mode": {
+        "CastWithKeyword": {
+          "keyword": "Flash"
+        }
+      },
+      "affected": {
+        "type": "Any"
+      },
       "modifications": [],
       "condition": null,
       "affected_zone": null,

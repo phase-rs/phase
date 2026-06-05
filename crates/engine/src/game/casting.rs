@@ -35513,6 +35513,74 @@ mod tests {
             );
         }
 
+        /// Issue #1957 regression: the PRINTED static "You may cast creature
+        /// spells as though they had flash." (Vivien, Champion of the Wilds)
+        /// must let the controller cast a CREATURE spell at instant speed —
+        /// and must NOT grant flash timing to a non-creature spell.
+        ///
+        /// CR 601.3b + CR 702.8a: this parses to a battlefield `CastWithKeyword
+        /// { Flash }` static carrying a creature spell filter, read by
+        /// `granted_spell_keywords`. The bug was that the line parsed to the
+        /// dead `CastWithFlash` mode (no filter, never consumed) — so the grant
+        /// silently did nothing.
+        #[test]
+        fn vivien_creature_flash_static_scopes_to_creature_spells() {
+            let mut state = setup_game_at_main_phase();
+
+            // P0 controls Vivien, Champion of the Wilds (only the static line
+            // matters here). Install the parsed static onto a battlefield object.
+            let vivien = create_object(
+                &mut state,
+                CardId(900),
+                PlayerId(0),
+                "Vivien, Champion of the Wilds".to_string(),
+                Zone::Battlefield,
+            );
+            let parsed = parse_oracle_text(
+                "You may cast creature spells as though they had flash.",
+                "Vivien, Champion of the Wilds",
+                &[],
+                &["Planeswalker".to_string()],
+                &["Vivien".to_string()],
+            );
+            assert_eq!(
+                parsed.statics.len(),
+                1,
+                "the flash-permission line must parse to exactly one static, got {:?}",
+                parsed.statics
+            );
+            state.objects.get_mut(&vivien).unwrap().static_definitions =
+                parsed.statics.clone().into();
+
+            // A creature spell and a sorcery in P0's hand.
+            let creature = create_object(
+                &mut state,
+                CardId(901),
+                PlayerId(0),
+                "Test Creature".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&creature).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.mana_cost = ManaCost::generic(1);
+            }
+            let sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(902));
+
+            // CR 601.3b: the creature spell gains flash timing via the static.
+            assert!(
+                effective_spell_keyword_kinds(&state, PlayerId(0), creature)
+                    .contains(&KeywordKind::Flash),
+                "creature spell must gain Flash from Vivien's static"
+            );
+            // The filter scopes to creature spells — the sorcery is unaffected.
+            assert!(
+                !effective_spell_keyword_kinds(&state, PlayerId(0), sorcery)
+                    .contains(&KeywordKind::Flash),
+                "sorcery must NOT gain Flash (static is creature-scoped)"
+            );
+        }
+
         /// (g) CR 611.2c regression lock: the grant is bound to the grantee via
         /// the outer `SpecificPlayer` gate, so it must survive an opponent GAINING
         /// CONTROL of Teferi (not just Teferi leaving play — that is test (b)).

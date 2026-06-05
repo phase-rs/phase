@@ -311,6 +311,76 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     None
 }
 
+/// Parse the static permission "You may cast [type] spells as though they had
+/// flash." (Leyline of Anticipation, Vedalken Orrery, Vivien, Champion of the
+/// Wilds' first ability).
+///
+/// CR 601.3b: An effect that lets a player cast a spell "as though it had flash"
+/// lets that player begin to cast it at instant speed. CR 702.8a: flash means
+/// the spell may be cast any time its controller could cast an instant.
+///
+/// This must emit `StaticMode::CastWithKeyword { keyword: Flash }` with the
+/// spell-type filter in `affected` — that is the ONLY static mode the
+/// flash-timing path (`granted_spell_keywords` in casting.rs) actually reads.
+/// The legacy `StaticMode::CastWithFlash` carries no spell filter and is never
+/// consumed by that path, so it silently dropped both the timing grant and the
+/// "creature spells" restriction (issue #1957). Mirrors the activated/triggered
+/// `try_parse_cast_as_though_flash_permission` (oracle_effect) so the static and
+/// duration-scoped forms share one filter-construction contract.
+pub(crate) fn parse_cast_as_though_flash_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let type_text = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
+        let (i, _) = tag("cast ").parse(i)?;
+        // "[type] spells as though they had flash" — the bare "spells" form
+        // (no type prefix) grants flash to every spell (Leyline of Anticipation).
+        let (i, type_part) = alt((
+            value("", tag("spells as though they had flash")),
+            map(
+                terminated(
+                    take_until(" spells as though they had flash"),
+                    tag(" spells as though they had flash"),
+                ),
+                str::trim,
+            ),
+        ))
+        .parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, type_part.to_string()))
+    })?
+    .0;
+
+    // CR 601.3b: scope the grant to the spell class. A bare "spells" grant
+    // applies to every spell the controller casts (TargetFilter::Any); a typed
+    // grant ("creature spells") constrains to that type and is scoped to spells
+    // the controller casts (ControllerRef::You), matching the casting-grant
+    // semantics of `parse_spells_have_keyword`.
+    let affected = if type_text.is_empty() {
+        TargetFilter::Any
+    } else {
+        let phrase = format!("{type_text} spells");
+        let mut filter = parse_type_phrase(&phrase).0;
+        if let TargetFilter::Typed(ref mut tf) = filter {
+            if tf.controller.is_none() {
+                tf.controller = Some(ControllerRef::You);
+            }
+        }
+        filter
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash,
+        })
+        .affected(affected)
+        .description(text.to_string())
+        .active_zones(vec![Zone::Battlefield]),
+    )
+}
+
 pub(crate) fn apply_spell_keyword_subject_constraints(
     filter: TargetFilter,
     zone_filter: Option<FilterProp>,
