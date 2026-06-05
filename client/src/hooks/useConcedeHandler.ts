@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { useNavigate } from "react-router";
 
+import { clearPromptOverlayState } from "../game/sessionCleanup";
 import { clearGame, useGameStore } from "../stores/gameStore";
 import { useDraftStore } from "../stores/draftStore";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore";
@@ -109,14 +110,16 @@ export function useConcedeHandler({
     void useGameStore
       .getState()
       .dispatch({ type: "Concede", data: { player_id: getPlayerId() } })
-      .then(() => {
-        clearGame(gameId);
+      .then(async () => {
+        clearPromptOverlayState();
+        await clearGame(gameId);
         navigate("/");
       })
-      .catch((err) => {
+      .catch(async (err) => {
         console.error("[useConcedeHandler] concede dispatch failed:", err);
         // Still clear + navigate on failure — the user has decided to leave.
-        clearGame(gameId);
+        clearPromptOverlayState();
+        await clearGame(gameId);
         navigate("/");
       });
   }, [gameId, isDraft, isDraftPodMatch, navigate]);

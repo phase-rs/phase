@@ -8196,6 +8196,26 @@ pub(super) fn can_feasibly_pay_mana_cost(
     source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
 ) -> bool {
+    // CR 601.2f + CR 107.1b: Affordability must check a concrete X value, not
+    // the symbolic `{X}` shard left in the cost (issue #2011: Kozilek's Command
+    // `{X}{C}{C}` with only Eldrazi Temple was treated as uncastable). X only
+    // adds generic mana, so X=0 is the cheapest concrete affordability probe.
+    if let Some(sid) = source_id {
+        if super::casting_costs::cost_has_x(cost) {
+            let mut concrete = cost.clone();
+            concrete.concretize_x(0);
+            return can_feasibly_pay_mana_cost_without_x(state, player, Some(sid), &concrete);
+        }
+    }
+    can_feasibly_pay_mana_cost_without_x(state, player, source_id, cost)
+}
+
+fn can_feasibly_pay_mana_cost_without_x(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
     // CR 117.1d: Auto-tap path remains the fast path. Anything that can be
     // paid with only `{T}` activations was castable before this predicate
     // existed and must continue to be castable now.
@@ -11316,7 +11336,7 @@ mod tests {
         BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
         CostCategory, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
-        ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
+        ManaSpendPermission, ManaSpendRestriction, ModalChoice, ModalSelectionCondition,
         ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtValue,
         QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
         RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
@@ -35816,5 +35836,114 @@ mod tests {
                 "stealing Teferi must not hand the grant to the thief"
             );
         }
+    }
+
+    /// Issue #2011: `{X}{C}{C}` Kozilek's Command must be castable when Eldrazi
+    /// Temple is the only colorless source (restricted `{C}{C}` covers `{C}{C}` at X=0).
+    #[test]
+    fn issue_2011_kozilek_command_castable_with_only_eldrazi_temple() {
+        let mut state = setup_game_at_main_phase();
+        let temple = create_object(
+            &mut state,
+            CardId(9200),
+            PlayerId(0),
+            "Eldrazi Temple".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&temple).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).extend([
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                            "Colorless Eldrazi".to_string(),
+                        )],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            ]);
+        }
+
+        let command = create_object(
+            &mut state,
+            CardId(9201),
+            PlayerId(0),
+            "Kozilek's Command".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&command).unwrap();
+            obj.card_types.core_types.push(CoreType::Kindred);
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.card_types.subtypes.push("Eldrazi".to_string());
+            obj.color.clear();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::X,
+                    ManaCostShard::Colorless,
+                    ManaCostShard::Colorless,
+                ],
+                generic: 0,
+            };
+            obj.modal = Some(ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 4,
+                ..ModalChoice::default()
+            });
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        let cost = state.objects[&command].mana_cost.clone();
+        let max_x = super::casting_costs::max_x_value_excluding(
+            &state,
+            PlayerId(0),
+            &cost,
+            Some(command),
+            &HashSet::new(),
+        );
+        assert_eq!(max_x, 0, "only Temple should afford X=0 for {{C}}{{C}}");
+
+        let mut concrete = cost.clone();
+        concrete.concretize_x(0);
+        assert!(
+            can_pay_cost_after_auto_tap(&state, PlayerId(0), command, &concrete),
+            "auto-tap must cover {{C}}{{C}} with Eldrazi Temple restricted mana"
+        );
+        assert!(
+            can_feasibly_pay_mana_cost_without_x(&state, PlayerId(0), Some(command), &concrete),
+            "X=0 concrete cost must be feasible via Temple restricted mana"
+        );
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), command),
+            "can_cast_object_now must be true (issue #2011)"
+        );
     }
 }
