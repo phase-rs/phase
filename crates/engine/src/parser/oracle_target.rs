@@ -1315,6 +1315,8 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" have ")),
         // Per-player / per-permanent action predicates (issue #2016 class:
         // "… draws a card", "… loses N life", "… gains", "… gets", "… sacrifices").
+        // Plural/modal board-filter predicates ("get", "can't") are split
+        // upstream by the static parser before this name terminator sees them.
         value(
             (),
             (

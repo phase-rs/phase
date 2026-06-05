@@ -16984,9 +16984,9 @@ mod tests {
         ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode,
         Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming,
-        TypeFilter, TypedFilter, ZoneRef,
+        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation, PtStat,
+        PtValue, PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
+        TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -31282,8 +31282,6 @@ mod tests {
     /// opponent's Ornament drew the reporter a card despite controlling none).
     #[test]
     fn bonders_ornament_controls_named_permanent_scope() {
-        use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
-
         let (scope, result) = strip_each_player_subject(
             "each player who controls a permanent named Bonder's Ornament draws a card",
         );
