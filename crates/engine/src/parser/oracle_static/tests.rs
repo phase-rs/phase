@@ -8290,9 +8290,24 @@ fn static_cant_cast_players_during_combat() {
 
 #[test]
 fn static_cant_cast_from_still_works() {
-    // Regression: CantCastFrom (zone-based) must not be affected
+    // Regression: CantCastFrom (zone-based) must not be affected. "Players" → AllPlayers.
     let def = parse_static_line("Players can't cast spells from graveyards or libraries.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantCastFrom);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    // The prohibited zones ride the affected filter via InAnyZone.
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(ref tf))
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Graveyard) && zones.contains(&Zone::Library)
+            ))
+    ));
 }
 
 #[test]
@@ -8601,7 +8616,46 @@ fn per_turn_cast_limit_does_not_affect_cant_cast_during() {
 fn per_turn_cast_limit_does_not_affect_cant_cast_from() {
     // Regression: CantCastFrom must still parse correctly
     let def = parse_static_line("Players can't cast spells from graveyards or libraries.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantCastFrom);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+}
+
+#[test]
+fn static_cant_cast_from_anywhere_other_than_hand_drannith_magistrate() {
+    // CR 601.3 + CR 109.5: Drannith Magistrate — "Your opponents can't cast spells
+    // from anywhere other than their hands." Subject → Opponents scope; the inverse
+    // "anywhere other than [hand]" clause expands to every cast-capable zone except
+    // the hand (graveyard, library, exile, command) on the affected filter.
+    let def =
+        parse_static_line("Your opponents can't cast spells from anywhere other than their hands.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected typed affected filter, got {:?}", def.affected);
+    };
+    let zones = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            _ => None,
+        })
+        .expect("expected InAnyZone prohibited-zone list");
+    // Hand is the only allowed zone; every other cast-capable zone is prohibited.
+    assert!(!zones.contains(&Zone::Hand));
+    assert!(zones.contains(&Zone::Graveyard));
+    assert!(zones.contains(&Zone::Library));
+    assert!(zones.contains(&Zone::Exile));
+    assert!(zones.contains(&Zone::Command));
 }
 
 // --- MustAttack / MustBlock additional combat requirement tests ---

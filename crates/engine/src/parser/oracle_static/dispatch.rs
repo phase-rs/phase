@@ -1532,23 +1532,34 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
-    // --- CR 604.3: "Players can't cast spells from [zones]" ---
-    // e.g., Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
+    // --- CR 601.3 + CR 101.2 + CR 109.5: "[subject] can't cast spells from [zones]" ---
+    // Two phrasings collapse here, discriminated by the zone clause:
+    // - Explicit list (Grafdigger's Cage): "Players can't cast spells from
+    //   graveyards or libraries." → prohibited = the listed zones.
+    // - Inverse "anywhere other than" (Drannith Magistrate): "Your opponents
+    //   can't cast spells from anywhere other than their hands." → prohibited =
+    //   every cast-capable zone except the named allowed zone.
+    // The subject prefix rides the `who` scope axis via the shared building block.
     if nom_primitives::scan_contains(tp.lower, "can't cast spells from") {
-        let zones = parse_zone_names_from_tp(&tp);
-        let affected = if zones.is_empty() {
-            TargetFilter::Any
-        } else {
-            TargetFilter::Typed(TypedFilter {
+        let who = strip_casting_prohibition_subject(tp.lower)
+            .map(|(scope, _)| scope)
+            .unwrap_or(ProhibitionScope::AllPlayers);
+        // CR 601.2a: Prefer the "anywhere other than" complement; fall back to the
+        // explicit zone list. An empty list (no recognized zone) yields no static —
+        // returning `TargetFilter::Any` here would over-block every zone.
+        let zones = parse_cast_from_anywhere_other_than_tp(&tp)
+            .unwrap_or_else(|| parse_zone_names_from_tp(&tp));
+        if !zones.is_empty() {
+            let affected = TargetFilter::Typed(TypedFilter {
                 properties: vec![FilterProp::InAnyZone { zones }],
                 ..TypedFilter::default()
-            })
-        };
-        return Some(
-            StaticDefinition::new(StaticMode::CantCastFrom)
-                .affected(affected)
-                .description(text.to_string()),
-        );
+            });
+            return Some(
+                StaticDefinition::new(StaticMode::CantCastFrom { who })
+                    .affected(affected)
+                    .description(text.to_string()),
+            );
+        }
     }
 
     // --- CR 101.2: Blanket casting prohibition ("can't cast [type] spells") ---
