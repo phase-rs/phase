@@ -5425,11 +5425,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
-        CastingPermission, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission, ObjectProperty,
-        PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-        SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
-        UntilCondition,
+        CastingPermission, Chooser, ChosenAttribute, Comparator, ContinuousModification,
+        ControllerRef, DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission,
+        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -6659,8 +6659,6 @@ mod tests {
     /// the two exiled cards — never three (the discard plus the two exiled).
     #[test]
     fn if_you_do_gate_resets_tracked_set_so_choice_excludes_gating_discard() {
-        use crate::types::ability::{Chooser, ZoneOwner};
-
         let mut state = GameState::new_two_player(42);
         // One card in hand — discarded by the gating action (lands in graveyard).
         let discarded = create_object(
@@ -6686,7 +6684,10 @@ mod tests {
             Zone::Library,
         );
 
-        // Rider: exile the top two cards, then choose one of them.
+        // Rider: exile the top two cards, then choose one of them. The real
+        // Party Thrasher chain continues from this choice into
+        // GrantCastingPermission; the polluted tracked set first becomes
+        // user-visible at this choice boundary.
         let choose = ResolvedAbility::new(
             Effect::ChooseFromZone {
                 count: 1,
