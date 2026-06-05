@@ -25695,6 +25695,7 @@ mod tests {
 /// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
 #[cfg(test)]
 mod snapshot_tests {
+    use crate::parser::oracle_nom::quantity::parse_quantity_ref;
     use crate::types::ability::AbilityCondition;
 
     use super::*;
@@ -25710,6 +25711,80 @@ mod snapshot_tests {
             "Test Card",
         );
         insta::assert_json_snapshot!(def);
+    }
+
+    /// CR 208.3 + CR 608.2k (issue #2009): "that spell's power/toughness" in a
+    /// `Whenever you cast a [creature] spell` trigger must gate the chained
+    /// sub-effects on the triggering spell's power. Before the fix the
+    /// `"that spell's power"` quantity ref was unrecognized, so
+    /// `parse_condition_text` returned `None` and `strip_leading_general_conditional`
+    /// silently dropped each `If that spell's power is N or greater, …` head —
+    /// the draw and damage fired on every creature spell regardless of power.
+    /// Asserts each chained sub-ability carries the right
+    /// `QuantityCheck { Power(CostPaidObject) GE N }` gate (Eshki, Temur's Roar).
+    #[test]
+    fn eshki_that_spell_power_gates_chained_effects() {
+        let power_ge = |n: i32| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n },
+        };
+
+        let def = parse_trigger_line(
+            "Whenever you cast a creature spell, put a +1/+1 counter on Eshki. If that spell's power is 4 or greater, draw a card. If that spell's power is 6 or greater, Eshki deals damage equal to Eshki's power to each opponent.",
+            "Eshki, Temur's Roar",
+        );
+
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+
+        let execute = def.execute.as_ref().expect("execute ability present");
+        // First instruction (put a +1/+1 counter) is unconditional.
+        assert_eq!(execute.condition, None);
+
+        // "If that spell's power is 4 or greater, draw a card."
+        let draw = execute
+            .sub_ability
+            .as_ref()
+            .expect("draw sub-ability present");
+        assert_eq!(draw.condition.as_ref(), Some(&power_ge(4)));
+
+        // "If that spell's power is 6 or greater, Eshki deals damage …"
+        let damage = draw
+            .sub_ability
+            .as_ref()
+            .expect("damage sub-ability present");
+        assert_eq!(damage.condition.as_ref(), Some(&power_ge(6)));
+    }
+
+    /// CR 208.3 + CR 608.2k (issue #2009): building-block coverage — the bare
+    /// "that spell's power"/"toughness" quantity refs resolve through the same
+    /// `parse_quantity_ref` path as "that creature's power" and "that spell's
+    /// mana value", scoped to the trigger-condition referent (CostPaidObject).
+    #[test]
+    fn that_spell_power_toughness_quantity_refs() {
+        assert_eq!(
+            parse_quantity_ref("that spell's power"),
+            Ok((
+                "",
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                }
+            ))
+        );
+        assert_eq!(
+            parse_quantity_ref("that spell's toughness"),
+            Ok((
+                "",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                }
+            ))
+        );
     }
 
     /// CR 608.2c (issue #1584): Kathril's "Repeat this process for <10 keywords>"

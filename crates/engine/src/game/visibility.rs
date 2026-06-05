@@ -60,6 +60,19 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         HashSet::new()
     };
 
+    // CR 701.20e: A bare "look at the top card" peek (Dig with keep_count == 0,
+    // reveal == false) privately reveals the card(s) to the looking player only.
+    // `dig.rs` records the looker in `private_look_player`; surface the peeked
+    // cards to that player so they can see the card while deciding a subsequent
+    // "you may reveal that card" optional (Delver of Secrets), without leaking it
+    // to opponents.
+    let private_look_visible: HashSet<ObjectId> = match state.private_look_player {
+        Some(looker) if can_view_private_for_player(looker) => {
+            state.private_look_ids.iter().copied().collect()
+        }
+        _ => HashSet::new(),
+    };
+
     let search_visible: HashSet<ObjectId> =
         if let WaitingFor::SearchChoice {
             player, ref cards, ..
@@ -111,6 +124,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         let owner = state.objects.get(&obj_id).map(|o| o.owner);
         let visible = manifest_dread_visible.contains(&obj_id)
             || dig_visible.contains(&obj_id)
+            || private_look_visible.contains(&obj_id)
             || search_visible.contains(&obj_id)
             // CR 701.20b: Revealed cards are visible to all players. For reveal-digs
             // ("reveal the top N"), dig cards are also in revealed_cards and must remain
@@ -162,6 +176,36 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .collect();
     for obj_id in hidden_facedown_exile_ids {
         hide_card(&mut filtered, obj_id);
+    }
+
+    // CR 708.5: "At any time, you may look at a face-down permanent you control
+    // (even if it's phased out). You can't look at face-down spells or
+    // permanents controlled by another player." Face-down objects on the
+    // battlefield (manifest / morph / disguise / cloak) and any future modeled
+    // face-down stack spells keep their real identity in `back_face`. That
+    // hidden identity is look-permission of the *controller* alone — strip
+    // `back_face` for every viewer who is not the controller so the underlying
+    // card never leaks to opponents over the wire. The controller (turn-control
+    // aware, matching the rest of this filter) retains it so their client can
+    // show them the face. DFC back faces (`face_down == false`) are public
+    // information and are intentionally left untouched.
+    let leaked_facedown_object_ids: Vec<ObjectId> = filtered
+        .battlefield
+        .iter()
+        .copied()
+        .chain(filtered.stack.iter().map(|entry| entry.id))
+        .filter(|obj_id| {
+            state.objects.get(obj_id).is_some_and(|obj| {
+                obj.face_down
+                    && obj.back_face.is_some()
+                    && !can_view_private_for_player(obj.controller)
+            })
+        })
+        .collect();
+    for obj_id in leaked_facedown_object_ids {
+        if let Some(obj) = filtered.objects.get_mut(&obj_id) {
+            obj.back_face = None;
+        }
     }
 
     if let WaitingFor::ManifestDreadChoice { player, ref cards } = state.waiting_for {
@@ -533,6 +577,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.casting_permissions.clear();
         obj.printed_ref = None;
         obj.base_printed_ref = None;
+        obj.back_face = None;
         obj.token_image_ref = None;
         obj.source_related_token_ids.clear();
         obj.foretold = false;
@@ -573,8 +618,11 @@ fn redact_pending_trigger_context_for_observer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::morph::manifest;
+    use crate::game::printed_cards::snapshot_object_face;
     use crate::game::zones::create_object;
     use crate::types::ability::{BeholdCostAction, Effect, ResolvedAbility};
+    use crate::types::card_type::{CardType, CoreType};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityResume,
@@ -698,6 +746,30 @@ mod tests {
         assert_eq!(hidden.name, "Hidden Card");
         assert!(hidden.source_related_token_ids.is_empty());
         assert!(hidden.token_image_ref.is_none());
+    }
+
+    #[test]
+    fn hidden_cards_redact_back_face_identity() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Front Face".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&card_id).unwrap();
+            let mut back_face = snapshot_object_face(obj);
+            back_face.name = "Secret Back Face".to_string();
+            obj.back_face = Some(back_face);
+        }
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        let hidden = filtered.objects.get(&card_id).unwrap();
+
+        assert_eq!(hidden.name, "Hidden Card");
+        assert!(hidden.back_face.is_none());
     }
 
     #[test]
@@ -1559,5 +1631,68 @@ mod tests {
         let opponent_obj = opponent_view.objects.get(&card_id).unwrap();
         assert_eq!(opponent_obj.name, "Hidden Card");
         assert!(opponent_obj.face_down);
+    }
+
+    /// Issue #2024 (Manifest): CR 708.5 — "At any time, you may look at a
+    /// face-down permanent you control." A manifested (or morph/disguise/cloak)
+    /// face-down battlefield permanent stores its real identity in `back_face`.
+    /// The permanent's *controller* must keep that identity in their filtered
+    /// view so the client can show them the face, while opponents must have it
+    /// redacted (CR 708.5 — you can't look at a face-down permanent controlled
+    /// by another player).
+    #[test]
+    fn face_down_battlefield_permanent_identity_visible_only_to_controller() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let controller = PlayerId(0);
+        let secret = create_object(
+            &mut state,
+            CardId(7),
+            controller,
+            "Secret Manifest".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&secret).unwrap();
+            obj.power = Some(5);
+            obj.toughness = Some(4);
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+        }
+
+        let mut events = Vec::new();
+        manifest(&mut state, controller, &mut events).unwrap();
+
+        // Server-side, the face-down 2/2 carries its real identity in back_face.
+        assert!(state.objects[&secret].face_down);
+        assert_eq!(state.objects[&secret].zone, Zone::Battlefield);
+        let stored = state.objects[&secret].back_face.as_ref().unwrap();
+        assert_eq!(stored.name, "Secret Manifest");
+
+        // CR 708.5: the controller may look at their own face-down permanent —
+        // their filtered view keeps the underlying identity in back_face.
+        let controller_view = filter_state_for_viewer(&state, controller);
+        let controller_obj = controller_view.objects.get(&secret).unwrap();
+        assert!(controller_obj.face_down);
+        let controller_back = controller_obj
+            .back_face
+            .as_ref()
+            .expect("controller must retain back_face to look at their own manifest");
+        assert_eq!(controller_back.name, "Secret Manifest");
+        assert_eq!(controller_back.power, Some(5));
+
+        // CR 708.5: an opponent can't look at it — back_face is redacted, but
+        // the public 2/2 face is still shown.
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        let opponent_obj = opponent_view.objects.get(&secret).unwrap();
+        assert!(opponent_obj.face_down);
+        assert!(
+            opponent_obj.back_face.is_none(),
+            "opponent must not see the manifested card's hidden identity"
+        );
+        assert_eq!(opponent_obj.power, Some(2));
+        assert_eq!(opponent_obj.toughness, Some(2));
     }
 }

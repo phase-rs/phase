@@ -1677,6 +1677,25 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("that spell's mana value"),
         ),
+        // CR 208.3 + CR 608.2k: "that spell's power"/"toughness" — the cast
+        // event's source object IS the spell on the stack, and a creature spell
+        // has the power/toughness printed on its card (CR 208.3), so these read
+        // directly off the trigger-condition referent (CostPaidObject, the same
+        // CR 608.2k scope as "that creature's power"/"mana value" above). Covers
+        // the class of "Whenever you cast a creature spell, if that spell's
+        // power is N or greater, …" cards (Eshki, Temur's Roar — issue #2009).
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+            tag("that spell's power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
+            tag("that spell's toughness"),
+        ),
         // CR 109.2a + CR 608.2c: "that [type] card's [property]" — anaphoric
         // reference to a card selected by an earlier instruction in the same
         // resolution sequence.

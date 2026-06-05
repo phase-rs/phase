@@ -11631,6 +11631,15 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return clause;
     }
 
+    // CR 400.11 + CR 400.11a + CR 701.23j: "play/cast a … card you own from
+    // outside the game [this turn]" (Wish, M19) draws from the sideboard /
+    // wishboard pool, not from an in-game zone. Probe it before the generic
+    // cast parser so it lowers to `Effect::SearchOutsideGame` instead of a
+    // `CastFromZone` that would target an in-game permanent (issue #1976).
+    if let Some(effect) = imperative::try_parse_play_from_outside_game(tp.lower, ctx) {
+        return parsed_clause(effect);
+    }
+
     // CR 601.2a + CR 118.9: "cast it/that card without paying its mana cost"
     if let Some(effect) = try_parse_cast_effect(tp.lower) {
         return parsed_clause(effect);
@@ -24515,6 +24524,69 @@ mod tests {
                 TargetFilter::Typed(TypedFilter::creature()),
                 TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
             ]
+        );
+    }
+
+    /// Issue #1978 — Shatterskull Smashing: "deals X damage divided as you choose
+    /// among up to two target creatures and/or planeswalkers". CR 115.1d caps the
+    /// number of targets at two (independent of the X damage pool), CR 601.2d makes
+    /// the controller divide damage among them. Regression: the distribute-damage
+    /// path only honored "any number of" and dropped the "up to N" target cap,
+    /// leaving multi_target = None so only a single target could be selected.
+    #[test]
+    fn deal_damage_divided_among_up_to_two_target_creatures_planeswalkers() {
+        let clause = parse_effect_clause(
+            "~ deals 5 damage divided as you choose among up to two target creatures and/or planeswalkers",
+            &mut ParseContext::default(),
+        );
+        // CR 115.1d: up to two targets (min 0, max 2), not the damage amount.
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
+        // CR 601.2d: damage divided as the controller chooses.
+        assert_eq!(clause.distribute, Some(DistributionUnit::Damage));
+        let Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 5 },
+            target: TargetFilter::Or { filters },
+            damage_source: None,
+        } = clause.effect
+        else {
+            panic!(
+                "Expected divided DealDamage with multi_target, got {:?}",
+                clause.effect
+            );
+        };
+        assert_eq!(
+            filters,
+            vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+            ]
+        );
+    }
+
+    /// Issue #1978 — the variable-X form on the real card: "deals X damage divided
+    /// as you choose among up to two target creatures and/or planeswalkers". The
+    /// target cap stays two even though the damage amount is the variable X.
+    #[test]
+    fn deal_damage_divided_x_among_up_to_two_targets() {
+        let clause = parse_effect_clause(
+            "Shatterskull Smashing deals X damage divided as you choose among up to two target creatures and/or planeswalkers",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
+        assert_eq!(clause.distribute, Some(DistributionUnit::Damage));
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    },
+                    target: TargetFilter::Or { .. },
+                    damage_source: None,
+                }
+            ),
+            "Expected divided X DealDamage with multi_target, got {:?}",
+            clause.effect
         );
     }
 

@@ -1835,6 +1835,21 @@ fn parse_search_outside_game_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<SearchCreationImperativeAst> {
+    // CR 400.11 + CR 400.11a + CR 701.23j: The outside-the-game pool (a player's
+    // sideboard / wishboard) is selected by any of three surface verbs:
+    //   - "reveal a … card you own from outside the game …" — Burning Wish,
+    //     Cunning Wish, Living Wish (reveal to hand).
+    //   - "play a … card you own from outside the game this turn" — Wish (M19),
+    //     which grants the controller permission to play the chosen card.
+    //   - "cast a … card you own from outside the game …" — same play class for
+    //     spells specifically.
+    // All three pull from the same pool (CR 400.11b brings the chosen card into
+    // the game); the verb only changes whether the card is revealed and whether
+    // a "this turn" play window is attached. Routing the play/cast forms here —
+    // rather than letting them fall to `try_parse_cast_effect` — is what keeps
+    // Wish from misparsing into a `CastFromZone` that targets an in-game
+    // permanent the controller already owns (issue #1976).
+    //
     // CR 406.3 + CR 400.11: Two source pools may appear under a single
     // "reveal … or choose a face-up … card you own in exile" disjunction
     // (Karn, the Great Creator; Coax from the Blind Eternities). The
@@ -1842,18 +1857,31 @@ fn parse_search_outside_game_ast(
     // game collection and (b) face-up exile cards they own matching the
     // filter. The destination clause may be inline (" and put it into your
     // hand") or a sibling sentence handled by the chain splitter.
-    // (filter_text, destination, source_pool) — extracted into a
+    // (filter_text, destination, source_pool, reveal) — extracted into a
     // type alias so the parser's return type stays under the
     // clippy::type_complexity threshold.
-    type OutsideGameParseFields<'a> = (&'a str, Zone, OutsideGameSourcePool);
+    type OutsideGameParseFields<'a> = (&'a str, Zone, OutsideGameSourcePool, bool);
     fn parse_clause<'a>(
         input: &'a str,
     ) -> Result<(&'a str, OutsideGameParseFields<'a>), nom::Err<OracleError<'a>>> {
-        // "reveal a "/"reveal an " — articles vary by filter (artifact → an).
-        let (rest, _) = alt((tag("reveal a "), tag("reveal an "))).parse(input)?;
-        // Outside-the-game branch is mandatory and yields filter_text.
-        let (rest, filter_text) = take_until(" card you own from outside the game").parse(rest)?;
-        let (rest, _) = tag(" card you own from outside the game").parse(rest)?;
+        // CR 701.20 / CR 701.23j vs CR 305.1 + CR 601.2a: The verb determines
+        // whether the chosen card is revealed. "reveal" makes it public;
+        // "play"/"cast" bring it into the game to be played without revealing.
+        let (rest, reveal) = alt((
+            value(true, tag("reveal ")),
+            value(false, tag("play ")),
+            value(false, tag("cast ")),
+        ))
+        .parse(input)?;
+        // Article: "a "/"an " — varies by filter head noun (artifact → an).
+        let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
+        // Outside-the-game branch is mandatory and yields filter_text. Use a
+        // leading-space-free anchor so the bare "a card …" form (Wish, no type
+        // adjective) captures an empty filter region that lowers to
+        // `TargetFilter::Any`; typed forms ("sorcery card …") capture the
+        // adjective with a trailing space that the filter parser trims.
+        let (rest, filter_text) = take_until("card you own from outside the game").parse(rest)?;
+        let (rest, _) = tag("card you own from outside the game").parse(rest)?;
         // Optional face-up exile disjunction. Re-uses the same filter phrase
         // (Karn and Coax both repeat the filter literally in both branches);
         // we discard the second filter_text since the outside-game one is
@@ -1872,11 +1900,21 @@ fn parse_search_outside_game_ast(
             value(Zone::Hand, tag(" and put that card into your hand")),
         )))
         .parse(rest)?;
+        // CR 611.2a: The play/cast forms carry a trailing "this turn" window.
+        // The card is brought to hand (CR 400.11b) where it can be played; the
+        // window is consumed here so the clause parses to EOF cleanly rather
+        // than leaving an unparsed tail that would re-route the whole line.
+        let (rest, _) = opt(tag(" this turn")).parse(rest)?;
         let (rest, _) = opt(tag(".")).parse(rest)?;
         let (rest, _) = eof.parse(rest)?;
         Ok((
             rest,
-            (filter_text, destination.unwrap_or(Zone::Hand), source_pool),
+            (
+                filter_text,
+                destination.unwrap_or(Zone::Hand),
+                source_pool,
+                reveal,
+            ),
         ))
     }
 
@@ -1893,16 +1931,31 @@ fn parse_search_outside_game_ast(
         Ok((rest, ()))
     }
 
-    let (_, (filter_text, destination, source_pool)) = parse_clause(lower).ok()?;
+    let (_, (filter_text, destination, source_pool, reveal)) = parse_clause(lower).ok()?;
     let filter = super::search::parse_search_filter(filter_text, ctx);
     Some(SearchCreationImperativeAst::SearchOutsideGame {
         filter,
         count: QuantityExpr::Fixed { value: 1 },
-        reveal: true,
+        reveal,
         destination,
         up_to: true,
         source_pool,
     })
+}
+
+/// CR 400.11 + CR 400.11a + CR 701.23j: Route "play/cast a … card you own from
+/// outside the game …" (Wish, M19) to the outside-game pool selector, lowering
+/// the AST to `Effect::SearchOutsideGame`. The verb-keyed imperative dispatcher
+/// only sends "reveal"/"search" lines through `parse_search_and_creation_ast`,
+/// so the "play"/"cast" surface forms must be probed explicitly before the
+/// generic `try_parse_cast_effect` parser — otherwise Wish misparses into a
+/// `CastFromZone` that targets an in-game permanent (issue #1976).
+pub(super) fn try_parse_play_from_outside_game(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<Effect> {
+    let ast = parse_search_outside_game_ast(lower, ctx)?;
+    Some(lower_search_and_creation_ast(ast))
 }
 
 pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) -> Effect {
@@ -7710,6 +7763,103 @@ mod tests {
                     "legacy wishboard text must NOT enable face-up exile"
                 );
                 assert_eq!(destination, Zone::Hand);
+            }
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+    }
+
+    /// Regression (issue #1976): Wish (M19) — "You may play a card you own from
+    /// outside the game this turn." must parse to `SearchOutsideGame` (the
+    /// sideboard / wishboard pool, CR 400.11 + CR 400.11a + CR 701.23j), NOT a
+    /// `CastFromZone` that targets an in-game permanent the controller already
+    /// owns. The bare "a card" filter (no type adjective) must widen to
+    /// `TargetFilter::Any`, the destination defaults to Hand (CR 400.11b), the
+    /// play verb suppresses the reveal, and the choice is optional ("up to").
+    #[test]
+    fn parse_outside_game_wish_play_from_sideboard() {
+        let ability = super::super::parse_effect_chain(
+            "You may play a card you own from outside the game this turn.",
+            AbilityKind::Spell,
+        );
+        match &*ability.effect {
+            Effect::SearchOutsideGame {
+                filter,
+                count,
+                reveal,
+                destination,
+                source_pool,
+            } => {
+                assert_eq!(
+                    *filter,
+                    TargetFilter::Any,
+                    "bare \"a card\" must widen to any card"
+                );
+                assert!(count.is_up_to(), "Wish's play choice is optional (up to 1)");
+                assert!(!*reveal, "the play form does not reveal the chosen card");
+                assert_eq!(*destination, Zone::Hand);
+                assert!(
+                    !source_pool.includes_face_up_exile(),
+                    "Wish is sideboard-only, not a Karn-class disjunction"
+                );
+            }
+            other => panic!(
+                "Wish must parse to SearchOutsideGame, not a permanent-targeting cast; got {other:?}"
+            ),
+        }
+
+        // End-to-end through the canonical card pipeline: the full Wish card
+        // must yield a single SearchOutsideGame ability, never a CastFromZone.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "You may play a card you own from outside the game this turn.",
+            "Wish",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::SearchOutsideGame { .. })),
+            "Wish card pipeline must produce SearchOutsideGame, got {:?}",
+            parsed
+                .abilities
+                .iter()
+                .map(|ability| &ability.effect)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::CastFromZone { .. })),
+            "Wish must not parse to a permanent-targeting CastFromZone"
+        );
+    }
+
+    /// Regression (issue #1976): the "cast a … card you own from outside the
+    /// game" sibling surface form (Cunning Wish class for spells) routes through
+    /// the same outside-game pool, carrying its type filter.
+    #[test]
+    fn parse_outside_game_cast_typed_from_sideboard() {
+        let effect = super::super::parse_effect(
+            "You may cast an instant card you own from outside the game this turn.",
+        );
+        match effect {
+            Effect::SearchOutsideGame {
+                filter,
+                source_pool,
+                reveal,
+                ..
+            } => {
+                assert!(!reveal, "the cast form does not reveal");
+                assert!(!source_pool.includes_face_up_exile());
+                let typed = typed_leg(&filter).expect("instant filter must be typed");
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Instant),
+                    "expected instant filter, got {:?}",
+                    typed.type_filters
+                );
             }
             other => panic!("expected SearchOutsideGame, got {other:?}"),
         }
