@@ -4989,7 +4989,6 @@ fn parse_damage_prevention_replacement(
     {
         Some(damage_target_controller())
     } else if nom_primitives::scan_contains(working_lower, "dealt to target creature")
-        || nom_primitives::scan_contains(working_lower, "dealt to ~")
         || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
     {
         Some(DamageTargetFilter::CreatureOnly)
@@ -5009,16 +5008,18 @@ fn parse_damage_prevention_replacement(
     // `damage_target_filter = None` caused the shield to prevent ALL damage to
     // any target, which was the Multiclass Baldric / Inviolability / Artifact Ward
     // class of bug.
-    let valid_card_filter: Option<TargetFilter> =
-        nom_primitives::scan_at_word_boundaries(working_lower, |input| {
-            preceded(
-                tag::<_, _, OracleError<'_>>("dealt to "),
-                terminated(
-                    parse_attached_subject_target_filter,
-                    alt((value((), eof), value((), multispace1), value((), tag(".")))),
-                ),
-            )
-            .parse(input)
+    let valid_card_filter: Option<TargetFilter> = parse_self_recipient_valid_card(working_lower)
+        .or_else(|| {
+            nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+                preceded(
+                    tag::<_, _, OracleError<'_>>("dealt to "),
+                    terminated(
+                        parse_attached_subject_target_filter,
+                        alt((value((), eof), value((), multispace1), value((), tag(".")))),
+                    ),
+                )
+                .parse(input)
+            })
         })
         .or_else(|| parse_damage_recipient_valid_card_filter(working_lower));
 
@@ -5119,6 +5120,32 @@ fn parse_damage_prevention_replacement(
     }
 
     Some(def)
+}
+
+/// CR 614.1a + CR 615 + CR 608.2c: Scope a static damage-prevention shield to
+/// its own source when the recipient is the bare self-reference ("If damage
+/// would be dealt to ~, prevent that damage …" — Anti-Venom, Phyrexian Hydra,
+/// Stormwild Capridor, Hostility). The shield lives on the source object, so
+/// `valid_card: SelfRef` makes it fire only on damage to that object. Without
+/// this the recipient fell through to `DamageTargetFilter::CreatureOnly`, which
+/// over-applied the shield to *every* creature on the battlefield.
+///
+/// Only the bare self-recipient matches: "dealt to ~" must close at a clause
+/// boundary (`,`/`.`/`this turn`/end), never `~'s` or `~ and/or …` continuations
+/// that name a wider or different scope (e.g. the "dealt to and dealt by ~"
+/// both-directions form, which keeps its existing handling).
+fn parse_self_recipient_valid_card(working_lower: &str) -> Option<TargetFilter> {
+    nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("dealt to ~").parse(input)?;
+        peek(alt((
+            value((), eof::<&str, OracleError<'_>>),
+            value((), char(',')),
+            value((), char('.')),
+            value((), tag::<_, _, OracleError<'_>>(" this turn")),
+        )))
+        .parse(rest)?;
+        Ok((rest, TargetFilter::SelfRef))
+    })
 }
 
 /// CR 614.1a: Extract the typed event-recipient filter from a damage-prevention
@@ -6207,6 +6234,63 @@ mod tests {
                 );
             }
             other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anti_venom_self_prevention_scopes_to_source_not_all_creatures() {
+        // CR 615 + CR 614.1a + CR 608.2c: Anti-Venom's "If damage would be dealt
+        // to ~, prevent that damage and put that many +1/+1 counters on ~" is a
+        // continuous static replacement scoped to the source itself — not to
+        // every creature (#2401). The bare self-recipient must produce a
+        // `valid_card: SelfRef` (so the shield fires only on damage to the
+        // source) and must NOT be coerced to `DamageTargetFilter::CreatureOnly`
+        // (which over-applied the shield to all creatures' damage).
+        let def = parse_replacement_line(
+            "If damage would be dealt to ~, prevent that damage and put that many \
+             +1/+1 counters on ~.",
+            "Anti-Venom, Horrifying Healer",
+        )
+        .expect("Anti-Venom should parse as a damage prevention replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert!(matches!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "self-recipient prevention must scope to the source via valid_card SelfRef, got {:?}",
+            def.valid_card
+        );
+        assert!(
+            def.damage_target_filter.is_none(),
+            "self-recipient must NOT be coerced to CreatureOnly (which prevents all \
+             creatures' damage), got {:?}",
+            def.damage_target_filter
+        );
+
+        // CR 615.5: The +1/+1 counter rider lands on the source itself.
+        let execute = def.execute.as_ref().expect("counter rider present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                target,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert!(
+                    matches!(
+                        target,
+                        TargetFilter::SelfRef | TargetFilter::PostReplacementDamageTarget
+                    ),
+                    "counter must land on the source (self), got {target:?}"
+                );
+            }
+            other => panic!("expected Effect::PutCounter rider, got {other:?}"),
         }
     }
 
