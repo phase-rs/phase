@@ -1307,9 +1307,20 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
     // entry, and re-running it here would over-strictly reject casts where the
     // game state changed mid-cast (an unusual but possible edge case the rules
     // do not require us to police a second time).
-    obj.casting_options
+    let flash_options: Vec<_> = obj
+        .casting_options
         .iter()
         .filter(|o| o.kind == SpellCastingOptionKind::AsThoughHadFlash)
+        .collect();
+    // CR 118.9 + CR 702.8a: Instant-speed permission from a battlefield
+    // `CastWithAlternativeCost` grant (Primal Prayers class) is not encoded as
+    // a spell `casting_options` entry — only alternative-cost spell options
+    // carry target-dependent flash riders (Timely Ward class).
+    if flash_options.is_empty() {
+        return true;
+    }
+    flash_options
+        .iter()
         .any(|option| match option.condition.as_ref() {
             None => true,
             Some(ParsedCondition::SpellTargetsFilter { filter }) => evaluate_target_filter(filter),

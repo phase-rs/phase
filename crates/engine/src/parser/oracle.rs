@@ -37,8 +37,8 @@ use super::oracle_casting::{
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_cant_win_lose_compound, is_compound_turn_limit, is_defiler_cost_pattern,
-    is_enters_tapped_cant_untap_compound, is_enters_with_counter_trigger,
+    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern, is_compound_turn_limit,
+    is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound, is_enters_with_counter_trigger,
     is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
     is_opening_hand_begin_game, is_replacement_pattern, is_spells_alternative_cost_pattern,
     is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
@@ -74,9 +74,10 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    lower_static_ir, parse_chosen_creature_type_static_prefix,
-    parse_every_creature_type_static_prefix, parse_spells_alternative_cost, parse_static_line,
-    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    lower_static_ir, parse_cast_spells_alternative_cost_multi,
+    parse_chosen_creature_type_static_prefix, parse_every_creature_type_static_prefix,
+    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
+    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -2465,7 +2466,7 @@ pub(crate) fn parse_oracle_ir(
         }
 
         // Priority 6c-altcost: CR 118.9 — "You may pay X rather than pay the mana
-        // cost for [filter] spells you cast." Mana-cost-alternative-grant static
+        // cost for [filter] spells you cast." Alternative-cost-grant static
         // (Rooftop Storm, Fist of Suns, Jodah). Must run before Priority 7
         // because `is_static_pattern` does not classify this shape, so the line
         // would otherwise fall through to the imperative parser as
@@ -2473,6 +2474,18 @@ pub(crate) fn parse_oracle_ir(
         if is_spells_alternative_cost_pattern(&lower) {
             if let Some(static_def) = parse_spells_alternative_cost(&line) {
                 result.statics.push(static_def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-b: CR 118.9 — "You may cast [filter] by paying {X}
+        // rather than paying their mana costs." (Primal Prayers). May also carry a
+        // flash rider on the same line.
+        if is_cast_spells_alternative_cost_pattern(&lower) {
+            let defs = parse_cast_spells_alternative_cost_multi(&line);
+            if !defs.is_empty() {
+                result.statics.extend(defs);
                 i += 1;
                 continue;
             }

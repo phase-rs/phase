@@ -1589,6 +1589,37 @@ mod tests {
     }
 
     #[test]
+    fn cost_exile_colored_card_with_mana_value_x_from_hand() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Exile a green card with mana value X from your hand") {
+            AbilityCost::Exile {
+                zone,
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => {
+                assert_eq!(zone, Some(Zone::Hand));
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Green
+                    }
+                )));
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name }
+                        }
+                    } if name == "X"
+                )));
+            }
+            other => panic!("Expected Exile with green + CmcEQ(X), got {:?}", other),
+        }
+    }
+
+    #[test]
     fn cost_exile_colored_card_from_hand() {
         match parse_oracle_cost("Exile a blue card from your hand") {
             AbilityCost::Exile {

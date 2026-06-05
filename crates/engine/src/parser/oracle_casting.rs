@@ -1401,6 +1401,46 @@ mod tests {
     }
 
     #[test]
+    fn alt_cost_nourishing_shoal_exile_green_card_with_mana_value_x() {
+        use crate::types::ability::{
+            Comparator, FilterProp, QuantityExpr, QuantityRef, TargetFilter,
+        };
+
+        let option = parse_spell_casting_option_line(
+            "You may exile a green card with mana value X from your hand rather than pay this spell's mana cost.",
+            "Nourishing Shoal",
+        )
+        .expect("Nourishing Shoal alt-cost should parse (#2372)");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost:
+                    Some(AbilityCost::Exile {
+                        filter: Some(filter),
+                        zone,
+                        ..
+                    }),
+                condition: None,
+            } => {
+                assert_eq!(zone, Some(crate::types::zones::Zone::Hand));
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("expected typed exile filter, got {filter:?}");
+                };
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name },
+                        },
+                    } if name == "X"
+                )));
+            }
+            other => panic!("expected AlternativeCost(Exile), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn alt_cost_pay_mana_composite_regression_unchanged() {
         // Force of Will shape — composite cost via " and " split.
         let option = parse_spell_casting_option_line(

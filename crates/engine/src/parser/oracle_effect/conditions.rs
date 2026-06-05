@@ -2303,6 +2303,24 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    // CR 608.2c: trailing "this way" outcome gate — "[effect] if at least one
+    // <filter> was <verb> this way". CR 608.2c explicitly defines that later
+    // text on a card may reference an earlier instruction in the same effect
+    // ("if that spell is countered this way") — here "this way" names the set
+    // of objects affected by the immediately-preceding instruction. The suffix
+    // lands here after
+    // `strip_suffix_conditional` peels the effect, so the residual condition
+    // text is the bare existential "<quantifier> <filter> (was|is) <verb> this
+    // way". Delegate to the shared `parse_zone_changed_this_way_clause`
+    // combinator — the same authority the leading-form
+    // `strip_if_you_do_conditional` uses — so prefix ("if a creature card is
+    // exiled this way, …") and suffix ("… if at least one creature card was
+    // exiled this way") forms produce the identical
+    // `AbilityCondition::ZoneChangedThisWay { filter }` representation.
+    if let Some(condition) = parse_outcome_this_way_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_target_supertype_condition_text(lower.as_str()) {
         return Some(condition);
     }
@@ -3199,6 +3217,33 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
     ))
 }
 
+/// CR 608.2c: "[effect] if at least one <filter> was <verb> this way" — the
+/// trailing (suffix) form of the prior-effect outcome gate. CR 608.2c states
+/// later text on a card may reference an earlier instruction in the same
+/// effect; here "this way" refers to the set of objects affected by the
+/// immediately-preceding instruction, and the condition fires when that set
+/// contains at least one object matching `<filter>`. Kaya, Orzhov Usurper's
+/// +1 ("Exile up to two target
+/// cards from a single graveyard. You gain 2 life if at least one creature
+/// card was exiled this way.") is the motivating case.
+///
+/// The whole condition fragment must be consumed: `parse_zone_changed_this_way_clause`
+/// already covers the existential quantifiers ("at least one"/"one or more"/
+/// article), the type/subtype filter, both tenses, the verb set, and the
+/// negation flag (`wasn't`/`isn't`). Requiring an empty remainder keeps this
+/// matcher from firing on partial overlaps with longer condition phrases.
+fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
+    let (rest, (filter, negated)) =
+        crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(lower).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(maybe_negate(
+        AbilityCondition::ZoneChangedThisWay { filter },
+        negated,
+    ))
+}
+
 fn parse_zone_change_object_type_text(
     input: &str,
 ) -> nom::IResult<&str, (&str, bool), OracleError<'_>> {
@@ -3574,6 +3619,48 @@ mod tests {
             }
             other => panic!("expected Typed Angel filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn suffix_outcome_this_way_kaya_creature_card_exiled() {
+        // Kaya, Orzhov Usurper +1 (PR #2447): "Exile up to two target cards
+        // from a single graveyard. You gain 2 life if at least one creature
+        // card was exiled this way." The trailing outcome gate must re-home
+        // onto the GainLife clause as `ZoneChangedThisWay { creature card }`
+        // — never drop to `condition: null` (which triggers the Condition_If
+        // swallowed-clause warning).
+        let (condition, body) = strip_suffix_conditional(
+            "You gain 2 life if at least one creature card was exiled this way.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "You gain 2 life");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        let TargetFilter::Typed(TypedFilter { type_filters, .. }) = filter else {
+            panic!("expected Typed creature-card filter, got {filter:?}");
+        };
+        assert!(
+            type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Creature)),
+            "expected Creature type filter, got {type_filters:?}"
+        );
+    }
+
+    #[test]
+    fn parse_outcome_this_way_negated_returns_not() {
+        // Build-for-the-class coverage: the suffix gate inherits the
+        // combinator's negation flag, so "wasn't exiled this way" maps to
+        // `Not { ZoneChangedThisWay { .. } }`.
+        let cond = parse_outcome_this_way_condition("a creature card wasn't exiled this way");
+        let Some(AbilityCondition::Not { condition }) = cond else {
+            panic!("expected Not, got {cond:?}");
+        };
+        assert!(matches!(
+            *condition,
+            AbilityCondition::ZoneChangedThisWay { .. }
+        ));
     }
 
     #[test]

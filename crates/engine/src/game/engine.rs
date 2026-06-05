@@ -988,6 +988,7 @@ mod auto_pass_decision_tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             Vec::new(),
             copy_id,

@@ -1821,6 +1821,7 @@ pub fn casualty_copy_ability_definition() -> AbilityDefinition {
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
         },
     )
     .condition(AbilityCondition::additional_cost_paid_any())
@@ -1910,6 +1911,7 @@ pub fn replicate_copy_ability_definition() -> AbilityDefinition {
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
         },
     )
     // CR 702.56a: "if a replicate cost was paid for it". With zero payments the
@@ -2017,6 +2019,111 @@ pub fn synthesize_replicate(face: &mut CardFace) {
     );
 }
 
+/// CR 702.144a: The `AbilityDefinition` produced by a Demonstrate trigger — an
+/// optional self-copy ("you may copy it ... and you may choose new targets")
+/// whose sub-ability copies the spell for a chosen opponent ("if you copy the
+/// spell, choose an opponent; that player copies the spell and may choose new
+/// targets for that copy").
+///
+/// The opponent's copy is a `sub_ability` so it only happens when the controller
+/// accepts the optional copy (CR 702.144a "if you copy the spell"); the existing
+/// chain resolver sequences it after the controller's copy (and its retarget)
+/// via `pending_continuation`. The opponent is routed through the new
+/// `Effect::CopySpell { copier: Some(Opponent) }` axis, which `copy_spell::resolve`
+/// turns into an opponent-controlled copy (CR 707.10).
+pub fn demonstrate_copy_ability_definition() -> AbilityDefinition {
+    let opponent_copy = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: Some(ControllerRef::Opponent),
+        },
+    )
+    .description(
+        "CR 702.144a: Demonstrate — the chosen opponent copies the spell and may choose new \
+         targets for that copy"
+            .to_string(),
+    );
+
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
+        },
+    )
+    .optional()
+    .sub_ability(opponent_copy)
+    .description(
+        "CR 702.144a: Demonstrate — you may copy this spell (you may choose new targets); if you \
+         do, a chosen opponent also copies it"
+            .to_string(),
+    )
+}
+
+/// CR 702.144a: Identity predicate for a synthesized Demonstrate copy-on-cast
+/// trigger — an optional `SpellCast` self-copy whose sub-ability is an
+/// opponent-`copier` copy. Used for idempotent synthesis.
+fn is_demonstrate_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.trigger_zones.contains(&Zone::Stack)
+        && t.execute.as_deref().is_some_and(|a| {
+            a.optional
+                && matches!(
+                    &*a.effect,
+                    Effect::CopySpell {
+                        target: TargetFilter::SelfRef,
+                        copier: None,
+                        ..
+                    }
+                )
+                && a.sub_ability.as_deref().is_some_and(|sub| {
+                    matches!(
+                        &*sub.effect,
+                        Effect::CopySpell {
+                            copier: Some(ControllerRef::Opponent),
+                            ..
+                        }
+                    )
+                })
+        })
+}
+
+/// CR 702.144a: Synthesize Demonstrate into a "when you cast this spell" copy
+/// trigger that functions on the stack: you may copy the spell, and if you do, a
+/// chosen opponent also copies it. Both copies may choose new targets (CR
+/// 707.10c).
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Demonstrate`, so every
+/// printed Demonstrate spell flows through this one synthesizer. Idempotent
+/// across repeated invocations.
+pub fn synthesize_demonstrate(face: &mut CardFace) {
+    if !face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Demonstrate))
+    {
+        return;
+    }
+    if face.triggers.iter().any(is_demonstrate_trigger) {
+        return;
+    }
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Stack])
+            .execute(demonstrate_copy_ability_definition())
+            .description(
+                "CR 702.144a: Demonstrate — when you cast this spell, you may copy it; if you do, \
+                 a chosen opponent also copies it."
+                    .to_string(),
+            ),
+    );
+}
+
 /// CR 702.69a: The `AbilityDefinition` produced by a Gravestorm trigger — a
 /// self-referential `CopySpell` repeated once for each permanent put into a
 /// graveyard from the battlefield this turn. Mirrors
@@ -2031,6 +2138,7 @@ pub fn gravestorm_copy_ability_definition() -> AbilityDefinition {
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
         },
     );
     // CR 702.69a: "copy it for each permanent that was put into a graveyard from
@@ -2058,6 +2166,7 @@ fn is_gravestorm_trigger(t: &TriggerDefinition) -> bool {
                 Effect::CopySpell {
                     target: TargetFilter::SelfRef,
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
                 }
             ) && a.repeat_for.as_ref().is_some_and(|repeat_for| {
                 matches!(
@@ -7429,6 +7538,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.69a: Gravestorm — copy this spell for each permanent put into a
     // graveyard from the battlefield this turn.
     synthesize_gravestorm(face);
+    // CR 702.144a: Demonstrate — optional self-copy on cast; if taken, a chosen
+    // opponent also copies the spell.
+    synthesize_demonstrate(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
     synthesize_evoke(face);
@@ -16118,7 +16230,9 @@ mod replicate_synthesis_tests {
         );
         // CR 707.10c: copies may choose new targets.
         match &*execute.effect {
-            Effect::CopySpell { target, retarget } => {
+            Effect::CopySpell {
+                target, retarget, ..
+            } => {
                 assert!(matches!(target, TargetFilter::SelfRef));
                 assert!(matches!(
                     retarget,
@@ -20634,6 +20748,7 @@ mod ingest_gravestorm_synthesis_tests {
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
+                ..
             }
         ));
         assert!(matches!(
@@ -21157,6 +21272,85 @@ mod champion_runtime_tests {
                 .any(|link| { link.source_id == champion_id && link.exiled_id == elf_id }),
             "Champion LTB return should consume the source-tracked exile link"
         );
+    }
+}
+
+#[cfg(test)]
+mod demonstrate_synthesis_tests {
+    //! CR 702.144a shape tests: Demonstrate was parsed/typed but had no
+    //! `synthesize_*` pass. `synthesize_demonstrate` installs an optional
+    //! "when you cast this spell" self-copy trigger whose sub-ability copies the
+    //! spell for a chosen opponent (`Effect::CopySpell { copier: Some(Opponent) }`).
+    //! The copier routing itself is verified behaviorally in `copy_spell`'s tests.
+    use super::*;
+
+    fn demonstrate_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Demonstrate);
+        face
+    }
+
+    #[test]
+    fn demonstrate_synthesizes_optional_self_copy_with_opponent_subcopy() {
+        let mut face = demonstrate_face();
+        synthesize_demonstrate(&mut face);
+        let t = face
+            .triggers
+            .iter()
+            .find(|t| is_demonstrate_trigger(t))
+            .expect("Demonstrate should add a SpellCast copy trigger");
+
+        assert!(matches!(t.mode, TriggerMode::SpellCast));
+        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(
+            t.trigger_zones.contains(&Zone::Stack),
+            "CR 702.144a: Demonstrate functions on the stack"
+        );
+
+        let execute = t.execute.as_deref().expect("execute body");
+        assert!(execute.optional, "CR 702.144a: 'you MAY copy it'");
+        // Controller's copy — no copier override, may retarget.
+        assert!(matches!(
+            &*execute.effect,
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+            }
+        ));
+        // Opponent's copy — sub-ability with the opponent copier, may retarget.
+        let sub = execute.sub_ability.as_deref().expect("opponent sub-copy");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: Some(ControllerRef::Opponent),
+            }
+        ));
+    }
+
+    #[test]
+    fn demonstrate_is_idempotent() {
+        let mut face = demonstrate_face();
+        synthesize_demonstrate(&mut face);
+        synthesize_demonstrate(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_demonstrate_trigger(t))
+                .count(),
+            1,
+            "repeated synthesis must not duplicate the Demonstrate trigger"
+        );
+    }
+
+    #[test]
+    fn demonstrate_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_demonstrate(&mut face);
+        assert!(face.triggers.iter().all(|t| !is_demonstrate_trigger(t)));
     }
 }
 

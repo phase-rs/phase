@@ -67,6 +67,16 @@ pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
         && scan_contains(lower, "spells you cast")
 }
 
+/// CR 118.9: Alternative-cost grant — "You may cast [filter] by paying {cost}
+/// rather than paying their mana costs." Primal Prayers class. Structural
+/// pre-filter; lowering is `parse_cast_spells_alternative_cost_multi`.
+pub(crate) fn is_cast_spells_alternative_cost_pattern(lower: &str) -> bool {
+    lower_starts_with(lower, "you may cast ")
+        && scan_contains(lower, "by paying ")
+        && scan_contains(lower, "rather than paying")
+        && (scan_contains(lower, "their mana costs") || scan_contains(lower, "its mana cost"))
+}
+
 pub(crate) fn is_enters_tapped_cant_untap_compound(lower: &str) -> bool {
     let has_enters_tapped = scan_contains(lower, "enters tapped")
         || scan_contains(lower, "enters the battlefield tapped");
@@ -676,6 +686,19 @@ mod tests {
         ));
         assert!(!is_spells_alternative_cost_pattern(
             "you may cast this spell as though it had flash."
+        ));
+    }
+
+    /// CR 118.9 + CR 107.14: Primal Prayers "you may cast ... by paying {E}"
+    /// shape must route to the cast-by-paying alt-cost parser.
+    #[test]
+    fn classifies_cast_spells_alternative_cost_pattern() {
+        assert!(is_cast_spells_alternative_cost_pattern(
+            "you may cast creature spells with mana value 3 or less by paying {e} \
+             rather than paying their mana costs."
+        ));
+        assert!(!is_cast_spells_alternative_cost_pattern(
+            "you may pay {0} rather than pay the mana cost for zombie creature spells you cast."
         ));
     }
 }

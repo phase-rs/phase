@@ -63,7 +63,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // and casting_costs.rs.
             | StaticMode::ExileCastPermission { .. }
             | StaticMode::CastWithKeyword { .. }
-            // CR 118.9: CastWithAlternativeCost carries a `ManaCost` — runtime
+            // CR 118.9: CastWithAlternativeCost carries an `AbilityCost` — runtime
             // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
             | StaticMode::CastWithAlternativeCost { .. }
             // CR 702.16: PlayerProtection carries a `ProtectionTarget` (Strings) —

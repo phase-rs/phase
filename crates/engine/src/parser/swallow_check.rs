@@ -2346,7 +2346,7 @@ fn effect_name(effect: &Effect) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{def_tree_has_optional, trigger_tree_has_optional};
+    use super::{def_tree_has_optional, def_tree_has_unimplemented, trigger_tree_has_optional};
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool};
@@ -2460,6 +2460,72 @@ mod tests {
             other => panic!("expected SearchOutsideGame, got {other:?}"),
         }
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn kaya_orzhov_usurper_plus_one_gates_gain_life_on_creature_exiled_this_way() {
+        // PR #2447 / issue #1998 follow-up. With the +1 conditional now parsed,
+        // Kaya has zero Unimplemented across all three loyalty abilities, so the
+        // swallow detectors un-suppress. The +1's trailing outcome gate
+        // ("You gain 2 life if at least one creature card was exiled this way")
+        // must re-home as `AbilityCondition::ZoneChangedThisWay { creature }`
+        // — otherwise `detect_condition_if` flags a swallowed " if " clause.
+        let parsed = parse_named(
+            "[+1]: Exile up to two target cards from a single graveyard. \
+             You gain 2 life if at least one creature card was exiled this way.\n\
+             [\u{2212}1]: Exile target nonland permanent with mana value 1 or less.\n\
+             [\u{2212}5]: Kaya deals damage to target player equal to the number of \
+             cards that player owns in exile and you gain that much life.",
+            "Kaya, Orzhov Usurper",
+            &["Planeswalker"],
+        );
+
+        // No ability may be Unimplemented (the precondition for the swallow
+        // detectors to run at all — and the whole point of the fix).
+        assert!(
+            !parsed.abilities.iter().any(def_tree_has_unimplemented),
+            "Kaya's loyalty abilities must all parse without Unimplemented"
+        );
+        // The trailing "if ... this way" gate must not be swallowed.
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Kaya +1 trailing outcome gate must not be a swallowed clause"
+        );
+
+        // The +1 GainLife must carry a non-null ZoneChangedThisWay condition.
+        let gated_gain_life = parsed
+            .abilities
+            .iter()
+            .any(def_tree_gates_gain_life_on_this_way);
+        assert!(
+            gated_gain_life,
+            "expected a GainLife gated by ZoneChangedThisWay on Kaya's +1, \
+             parsed abilities: {:#?}",
+            parsed.abilities
+        );
+    }
+
+    /// Walk a def tree looking for a `GainLife` (anywhere in the chain) whose
+    /// owning def carries an `AbilityCondition::ZoneChangedThisWay` gate.
+    fn def_tree_gates_gain_life_on_this_way(def: &AbilityDefinition) -> bool {
+        let gain_here = matches!(&*def.effect, Effect::GainLife { .. })
+            && matches!(
+                def.condition,
+                Some(crate::types::ability::AbilityCondition::ZoneChangedThisWay { .. })
+            );
+        gain_here
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(def_tree_gates_gain_life_on_this_way)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(def_tree_gates_gain_life_on_this_way)
+            || def
+                .mode_abilities
+                .iter()
+                .any(def_tree_gates_gain_life_on_this_way)
     }
 
     #[test]

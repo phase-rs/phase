@@ -6120,6 +6120,17 @@ pub enum Effect {
         /// CR 707.10c: whether the controller may choose new targets for the copy.
         #[serde(default = "default_copy_keep_targets")]
         retarget: CopyRetargetPermission,
+        /// CR 707.10: which player puts this copy onto the stack (and thus
+        /// controls it), when that player is NOT the effect's controller. `None`
+        /// = the controller copies (Twincast, Casualty, Replicate). `Some(ref)`
+        /// resolves a player relative to the controller for "[another player]
+        /// copies the spell" effects — CR 702.144a (Demonstrate) uses
+        /// `Some(ControllerRef::Opponent)` so a chosen opponent copies. This
+        /// parameterizes the existing copier axis (the same axis the Chain cycle
+        /// expresses via an inherited `TargetRef::Player`) rather than adding a
+        /// sibling copy effect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copier: Option<ControllerRef>,
     },
     /// CR 707.12: Create a copy of a card/object in its zone and cast that
     /// copy while the resolving spell or ability continues resolving.

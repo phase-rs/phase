@@ -2430,6 +2430,27 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
     }
 }
 
+/// CR 611.2 + CR 514.2: Recover a duration phrase embedded mid-predicate (not at
+/// the trailing edge `strip_trailing_duration` scans). Granted combat
+/// restrictions place the timing phrase before the restriction body —
+/// "can't be blocked this turn except by <filter>" — so the marker is interior.
+/// Scanned at word boundaries via a nom combinator so "this turn"/"this combat"
+/// matches a complete phrase, never an arbitrary substring. Returns `None` when
+/// no recognized interior duration phrase is present.
+fn embedded_restriction_duration(lower: &str) -> Option<Duration> {
+    let (_, duration, _) = nom_primitives::scan_preceded(lower, |i: &str| {
+        alt((
+            value(
+                Duration::UntilEndOfCombat,
+                tag::<_, _, OracleError<'_>>("this combat"),
+            ),
+            value(Duration::UntilEndOfTurn, tag("this turn")),
+        ))
+        .parse(i)
+    })?;
+    Some(duration)
+}
+
 fn build_restriction_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -2491,6 +2512,15 @@ fn build_restriction_clause(
     } else {
         duration
     };
+
+    // CR 611.2 + CR 509.1b: A duration phrase can sit mid-predicate rather than
+    // trailing — "can't be blocked this turn except by <filter>" (Fast //
+    // Furious) — so `strip_trailing_duration` (which only matches a suffix) left
+    // `duration` as None. Recover the embedded "this turn"/"this combat" marker
+    // so the granted restriction is correctly scoped; without it the static
+    // would persist indefinitely. Only fills an unset duration, so a trailing
+    // phrase the strip already captured is never overridden.
+    let duration = duration.or_else(|| embedded_restriction_duration(&lower));
 
     let affected = static_affected_for_application(&application);
     // CR 119.7 + CR 119.8 + CR 104.2b + CR 104.3b + CR 305.1: Player-scoped
@@ -2720,14 +2750,23 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     if lower == "can't block or be blocked" || lower == "cannot block or be blocked" {
         return Some(vec![StaticMode::CantBlock, StaticMode::CantBeBlocked]);
     }
-    // CR 509.1b: "can't be blocked except by ..." — evasion restriction
-    if let Ok((except_text, _)) = alt((
-        tag::<_, _, OracleError<'_>>("can't be blocked except by "),
-        tag("cannot be blocked except by "),
-        tag("can't be blocked this turn except by "),
-        tag("cannot be blocked this turn except by "),
-    ))
-    .parse(lower)
+    // CR 509.1b + CR 611.2: "can't be blocked [this turn] except by <filter>" —
+    // granted evasion restriction (Fast // Furious: "It can't be blocked this turn
+    // except by Vehicles or by creatures with haste."). The duration phrase can
+    // sit mid-predicate ("blocked this turn except by …"), so it is not removed by
+    // the trailing-duration strip; absorb the optional " this turn" here between
+    // "blocked" and "except by". The filter is classified by the same
+    // `classify_block_exception` authority the printed/static evasion path uses, so
+    // "Vehicles or by creatures with haste" lowers to the full quality `Or`.
+    if let Ok((except_text, _)) = (
+        alt((
+            tag::<_, _, OracleError<'_>>("can't be blocked"),
+            tag("cannot be blocked"),
+        )),
+        opt(tag::<_, _, OracleError<'_>>(" this turn")),
+        tag(" except by "),
+    )
+        .parse(lower)
     {
         return Some(vec![StaticMode::CantBeBlockedExceptBy {
             kind: classify_block_exception(except_text),
@@ -3213,6 +3252,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, ContinuousModification, Effect, TypeFilter};
     use crate::types::card_type::Supertype;
+    use crate::types::statics::BlockExceptionKind;
 
     /// CR 702.3b: the subjectless conjunct recognizer accepts every grammatical
     /// shape the sequence splitter can leave behind ("this turn" optional, both
@@ -4335,5 +4375,114 @@ mod tests {
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// CR 509.1b + CR 611.2: A granted "can't be blocked [this turn] except by
+    /// <filter>" clause (Fast // Furious's second sentence) must lower to a real
+    /// `CantBeBlockedExceptBy` evasion static on the anaphoric "It" subject —
+    /// previously the whole clause fell through to `Effect::Unimplemented`,
+    /// flipping the card unsupported and inflating the swallowed-clause gate.
+    ///
+    /// Asserts the building-block shape: the granted static carries
+    /// `CantBeBlockedExceptBy { kind: Quality(<filter>) }` propagated via
+    /// `AddStaticMode`, the duration is `UntilEndOfTurn` (the mid-predicate "this
+    /// turn"), and the quality filter is an `Or` whose disjuncts cover the Vehicle
+    /// subtype and a has-haste creature.
+    #[test]
+    fn granted_cant_be_blocked_except_by_filter_is_supported() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Target creature gains haste until end of turn. It can't be blocked this turn except by Vehicles or by creatures with haste.",
+            AbilityKind::Spell,
+        );
+
+        let sub = def
+            .sub_ability
+            .expect("the can't-be-blocked clause must be a supported sub-ability");
+        assert!(
+            !matches!(*sub.effect, Effect::Unimplemented { .. }),
+            "the evasion clause must not be swallowed as Unimplemented, got {:?}",
+            sub.effect
+        );
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*sub.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", sub.effect);
+        };
+
+        // The anaphoric "It" binds to the previously-targeted creature.
+        assert_eq!(*target, Some(TargetFilter::ParentTarget));
+        // CR 611.2: the mid-predicate "this turn" sets the granted duration.
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+
+        let def = static_abilities
+            .iter()
+            .find_map(|sd| match &sd.modifications[..] {
+                [ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeBlockedExceptBy { kind },
+                }] => Some(kind.clone()),
+                _ => None,
+            })
+            .expect("granted static must carry AddStaticMode(CantBeBlockedExceptBy)");
+
+        let BlockExceptionKind::Quality(filter) = def else {
+            panic!("expected a quality block-exception filter, got {def:?}");
+        };
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected an Or of Vehicle/has-haste disjuncts, got {filter:?}");
+        };
+        // The union must cover the Vehicle subtype and a has-haste creature; the
+        // repeated "by" ("Vehicles or by creatures with haste") must not truncate
+        // the second disjunct.
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(t)
+                    if t.type_filters.contains(&TypeFilter::Subtype("Vehicle".into()))
+            )),
+            "filter union must include the Vehicle subtype, got {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(t)
+                    if t.properties.contains(&FilterProp::WithKeyword { value: Keyword::Haste })
+            )),
+            "filter union must include a has-haste creature, got {filters:?}"
+        );
+    }
+
+    /// CR 509.1b: `classify_block_exception` is the single authority for the
+    /// "except by <filter>" grammar shared by the printed/static and granted
+    /// evasion paths. The evasion wording repeats the "by" preposition before
+    /// each disjunct ("Vehicles or by creatures with haste"); the redundant "by"
+    /// must be stripped so the full union parses, not just its first disjunct.
+    #[test]
+    fn classify_block_exception_strips_redundant_by() {
+        let kind = classify_block_exception("vehicles or by creatures with haste");
+        let BlockExceptionKind::Quality(TargetFilter::Or { filters }) = kind else {
+            panic!("expected a quality Or filter, got {kind:?}");
+        };
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(t)
+                    if t.type_filters.contains(&TypeFilter::Subtype("Vehicle".into()))
+            )),
+            "first disjunct (Vehicle) missing: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(t)
+                    if t.properties.contains(&FilterProp::WithKeyword { value: Keyword::Haste })
+            )),
+            "second disjunct (has-haste) dropped by repeated 'by': {filters:?}"
+        );
     }
 }

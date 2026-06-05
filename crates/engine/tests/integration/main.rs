@@ -84,6 +84,7 @@ mod issue_2345_lavinia_no_mana_spent;
 mod issue_2360_the_rack;
 mod issue_2361_unless_pay_choice;
 mod issue_2371_triskaidekaphile;
+mod issue_2372_nourishing_shoal_alt_cost;
 mod issue_2374_fblthp_library_origin;
 mod issue_2376_pyromancers_ascension;
 mod issue_2415_rottenmouth_viper_sacrifice_cost;
