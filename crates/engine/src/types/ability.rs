@@ -10528,6 +10528,12 @@ pub enum TriggerCondition {
         comparator: Comparator,
         count: u32,
     },
+    /// Legacy variant for "minimum attackers" condition - superseded by AttackersDeclaredCount
+    /// Kept for backward compatibility with existing card-data.json
+    AttackersDeclaredMin { minimum: u32 },
+    /// Legacy variant for "none of attackers targeted you" condition - superseded by AttackersDeclaredCount
+    /// Kept for backward compatibility with existing card-data.json
+    NoneOfAttackersTargetedYou,
 
     /// CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they] draw in
     /// each of [your|their] draw steps" — the trigger fires for every card-draw

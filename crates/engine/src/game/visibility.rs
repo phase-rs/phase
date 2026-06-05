@@ -164,6 +164,39 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         hide_card(&mut filtered, obj_id);
     }
 
+    // CR 701.32: A player can look at face-down cards they control on the battlefield
+    // or in exile at any time. For face-down battlefield cards (manifest, morph),
+    // the controller sees the full card (from back_face), opponents see it as hidden.
+    let all_battlefield_ids: Vec<ObjectId> = filtered.battlefield.iter().copied().collect();
+    for obj_id in all_battlefield_ids {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj.face_down {
+                if obj.controller == viewer {
+                    // Controller sees the original card from back_face
+                    if let Some(back_face) = &obj.back_face {
+                        let filtered_obj = filtered.objects.get_mut(&obj_id).unwrap();
+                        filtered_obj.name = back_face.name.clone();
+                        filtered_obj.power = back_face.power;
+                        filtered_obj.toughness = back_face.toughness;
+                        filtered_obj.card_types = back_face.card_types.clone();
+                        filtered_obj.color = back_face.color.clone();
+                        filtered_obj.keywords = back_face.keywords.clone();
+                        filtered_obj.abilities = back_face.abilities.clone().into();
+                        filtered_obj.trigger_definitions = back_face.trigger_definitions.clone();
+                        filtered_obj.replacement_definitions =
+                            back_face.replacement_definitions.clone();
+                        filtered_obj.static_definitions = back_face.static_definitions.clone();
+                        filtered_obj.casting_restrictions = back_face.casting_restrictions.clone();
+                        filtered_obj.printed_ref = back_face.printed_ref.clone();
+                    }
+                } else {
+                    // Opponent sees it as hidden
+                    hide_card(&mut filtered, obj_id);
+                }
+            }
+        }
+    }
+
     if let WaitingFor::ManifestDreadChoice { player, ref cards } = state.waiting_for {
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::ManifestDreadChoice {

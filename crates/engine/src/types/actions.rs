@@ -260,6 +260,12 @@ pub enum GameAction {
     TurnFaceUp {
         object_id: ObjectId,
     },
+    /// CR 701.32: Look at a face-down card you control on the battlefield or in exile.
+    /// This is a special action that allows the controller to view the face-down card's
+    /// identity without turning it face-up. Used for manifested cards and morph creatures.
+    LookAtFaceDownCard {
+        object_id: ObjectId,
+    },
     SubmitSideboard {
         main: Vec<DeckCardCount>,
         sideboard: Vec<DeckCardCount>,
@@ -1207,6 +1213,7 @@ impl GameAction {
             GameAction::UnlockRoomDoor { object_id, .. } => Some(*object_id),
             GameAction::PlayFaceDown { object_id, .. } => Some(*object_id),
             GameAction::TurnFaceUp { object_id } => Some(*object_id),
+            GameAction::LookAtFaceDownCard { object_id } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
             GameAction::ChoosePair { partner } => *partner,
             GameAction::ChooseDamageSource { source } => Some(*source),

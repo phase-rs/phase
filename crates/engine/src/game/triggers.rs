@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
-    CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
-    ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-    TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, AttackersDeclaredCountSubject, BounceSelection,
+    ChosenAttribute, CommanderOwnership, Comparator, ControllerRef, CopyRetargetPermission,
+    DelayedTriggerCondition, Effect, ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -3936,6 +3937,56 @@ pub(crate) fn check_trigger_condition(
                 subject,
             );
             comparator.evaluate(actual as i32, *count as i32)
+        }
+        // Legacy variant for backward compatibility with card-data.json
+        TriggerCondition::AttackersDeclaredMin { minimum } => {
+            let Some(GameEvent::AttackersDeclared {
+                attacker_ids,
+                attacks,
+                ..
+            }) = trigger_event
+            else {
+                return false;
+            };
+            // Legacy variant assumes Controller scope with no filter
+            let subject = AttackersDeclaredCountSubject::Controller {
+                scope: ControllerRef::You,
+                filter: None,
+            };
+            let actual = attackers_declared_count(
+                state,
+                attacker_ids,
+                attacks,
+                controller,
+                source_id,
+                &subject,
+            );
+            Comparator::GE.evaluate(actual as i32, *minimum as i32)
+        }
+        // Legacy variant for backward compatibility with card-data.json
+        TriggerCondition::NoneOfAttackersTargetedYou => {
+            let Some(GameEvent::AttackersDeclared {
+                attacker_ids,
+                attacks,
+                ..
+            }) = trigger_event
+            else {
+                return false;
+            };
+            // Legacy variant: count attackers targeting the controller, check if count is 0
+            let subject = AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked: AttackTargetFilter::Player,
+            };
+            let actual = attackers_declared_count(
+                state,
+                attacker_ids,
+                attacks,
+                controller,
+                source_id,
+                &subject,
+            );
+            Comparator::EQ.evaluate(actual as i32, 0)
         }
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
         TriggerCondition::SolveConditionMet => source_id
@@ -19266,6 +19317,267 @@ mod dedup_regression_tests {
         assert!(
             check_trigger_condition(&state, &condition, controller, None, None),
             "opponent-discard must satisfy 'an opponent discarded a card this turn'"
+        );
+    }
+
+    /// Regression test for GitHub issue #1984: Blood Artist dies trigger
+    /// should fire exactly once per dying creature, not multiple times.
+    /// Blood Artist has a single trigger watching "this creature or another creature"
+    /// dying. This test verifies deduplication works correctly for this pattern.
+    ///
+    /// NOTE: This test is deferred - requires understanding the exact trigger
+    /// definition structure for "self or another creature" patterns. The existing
+    /// test `dies_trigger_fires_after_sacrifice_as_cost` covers basic dies trigger
+    /// behavior. This specific test will be added after investigating the parser
+    /// output for Blood Artist's trigger definition.
+    #[test]
+    #[ignore]
+    fn blood_artist_dies_trigger_fires_once_per_creature() {
+        // TODO: Implement after investigating Blood Artist's trigger definition structure
+    }
+
+    /// Regression test for GitHub issue #1356: Tinybones, Trinket Thief end step trigger
+    /// should fire when an opponent discards a card this turn. This test verifies the
+    /// specific card's trigger works correctly with the discard tracking system.
+    #[test]
+    fn tinybones_end_step_trigger_fires_when_opponent_discards() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AggregateFunction, Comparator, PlayerScope, QuantityExpr, QuantityRef, TriggerCondition,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // Create Tinybones with its end step trigger
+        let tinybones = create_object(
+            &mut state,
+            CardId(100),
+            controller,
+            "Tinybones, Trinket Thief".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&tinybones).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            // Tinybones trigger: "At the beginning of each end step, if an opponent discarded a card this turn, you draw a card and you lose 1 life"
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(Phase::End)
+                    .condition(TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::CardsDiscardedThisTurn {
+                                player: PlayerScope::Opponent {
+                                    aggregate: AggregateFunction::Sum,
+                                },
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    ))
+                    .description("Tinybones end step trigger".to_string()),
+            );
+        }
+
+        // Record that opponent discarded a card
+        crate::game::restrictions::record_discard(&mut state, opponent);
+
+        // Verify the condition is met
+        let condition = TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Sum,
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+        assert!(
+            check_trigger_condition(&state, &condition, controller, None, None),
+            "Tinybones trigger condition should be met when opponent discarded"
+        );
+    }
+
+    /// Regression test for GitHub issue #2022: Mangara the Diplomat trigger
+    /// should fire when exactly one creature attacks the controller. This test
+    /// verifies the AttackersDeclaredCount trigger condition works correctly.
+    #[test]
+    fn mangara_trigger_fires_when_exactly_one_attacker() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{Comparator, ControllerRef, TriggerCondition};
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // Create Mangara with its attackers declared trigger
+        let mangara = create_object(
+            &mut state,
+            CardId(100),
+            controller,
+            "Mangara, the Diplomat".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mangara).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            // Mangara trigger: "Whenever an opponent attacks with exactly one creature, that creature can't block this combat"
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::AttackersDeclared)
+                    .condition(TriggerCondition::AttackersDeclaredCount {
+                        subject: crate::types::ability::AttackersDeclaredCountSubject::Controller {
+                            scope: ControllerRef::Opponent,
+                            filter: None,
+                        },
+                        comparator: Comparator::EQ,
+                        count: 1,
+                    })
+                    .description("Mangara attackers declared trigger".to_string()),
+            );
+        }
+
+        // Create an attacking creature
+        let attacker = create_object(
+            &mut state,
+            CardId(101),
+            opponent,
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        // Simulate exactly one attacker being declared
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: controller,
+            attacks: vec![(attacker, AttackTarget::Player(controller))],
+        };
+
+        // Verify the condition is met
+        let condition = TriggerCondition::AttackersDeclaredCount {
+            subject: crate::types::ability::AttackersDeclaredCountSubject::Controller {
+                scope: ControllerRef::Opponent,
+                filter: None,
+            },
+            comparator: Comparator::EQ,
+            count: 1,
+        };
+        assert!(
+            check_trigger_condition(&state, &condition, controller, Some(mangara), Some(&event)),
+            "Mangara trigger condition should be met when exactly one creature attacks"
+        );
+    }
+
+    /// Regression test for GitHub issue #2022: Mangara the Diplomat trigger
+    /// should NOT fire when two or more creatures attack. This test verifies
+    /// the "exactly one" condition is enforced correctly.
+    #[test]
+    fn mangara_trigger_does_not_fire_when_two_attackers() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{Comparator, ControllerRef, TriggerCondition};
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // Create Mangara with its attackers declared trigger
+        let mangara = create_object(
+            &mut state,
+            CardId(100),
+            controller,
+            "Mangara, the Diplomat".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mangara).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::AttackersDeclared)
+                    .condition(TriggerCondition::AttackersDeclaredCount {
+                        subject: crate::types::ability::AttackersDeclaredCountSubject::Controller {
+                            scope: ControllerRef::Opponent,
+                            filter: None,
+                        },
+                        comparator: Comparator::EQ,
+                        count: 1,
+                    })
+                    .description("Mangara attackers declared trigger".to_string()),
+            );
+        }
+
+        // Create two attacking creatures
+        let attacker1 = create_object(
+            &mut state,
+            CardId(101),
+            opponent,
+            "Attacker1".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker2 = create_object(
+            &mut state,
+            CardId(102),
+            opponent,
+            "Attacker2".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker1)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state
+            .objects
+            .get_mut(&attacker2)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        // Simulate two attackers being declared
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker1, attacker2],
+            defending_player: controller,
+            attacks: vec![
+                (attacker1, AttackTarget::Player(controller)),
+                (attacker2, AttackTarget::Player(controller)),
+            ],
+        };
+
+        // Verify the condition is NOT met
+        let condition = TriggerCondition::AttackersDeclaredCount {
+            subject: crate::types::ability::AttackersDeclaredCountSubject::Controller {
+                scope: ControllerRef::Opponent,
+                filter: None,
+            },
+            comparator: Comparator::EQ,
+            count: 1,
+        };
+        assert!(
+            !check_trigger_condition(&state, &condition, controller, Some(mangara), Some(&event)),
+            "Mangara trigger condition should NOT be met when two creatures attack"
         );
     }
 

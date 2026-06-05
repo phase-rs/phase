@@ -3659,6 +3659,28 @@ fn apply_action(
             super::morph::turn_face_up(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
+        (WaitingFor::Priority { player }, GameAction::LookAtFaceDownCard { object_id }) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            let p = *player;
+            // Verify the player controls the face-down card
+            let obj = state.objects.get(&object_id).ok_or_else(|| {
+                EngineError::InvalidAction("Object not found".to_string())
+            })?;
+            if obj.controller != p {
+                return Err(EngineError::InvalidAction("You don't control this card".to_string()));
+            }
+            // Verify the card is face-down
+            if !obj.face_down {
+                return Err(EngineError::InvalidAction("Card is not face-down".to_string()));
+            }
+            // Looking at a face-down card is a no-op for game state - it just reveals the card
+            // to the controller in the UI. The visibility system handles this.
+            WaitingFor::Priority { player: p }
+        }
         (
             WaitingFor::TriggerTargetSelection {
                 player,
