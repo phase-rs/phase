@@ -21,9 +21,6 @@
 //! No synthetic events — every step goes through `apply` / the public
 //! game-start entry point.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use engine::database::card_db::CardDatabase;
 use engine::game::deck_loading::create_object_from_card_face;
 use engine::game::{apply, start_game_with_starting_player};
@@ -33,14 +30,7 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Build a 2-player game where the non-starting player (P1) has a 7-card
 /// library consisting of Gemstone Caverns plus six basic lands. After the

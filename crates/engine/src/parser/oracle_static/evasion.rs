@@ -1344,12 +1344,21 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         parse_combat_rule_static_predicate_with_defended_nom,
     )?;
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
     let subject = text[..subject_lower.len()].trim();
     let affected = parse_rule_static_subject_filter(subject)?;
-    Some(lower_rule_static(predicate, affected, text).attack_defended(defended))
+    let mut def = lower_rule_static(predicate, affected, text).attack_defended(defended);
+    let trailing = rest.trim();
+    if trailing.is_empty() {
+        return Some(def);
+    }
+    if let Some(unless_cond) = {
+        let tp = TextPair::new(text, &lower);
+        super::shared::parse_unless_static_condition(&tp)
+    } {
+        def.condition = Some(unless_cond);
+        return Some(def);
+    }
+    None
 }
 
 /// Nom 8.0 parser for the combat-tax body.

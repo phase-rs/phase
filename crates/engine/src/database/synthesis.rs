@@ -7294,6 +7294,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.128a / CR 702.129a: Embalm / Eternalize graveyard-activated
     // token-copy abilities (self-contained building block in its own module).
     crate::database::embalm_eternalize::synthesize_embalm_eternalize(face);
+    // CR 702.84a: Unearth graveyard-activated temporary reanimation (return with
+    // haste, exile at the next end step) — self-contained building block.
+    crate::database::unearth::synthesize_unearth(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);

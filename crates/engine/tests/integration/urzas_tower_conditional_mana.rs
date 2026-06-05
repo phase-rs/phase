@@ -25,39 +25,13 @@
 //! `ControllerControlsMatching` filters is what makes the three lands
 //! reference each other rather than themselves.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-const URZA_LAND_KEYS: [&str; 3] = ["urza's tower", "urza's mine", "urza's power plant"];
-
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| {
-        let raw = std::fs::read_to_string(&path).expect("card-data.json should be readable");
-        let export: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&raw).expect("card-data.json should be a JSON object");
-        let mut selected = serde_json::Map::new();
-        for key in URZA_LAND_KEYS {
-            let value = export
-                .get(key)
-                .unwrap_or_else(|| panic!("{key} should be in card-data.json"));
-            selected.insert(key.to_string(), value.clone());
-        }
-        CardDatabase::from_json_str(&serde_json::Value::Object(selected).to_string())
-            .expect("Urza land export records should load")
-    }))
-}
+use crate::support::shared_card_db as load_db;
 
 /// With all three Urza lands on the battlefield, tapping Urza's Tower for mana
 /// must produce three colorless (the `Add {C}` base plus the +2 delta granted

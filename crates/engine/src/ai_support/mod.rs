@@ -711,7 +711,19 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     let mut grouped: HashMap<ObjectId, Vec<GameAction>> = HashMap::new();
     for action in &grouped_actions {
         if let Some(id) = action.source_object() {
-            grouped.entry(id).or_default().push(action.clone());
+            // Dedup per object. During WaitingFor::ManaPayment the flat
+            // candidate list already contains non-land mana abilities (e.g.
+            // Birds of Paradise's ActivateAbility, emitted by
+            // `mana_payment_actions` so the AI/server can pay), and the
+            // `activatable_object_mana_actions` extension above re-derives the
+            // same ones. `is_mana_ability()` only strips land taps, so the flat
+            // copy is not filtered out — without this guard the per-object map
+            // (the frontend ability picker) lists an identical mana ability
+            // twice (the convoke "Add one mana of any color" duplicate).
+            let bucket = grouped.entry(id).or_default();
+            if !bucket.contains(action) {
+                bucket.push(action.clone());
+            }
         }
     }
 
@@ -1431,6 +1443,53 @@ mod tests {
         assert!(!flat.iter().any(
             |action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == rock)
         ));
+    }
+
+    #[test]
+    fn legal_actions_by_object_dedups_mana_ability_during_payment() {
+        // Regression: during WaitingFor::ManaPayment the flat candidate list
+        // (from `mana_payment_actions`) carries the non-land mana ability so the
+        // AI/server can pay, and the `activatable_object_mana_actions` extension
+        // re-derives it. `is_mana_ability()` only strips land taps, so without a
+        // per-object dedup the grouped map (the frontend ability picker) listed
+        // the same ActivateAbility twice — surfacing as Birds of Paradise's "Add
+        // one mana of any color" appearing twice in the convoke picker.
+        let mut state = setup_priority();
+        let rock = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rock)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let ability_index = add_fixed_mana_ability(&mut state, rock, ManaColor::Green);
+        set_dummy_pending_cast(&mut state);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let (_, _, grouped) = legal_actions_full(&state);
+
+        let mana_action = GameAction::ActivateAbility {
+            source_id: rock,
+            ability_index,
+        };
+        let count = grouped
+            .get(&rock)
+            .map(|bucket| bucket.iter().filter(|a| **a == mana_action).count())
+            .unwrap_or(0);
+        assert_eq!(
+            count, 1,
+            "the per-object map must offer the mana ability exactly once during ManaPayment, got {count}"
+        );
     }
 
     #[test]

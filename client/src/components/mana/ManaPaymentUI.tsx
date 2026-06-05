@@ -159,6 +159,25 @@ export function ManaPaymentUI() {
     return MANA_ORDER.filter((c) => counts[c] > 0).map((c) => ({ color: c, amount: counts[c] }));
   }, [player]);
 
+  // CR 702.51a / CR 702.126a: each creature/artifact tapped for convoke/improvise
+  // adds a `ConvokePayment`-restricted marker to the pool (engine
+  // `ManaUnit::convoke_payment`). These are deliberately excluded from
+  // `manaPoolSummary` above because they are not spendable mana — only a record
+  // that the permanent has been tapped toward this cost. Surface them in their
+  // own row so each tap gives the player visible feedback (otherwise the panel
+  // looks frozen as creatures are tapped).
+  const convokeStaged = useMemo(() => {
+    if (!player) return [];
+    const counts: Record<ManaType, number> = {
+      White: 0, Blue: 0, Black: 0, Red: 0, Green: 0, Colorless: 0,
+    };
+    for (const unit of player.mana_pool.mana) {
+      if (!unit.restrictions.includes("ConvokePayment")) continue;
+      counts[unit.color]++;
+    }
+    return MANA_ORDER.filter((c) => counts[c] > 0).map((c) => ({ color: c, amount: counts[c] }));
+  }, [player]);
+
   // CR 107.4f + CR 601.2f: Only shards with `ManaOrLife` can be toggled; ManaOnly
   // / LifeOnly shards are locked to their single legal payment.
   const shardByIndex = useMemo(() => {
@@ -279,6 +298,20 @@ export function ManaPaymentUI() {
                       ? t("mana.improviseHint")
                       : t("mana.convokeOrImproviseHint")}
                 </p>
+              )}
+
+              {/* CR 702.51a: live feedback for staged convoke/improvise taps —
+                  each tapped permanent shows here as a cyan-tinted badge so the
+                  player can see the payment progressing as the cost is covered. */}
+              {convokeMode && convokeStaged.length > 0 && (
+                <div className="mb-3 flex items-center justify-center gap-2">
+                  <span className="text-xs text-cyan-400">
+                    {t("mana.convokeStaged")}
+                  </span>
+                  {convokeStaged.map(({ color, amount }) => (
+                    <ManaBadge key={color} color={color} amount={amount} />
+                  ))}
+                </div>
               )}
 
               {/* Phyrexian toggles — during PhyrexianPayment we iterate the
