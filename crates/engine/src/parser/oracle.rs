@@ -11716,6 +11716,23 @@ mod tests {
         );
     }
 
+    // CR 106.6: Tablet of Discovery (issue #1975) phrases its restricted mana as
+    // "instant and sorcery spells". This must parse to the same two-type union
+    // the " or " phrasing yields so the runtime matcher accepts either type.
+    #[test]
+    fn mana_spend_restriction_instant_and_sorcery() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::ManaSpendRestriction;
+        let result =
+            parse_mana_spend_restriction("spend this mana only to cast instant and sorcery spells");
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellType(
+                "Instant and Sorcery".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn mana_spend_restriction_colorless_eldrazi_spell_or_activation() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;

@@ -788,6 +788,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::StackResolved { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::GameOver { .. }
+        // CR 732.2: a halted-resolution notification carries no trigger subject.
+        | GameEvent::ResolutionHalted { .. }
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::CounterAdded { .. }

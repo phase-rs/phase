@@ -4442,9 +4442,104 @@ fn static_players_cant_gain_life() {
 
 #[test]
 fn static_cast_as_though_flash() {
-    // CR 702.8a: Flash-granting static
+    // CR 601.3b + CR 702.8a: "You may cast [type] spells as though they had
+    // flash" must emit a `CastWithKeyword { Flash }` static — the only mode the
+    // flash-timing path (granted_spell_keywords) reads — with the spell-type
+    // filter preserved. Issue #1957: Vivien, Champion of the Wilds restricts the
+    // grant to CREATURE spells, and the dead `CastWithFlash` mode dropped both
+    // the timing grant and the type restriction.
     let def = parse_static_line("You may cast creature spells as though they had flash.").unwrap();
-    assert_eq!(def.mode, StaticMode::CastWithFlash);
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!(
+            "affected must be a Typed creature filter, got {:?}",
+            def.affected
+        );
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "filter must constrain to creature spells, got {:?}",
+        tf.type_filters
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::You),
+        "grant must scope to spells you cast"
+    );
+    assert_eq!(def.active_zones, vec![Zone::Battlefield]);
+}
+
+#[test]
+fn static_cast_as_though_flash_all_spells() {
+    // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
+    // Orrery) grants flash to every spell the controller casts.
+    let def = parse_static_line("You may cast spells as though they had flash.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+}
+
+#[test]
+fn static_cast_as_though_flash_compound_spell_types_scope_each_leg_to_you() {
+    let def = parse_static_line(
+        "You may cast legendary spells and artifact spells as though they had flash.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Or { filters }) = &def.affected else {
+        panic!("expected Or affected filter, got {:?}", def.affected);
+    };
+    assert!(
+        filters.iter().all(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            })
+        )),
+        "each disjunct must be scoped to spells you cast, got {filters:?}"
+    );
+}
+
+#[test]
+fn static_cast_as_though_flash_players_may_forms_are_unscoped() {
+    for text in [
+        "Players may cast enchantment spells as though they had flash.",
+        "Any player may cast Sliver spells as though they had flash.",
+    ] {
+        let def = parse_static_line(text).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, None, "{text}: must apply to every player");
+            }
+            other => panic!("{text}: expected Typed affected filter, got {other:?}"),
+        }
+    }
 }
 
 #[test]
