@@ -2300,22 +2300,11 @@ fn earthbended_land_returns_tapped_after_exile() {
 /// This is the closest analog to what the user reported in #313.
 #[test]
 fn earthbending_lesson_returned_tapped_after_dies_e2e() {
-    use std::path::Path;
-    use std::sync::OnceLock;
-
-    use engine::database::card_db::CardDatabase;
     use engine::game::engine::apply_as_current;
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::card_type::Supertype;
 
-    fn load_db() -> Option<&'static CardDatabase> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-        if !path.exists() {
-            return None;
-        }
-        static DB: OnceLock<CardDatabase> = OnceLock::new();
-        Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-    }
+    use crate::support::shared_card_db as load_db;
 
     let Some(db) = load_db() else {
         return;
