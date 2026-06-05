@@ -5078,6 +5078,22 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
 
+    /// CR 701.20a: Cards the controller is privately "looking at" during the
+    /// current resolution — the looker-scoped peek window of a bare
+    /// "look at the top card of your library" (Dig with `keep_count == 0`,
+    /// `reveal == false`). Unlike `revealed_cards` (public, all players) and
+    /// `last_revealed_ids` (condition bookkeeping, not viewer-scoped), these ids
+    /// are surfaced by `filter_state_for_viewer` ONLY to `private_look_player`,
+    /// so the looking player can see the card while deciding a subsequent
+    /// "you may reveal that card" optional, without leaking it to opponents.
+    /// Cleared at depth 0 of `resolve_ability_chain` and at action boundaries
+    /// once no optional-effect decision that depends on the peek is pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_look_ids: Vec<ObjectId>,
+    /// CR 701.20a: The player to whom `private_look_ids` is visible (the looker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_look_player: Option<PlayerId>,
+
     /// ObjectIds of objects moved by the most recent zone-change effect.
     /// Used by AbilityCondition::ZoneChangedThisWay to gate sub_abilities on
     /// whether the parent effect moved an object matching a type filter.
@@ -5738,6 +5754,8 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            private_look_ids: Vec::new(),
+            private_look_player: None,
             last_zone_changed_ids: Vec::new(),
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
@@ -6033,6 +6051,8 @@ impl PartialEq for GameState {
             && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
+            && self.private_look_ids == other.private_look_ids
+            && self.private_look_player == other.private_look_player
             && self.last_zone_changed_ids == other.last_zone_changed_ids
             && self.last_vote_ballots == other.last_vote_ballots
             && self.player_actions_this_way == other.player_actions_this_way
