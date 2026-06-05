@@ -217,7 +217,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "huatli's final strike",
     "hunter's edge",
     "hunter's mark",
-    "immersturm",
     "infernal reckoning",
     "jenova, ancient calamity",
     "judgment of alexander",
@@ -249,7 +248,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "packsong pup",
     "pain for all",
     "paladin of atonement",
-    "pandemonium",
     "phthisis",
     "polukranos, world eater",
     "predatory urge",
@@ -498,19 +496,21 @@ fn anaphoric_scope_set_is_frozen() {
     // them) moved 95 cards from this set into DEMONSTRATIVE_SCOPE_CARDS, and
     // Steadfast Armasaur's "its toughness" rebound to `Source` (the LKI-toughness
     // fix), taking the count 252 -> 156; the Optional_YouMay capture fix
-    // (#2277) then dropped "ian the reckless" to 155. If #512/#511 land, this
-    // shrinks further.
+    // (#2277) then dropped "ian the reckless" to 155. The causative "may have"
+    // parser (#2313) then rebound Immersturm/Pandemonium to
+    // ParentObjectTargetController, taking the count to 153. If #512/#511 land,
+    // this shrinks further.
     assert_eq!(
         observed.len(),
-        155,
-        "Expected exactly 155 cards retaining ObjectScope::Anaphoric (pronoun \
+        153,
+        "Expected exactly 153 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        155,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 155 cards."
+        153,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 153 cards."
     );
 }
 

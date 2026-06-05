@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, map, value};
+use nom::combinator::{all_consuming, map, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -457,10 +457,14 @@ fn parse_during_your_nth_turns_of_game_condition(text: &str) -> Option<ParsedCon
         return None;
     }
 
-    // Expect "turns" or "turn" (optionally followed by " of the game")
-    alt((tag::<_, _, OracleError<'_>>("turns"), tag("turn")))
-        .parse(remaining.trim_start())
-        .ok()?;
+    // Expect "turns" or "turn" (optionally followed by " of the game") and
+    // reject trailing conjuncts so they do not become swallowed restrictions.
+    all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("turns"), tag("turn"))),
+        opt(tag(" of the game")),
+    ))
+    .parse(remaining.trim_start())
+    .ok()?;
 
     // Casting is allowed only when turns_taken > max_ordinal.
     // Represented as Not(turns_taken <= max_ordinal) so RequiresCondition
@@ -1558,6 +1562,17 @@ mod tests {
                     }),
                 }),
             }]
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_rejects_trailing_turn_clause_text() {
+        let restrictions = parse_casting_restriction_line(
+            "You can't cast ~ during your first turn of the game and only if you control a Forest.",
+        );
+        assert_eq!(
+            restrictions, None,
+            "trailing conjunct must not be swallowed into an unconditional turn restriction"
         );
     }
 }
