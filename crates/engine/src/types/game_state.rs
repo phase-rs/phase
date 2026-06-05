@@ -3847,6 +3847,11 @@ pub enum CastingVariant {
     /// CR 702.180a: Cast from graveyard for harmonize cost. On resolution, exiled
     /// instead of going anywhere else (unlike Escape which returns to graveyard).
     Harmonize,
+    /// CR 702.187b: Cast from graveyard for mayhem cost (allowed only while the
+    /// card was discarded this turn). Unlike Flashback/Harmonize, the spell is
+    /// NOT exiled — it resolves normally (like Escape), so it can be discarded
+    /// and recast again on a later turn.
+    Mayhem,
     /// CR 702.34a: Cast from graveyard for flashback cost. On resolution (or
     /// whenever leaving the stack for any reason), exiled instead of going anywhere else.
     Flashback,
@@ -4085,6 +4090,7 @@ impl CastingVariant {
             CastingVariant::Warp
             | CastingVariant::Escape
             | CastingVariant::Harmonize
+            | CastingVariant::Mayhem
             | CastingVariant::Flashback
             | CastingVariant::HandPermission { .. }
             | CastingVariant::Sneak { .. }
