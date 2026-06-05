@@ -450,6 +450,15 @@ pub struct GameObject {
     // filters — NOT for summoning-sickness (see `summoning_sick`).
     pub entered_battlefield_turn: Option<u32>,
 
+    // CR 702.187b: Global turn on which this card was put into a graveyard as a
+    // result of a discard. Used by the Mayhem keyword's "as long as you
+    // discarded this card this turn" gate. Compared against the current turn
+    // number at query time, so it auto-expires when the turn advances; reset to
+    // `None` whenever the object changes zones (a card that leaves the graveyard
+    // and returns is a new object that was not discarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discarded_turn: Option<u32>,
+
     /// CR 302.6: Summoning-sickness state flag. True when this permanent has
     /// NOT been continuously under its controller's control since that player's
     /// most recent turn began — i.e., it can't attack or pay `{T}`/`{Q}` costs
@@ -982,6 +991,7 @@ impl GameObject {
             base_characteristics_initialized: false,
             timestamp: 0,
             entered_battlefield_turn: None,
+            discarded_turn: None,
             summoning_sick: false,
             echo_due: false,
             cast_variant_paid: None,

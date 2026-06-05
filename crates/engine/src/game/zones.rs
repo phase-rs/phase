@@ -61,6 +61,13 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     // re-drawn does not surface as "still revealed."
     state.revealed_cards.remove(&object_id);
     state.public_revealed_cards.remove(&object_id);
+    // CR 400.7 + CR 702.187b: The "discarded this turn" mark (Mayhem's gate)
+    // belongs to the old object. Clear it on any zone change so a card that
+    // leaves the graveyard and returns is not treated as still discarded; the
+    // discard pipeline re-stamps it after the move-to-graveyard completes.
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.discarded_turn = None;
+    }
     // CR 400.7 + CR 403.4: Activation-use history belongs to the old
     // object. `ObjectId` is storage identity here, so clear per-object counts
     // at the zone-change boundary before the same id can represent a new object.

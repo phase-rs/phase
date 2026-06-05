@@ -273,6 +273,20 @@ pub fn record_discard(state: &mut crate::types::game_state::GameState, player: P
         .or_insert(0) += 1;
 }
 
+/// CR 702.187b: Stamp a card that was just put into a graveyard by a discard
+/// with the current turn, so the Mayhem keyword's "as long as you discarded
+/// this card this turn" gate can recognize it. The mark auto-expires when the
+/// turn advances (compared against `turn_number` at query time) and is cleared
+/// by `move_to_zone` on any subsequent zone change. Call only when the
+/// discarded card actually went to the graveyard (not when a replacement
+/// redirected it elsewhere, e.g. Madness → exile).
+pub fn record_card_discarded(state: &mut crate::types::game_state::GameState, object_id: ObjectId) {
+    let turn = state.turn_number;
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.discarded_turn = Some(turn);
+    }
+}
+
 pub fn record_token_created(state: &mut crate::types::game_state::GameState, object_id: ObjectId) {
     if let Some(obj) = state.objects.get(&object_id) {
         state

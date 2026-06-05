@@ -222,6 +222,8 @@ pub(super) fn handle_replacement_choice(
                 } => {
                     zones::move_to_zone(state, object_id, Zone::Graveyard, events);
                     crate::game::restrictions::record_discard(state, player_id);
+                    // CR 702.187b: Mark the graveyard card for Mayhem's gate.
+                    crate::game::restrictions::record_card_discarded(state, object_id);
                     events.push(GameEvent::Discarded {
                         player_id,
                         object_id,

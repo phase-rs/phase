@@ -924,6 +924,8 @@ pub(super) fn handle_ward_discard_choice(
 
     zones::move_to_zone(state, chosen[0], Zone::Graveyard, events);
     restrictions::record_discard(state, player);
+    // CR 702.187b: Mark the graveyard card for Mayhem's gate.
+    restrictions::record_card_discarded(state, chosen[0]);
     events.push(GameEvent::Discarded {
         player_id: player,
         object_id: chosen[0],

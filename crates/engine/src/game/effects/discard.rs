@@ -106,6 +106,8 @@ pub fn resolve(
                         } => {
                             zones::move_to_zone(state, oid, Zone::Graveyard, events);
                             crate::game::restrictions::record_discard(state, pid);
+                            // CR 702.187b: Mark the graveyard card for Mayhem's gate.
+                            crate::game::restrictions::record_card_discarded(state, oid);
                             events.push(GameEvent::Discarded {
                                 player_id: pid,
                                 object_id: oid,
@@ -263,6 +265,8 @@ pub(crate) fn discard_as_cost_with_source(
             } => {
                 zones::move_to_zone(state, oid, Zone::Graveyard, events);
                 crate::game::restrictions::record_discard(state, pid);
+                // CR 702.187b: Mark the graveyard card for Mayhem's gate.
+                crate::game::restrictions::record_card_discarded(state, oid);
                 events.push(GameEvent::Discarded {
                     player_id: pid,
                     object_id: oid,
