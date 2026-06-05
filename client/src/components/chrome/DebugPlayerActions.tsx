@@ -5,6 +5,7 @@ import { usePerspectivePlayerId } from "../../hooks/usePlayerId";
 import { useUiStore } from "../../stores/uiStore";
 import {
   AccordionItem,
+  CheckboxInput,
   FieldRow,
   ManaTypeSelect,
   NumberInput,
@@ -153,6 +154,25 @@ function AddManaForm({ onDispatch }: Props) {
   );
 }
 
+function InfiniteManaForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [enabled, setEnabled] = useState(true);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="State">
+        <CheckboxInput checked={enabled} onChange={setEnabled} label="Enabled" />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "SetInfiniteMana", data: { player_id: playerId, enabled } })}>
+        Apply
+      </SubmitButton>
+    </>
+  );
+}
+
 function ModifyPlayerCountersForm({ onDispatch }: Props) {
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [counterKind, setCounterKind] = useState<PlayerCounterKind>("Poison");
@@ -253,6 +273,13 @@ export function DebugPlayerActions({ onDispatch }: Props) {
       </AccordionItem>
       <AccordionItem label="Add Mana" expanded={expanded === "mana"} onToggle={() => toggle("mana")}>
         <AddManaForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem
+        label="Infinite Mana"
+        expanded={expanded === "infinite-mana"}
+        onToggle={() => toggle("infinite-mana")}
+      >
+        <InfiniteManaForm onDispatch={onDispatch} />
       </AccordionItem>
       <AccordionItem label="Modify Counters" expanded={expanded === "counters"} onToggle={() => toggle("counters")}>
         <ModifyPlayerCountersForm onDispatch={onDispatch} />

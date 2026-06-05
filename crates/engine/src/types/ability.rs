@@ -3071,6 +3071,10 @@ pub enum QuantityRef {
     /// "enchanted/equipped creature gets +N/+N for each word in its name" by
     /// binding to the affected object rather than the Aura or Equipment source.
     ObjectNameWordCount { scope: ObjectScope },
+    /// CR 205.4a + CR 205.2a + CR 205.3: Number of typeline components on an
+    /// object (supertypes + core card types + subtypes). Embiggen: "+1/+1 for
+    /// each supertype, card type, and subtype it has."
+    ObjectTypelineComponentCount { scope: ObjectScope },
     /// CR 107.4 + CR 202.1: Count colored mana symbols in an object's mana
     /// cost. Hybrid, monocolored hybrid, Phyrexian, hybrid Phyrexian, and
     /// colorless hybrid symbols count when they contain `color`, via
@@ -3244,9 +3248,14 @@ pub enum QuantityRef {
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
     /// CR 305.2a + CR 603.4: Count of lands played by the scoped player this turn.
-    /// Backed by `Player::lands_played_this_turn`. Used for intervening-if conditions
-    /// like "if it wasn't the first land you played this turn" (Fastbond).
-    LandsPlayedThisTurn { player: PlayerScope },
+    /// `from_zones: None` uses `Player::lands_played_this_turn`; `Some` reads the
+    /// per-player land-play origin history for conditions like "played a land
+    /// from anywhere other than your hand."
+    LandsPlayedThisTurn {
+        player: PlayerScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_zones: Option<Vec<Zone>>,
+    },
     /// CR 500: Number of turns this player has taken so far in the game.
     /// Resolved against the controller/scope player.
     TurnsTaken,
@@ -3283,6 +3292,12 @@ pub enum QuantityRef {
         aggregate: AggregateFunction,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_by: Option<DamageGroupKey>,
+        /// CR 120.2a/120.2b: Restrict to combat or noncombat damage records.
+        #[serde(
+            default = "default_damage_kind",
+            skip_serializing_if = "is_default_damage_kind"
+        )]
+        damage_kind: DamageKindFilter,
     },
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
@@ -5994,6 +6009,16 @@ pub enum Effect {
     /// CR 725.1: Become the monarch. Sets GameState::monarch to the controller.
     BecomeMonarch,
     Proliferate,
+    /// CR 701.34a (operation) + CR 122.1: "For each kind of counter on target
+    /// permanent or player, give that permanent or player another counter of
+    /// that kind." This is the proliferate counter-add operation, but forced on
+    /// a single chosen target rather than a player-chosen set — so it carries a
+    /// `target` and runs without a `ProliferateChoice` prompt. Skyship
+    /// Plunderer and Maulfist Revolutionary.
+    ProliferateTarget {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 701.36a: Choose a creature token you control, then create a copy of it.
     Populate,
     /// CR 701.30: Clash with an opponent — reveal top cards, compare mana values.
@@ -7532,6 +7557,14 @@ fn is_default_damage_aggregate(a: &AggregateFunction) -> bool {
     matches!(a, AggregateFunction::Sum)
 }
 
+fn default_damage_kind() -> DamageKindFilter {
+    DamageKindFilter::Any
+}
+
+fn is_default_damage_kind(k: &DamageKindFilter) -> bool {
+    matches!(k, DamageKindFilter::Any)
+}
+
 fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool {
     matches!(c, SearchSelectionConstraint::None)
 }
@@ -8094,6 +8127,7 @@ impl Effect {
             | Effect::SetLifeTotal { target, .. }
             | Effect::GiveControl { target, .. }
             | Effect::RemoveFromCombat { target, .. }
+            | Effect::ProliferateTarget { target, .. }
             // CR 115.7 + CR 115.1: "Change the target of target spell or ability"
             // (Bolt Bend, Redirect, Misdirection) targets the stack spell/ability
             // it will retarget. That target is chosen as the spell is cast (CR
@@ -8357,6 +8391,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TimeTravel => "TimeTravel",
         Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
+        Effect::ProliferateTarget { .. } => "ProliferateTarget",
         Effect::EndTheTurn => "EndTheTurn",
         Effect::EndCombatPhase => "EndCombatPhase",
         Effect::Populate => "Populate",
@@ -8543,6 +8578,7 @@ pub enum EffectKind {
     TimeTravel,
     BecomeMonarch,
     Proliferate,
+    ProliferateTarget,
     Populate,
     Clash,
     EndTheTurn,
@@ -8732,6 +8768,7 @@ impl From<&Effect> for EffectKind {
             Effect::TimeTravel => EffectKind::TimeTravel,
             Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,
+            Effect::ProliferateTarget { .. } => EffectKind::ProliferateTarget,
             Effect::EndTheTurn => EffectKind::EndTheTurn,
             Effect::EndCombatPhase => EffectKind::EndCombatPhase,
             Effect::Populate => EffectKind::Populate,
@@ -10952,6 +10989,17 @@ pub struct TriggerDefinition {
     /// `DamageDealtOnce`); ignored by other modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_amount: Option<(Comparator, u32)>,
+    /// CR 119.3: Per-event life-change-amount constraint for life triggers
+    /// ("Whenever [a player] loses exactly N life" / "…loses N or more life").
+    /// When `Some((cmp, n))`, the matcher requires the `LifeChanged` event's
+    /// magnitude (`|amount|`) to satisfy `magnitude cmp n`. `None` means no
+    /// amount restriction. Applies to the life-event trigger modes
+    /// (`LifeLost`, `LifeLostAll`, `LifeGained`, `LifeChanged`); ignored by
+    /// other modes. Mirrors `damage_amount` but is a separate field because
+    /// life (CR 119) and damage (CR 120) are distinct rule sections evaluated
+    /// against different event payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub life_amount: Option<(Comparator, u32)>,
     /// CR 705.2: Coin-flip result filter for FlippedCoin trigger mode.
     /// When `Some(Won)`, fires only on wins; `Some(Lost)` only on losses; `None` fires on any flip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10988,6 +11036,7 @@ impl TriggerDefinition {
             attack_target_filter: None,
             player_actions: None,
             damage_amount: None,
+            life_amount: None,
             coin_flip_result: None,
         }
     }
@@ -12025,6 +12074,14 @@ pub enum ContinuousModification {
         /// characteristics").
         if_type: Option<CoreType>,
     },
+    /// CR 707.9 + CR 202.1b: Strip a copy's mana cost — the "has no mana cost"
+    /// copy exception used by Embalm (CR 702.128a) and Eternalize
+    /// (CR 702.129a). Like `AddCounterOnEnter`, this is consumed at copy
+    /// resolution, never evaluated through the layer system, so
+    /// `ContinuousModification::layer()` treats it as unreachable: `token_copy.rs`
+    /// bakes it into the new token's base mana cost, and `become_copy.rs` strips
+    /// it from the copied values so the continuous copy carries mana value 0.
+    RemoveManaCost,
 }
 
 // ---------------------------------------------------------------------------
@@ -12403,6 +12460,25 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_original_controller_recursive(player);
+        }
+    }
+
+    /// CR 608.2: Rebind the acting controller across this ability and every
+    /// sub/else branch. Used by the `player_scope` driver: when a compound
+    /// "each player <verb1>, <verb2>, then <verb3>" instruction iterates, the
+    /// SCOPED player is the acting controller for the WHOLE chain, not just the
+    /// top clause — so a co-scoped sub-clause's implicit-controller recipient
+    /// (e.g. `LoseLife { target: None }`, "each player ... loses life") and any
+    /// generic handler that reads `controller` resolve to the iterating player.
+    /// The printed ability controller is preserved separately via
+    /// `original_controller` (CR 109.5), so "you" references are unaffected.
+    pub fn set_controller_recursive(&mut self, player: PlayerId) {
+        self.controller = player;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_controller_recursive(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_controller_recursive(player);
         }
     }
 
@@ -13227,6 +13303,7 @@ mod tests {
             attack_target_filter: None,
             player_actions: None,
             damage_amount: None,
+            life_amount: None,
             coin_flip_result: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();

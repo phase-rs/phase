@@ -24,9 +24,6 @@
 //! `current_trigger_event == None` runtime failure, so this drives the full
 //! cast/resolve pipeline.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{CastOutcome, GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -41,14 +38,7 @@ use engine::types::zones::Zone;
 
 const P1: PlayerId = PlayerId(1);
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Create a Treasure artifact token on `owner`'s battlefield. Devour Intellect
 /// only cares about the *source snapshot* of the mana that paid for it, so the

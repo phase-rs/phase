@@ -627,7 +627,7 @@ pub fn resolve(
                 damage_source,
                 target,
             } => (
-                resolve_quantity_with_targets(state, amount, ability) as u32,
+                resolve_quantity_with_targets(state, amount, ability).max(0) as u32,
                 *damage_source,
                 target,
             ),

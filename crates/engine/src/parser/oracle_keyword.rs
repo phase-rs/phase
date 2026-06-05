@@ -380,6 +380,10 @@ fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keywo
     let keyword = parse_keyword_from_oracle(&lower)?;
     match keyword {
         Keyword::ForMirrodin => Some(vec![keyword]),
+        // CR 702.89a: Umbra armor (printed as "umbra armor"/"totem armor") is a
+        // standalone keyword line MTGJSON does not surface in its `keywords` array,
+        // so it must be recovered from the Oracle line here.
+        Keyword::TotemArmor => Some(vec![keyword]),
         _ => None,
     }
 }
@@ -1209,6 +1213,20 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     .is_ok()
     {
         return Some(Keyword::Ripple);
+    }
+
+    // CR 702.89a/b: "umbra armor" — and the obsolete "totem armor" the Oracle text
+    // of older cards was updated from — is a single two-word keyword. The generic
+    // name/parameter split below would read "umbra"/"totem" as the name and drop
+    // "armor", so recognize the whole phrase here (mirrors the `ripple N` check).
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("umbra armor"),
+        tag("totem armor"),
+    )))
+    .parse(text)
+    .is_ok()
+    {
+        return Some(Keyword::TotemArmor);
     }
 
     // For parameterized keywords, find the first space to split name from parameter.
@@ -2516,6 +2534,39 @@ mod tests {
         let keywords = result.unwrap();
         assert_eq!(keywords.len(), 1);
         assert!(matches!(keywords[0], Keyword::Transmute(_)));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_umbra_and_totem_armor() {
+        // CR 702.89a/b: both the current "umbra armor" and the obsolete
+        // "totem armor" spelling map to Keyword::TotemArmor.
+        assert_eq!(
+            parse_keyword_from_oracle("umbra armor"),
+            Some(Keyword::TotemArmor)
+        );
+        assert_eq!(
+            parse_keyword_from_oracle("totem armor"),
+            Some(Keyword::TotemArmor)
+        );
+    }
+
+    #[test]
+    fn extract_keyword_line_umbra_armor_reachable_without_mtgjson_keyword() {
+        // CR 702.89a: the Umbra cycle's "Umbra armor (…)" line carries reminder
+        // text and is NOT surfaced in MTGJSON's `keywords` array, so it must be
+        // recovered from the Oracle line. Regression guard that the runtime
+        // umbra-armor replacement is actually reachable (the keyword is produced).
+        for line in [
+            "Umbra armor (If enchanted permanent would be destroyed, instead remove all damage marked on it and destroy this Aura.)",
+            "Totem armor (If enchanted creature would be destroyed, instead remove all damage marked on it and destroy this Aura.)",
+        ] {
+            let result = extract_keyword_line(line, &[]);
+            assert_eq!(
+                result,
+                Some(vec![Keyword::TotemArmor]),
+                "umbra/totem armor line must yield Keyword::TotemArmor, got {result:?} for {line:?}"
+            );
+        }
     }
 
     #[test]

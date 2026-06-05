@@ -118,6 +118,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SpecializeColor { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::MutateMergeChoice { .. }
+            | WaitingFor::CipherEncodeChoice { .. }
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
@@ -1864,6 +1865,17 @@ pub(super) fn handle_resolution_choice(
                 effects::publish_tracked_set(state, discarded_to_graveyard);
             }
 
+            // CR 608.2c: "discard a card. If you do, [effect]" — the IfYouDo
+            // sub_ability condition evaluates against optional_effect_performed.
+            // Set it on the stashed continuation before draining so the gate
+            // evaluates true when at least one card was actually discarded.
+            // Mirrors the recursive AutoMayChoice::Accept path in effects/mod.rs.
+            if !chosen.is_empty() {
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain.set_optional_effect_performed_recursive(true);
+                }
+            }
+
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
@@ -2496,6 +2508,17 @@ pub(super) fn handle_resolution_choice(
             let waiting =
                 crate::game::merge::handle_mutate_merge_choice(state, player, side, events)?;
             ResolutionChoiceOutcome::WaitingFor(waiting)
+        }
+        // CR 702.99a: The resolving Cipher spell's controller chose a creature to
+        // encode the card on (or declined). `cipher::handle_encode_choice`
+        // exiles+links on accept or routes the card to its graveyard on decline,
+        // then resolution is complete — return to priority so the resulting zone
+        // change's triggers/SBAs are processed.
+        (WaitingFor::CipherEncodeChoice { card_id, .. }, GameAction::CipherEncode { creature }) => {
+            crate::game::cipher::handle_encode_choice(state, card_id, creature, events);
+            ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                player: state.active_player,
+            })
         }
         // CR 903.9a: Owner decides whether to return their commander to the command zone.
         // Accept = move to command zone; Decline = leave in current zone (marked as

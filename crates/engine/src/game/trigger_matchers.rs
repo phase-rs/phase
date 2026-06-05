@@ -605,6 +605,9 @@ fn player_matches_filter(
             controller: Some(ControllerRef::Opponent),
             ..
         }) => trigger_controller.is_some_and(|controller| controller != player_id),
+        TargetFilter::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, source_id) == Some(player_id)
+        }
         TargetFilter::AttachedTo => {
             state
                 .objects
@@ -788,6 +791,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::StackResolved { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::GameOver { .. }
+        // CR 732.2: a halted-resolution notification carries no trigger subject.
+        | GameEvent::ResolutionHalted { .. }
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::CounterAdded { .. }
@@ -1710,9 +1715,24 @@ pub(super) fn match_life_gained(
         if *amount <= 0 {
             return false;
         }
+        // CR 119.3: optional per-event magnitude constraint ("gains exactly N life").
+        if !life_amount_matches(trigger, *amount) {
+            return false;
+        }
         valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
+    }
+}
+
+/// CR 119.3: Check a `LifeChanged` event's magnitude against the trigger's
+/// optional `life_amount` constraint. `amount` is signed (negative for loss);
+/// the comparison uses its magnitude so the same combinator serves gain and
+/// loss triggers. `None` (the common case) imposes no restriction.
+fn life_amount_matches(trigger: &TriggerDefinition, amount: i32) -> bool {
+    match trigger.life_amount {
+        Some((cmp, threshold)) => cmp.evaluate(amount.abs(), threshold as i32),
+        None => true,
     }
 }
 
@@ -1724,6 +1744,10 @@ pub(super) fn match_life_lost(
 ) -> bool {
     if let GameEvent::LifeChanged { player_id, amount } = event {
         if *amount >= 0 {
+            return false;
+        }
+        // CR 119.3: optional per-event magnitude constraint ("loses exactly N life").
+        if !life_amount_matches(trigger, *amount) {
             return false;
         }
         valid_player_matches(trigger, state, *player_id, source_id)
@@ -1741,6 +1765,10 @@ pub(super) fn match_life_changed(
 ) -> bool {
     if let GameEvent::LifeChanged { player_id, amount } = event {
         if *amount == 0 {
+            return false;
+        }
+        // CR 119.3: optional per-event magnitude constraint ("gains or loses exactly N life").
+        if !life_amount_matches(trigger, *amount) {
             return false;
         }
         valid_player_matches(trigger, state, *player_id, source_id)
@@ -6447,6 +6475,47 @@ mod tests {
             amount: 3,
         };
         assert!(!match_life_lost(&gain_event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn life_lost_exact_amount_constraint_gates_magnitude() {
+        // CR 119.3: "loses exactly 1 life" — the trigger fires only on an event
+        // whose magnitude is exactly 1, not on larger losses.
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::LifeLost);
+        trigger.life_amount = Some((Comparator::EQ, 1));
+
+        let loss_one = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -1,
+        };
+        assert!(match_life_lost(&loss_one, &trigger, ObjectId(1), &state));
+
+        let loss_two = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -2,
+        };
+        assert!(!match_life_lost(&loss_two, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn life_lost_or_more_amount_constraint_accepts_at_or_above() {
+        // CR 119.3: "loses 3 or more life" — same building block, GE comparator.
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::LifeLost);
+        trigger.life_amount = Some((Comparator::GE, 3));
+
+        let loss_two = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -2,
+        };
+        assert!(!match_life_lost(&loss_two, &trigger, ObjectId(1), &state));
+
+        let loss_four = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -4,
+        };
+        assert!(match_life_lost(&loss_four, &trigger, ObjectId(1), &state));
     }
 
     #[test]

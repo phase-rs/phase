@@ -1,12 +1,14 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
+use nom::character::complete::space1;
 use nom::combinator::{map, opt, peek, value};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::filter as nom_filter;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
@@ -1557,7 +1559,7 @@ fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
     }
 }
 
-fn parse_search_name_reference_suffix(
+pub(crate) fn parse_search_name_reference_suffix(
     input: &str,
 ) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
     let (rest, relation) = alt((
@@ -2155,7 +2157,7 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, prop)) = parse_shared_quality_clause(remaining) {
+        if let Ok((rest, prop)) = parse_shared_quality_clause(remaining, &ParseContext::default()) {
             last_shared_quality_reference = match &prop {
                 FilterProp::SharesQuality {
                     reference: Some(reference),
@@ -2199,8 +2201,13 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with no abilities").parse(remaining) {
-            suffix.properties.push(FilterProp::HasNoAbilities);
+        if let Ok((rest, prop)) = preceded(
+            (tag::<_, _, OracleError<'_>>("with"), space1),
+            nom_filter::parse_no_abilities,
+        )
+        .parse(remaining)
+        {
+            suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
         }

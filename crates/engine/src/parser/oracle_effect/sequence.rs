@@ -749,7 +749,7 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_ascii_lowercase();
-    let sequence_starts = alt((
+    if alt((
         tag::<_, _, OracleError<'_>>("then, if "),
         tag("then if "),
         tag("then "),
@@ -757,8 +757,21 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         tag("otherwise"),
     ))
     .parse(trimmed_lower.as_str())
-    .is_ok();
-    sequence_starts
+    .is_ok()
+    {
+        return true;
+    }
+    // CR 608.2c: read the whole text and apply the rules of English — a
+    // granted-ability quote that ends a sentence can be followed by a fresh
+    // causative "may have …" sentence directed at the affected object's
+    // controller ("…life." That creature's controller may have this artifact
+    // deal 1 damage to it." — Requiem Monolith). Split only on that narrow
+    // causative form; arbitrary capitalized continuations ("The token is
+    // goaded", "It becomes a 2/2 …") must stay attached to the quote.
+    nom_primitives::scan_at_word_boundaries(trimmed_lower.as_str(), |i| {
+        tag::<_, _, OracleError<'_>>("may have ").parse(i)
+    })
+    .is_some()
 }
 
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
@@ -1029,10 +1042,49 @@ fn starts_you_control_subject_predicate(s: &str) -> bool {
     .is_ok()
 }
 
+/// CR 613.1b + CR 110.2: True when `s` is a "<player-subject> gains control of …"
+/// clause — i.e. the control-handoff predicate where a *player* (not the acting
+/// controller) takes control of an object. The subject axis is the full set of
+/// player-noun phrases (`an opponent`, `an opponent of your choice`, `target
+/// opponent`, `that player`, `each opponent`, …) recognized by
+/// `subject::starts_with_subject_prefix`; the predicate is the fixed verb phrase
+/// "gains control of ". A player subject followed by this conjugated predicate is
+/// always a standalone subject-predicate clause that lowers to
+/// `Effect::GiveControl` (via the `GainControl → GiveControl` subject rewrite in
+/// `oracle_effect::mod`), never a noun-phrase continuation of the prior conjunct.
+/// So both the comma splitter and the bare-`and` splitter must peel it off as its
+/// own clause — otherwise the control transfer is silently dropped (Slicer, Hired
+/// Muscle: "untap it, goad it, and an opponent of your choice gains control of
+/// it"). Scoped to the "gains control of" verb so plain GainControl (the acting
+/// controller steals) stays on the un-split imperative path.
+fn starts_player_gains_control_clause(s: &str) -> bool {
+    let Ok((_predicate, subject)) =
+        take_until::<_, _, OracleError<'_>>(" gains control of ").parse(s)
+    else {
+        return false;
+    };
+    if subject.trim().is_empty() {
+        return false;
+    }
+    // The span before the predicate must be a recognized player-subject phrase.
+    // Include the boundary space consumed by `take_until`; the predicate match
+    // above guarantees the next byte is the ASCII space before "gains".
+    let subject_phrase = &s[..subject.len() + 1];
+    super::subject::starts_with_subject_prefix(subject_phrase)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_clause_text_lower(s: &str) -> bool {
     if starts_multiword_keyword_continuation(s) {
         return false;
+    }
+
+    // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
+    // clause (Slicer, Hired Muscle). A player subject + "gains control of"
+    // predicate is never a noun-phrase continuation, so it must split off as its
+    // own clause to reach the GiveControl subject-rewrite path.
+    if starts_player_gains_control_clause(s) {
+        return true;
     }
 
     // Table-driven prefix check via nom tag() — try all imperative verbs and
@@ -1172,7 +1224,25 @@ fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool 
         value((), tag("that creature each ")),
     ))
     .parse(lower.as_str());
-    result.is_ok()
+    if result.is_ok() {
+        return true;
+    }
+    controlled_creature_each_subject_starts(&lower)
+}
+
+fn controlled_creature_each_subject_starts(lower: &str) -> bool {
+    let Ok((_, type_phrase)) = terminated(
+        take_until::<_, _, OracleError<'_>>(" you control each "),
+        tag::<_, _, OracleError<'_>>(" you control each "),
+    )
+    .parse(lower) else {
+        return false;
+    };
+    let type_phrase = type_phrase.trim();
+    !type_phrase.is_empty()
+        && take_until::<_, _, OracleError<'_>>(" and ")
+            .parse(type_phrase)
+            .is_err()
 }
 
 /// Restricted clause-start check for bare " and " splitting (not after comma).
@@ -1190,6 +1260,15 @@ pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
 
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
+    // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
+    // clause (Slicer, Hired Muscle: "untap it, goad it, and an opponent of your
+    // choice gains control of it"). A player subject + "gains control of"
+    // predicate is always a standalone subject-predicate clause, never a
+    // noun-phrase continuation of the prior conjunct — split it off so it reaches
+    // the GiveControl subject-rewrite path instead of being dropped.
+    if starts_player_gains_control_clause(s) {
+        return true;
+    }
     // Split into multiple alt() groups chained with .or() for nom's tuple limit.
     let has_verb_prefix = alt((
         value((), tag::<_, _, OracleError<'_>>("add ")),
@@ -1476,9 +1555,13 @@ fn combat_requirement_conjunct_prepend(
     remainder_trimmed: &str,
 ) -> Option<String> {
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    let cant_be_blocked_restriction =
+        super::subject::is_cant_be_blocked_restriction_predicate(&remainder_lower);
     if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
         && !super::subject::is_can_block_extra_predicate(&remainder_lower)
         && !super::subject::is_can_attack_despite_defender_predicate(&remainder_lower)
+        && !(cant_be_blocked_restriction
+            && cant_be_blocked_restriction_needs_subject_reattach(&remainder_lower))
     {
         return None;
     }
@@ -1509,8 +1592,9 @@ fn combat_requirement_conjunct_prepend(
             alt((tag::<_, _, OracleError<'_>>(" gains "), tag(" gain ")))
                 .parse(after)
                 .ok()?;
-            // Map the verb position back onto the original-case slice.
-            let subject = before_and[..before_verb.len()].trim();
+            // Map the verb position back onto the original-case slice and keep
+            // only the local sentence's subject.
+            let subject = local_subject_before_continuous_verb(before_and, before_verb.len())?;
             (!subject.is_empty()).then_some(subject)
         })
         .or_else(|| {
@@ -1522,8 +1606,10 @@ fn combat_requirement_conjunct_prepend(
                     alt((tag::<_, _, OracleError<'_>>(" gets "), tag(" get ")))
                         .parse(after)
                         .ok()?;
-                    // Map the verb position back onto the original-case slice.
-                    let subject = before_and[..before_verb.len()].trim();
+                    // Map the verb position back onto the original-case slice
+                    // and keep only the local sentence's subject.
+                    let subject =
+                        local_subject_before_continuous_verb(before_and, before_verb.len())?;
                     (!subject.is_empty()).then_some(subject)
                 })
         })?;
@@ -1540,6 +1626,29 @@ fn combat_requirement_conjunct_prepend(
     } else {
         Some(format!("{subject_text} "))
     }
+}
+
+fn cant_be_blocked_restriction_needs_subject_reattach(remainder_lower: &str) -> bool {
+    // Plain inline evasion grants are owned by `parse_continuous_modifications`
+    // and must stay in one static definition. The where-suffixed form needs a
+    // split so the first conjunct's duration is not hidden behind the trailing
+    // variable definition.
+    nom_primitives::scan_contains(remainder_lower, "where ")
+}
+
+fn local_subject_before_continuous_verb(before_and: &str, before_verb_len: usize) -> Option<&str> {
+    let mut subject = before_and[..before_verb_len].trim();
+    let mut remaining = subject;
+    while let Ok((after_sentence, _)) = terminated(
+        take_until::<_, _, OracleError<'_>>(". "),
+        tag::<_, _, OracleError<'_>>(". "),
+    )
+    .parse(remaining)
+    {
+        subject = after_sentence.trim();
+        remaining = subject;
+    }
+    (!subject.is_empty()).then_some(subject)
 }
 
 /// CR 121.1 / CR 119.1: Returns true when the token immediately following a
@@ -3124,6 +3233,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
         | Effect::EndCombatPhase
         | Effect::Populate
@@ -4247,6 +4357,34 @@ mod tests {
                 "Then if you control four or more Wizards, transform ~",
             ]
         );
+    }
+
+    #[test]
+    fn quoted_grant_splits_before_following_sentence() {
+        // Requiem Monolith: period inside the granted trigger quote, then a new
+        // optional sentence starting with an uppercase letter.
+        let chunks = clause_texts(
+            "Until end of turn, target creature gains \"Whenever this creature is dealt damage, you draw that many cards and lose that much life.\" That creature's controller may have this artifact deal 1 damage to it.",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "Until end of turn, target creature gains \"Whenever this creature is dealt damage, you draw that many cards and lose that much life.\"",
+                "That creature's controller may have this artifact deal 1 damage to it",
+            ]
+        );
+    }
+
+    #[test]
+    fn quoted_grant_keeps_nonrecognized_capitalized_continuation() {
+        // CR 608.2c: a granted quote followed by a capitalized continuation that
+        // is NOT a "may have" causative sentence ("The token is goaded …",
+        // Nettling Nuisance-style) must stay a single chunk — the prior
+        // uppercase-letter fallback over-split these.
+        let chunks = clause_texts(
+            "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\" The token is goaded.",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
 
     // --- Bare " and " splitting: positive cases (should split) ---

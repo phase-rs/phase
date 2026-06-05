@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
-use nom::combinator::{all_consuming, map, opt, value, verify};
+use nom::combinator::{all_consuming, map, opt, rest, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -264,7 +264,7 @@ fn try_parse_subject_continuous_clause(
         return Some(clause);
     }
     let application = parse_subject_application(subject, ctx)?;
-    build_continuous_clause(application, predicate)
+    build_continuous_clause(application, predicate, ctx)
 }
 
 fn additive_type_subject_application(
@@ -650,6 +650,40 @@ pub(super) fn is_can_attack_despite_defender_predicate(lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 509.1b: predicate-only "can't be blocked [this turn] [except by … | by …]"
+/// conjunct left after the sequence splitter peels a trailing evasion restriction
+/// off a keyword/P/T grant ("gain haste until end of turn and can't be blocked
+/// this turn except by creatures with haste"). Used by
+/// `combat_requirement_conjunct_prepend` to re-attach the subject.
+pub(super) fn is_cant_be_blocked_restriction_predicate(lower: &str) -> bool {
+    let trimmed = lower.trim().trim_end_matches('.').trim();
+    parse_cant_be_blocked_restriction_predicate(trimmed).is_ok()
+        || parse_restriction_modes(trimmed).is_some_and(|modes| {
+            modes.iter().any(|mode| {
+                matches!(
+                    mode,
+                    StaticMode::CantBeBlocked
+                        | StaticMode::CantBeBlockedBy { .. }
+                        | StaticMode::CantBeBlockedExceptBy { .. }
+                )
+            })
+        })
+}
+
+fn parse_cant_be_blocked_restriction_predicate(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("can't be blocked"),
+        tag("cannot be blocked"),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(alt((tag(" this turn"), tag(" this combat")))).parse(input)?;
+    if input.is_empty() {
+        return Ok((input, ()));
+    }
+    let (input, _) = (tag(" "), alt((tag("except by "), tag("by "))), rest).parse(input)?;
+    Ok((input, ()))
+}
+
 fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {
     alt((
         map(
@@ -990,6 +1024,11 @@ pub(super) fn parse_subject_application(
                 })
             } else if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
                 TargetFilter::ScopedPlayer
+            } else if matches!(
+                ctx.relative_player_scope,
+                Some(ControllerRef::SourceChosenPlayer)
+            ) {
+                TargetFilter::SourceChosenPlayer
             } else if matches!(
                 ctx.relative_player_scope,
                 Some(ControllerRef::ParentTargetController)
@@ -1506,6 +1545,7 @@ pub(super) fn is_single_object_ref(filter: &TargetFilter) -> bool {
 fn try_split_pump_compound(
     normalized: &str,
     application: &SubjectApplication,
+    ctx: &ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = normalized.to_lowercase();
     // Find " and " that separates two independent clauses after a pump+duration.
@@ -1515,7 +1555,8 @@ fn try_split_pump_compound(
     let remainder = remainder_tp.original.trim();
 
     // Parse the pump clause first to check whether it carries its own duration.
-    let (power, toughness, duration) = super::parse_pump_clause(pump_part)?;
+    let (power, toughness, duration) =
+        super::lower::parse_pump_clause_with_context(pump_part, ctx)?;
 
     // Guard: when the pump part has NO duration (e.g., "get +2/+2 and gain flying
     // until end of turn"), the trailing duration is shared across both clauses.
@@ -1626,6 +1667,7 @@ fn build_keyword_choice_clause(
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
+    ctx: &ParseContext,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
 
@@ -1646,7 +1688,9 @@ fn build_continuous_clause(
     }
 
     // Try the full predicate first (simple pump with no compound).
-    if let Some((power, toughness, duration)) = super::parse_pump_clause(&normalized) {
+    if let Some((power, toughness, duration)) =
+        super::lower::parse_pump_clause_with_context(&normalized, ctx)
+    {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
             effect,
@@ -1663,7 +1707,7 @@ fn build_continuous_clause(
     // Compound: "get +1/+1 until end of turn and you gain 1 life"
     // Split on " and " that follows a duration marker, producing a pump
     // with a chained sub_ability for the remainder.
-    if let Some(clause) = try_split_pump_compound(&normalized, &application) {
+    if let Some(clause) = try_split_pump_compound(&normalized, &application, ctx) {
         return Some(clause);
     }
 
@@ -2652,6 +2696,8 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     if let Ok((except_text, _)) = alt((
         tag::<_, _, OracleError<'_>>("can't be blocked except by "),
         tag("cannot be blocked except by "),
+        tag("can't be blocked this turn except by "),
+        tag("cannot be blocked this turn except by "),
     ))
     .parse(lower)
     {

@@ -13,6 +13,68 @@ use crate::types::player::PlayerId;
 /// CR 107.4a: The five colors are white ({W}), blue ({U}), black ({B}), red ({R}), green ({G}).
 pub type ColorDemand = [u32; 5];
 
+/// Units of each mana type kept in a debug "infinite mana" pool. Large enough to
+/// cover any single resolution's worth of spends, small enough that the pool's
+/// linear spend scan (`ManaPool` is a `Vec<ManaUnit>`) stays cheap.
+const INFINITE_MANA_PER_TYPE: usize = 100;
+
+/// The six mana types an infinite-mana pool is seeded with: the five colors
+/// (CR 105.1) plus colorless (CR 107.4c).
+const INFINITE_MANA_TYPES: [ManaType; 6] = [
+    ManaType::White,
+    ManaType::Blue,
+    ManaType::Black,
+    ManaType::Red,
+    ManaType::Green,
+    ManaType::Colorless,
+];
+
+/// Debug-only: top every player in `GameState::debug_infinite_mana` back up to
+/// `INFINITE_MANA_PER_TYPE` unrestricted, non-expiring units of each mana type.
+///
+/// Idempotent — only the shortfall is added — and returns immediately when no
+/// player is flagged, so it is cheap to call after every action. Paired with the
+/// `UnitDisposition::Keep` override in `turns::drain_pending_phase_transition_progress`
+/// (which suppresses the CR 500.4 end-of-step empty for flagged players), this
+/// keeps the pool continuously full. Both the affordability check
+/// (`reduce_cost_by_pool`) and the real payment path read the same
+/// `player.mana_pool`, so a flagged player can pay any cost without divergence
+/// between "shows castable" and "actually pays".
+///
+/// NOT a rules-legal effect — a developer convenience gated behind the same
+/// debug-action permission as every other `DebugAction`.
+pub fn refill_infinite_mana(state: &mut GameState) {
+    if state.debug_infinite_mana.is_empty() {
+        return;
+    }
+    let flagged: Vec<PlayerId> = state.debug_infinite_mana.iter().copied().collect();
+    for &player_id in &flagged {
+        let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
+            continue;
+        };
+        for color in INFINITE_MANA_TYPES {
+            // Count only the units this top-up owns (unrestricted, non-expiring)
+            // so card-produced restricted/expiring mana never suppresses a refill.
+            let have = player
+                .mana_pool
+                .mana
+                .iter()
+                .filter(|u| u.color == color && u.restrictions.is_empty() && u.expiry.is_none())
+                .count();
+            for _ in have..INFINITE_MANA_PER_TYPE {
+                player
+                    .mana_pool
+                    .add(ManaUnit::new(color, ObjectId(0), false, Vec::new()));
+            }
+        }
+    }
+    // Mark display dirty only after the mutable-player borrow above is released.
+    for &player_id in &flagged {
+        super::public_state::mark_public_state_player_dirty(state, player_id);
+    }
+    super::public_state::mark_mana_display_dirty(state);
+}
+
 fn mana_type_to_demand_index(mt: ManaType) -> Option<usize> {
     match mt {
         ManaType::White => Some(0),
@@ -3024,5 +3086,106 @@ mod tests {
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
         ));
+    }
+
+    /// `refill_infinite_mana` is the debug "infinite mana" building block. It must
+    /// seed every flagged player's pool to `INFINITE_MANA_PER_TYPE` units of each
+    /// of the six mana types, restore that cap after a spend without unbounded
+    /// growth (idempotent), no-op when no player is flagged, and never touch an
+    /// unflagged player.
+    #[test]
+    fn refill_infinite_mana_seeds_tops_up_and_isolates_players() {
+        let mut state = GameState::new_two_player(0);
+        let p1 = state.players[1].id;
+
+        // No player flagged → cheap no-op.
+        refill_infinite_mana(&mut state);
+        assert!(state.players[0].mana_pool.mana.is_empty());
+
+        // Flag P0 → seeded to the cap for each of the six types; P1 untouched.
+        state.debug_infinite_mana.insert(state.players[0].id);
+        refill_infinite_mana(&mut state);
+        for color in INFINITE_MANA_TYPES {
+            let n = state.players[0]
+                .mana_pool
+                .mana
+                .iter()
+                .filter(|u| u.color == color)
+                .count();
+            assert_eq!(n, INFINITE_MANA_PER_TYPE, "{color:?} seeded to cap");
+        }
+        let p1_pool = state.players.iter().find(|p| p.id == p1).unwrap();
+        assert!(
+            p1_pool.mana_pool.mana.is_empty(),
+            "unflagged player untouched"
+        );
+
+        // Spend two units, refill restores to the cap — idempotent, no growth.
+        assert!(state.players[0].mana_pool.spend(ManaType::White).is_some());
+        assert!(state.players[0].mana_pool.spend(ManaType::Green).is_some());
+        refill_infinite_mana(&mut state);
+        let total: usize = INFINITE_MANA_TYPES
+            .iter()
+            .map(|&c| {
+                state.players[0]
+                    .mana_pool
+                    .mana
+                    .iter()
+                    .filter(|u| u.color == c)
+                    .count()
+            })
+            .sum();
+        assert_eq!(
+            total,
+            INFINITE_MANA_PER_TYPE * INFINITE_MANA_TYPES.len(),
+            "topped back up to cap with no unbounded growth"
+        );
+    }
+
+    /// The `SetInfiniteMana` debug handler must add the player to
+    /// `debug_infinite_mana` and seed the pool immediately on enable (so the next
+    /// affordability probe reads full), and remove the flag on disable.
+    #[test]
+    fn set_infinite_mana_handler_toggles_flag_and_seeds() {
+        use crate::game::engine_debug::apply_debug_action;
+        use crate::types::actions::DebugAction;
+
+        let mut state = GameState::new_two_player(0);
+        let p0 = state.players[0].id;
+        let mut events = Vec::new();
+
+        apply_debug_action(
+            &mut state,
+            p0,
+            DebugAction::SetInfiniteMana {
+                player_id: p0,
+                enabled: true,
+            },
+            &mut events,
+        )
+        .expect("enable infinite mana");
+        assert!(state.debug_infinite_mana.contains(&p0));
+        for color in INFINITE_MANA_TYPES {
+            assert!(
+                state.players[0]
+                    .mana_pool
+                    .mana
+                    .iter()
+                    .any(|u| u.color == color),
+                "{color:?} seeded on enable"
+            );
+        }
+
+        apply_debug_action(
+            &mut state,
+            p0,
+            DebugAction::SetInfiniteMana {
+                player_id: p0,
+                enabled: false,
+            },
+            &mut events,
+        )
+        .expect("disable infinite mana");
+        assert!(!state.debug_infinite_mana.contains(&p0));
     }
 }

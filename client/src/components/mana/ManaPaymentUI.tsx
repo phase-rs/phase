@@ -15,6 +15,9 @@ import {
   SHARD_ABBREVIATION,
 } from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { useIsNarrowViewport } from "../modal/DialogHost.tsx";
+import { PeekTab } from "../modal/DialogShell.tsx";
+import { useOptionalDialogPeek } from "../modal/dialogPeekContext.ts";
 import { ManaBadge } from "./ManaBadge.tsx";
 import { ManaSymbol } from "./ManaSymbol.tsx";
 
@@ -45,6 +48,13 @@ export function ManaPaymentUI() {
       : null;
   const convokeMode = isManaPayment ? waitingFor.data.convoke_mode : undefined;
   const player = playerId != null ? gameState?.players[playerId] : null;
+
+  // CR 702.51a: the bottom-anchored convoke panel can sit on top of the very
+  // creatures the player must tap to pay. The DialogHost peek affordance lets
+  // them slide it out of the way and back (a no-op for plain mana payment, which
+  // needs no board interaction). `useOptionalDialogPeek` is null outside a host.
+  const peek = useOptionalDialogPeek();
+  const isNarrow = useIsNarrowViewport();
 
   // CR 107.4f + CR 601.2f: Engine-provided per-shard options for Phyrexian payment.
   // The UI maps shard_index → PhyrexianShard so it can disable toggles for trivial
@@ -149,6 +159,25 @@ export function ManaPaymentUI() {
     return MANA_ORDER.filter((c) => counts[c] > 0).map((c) => ({ color: c, amount: counts[c] }));
   }, [player]);
 
+  // CR 702.51a / CR 702.126a: each creature/artifact tapped for convoke/improvise
+  // adds a `ConvokePayment`-restricted marker to the pool (engine
+  // `ManaUnit::convoke_payment`). These are deliberately excluded from
+  // `manaPoolSummary` above because they are not spendable mana — only a record
+  // that the permanent has been tapped toward this cost. Surface them in their
+  // own row so each tap gives the player visible feedback (otherwise the panel
+  // looks frozen as creatures are tapped).
+  const convokeStaged = useMemo(() => {
+    if (!player) return [];
+    const counts: Record<ManaType, number> = {
+      White: 0, Blue: 0, Black: 0, Red: 0, Green: 0, Colorless: 0,
+    };
+    for (const unit of player.mana_pool.mana) {
+      if (!unit.restrictions.includes("ConvokePayment")) continue;
+      counts[unit.color]++;
+    }
+    return MANA_ORDER.filter((c) => counts[c] > 0).map((c) => ({ color: c, amount: counts[c] }));
+  }, [player]);
+
   // CR 107.4f + CR 601.2f: Only shards with `ManaOrLife` can be toggled; ManaOnly
   // / LifeOnly shards are locked to their single legal payment.
   const shardByIndex = useMemo(() => {
@@ -221,7 +250,7 @@ export function ManaPaymentUI() {
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4"
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4"
         initial={{ y: 80, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         exit={{ y: 80, opacity: 0 }}
@@ -232,7 +261,17 @@ export function ManaPaymentUI() {
             DialogHost wrapper is `pointer-events: none` so board taps reach the
             artifacts/creatures, but the Pay/Cancel controls must still respond.
             The surrounding full-width strip stays pass-through. */}
-        <div className="pointer-events-auto rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
+        <div className="pointer-events-auto relative rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
+          {/* CR 702.51a: collapse cue for convoke/improvise payment — slides this
+              panel off any creature it overlaps so the player can tap it. Only
+              shown while the panel is in place (peeked state surfaces the
+              DialogHost restore tab instead). */}
+          {convokeMode && peek && !peek.peeked && (
+            <PeekTab
+              direction={isNarrow ? "bottom" : "right"}
+              onClick={peek.togglePeek}
+            />
+          )}
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
             {t("mana.payMana")}
             {cardName && (
@@ -259,6 +298,20 @@ export function ManaPaymentUI() {
                       ? t("mana.improviseHint")
                       : t("mana.convokeOrImproviseHint")}
                 </p>
+              )}
+
+              {/* CR 702.51a: live feedback for staged convoke/improvise taps —
+                  each tapped permanent shows here as a cyan-tinted badge so the
+                  player can see the payment progressing as the cost is covered. */}
+              {convokeMode && convokeStaged.length > 0 && (
+                <div className="mb-3 flex items-center justify-center gap-2">
+                  <span className="text-xs text-cyan-400">
+                    {t("mana.convokeStaged")}
+                  </span>
+                  {convokeStaged.map(({ color, amount }) => (
+                    <ManaBadge key={color} color={color} amount={amount} />
+                  ))}
+                </div>
               )}
 
               {/* Phyrexian toggles — during PhyrexianPayment we iterate the

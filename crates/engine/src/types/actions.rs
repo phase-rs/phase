@@ -512,6 +512,13 @@ pub enum GameAction {
     ChooseMutateMergeSide {
         side: crate::game::merge::MergeSide,
     },
+    /// CR 702.99a: As a Cipher spell resolves, the controller chooses a creature
+    /// to encode the card on (`Some`) or declines (`None`, card → graveyard).
+    /// Resolved by `cipher::handle_encode_choice`.
+    CipherEncode {
+        #[serde(default)]
+        creature: Option<ObjectId>,
+    },
     /// CR 704.5j: Choose which legendary permanent to keep.
     ChooseLegend {
         keep: ObjectId,
@@ -826,6 +833,12 @@ pub enum DebugAction {
         player_id: PlayerId,
         mana: Vec<ManaType>,
     },
+    /// Toggle "infinite mana" for a player (debug-only). While `enabled`, the
+    /// engine keeps the player's mana pool topped up after every action and
+    /// suppresses the end-of-step empty (CR 500.5) for that player, so any cost
+    /// is payable. Setting `enabled = false` clears the toggle; the pool then
+    /// empties normally on the next step transition. Off by default.
+    SetInfiniteMana { player_id: PlayerId, enabled: bool },
 
     // ── Game Flow ─────────────────────────────────────────────────────────
     /// Advance or rewind to a specific phase/step.
@@ -1084,6 +1097,11 @@ impl DebugAction {
             DebugAction::AddMana { player_id, mana } => {
                 format!("AddMana ({} gains {:?})", player_label(*player_id), mana)
             }
+            DebugAction::SetInfiniteMana { player_id, enabled } => format!(
+                "SetInfiniteMana ({} {})",
+                player_label(*player_id),
+                if *enabled { "on" } else { "off" }
+            ),
             DebugAction::SetPhase {
                 phase,
                 active_player,
@@ -1252,6 +1270,7 @@ impl GameAction {
             | GameAction::CascadeChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
             | GameAction::ChooseMutateMergeSide { .. }
+            | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }

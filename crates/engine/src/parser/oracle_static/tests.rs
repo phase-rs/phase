@@ -5,9 +5,9 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect,
-    ObjectProperty, PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation,
-    TypeFilter, ZoneRef,
+    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
+    Duration, Effect, ObjectProperty, PlayerScope, PtStat, PtValueScope, SharedQuality,
+    SharedQualityRelation, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -115,6 +115,32 @@ fn extra_blockers_static_self_reference_stays_selfref() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
+/// CR 502.3 + CR 113.6: the self-referential Seedborn-class untap permission —
+/// "Untap this artifact during each other player's untap step" (Bender's
+/// Waterskin) must lower to `UntapsDuringEachOtherPlayersUntapStep` with the
+/// affected filter being the source itself (`SelfRef`), so its controller
+/// untaps it during every other player's untap step. Before this, the line was
+/// classified as a one-shot `Effect::Untap` and never reached this static path.
+#[test]
+fn self_untap_during_each_other_untap_step_bender_waterskin() {
+    for subject in [
+        "this artifact",
+        "this creature",
+        "this permanent",
+        "this card",
+        "this attraction",
+        "itself",
+        "~",
+    ] {
+        let def = parse_static_line(&format!(
+            "Untap {subject} during each other player's untap step."
+        ))
+        .unwrap_or_else(|| panic!("static def for subject {subject:?}"));
+        assert_eq!(def.mode, StaticMode::UntapsDuringEachOtherPlayersUntapStep);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+}
+
 /// CR 509.1b: Copper Carapace — "Equipped creature gets +2/+2 and can't block."
 /// must decompose into BOTH the P/T grant AND a `CantBlock` static affecting the
 /// equipped creature. Previously the "can't block" drawback was dropped, making
@@ -145,6 +171,202 @@ fn cant_block_static_splits_self_reference() {
         .find(|d| d.mode == StaticMode::CantBlock)
         .expect("expected a CantBlock static");
     assert_eq!(cant.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 502.3: Flood the Engine — "Enchanted permanent loses all abilities and
+/// doesn't untap during its controller's untap step." must decompose into BOTH
+/// the loses-all-abilities grant AND a `CantUntap` static affecting the
+/// enchanted permanent. Previously the untap restriction was dropped, so the
+/// permanent untapped normally and the lock did nothing.
+#[test]
+fn doesnt_untap_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step.",
+    );
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantUntap),
+        "expected a CantUntap static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the loses-all-abilities grant must be preserved"
+    );
+}
+
+/// CR 502.3: A P/T pump compounded with the untap restriction also splits, with
+/// the `CantUntap` static affecting the same subject.
+#[test]
+fn doesnt_untap_static_splits_from_pump() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantUntap)
+        .expect("expected a CantUntap static");
+    assert!(
+        cant.affected.is_some(),
+        "CantUntap companion must share the grant's affected set"
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +1/+1 grant must be preserved"
+    );
+}
+
+/// CR 502.3: A trailing "as long as …" rider on the untap clause attaches to
+/// the `CantUntap` companion, not the grant.
+#[test]
+fn doesnt_untap_static_split_keeps_trailing_condition() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step as long as you control a Swamp.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantUntap)
+        .expect("expected a CantUntap static");
+    assert!(
+        cant.condition.is_some(),
+        "the 'as long as …' rider must attach to the CantUntap companion"
+    );
+}
+
+/// CR 502.3: The split declines (rather than silently dropping a clause) when
+/// an unrecognized clause trails the untap-step phrase — parity with the
+/// sibling `try_split_and_cant_block` terminal guard.
+#[test]
+fn doesnt_untap_static_split_declines_unknown_tail() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step, then its controller loses 1 life.",
+    );
+    assert!(
+        !defs.iter().any(|d| d.mode == StaticMode::CantUntap),
+        "unrecognized trailing clause must make the split decline, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 508.1c: Cagemail — "Enchanted creature gets +2/+2 and can't attack." must
+/// decompose into BOTH the P/T grant AND a `CantAttack` static affecting the
+/// enchanted creature. Previously the "can't attack" drawback was dropped,
+/// making the Aura a strictly-better-than-printed pure pump.
+#[test]
+fn cant_attack_static_splits_from_pump() {
+    let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and can't attack.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantAttack),
+        "expected a CantAttack static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +2/+2 grant must be preserved"
+    );
+}
+
+/// CR 508.1c: A self-referential pump ("This creature gets +1/+1 and can't
+/// attack.") also splits, with the `CantAttack` static affecting the source.
+#[test]
+fn cant_attack_static_splits_self_reference() {
+    let defs = parse_static_line_multi("This creature gets +1/+1 and can't attack.");
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected a CantAttack static");
+    assert_eq!(cant.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 508.1c: The terminal-phrase guard must NOT mis-split scoped attack
+/// restrictions. "can't attack alone" (Sightless Brawler) and the Vow cycle's
+/// "can't attack you or planeswalkers you control" are different restrictions
+/// owned by other branches — the plain-`CantAttack` splitter must decline.
+#[test]
+fn cant_attack_split_declines_scoped_restrictions() {
+    let alone = parse_static_line_multi("Enchanted creature gets +3/+2 and can't attack alone.");
+    assert!(
+        !alone.iter().any(|d| d.mode == StaticMode::CantAttack),
+        "\"can't attack alone\" must not become a plain CantAttack, got {:?}",
+        alone.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+
+    let scoped = parse_static_line_multi(
+        "Enchanted creature gets +2/+2, has vigilance, and can't attack you or planeswalkers you control.",
+    );
+    assert!(
+        !scoped.iter().any(|d| d.mode == StaticMode::CantAttack),
+        "scoped \"can't attack you …\" must not become a plain CantAttack, got {:?}",
+        scoped.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 702.5: Consecrate Land — "Enchanted land has indestructible and can't be
+/// enchanted by other Auras." must decompose into BOTH the indestructible grant
+/// AND a `CantBeEnchanted` static affecting the enchanted permanent. Previously
+/// the attach prohibition was dropped, so other Auras could still be attached.
+#[test]
+fn cant_be_attached_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted land has indestructible and can't be enchanted by other Auras.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string())),
+        "expected a CantBeEnchanted static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the indestructible grant must be preserved"
+    );
+}
+
+/// CR 702.5: Anti-Magic Aura — "Enchanted creature can't be the target of spells
+/// and can't be enchanted by other Auras." splits into BOTH the targeting
+/// restriction AND a `CantBeEnchanted` static.
+#[test]
+fn cant_be_attached_static_splits_from_restriction() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature can't be the target of spells and can't be enchanted by other Auras.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string()))
+        .expect("expected a CantBeEnchanted static");
+    assert!(
+        cant.affected.is_some(),
+        "CantBeEnchanted companion must share the first clause's affected set"
+    );
+    assert!(
+        defs.len() >= 2,
+        "the first clause must be preserved alongside CantBeEnchanted, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 702.5 + CR 702.6: A compound "can't be equipped or enchanted" tail yields
+/// BOTH attach prohibitions (equipped-first, matching the standalone dispatch).
+#[test]
+fn cant_be_attached_static_splits_both_prohibitions() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't be equipped or enchanted.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEquipped".to_string())),
+        "expected CantBeEquipped, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string())),
+        "expected CantBeEnchanted, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
 }
 
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
@@ -587,6 +809,43 @@ fn static_merfolk_lord() {
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddPower { value: 1 }));
+}
+
+/// CR 113.1 + CR 113.3 + CR 604.1: Muraganda Petroglyphs' battlefield-wide anthem
+/// "Creatures with no abilities get +2/+2." — a `Continuous` static (CR 604.1: always
+/// true, re-evaluated each time) affecting every player's creatures (no controller
+/// restriction) that have none of the four ability categories, granting +2/+2.
+#[test]
+fn static_muraganda_petroglyphs() {
+    let def = parse_static_line("Creatures with no abilities get +2/+2.").expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "must affect creatures, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::HasNoAbilities),
+                "must filter on no abilities, got {:?}",
+                tf.properties
+            );
+            // CR 604.1: no controller restriction → applies to ALL players' creatures.
+            assert_eq!(
+                tf.controller, None,
+                "anthem must affect every player's creatures, got {:?}",
+                tf.controller
+            );
+        }
+        other => panic!("expected Typed(creatures with no abilities), got {other:?}"),
+    }
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 2 }));
 }
 
 /// CR 509.1b + CR 609.4 + CR 702.14c: Ur-Drago's landwalk canceller produces
@@ -1192,6 +1451,42 @@ fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
             ..
         }
     ));
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        vec![Zone::Hand, Zone::Stack, Zone::Command]
+    );
+}
+
+#[test]
+fn chandras_incinerator_self_cost_reduction_uses_noncombat_damage_to_opponents() {
+    let def = parse_static_line(
+        "This spell costs {X} less to cast, where X is the total amount of noncombat damage dealt to your opponents this turn.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        dynamic_count:
+            Some(QuantityRef::DamageDealtThisTurn {
+                damage_kind: DamageKindFilter::NoncombatOnly,
+                target,
+                ..
+            }),
+        ..
+    } = def.mode
+    else {
+        panic!("expected dynamic self-spell ReduceCost, got {:?}", def.mode);
+    };
+    let TargetFilter::And { filters } = target.as_ref() else {
+        panic!("expected opponent player target filter, got {target:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    assert!(matches!(filters[0], TargetFilter::Player));
+    let TargetFilter::Typed(typed) = &filters[1] else {
+        panic!("expected opponent typed filter, got {:?}", filters[1]);
+    };
+    assert_eq!(typed.controller, Some(ControllerRef::Opponent));
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
@@ -4213,9 +4508,104 @@ fn static_players_cant_gain_life() {
 
 #[test]
 fn static_cast_as_though_flash() {
-    // CR 702.8a: Flash-granting static
+    // CR 601.3b + CR 702.8a: "You may cast [type] spells as though they had
+    // flash" must emit a `CastWithKeyword { Flash }` static — the only mode the
+    // flash-timing path (granted_spell_keywords) reads — with the spell-type
+    // filter preserved. Issue #1957: Vivien, Champion of the Wilds restricts the
+    // grant to CREATURE spells, and the dead `CastWithFlash` mode dropped both
+    // the timing grant and the type restriction.
     let def = parse_static_line("You may cast creature spells as though they had flash.").unwrap();
-    assert_eq!(def.mode, StaticMode::CastWithFlash);
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!(
+            "affected must be a Typed creature filter, got {:?}",
+            def.affected
+        );
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "filter must constrain to creature spells, got {:?}",
+        tf.type_filters
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::You),
+        "grant must scope to spells you cast"
+    );
+    assert_eq!(def.active_zones, vec![Zone::Battlefield]);
+}
+
+#[test]
+fn static_cast_as_though_flash_all_spells() {
+    // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
+    // Orrery) grants flash to every spell the controller casts.
+    let def = parse_static_line("You may cast spells as though they had flash.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+}
+
+#[test]
+fn static_cast_as_though_flash_compound_spell_types_scope_each_leg_to_you() {
+    let def = parse_static_line(
+        "You may cast legendary spells and artifact spells as though they had flash.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Or { filters }) = &def.affected else {
+        panic!("expected Or affected filter, got {:?}", def.affected);
+    };
+    assert!(
+        filters.iter().all(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            })
+        )),
+        "each disjunct must be scoped to spells you cast, got {filters:?}"
+    );
+}
+
+#[test]
+fn static_cast_as_though_flash_players_may_forms_are_unscoped() {
+    for text in [
+        "Players may cast enchantment spells as though they had flash.",
+        "Any player may cast Sliver spells as though they had flash.",
+    ] {
+        let def = parse_static_line(text).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, None, "{text}: must apply to every player");
+            }
+            other => panic!("{text}: expected Typed affected filter, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -7966,9 +8356,24 @@ fn static_cant_cast_players_during_combat() {
 
 #[test]
 fn static_cant_cast_from_still_works() {
-    // Regression: CantCastFrom (zone-based) must not be affected
+    // Regression: CantCastFrom (zone-based) must not be affected. "Players" → AllPlayers.
     let def = parse_static_line("Players can't cast spells from graveyards or libraries.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantCastFrom);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    // The prohibited zones ride the affected filter via InAnyZone.
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(ref tf))
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Graveyard) && zones.contains(&Zone::Library)
+            ))
+    ));
 }
 
 #[test]
@@ -8277,7 +8682,46 @@ fn per_turn_cast_limit_does_not_affect_cant_cast_during() {
 fn per_turn_cast_limit_does_not_affect_cant_cast_from() {
     // Regression: CantCastFrom must still parse correctly
     let def = parse_static_line("Players can't cast spells from graveyards or libraries.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantCastFrom);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+}
+
+#[test]
+fn static_cant_cast_from_anywhere_other_than_hand_drannith_magistrate() {
+    // CR 601.3 + CR 109.5: Drannith Magistrate — "Your opponents can't cast spells
+    // from anywhere other than their hands." Subject → Opponents scope; the inverse
+    // "anywhere other than [hand]" clause expands to every cast-capable zone except
+    // the hand (graveyard, library, exile, command) on the affected filter.
+    let def =
+        parse_static_line("Your opponents can't cast spells from anywhere other than their hands.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected typed affected filter, got {:?}", def.affected);
+    };
+    let zones = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            _ => None,
+        })
+        .expect("expected InAnyZone prohibited-zone list");
+    // Hand is the only allowed zone; every other cast-capable zone is prohibited.
+    assert!(!zones.contains(&Zone::Hand));
+    assert!(zones.contains(&Zone::Graveyard));
+    assert!(zones.contains(&Zone::Library));
+    assert!(zones.contains(&Zone::Exile));
+    assert!(zones.contains(&Zone::Command));
 }
 
 // --- MustAttack / MustBlock additional combat requirement tests ---
@@ -10568,6 +11012,80 @@ fn static_instant_and_sorcery_spells_have_affinity_for_creatures() {
     }
 }
 
+// CR 702.74a + CR 613.1f: Ashling, the Limitless line 1 — "Elemental permanent
+// spells you cast from your hand gain evoke {4} as you cast them." Exercises the
+// new " gain " grant verb, the trailing " as you cast them" strip, and the
+// granted-evoke keyword payload. The static must yield CastWithKeyword(Evoke).
+#[test]
+fn static_elemental_permanent_spells_gain_evoke() {
+    use crate::types::keywords::{EvokeCost, Keyword};
+
+    let def = parse_static_line(
+        "Elemental permanent spells you cast from your hand gain evoke {4} as you cast them.",
+    )
+    .unwrap();
+    match &def.mode {
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Evoke(EvokeCost::Mana(cost)),
+        } => {
+            assert_eq!(
+                cost.mana_value(),
+                4,
+                "granted evoke must carry the {{4}} cost, got {cost:?}"
+            );
+        }
+        other => panic!("expected CastWithKeyword(Evoke(Mana({{4}}))), got {other:?}"),
+    }
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "expected Permanent type filter, got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.get_subtype(),
+                Some("Elemental"),
+                "expected Elemental subtype, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::InZone { zone: Zone::Hand }),
+                "expected InZone(Hand) property, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(Elemental permanent you cast), got {other:?}"),
+    }
+    assert_eq!(def.active_zones, vec![Zone::Battlefield]);
+}
+
+// Building-block test: the new " gain " separator is general, not Ashling-
+// specific. "Creature spells you cast gain trample" → CastWithKeyword(Trample).
+#[test]
+fn static_creature_spells_gain_trample() {
+    let def = parse_static_line("Creature spells you cast gain trample.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Trample,
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature type filter, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected Typed(Creature you cast), got {other:?}"),
+    }
+}
+
 #[test]
 fn static_spells_with_mana_value_ge_have_cascade() {
     // Imoti, Celebrant of Bounty: "Spells you cast with mana value 6 or greater have cascade."
@@ -12511,6 +13029,62 @@ fn parse_unless_condition_excludes_unless_pay_from_not_wrap() {
     assert!(
         matches!(c, StaticCondition::Not { .. }),
         "non-UnlessPay condition must be Not-wrapped, got {c:?}"
+    );
+}
+
+/// CR 509.1c: Awesome Presence — block tax with defending-player payer and
+/// per-blocking-creature scaling.
+#[test]
+fn awesome_presence_block_tax_unless_pay() {
+    let def = parse_static_line(
+        "Enchanted creature can't be blocked unless defending player pays {3} for each creature they control that's blocking it.",
+    )
+    .expect("Awesome Presence should parse");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    let Some(StaticCondition::UnlessPay { scaling, .. }) = def.condition.as_ref() else {
+        panic!("expected UnlessPay, got {:?}", def.condition);
+    };
+    assert_eq!(
+        *scaling,
+        crate::types::ability::UnlessPayScaling::PerAffectedCreature
+    );
+}
+
+/// Chained Throatseeker's defending-player poison gate is preserved as an
+/// undecomposed unless rider until attack legality can evaluate the candidate
+/// defending player before attackers are committed.
+#[test]
+fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
+    let def = parse_static_line("This creature can't attack unless defending player is poisoned.")
+        .expect("Chained Throatseeker should parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+        panic!("expected Not(Unrecognized), got {:?}", def.condition);
+    };
+    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
+        panic!("expected preserved unrecognized rider, got {condition:?}");
+    };
+    assert_eq!(text, "unless defending player is poisoned");
+}
+
+/// Arboria's turn-history rider is preserved in the AST, but not yet decomposed
+/// into runtime semantics.
+#[test]
+fn arboria_cant_attack_player_unless_rider_preserved_not_decomposed() {
+    let def = parse_static_line(
+        "Creatures can't attack a player unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn.",
+    )
+    .expect("Arboria should parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+        panic!("expected Not(Unrecognized), got {:?}", def.condition);
+    };
+    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
+        panic!("expected preserved unrecognized rider, got {condition:?}");
+    };
+    assert_eq!(
+        text,
+        "unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn"
     );
 }
 

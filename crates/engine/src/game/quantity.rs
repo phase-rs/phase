@@ -162,6 +162,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ObjectNameWordCount {
                 scope: ObjectScope::Recipient,
             }
+            | QuantityRef::ObjectTypelineComponentCount {
+                scope: ObjectScope::Recipient,
+            }
             | QuantityRef::Power {
                 scope: ObjectScope::Recipient,
             }
@@ -275,6 +278,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
         | QuantityRef::ManaSymbolsInManaCost { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
@@ -442,6 +446,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ObjectManaValue { .. }
         | QuantityRef::ObjectColorCount { .. }
         | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
         | QuantityRef::ManaSymbolsInManaCost { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
@@ -1289,6 +1294,9 @@ fn resolve_ref(
         QuantityRef::ObjectNameWordCount { scope } => {
             resolve_object_name_word_count(state, *scope, ctx, targets)
         }
+        QuantityRef::ObjectTypelineComponentCount { scope } => {
+            resolve_object_typeline_component_count(state, *scope, ctx, targets)
+        }
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             resolve_mana_symbols_in_mana_cost(state, *scope, *color, ctx, targets)
         }
@@ -1895,9 +1903,24 @@ fn resolve_ref(
             })
         }
         // CR 305.2a + CR 603.4: Lands played this turn by the scoped player.
-        QuantityRef::LandsPlayedThisTurn { player } => {
+        QuantityRef::LandsPlayedThisTurn { player, from_zones } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
-                i32::from(p.lands_played_this_turn)
+                from_zones.as_ref().map_or_else(
+                    || i32::from(p.lands_played_this_turn),
+                    |zones| {
+                        usize_to_i32_saturating(
+                            state.lands_played_this_turn_by_player.get(&p.id).map_or(
+                                0,
+                                |records| {
+                                    records
+                                        .iter()
+                                        .filter(|record| zones.contains(&record.from_zone))
+                                        .count()
+                                },
+                            ),
+                        )
+                    },
+                )
             })
         }
         // CR 400.7 + CR 700.4: Count zone-change snapshots from this turn
@@ -1927,6 +1950,7 @@ fn resolve_ref(
             target,
             aggregate,
             group_by,
+            damage_kind,
         } => resolve_damage_dealt_this_turn(
             state,
             controller,
@@ -1937,6 +1961,7 @@ fn resolve_ref(
             target,
             *aggregate,
             *group_by,
+            *damage_kind,
         ),
         // CR 500: Cumulative turns taken by this player.
         QuantityRef::TurnsTaken => player.map_or(0, |p| u32_to_i32_saturating(p.turns_taken)),
@@ -2345,6 +2370,18 @@ fn damage_record_source_matches(
     matches_target_filter_on_damage_record_source(state, record, filter, ctx)
 }
 
+fn damage_record_matches_kind(
+    record: &crate::types::game_state::DamageRecord,
+    damage_kind: crate::types::ability::DamageKindFilter,
+) -> bool {
+    use crate::types::ability::DamageKindFilter;
+    match damage_kind {
+        DamageKindFilter::Any => true,
+        DamageKindFilter::CombatOnly => record.is_combat,
+        DamageKindFilter::NoncombatOnly => !record.is_combat,
+    }
+}
+
 /// CR 120.1 + CR 120.9 + CR 603.4: Resolver for `QuantityRef::DamageDealtThisTurn`.
 ///
 /// Walks `state.damage_dealt_this_turn`, filters records whose source/target
@@ -2362,6 +2399,7 @@ fn resolve_damage_dealt_this_turn(
     target: &TargetFilter,
     aggregate: AggregateFunction,
     group_by: Option<crate::types::ability::DamageGroupKey>,
+    damage_kind: crate::types::ability::DamageKindFilter,
 ) -> i32 {
     use crate::types::ability::DamageGroupKey;
 
@@ -2377,7 +2415,8 @@ fn resolve_damage_dealt_this_turn(
         |record: &DamageRecord| damage_record_source_matches(state, record, source, filter_ctx);
 
     let matching = state.damage_dealt_this_turn.iter().filter(|record| {
-        source_matches(record)
+        damage_record_matches_kind(record, damage_kind)
+            && source_matches(record)
             && damage_record_target_matches(
                 state, record, controller, ctx, ability, target, filter_ctx,
             )
@@ -2683,6 +2722,32 @@ fn resolve_object_name_word_count(
         .map(|obj| obj.name.as_str())
         .or_else(|| state.lki_cache.get(&object_id).map(|lki| lki.name.as_str()));
     name.map(|name| usize_to_i32_saturating(name.split_whitespace().count()))
+        .unwrap_or(0)
+}
+
+fn resolve_object_typeline_component_count(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+) -> i32 {
+    let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
+        return 0;
+    };
+    if let Some(obj) = state.objects.get(&object_id) {
+        let ct = &obj.card_types;
+        return usize_to_i32_saturating(
+            ct.supertypes.len() + ct.core_types.len() + ct.subtypes.len(),
+        );
+    }
+    state
+        .lki_cache
+        .get(&object_id)
+        .map(|lki| {
+            usize_to_i32_saturating(
+                lki.supertypes.len() + lki.card_types.len() + lki.subtypes.len(),
+            )
+        })
         .unwrap_or(0)
 }
 
@@ -3463,9 +3528,9 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, ChoiceValue, ControllerRef, DevotionColors, Effect, FilterProp,
-        KickerVariant, ObjectProperty, SharedQuality, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter,
+        AggregateFunction, ChoiceValue, ControllerRef, DamageKindFilter, DevotionColors, Effect,
+        FilterProp, KickerVariant, ObjectProperty, SharedQuality, TargetFilter, TargetRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -3477,7 +3542,7 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::zones::Zone;
-    use crate::types::SpellCastRecord;
+    use crate::types::{LandPlayRecord, SpellCastRecord};
 
     fn add_spent_mana_source_snapshot(
         state: &mut GameState,
@@ -4837,6 +4902,7 @@ mod tests {
                 target: Box::new(TargetFilter::Any),
                 aggregate: AggregateFunction::Max,
                 group_by: Some(crate::types::ability::DamageGroupKey::SourceId),
+                damage_kind: DamageKindFilter::Any,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
@@ -4889,6 +4955,7 @@ mod tests {
                 )),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
+                damage_kind: DamageKindFilter::Any,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
@@ -4928,6 +4995,7 @@ mod tests {
                 target: Box::new(TargetFilter::SelfRef),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
+                damage_kind: DamageKindFilter::Any,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
@@ -5019,6 +5087,7 @@ mod tests {
                 target: Box::new(TargetFilter::Any),
                 aggregate: AggregateFunction::Max,
                 group_by: Some(DamageGroupKey::SourceId),
+                damage_kind: DamageKindFilter::Any,
             },
         };
         // P0's single largest source contribution is 5 (Lightning Rig: 3+2),
@@ -5078,6 +5147,7 @@ mod tests {
                 target: Box::new(TargetFilter::Any),
                 aggregate: AggregateFunction::Max,
                 group_by: Some(DamageGroupKey::SourceId),
+                damage_kind: DamageKindFilter::Any,
             },
         };
         // P0 still sees their 4 damage even though the live source is now P1's.
@@ -5129,6 +5199,7 @@ mod tests {
                 )),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
+                damage_kind: DamageKindFilter::Any,
             },
         };
 
@@ -5149,6 +5220,51 @@ mod tests {
                 scoping,
             ),
             0
+        );
+    }
+
+    /// CR 120.2b + CR 601.2f: Noncombat-only damage to opponents (Chandra's
+    /// Incinerator cost reduction) ignores combat damage in the ledger.
+    #[test]
+    fn resolve_noncombat_damage_dealt_to_opponents_this_turn_excludes_combat() {
+        use crate::types::ability::DamageKindFilter;
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = GameState::new_two_player(42);
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 5,
+            is_combat: false,
+            ..Default::default()
+        });
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: ObjectId(2),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 7,
+            is_combat: true,
+            ..Default::default()
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ),
+                    ],
+                }),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::NoncombatOnly,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
+            5
         );
     }
 
@@ -5173,17 +5289,20 @@ mod tests {
                 target,
                 aggregate,
                 group_by,
+                damage_kind,
             } => {
                 assert_eq!(*source, TargetFilter::Any);
                 assert_eq!(*target, TargetFilter::SelfRef);
                 assert_eq!(aggregate, AggregateFunction::Sum);
                 assert_eq!(group_by, None);
+                assert_eq!(damage_kind, crate::types::ability::DamageKindFilter::Any);
                 // Sanity: an explicit Max+SourceId still round-trips.
                 let new_form = QuantityRef::DamageDealtThisTurn {
                     source: Box::new(TargetFilter::Any),
                     target: Box::new(TargetFilter::Any),
                     aggregate: AggregateFunction::Max,
                     group_by: Some(DamageGroupKey::SourceId),
+                    damage_kind: DamageKindFilter::Any,
                 };
                 let round_trip: QuantityRef =
                     serde_json::from_str(&serde_json::to_string(&new_form).unwrap()).unwrap();
@@ -6301,6 +6420,7 @@ mod tests {
                         target: Box::new(TargetFilter::Any),
                         aggregate: AggregateFunction::Sum,
                         group_by: None,
+                        damage_kind: DamageKindFilter::Any,
                     },
                 },
                 PlayerId(0),
@@ -7136,6 +7256,50 @@ mod tests {
     }
 
     #[test]
+    fn resolve_quantity_lands_played_this_turn_filters_origin_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].lands_played_this_turn = 2;
+        state.lands_played_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                LandPlayRecord {
+                    from_zone: Zone::Hand,
+                },
+                LandPlayRecord {
+                    from_zone: Zone::Exile,
+                },
+            ]),
+        );
+
+        let unrestricted = QuantityExpr::Ref {
+            qty: QuantityRef::LandsPlayedThisTurn {
+                player: PlayerScope::Controller,
+                from_zones: None,
+            },
+        };
+        let outside_hand = QuantityExpr::Ref {
+            qty: QuantityRef::LandsPlayedThisTurn {
+                player: PlayerScope::Controller,
+                from_zones: Some(vec![
+                    Zone::Graveyard,
+                    Zone::Library,
+                    Zone::Exile,
+                    Zone::Command,
+                ]),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &unrestricted, PlayerId(0), ObjectId(1)),
+            2
+        );
+        assert_eq!(
+            resolve_quantity(&state, &outside_hand, PlayerId(0), ObjectId(1)),
+            1
+        );
+    }
+
+    #[test]
     fn resolve_quantity_spells_cast_this_game_filtered_by_name() {
         // CR 117.1 + CR 201.2: Approach of the Second Sun's game-scope name
         // filter resolves against `state.spells_cast_this_game_by_player`.
@@ -7275,6 +7439,62 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn resolve_object_typeline_component_count_glistener_elf() {
+        use crate::types::ability::PtValue;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Embiggen".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Glistener Elf".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            use crate::types::card_type::CardType;
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![
+                    "Phyrexian".to_string(),
+                    "Elf".to_string(),
+                    "Warrior".to_string(),
+                ],
+            };
+        }
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectTypelineComponentCount {
+                scope: ObjectScope::Target,
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Quantity(expr.clone()),
+                toughness: PtValue::Quantity(expr.clone()),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            4,
+            "Creature + Phyrexian + Elf + Warrior = 4 typeline components"
+        );
     }
 
     #[test]

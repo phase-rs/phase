@@ -3083,7 +3083,8 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. } => None,
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::RemoveManaCost => None,
     }
 }
 
@@ -3540,6 +3541,17 @@ fn apply_continuous_effect_filtered(
                 debug_assert!(
                     false,
                     "AddCounterOnEnter must be consumed at resolution time, \
+                     not via apply_continuous_effect"
+                );
+            }
+            // CR 707.9 + CR 202.1b: the "has no mana cost" copy exception is
+            // consumed at copy resolution (token_copy.rs bakes it into the token;
+            // become_copy.rs strips it from the copied values), never via a
+            // continuous effect. Reaching this arm means a wiring bug.
+            ContinuousModification::RemoveManaCost => {
+                debug_assert!(
+                    false,
+                    "RemoveManaCost must be consumed at copy resolution time, \
                      not via apply_continuous_effect"
                 );
             }
@@ -6173,6 +6185,60 @@ mod tests {
             vec!["Insect".to_string()],
             "subtypes must be exactly [Insect]"
         );
+    }
+
+    #[test]
+    fn muraganda_petroglyphs_buffs_only_abilityless_creatures_e2e() {
+        // Drive the REAL parser end-to-end: Muraganda Petroglyphs' Oracle text
+        // ("Creatures with no abilities get +2/+2.") is parsed via
+        // `from_oracle_text` into a global continuous static, placed on the
+        // battlefield as an enchantment, then applied by `evaluate_layers`.
+        // Discriminates on two axes: ability-presence (vanilla buffed, flyer not)
+        // and global scope (an OPPONENT's vanilla creature is buffed, since the
+        // anthem has no controller restriction).
+        let mut scenario = GameScenario::new();
+
+        // Opponent's vanilla creature (no abilities) — must be buffed (global).
+        let opp_vanilla = scenario
+            .add_creature(PlayerId(1), "Vanilla Bear", 2, 2)
+            .id();
+
+        // Controller's flyer (has a keyword ability) — must NOT be buffed.
+        let flyer = {
+            let mut card = scenario.add_creature(PlayerId(0), "Sky Bear", 2, 2);
+            card.flying();
+            card.id()
+        };
+
+        // Muraganda Petroglyphs as a real battlefield enchantment whose static is
+        // parsed from Oracle text (exercises the new `parse_no_abilities` arm).
+        scenario
+            .add_creature(PlayerId(0), "Muraganda Petroglyphs", 0, 0)
+            .as_enchantment()
+            .from_oracle_text("Creatures with no abilities get +2/+2.");
+
+        let mut state = scenario.build().state().clone();
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // CR 613.4c: the abilityless creature gets +2/+2 — every player's
+        // creatures, so the opponent's vanilla is buffed to 4/4.
+        let v = state.objects.get(&opp_vanilla).unwrap();
+        assert_eq!(
+            v.power,
+            Some(4),
+            "abilityless creature should be buffed to 4/4"
+        );
+        assert_eq!(v.toughness, Some(4));
+
+        // CR 113.3: the flyer HAS an ability, so it is excluded — stays 2/2.
+        let f = state.objects.get(&flyer).unwrap();
+        assert_eq!(
+            f.power,
+            Some(2),
+            "ability-bearing creature must not be buffed"
+        );
+        assert_eq!(f.toughness, Some(2));
     }
 
     #[test]

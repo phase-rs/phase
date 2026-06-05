@@ -39,7 +39,7 @@ pub fn next_phase(phase: Phase) -> Phase {
     PHASE_ORDER[(idx + 1) % PHASE_ORDER.len()]
 }
 
-/// CR 500.4: Advance to the next phase/step, clearing mana pools.
+/// CR 500.5: Advance to the next phase/step, clearing mana pools.
 pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 500.8: Extra phases are inserted *directly after* their anchor phase
     // (e.g., Aurelia's "after this phase" extra combat is inserted after the
@@ -230,6 +230,12 @@ pub(super) fn drain_pending_phase_transition_progress(
         // decisions. The `enumerate` runs over the full pool so `pool_index`
         // stays aligned with the retained expiry units that remain in
         // `mana_pool.mana`.
+        // Debug-only: CR 500.5 end-of-step empty is suppressed for a player with
+        // the infinite-mana toggle active — every non-expiry unit is dispositioned
+        // `Keep` instead of `Drop` so the pool survives the step transition. This
+        // is the partner of `mana_payment::refill_infinite_mana`; together they
+        // keep a flagged player's pool continuously full.
+        let keep_for_infinite_mana = state.debug_infinite_mana.contains(&player_id);
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -243,7 +249,11 @@ pub(super) fn drain_pending_phase_transition_progress(
                     .map(|(idx, u)| crate::types::mana::UnitDecision {
                         pool_index: idx,
                         color: u.color,
-                        disposition: crate::types::mana::UnitDisposition::Drop,
+                        disposition: if keep_for_infinite_mana {
+                            crate::types::mana::UnitDisposition::Keep
+                        } else {
+                            crate::types::mana::UnitDisposition::Drop
+                        },
                     })
                     .collect()
             })
@@ -550,6 +560,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // a card drawn last turn.
     state.pending_miracle_offers.clear();
     state.spells_cast_this_turn_by_player.clear();
+    state.lands_played_this_turn_by_player.clear();
     state.players_who_searched_library_this_turn.clear();
     state.player_actions_this_turn.clear();
     state.players_attacked_this_step.clear();
@@ -702,27 +713,21 @@ pub fn execute_untap_with_choices(
         })
         .collect();
 
-    // CR 302.6: Also check intrinsic CantUntap statics on objects
-    // (permanent "doesn't untap" from auras/enchantments).
+    // CR 502.3 + CR 604.1: Also check permanent-sourced CantUntap
+    // statics, including attached-subject restrictions from Auras/enchantments.
     let intrinsic_cant_untap: HashSet<ObjectId> = state
         .battlefield
         .iter()
         .copied()
         .filter(|id| {
             state.objects.get(id).is_some_and(|obj| {
-                // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
                 obj.controller == active
-                    && super::functioning_abilities::active_static_definitions(state, obj).any(
-                        |sd| {
-                            sd.mode == StaticMode::CantUntap
-                                && super::static_abilities::check_static_ability(
-                                    state,
-                                    StaticMode::CantUntap,
-                                    &super::static_abilities::StaticCheckContext {
-                                        target_id: Some(*id),
-                                        ..Default::default()
-                                    },
-                                )
+                    && super::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantUntap,
+                        &super::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
                         },
                     )
             })
@@ -3156,6 +3161,65 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == id)));
+    }
+
+    #[test]
+    fn execute_untap_honors_attached_subject_cant_untap_from_parser() {
+        use crate::game::effects::attach::attach_to;
+        use crate::types::card_type::CoreType;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Locked Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.tapped = true;
+        }
+
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Flood the Engine".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let defs = crate::parser::oracle_static::parse_static_line_multi(
+                "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step.",
+            );
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            for def in defs.iter().cloned() {
+                obj.static_definitions.push(def);
+            }
+            Arc::make_mut(&mut obj.base_static_definitions).extend(defs);
+        }
+        attach_to(&mut state, aura, host);
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        assert!(
+            state.objects[&host].tapped,
+            "attached CantUntap static must keep the enchanted permanent tapped"
+        );
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == host)
+            }),
+            "skipped untap must not emit PermanentUntapped"
+        );
     }
 
     fn install_may_choose_not_to_untap_static(state: &mut GameState, source_id: ObjectId) {

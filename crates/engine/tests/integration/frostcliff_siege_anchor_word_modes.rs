@@ -47,10 +47,6 @@
 //! breaks integration coverage) and then drive each mode through the real
 //! `apply()` pipeline.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -67,14 +63,7 @@ use engine::types::zones::Zone;
 
 use super::rules::run_combat;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Drive the as-enters labeled choice for an already-placed Frostcliff Siege
 /// through the real `apply()` pipeline so `ChosenAttribute::Label(<chosen>)`

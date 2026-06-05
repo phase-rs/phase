@@ -6,12 +6,14 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
+use super::oracle_effect::imperative::parse_discard_card_filter;
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_quantity::parse_for_each_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
@@ -481,6 +483,25 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 random: false,
                 self_ref: false,
             };
+        }
+        // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
+        // card-type filter so only matching cards can pay the cost (Lotleth
+        // Troll: "Discard a creature card:"). Without this the typed
+        // restriction is dropped and any card pays the cost. Mirrors the
+        // effect-form discard and the trigger-side cost parser, which both
+        // delegate to `parse_discard_card_filter`: `parse_count_expr` eats the
+        // leading count token ("a "/"two ") and the remainder is the typed noun
+        // phrase. Ordered before the plain `parse_number` arm so "two creature
+        // cards" is not swallowed as an untyped count.
+        if let Some((count, after_count)) = parse_count_expr(&rest_lower) {
+            if let Some(filter) = parse_discard_card_filter(after_count.trim_start()) {
+                return AbilityCost::Discard {
+                    count,
+                    filter: Some(filter),
+                    random: false,
+                    self_ref: false,
+                };
+            }
         }
         if let Some((n, _)) = parse_number(&rest_lower) {
             return AbilityCost::Discard {
@@ -1440,6 +1461,37 @@ mod tests {
             parse_oracle_cost("Discard a card"),
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                random: false,
+                self_ref: false,
+            }
+        );
+    }
+
+    /// CR 701.9a + CR 608.2c: A typed cost-form discard must capture its
+    /// card-type filter (Lotleth Troll: "Discard a creature card:"). Before this
+    /// the filter was dropped, letting any card pay the cost.
+    #[test]
+    fn cost_discard_typed_creature_card() {
+        assert_eq!(
+            parse_oracle_cost("Discard a creature card"),
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                random: false,
+                self_ref: false,
+            }
+        );
+    }
+
+    /// The typed-filter arm must not swallow plural untyped discards: "Discard
+    /// two cards" stays `filter: None, count: 2`.
+    #[test]
+    fn cost_discard_two_untyped_cards_keeps_no_filter() {
+        assert_eq!(
+            parse_oracle_cost("Discard two cards"),
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
                 filter: None,
                 random: false,
                 self_ref: false,

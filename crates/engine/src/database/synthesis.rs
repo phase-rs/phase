@@ -14,11 +14,11 @@ use crate::types::ability::{
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration,
     Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
+    StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -292,6 +292,12 @@ impl KeywordTriggerInstaller {
             // CR 702.70a: Poisonous N — a combat-damage-to-player trigger.
             // CR 702.70b: each Poisonous instance triggers separately (one trigger per instance).
             Keyword::Poisonous(n) => vec![build_poisonous_trigger(*n)],
+            // CR 702.115a: Ingest — a combat-damage-to-player trigger.
+            // CR 702.115b: each Ingest instance triggers separately (one trigger per instance).
+            Keyword::Ingest => vec![build_ingest_trigger()],
+            // CR 702.69a: Gravestorm — a stack-functioning spell-cast copy
+            // trigger. CR 702.69b: each Gravestorm instance triggers separately.
+            Keyword::Gravestorm => vec![build_gravestorm_trigger()],
             // CR 702.32a + CR 604.1: granted Fading carries the upkeep
             // counter-removal / "if you can't, sacrifice" trigger. The
             // ETB-with-N-fade-counters replacement (CR 702.32a clause 1) is a
@@ -368,6 +374,10 @@ impl KeywordTriggerInstaller {
             Keyword::Training => is_training_trigger(trigger),
             // CR 702.70a + CR 604.1: symmetric removal for granted Poisonous.
             Keyword::Poisonous(n) => is_poisonous_trigger(trigger, *n),
+            // CR 702.115a + CR 604.1: symmetric removal for granted Ingest.
+            Keyword::Ingest => is_ingest_trigger(trigger),
+            // CR 702.69a + CR 604.1: symmetric removal for granted Gravestorm.
+            Keyword::Gravestorm => is_gravestorm_trigger(trigger),
             // CR 702.32a + CR 604.1: symmetric removal — `RemoveKeyword` strips
             // the granted Fading trigger when the granted keyword is removed.
             Keyword::Fading(_) => is_fading_upkeep_trigger(trigger),
@@ -2113,6 +2123,92 @@ pub fn synthesize_demonstrate(face: &mut CardFace) {
     );
 }
 
+/// CR 702.69a: The `AbilityDefinition` produced by a Gravestorm trigger — a
+/// self-referential `CopySpell` repeated once for each permanent put into a
+/// graveyard from the battlefield this turn. Mirrors
+/// `replicate_copy_ability_definition` but drives `repeat_for` off the
+/// battlefield-to-graveyard zone-change count (CR 702.69a) rather than the
+/// additional-cost payment count, and carries no intervening-if.
+pub fn gravestorm_copy_ability_definition() -> AbilityDefinition {
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        // CR 702.69a + CR 707.10c: "If the spell has any targets, you may
+        // choose new targets for any of the copies."
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
+        },
+    );
+    // CR 702.69a: "copy it for each permanent that was put into a graveyard from
+    // the battlefield this turn." The count drives N `CopySpell` iterations.
+    def.repeat_for = Some(QuantityExpr::Ref {
+        qty: QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Graveyard),
+            filter: TargetFilter::Typed(TypedFilter::permanent()),
+        },
+    });
+    def
+}
+
+/// CR 702.69a: A Gravestorm trigger — a self-referential `SpellCast` copy
+/// trigger that functions on the stack and whose copy count is the
+/// battlefield-to-graveyard zone-change count this turn.
+fn is_gravestorm_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.trigger_zones.contains(&Zone::Stack)
+        && t.execute.as_deref().is_some_and(|a| {
+            matches!(
+                &*a.effect,
+                Effect::CopySpell {
+                    target: TargetFilter::SelfRef,
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ) && a.repeat_for.as_ref().is_some_and(|repeat_for| {
+                matches!(
+                    repeat_for,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeCountThisTurn {
+                            from: Some(Zone::Battlefield),
+                            to: Some(Zone::Graveyard),
+                            filter,
+                        }
+                    } if *filter == TargetFilter::Typed(TypedFilter::permanent())
+                )
+            })
+        })
+}
+
+/// CR 702.69a: Build one Gravestorm trigger — "when you cast this spell, copy
+/// it for each permanent that was put into a graveyard from the battlefield
+/// this turn." CR 702.69b: multiple Gravestorm instances trigger separately.
+fn build_gravestorm_trigger() -> TriggerDefinition {
+    TriggerDefinition::new(TriggerMode::SpellCast)
+        .valid_card(TargetFilter::SelfRef)
+        .trigger_zones(vec![Zone::Stack])
+        .execute(gravestorm_copy_ability_definition())
+        .description(
+            "CR 702.69a: Gravestorm — when you cast this spell, copy it for each permanent \
+             put into a graveyard from the battlefield this turn."
+                .to_string(),
+        )
+}
+
+/// CR 702.69a: Synthesize Gravestorm into "when you cast this spell" copy
+/// triggers that function on the stack and copy the spell once for each
+/// permanent put into a graveyard from the battlefield this turn.
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Gravestorm`, so every
+/// printed Gravestorm card flows through this one synthesizer. CR 702.69b says
+/// each Gravestorm instance triggers separately, which `install_matching`
+/// preserves while keeping repeated synthesis idempotent.
+pub fn synthesize_gravestorm(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Gravestorm));
+}
+
 /// CR 702.42a: Synthesize Entwine cost onto modal spell's ModalChoice.
 ///
 /// Sets `entwine_cost` on the face's modal abilities and raises `max_choices`
@@ -2249,6 +2345,18 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         return;
     }
 
+    face.triggers.push(build_evoke_etb_sac_trigger());
+}
+
+/// CR 702.74a: Build the evoke ETB-sacrifice triggered ability — "When this
+/// permanent enters, if its evoke cost was paid, its controller sacrifices it."
+///
+/// Shared by `synthesize_evoke` (card-data baking of printed evoke) and the
+/// runtime `ensure_evoke_etb_sac_trigger` (granted evoke, where the keyword
+/// lived on the spell and never reached the resolving permanent's printed
+/// triggers). The trigger is gated on `CastVariantPaid { variant: Evoke }`, so
+/// it is a no-op when the permanent was not cast for its evoke cost.
+pub(crate) fn build_evoke_etb_sac_trigger() -> TriggerDefinition {
     let sac = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Sacrifice {
@@ -2257,7 +2365,7 @@ pub fn synthesize_evoke(face: &mut CardFace) {
             min_count: 0,
         },
     );
-    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+    TriggerDefinition::new(TriggerMode::ChangesZone)
         .destination(Zone::Battlefield)
         .valid_card(TargetFilter::SelfRef)
         .condition(TriggerCondition::CastVariantPaid {
@@ -2267,8 +2375,57 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         .description(
             "CR 702.74a: When this permanent enters, if its evoke cost was paid, sacrifice it."
                 .to_string(),
-        );
-    face.triggers.push(trigger);
+        )
+}
+
+/// CR 702.74a + CR 604.1: Install the evoke ETB-sacrifice trigger on a live
+/// `GameObject` if it is not already present.
+///
+/// For printed evoke the trigger is already baked into the card face by
+/// `synthesize_evoke`, so this is an idempotent no-op. For *granted* evoke
+/// (a `StaticMode::CastWithKeyword { keyword: Evoke }` static such as Ashling,
+/// the Limitless) the keyword lives on the spell while it is on the stack and
+/// never propagates to the resolving permanent's printed triggers, so the
+/// trigger must be installed onto the permanent at resolution. The structural-
+/// equality scan mirrors `synthesize_evoke`'s `already_has_trigger` matcher so
+/// the two paths never double-install.
+pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::GameObject) {
+    let is_evoke_sac = |t: &TriggerDefinition| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Evoke,
+                })
+            )
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    };
+    // CR 702.74a + CR 613.1f: the layer system rebuilds `trigger_definitions`
+    // from `base_trigger_definitions` on every evaluation (layers.rs), so a
+    // runtime install must land in the durable base or it is wiped before the
+    // ETB ChangesZone trigger is collected. Printed evoke already carries the
+    // trigger in `base_trigger_definitions` (baked into the card face by
+    // `synthesize_evoke`), making this an idempotent no-op for that path. Push to
+    // base (the durable source layers rebuild from), then refresh the live copy
+    // so the trigger is collectable this same resolution before the next layers
+    // pass re-derives `trigger_definitions`.
+    if obj.base_trigger_definitions.iter().any(is_evoke_sac) {
+        if !obj.trigger_definitions.iter_all().any(is_evoke_sac) {
+            obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
+        }
+        return;
+    }
+    let trigger = build_evoke_etb_sac_trigger();
+    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
+    obj.trigger_definitions.push(trigger);
 }
 
 /// CR 702.30a: Echo is a triggered ability. "Echo [cost]" means "At the
@@ -2746,6 +2903,165 @@ fn static_grants_haste_to_self(static_def: &StaticDefinition) -> bool {
                 }
             )
         })
+}
+
+/// CR 702.98a: Unleash represents two static abilities — the permanent "may enter
+/// with an additional +1/+1 counter on it" and "can't block as long as it has a
+/// +1/+1 counter on it." The first mirrors `synthesize_riot`'s optional ETB +1/+1
+/// counter (here with no decline branch); the second is a `CantBlock` static gated
+/// on the creature carrying any +1/+1 counter (CR 702.98a keys on *any* such
+/// counter, not only the unleash one). Static grants of Unleash synthesize the
+/// same shape from the static's affected filter, mirroring `synthesize_riot`.
+pub fn synthesize_unleash(face: &mut CardFace) {
+    let printed_count = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Unleash))
+        .count();
+    add_unleash_replacements(face, TargetFilter::SelfRef, printed_count);
+    if printed_count > 0 {
+        add_unleash_cant_block_static(
+            face,
+            TargetFilter::SelfRef,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                minimum: 1,
+                maximum: None,
+            },
+        );
+    }
+
+    let static_grants: Vec<TargetFilter> = face
+        .static_abilities
+        .iter()
+        .filter(|static_def| static_grants_unleash(static_def))
+        .map(|static_def| static_def.affected.clone().unwrap_or(TargetFilter::Any))
+        .collect();
+    for filter in static_grants {
+        add_unleash_replacements(face, filter.clone(), 1);
+        add_unleash_cant_block_static(
+            face,
+            filter,
+            StaticCondition::RecipientHasCounters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                minimum: 1,
+                maximum: None,
+            },
+        );
+    }
+}
+
+fn static_grants_unleash(static_def: &StaticDefinition) -> bool {
+    static_def.mode == StaticMode::Continuous
+        && static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Unleash
+                }
+            )
+        })
+}
+
+fn add_unleash_replacements(face: &mut CardFace, valid_card: TargetFilter, needed: usize) {
+    let existing = face
+        .replacements
+        .iter()
+        .filter(|replacement| is_unleash_replacement(replacement, &valid_card))
+        .count();
+    for _ in existing..needed {
+        face.replacements
+            .push(build_unleash_replacement(valid_card.clone()));
+    }
+}
+
+fn build_unleash_replacement(valid_card: TargetFilter) -> ReplacementDefinition {
+    // CR 702.98a: "You may have this permanent enter with an additional +1/+1
+    // counter on it."
+    let counter_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("This permanent enters with an additional +1/+1 counter on it".to_string());
+
+    ReplacementDefinition {
+        event: ReplacementEvent::Moved,
+        execute: Some(Box::new(counter_branch)),
+        mode: crate::types::ability::ReplacementMode::Optional { decline: None },
+        valid_card: Some(valid_card),
+        destination_zone: Some(Zone::Battlefield),
+        description: Some(
+            "CR 702.98a: Unleash — this permanent may enter with an additional +1/+1 counter on it."
+                .to_string(),
+        ),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    }
+}
+
+fn is_unleash_replacement(replacement: &ReplacementDefinition, valid_card: &TargetFilter) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || replacement.valid_card.as_ref() != Some(valid_card)
+        || replacement.destination_zone != Some(Zone::Battlefield)
+        || !matches!(
+            replacement.mode,
+            crate::types::ability::ReplacementMode::Optional { decline: None }
+        )
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    )
+}
+
+fn add_unleash_cant_block_static(
+    face: &mut CardFace,
+    affected: TargetFilter,
+    condition: StaticCondition,
+) {
+    if !face
+        .static_abilities
+        .iter()
+        .any(|static_def| is_unleash_cant_block_static(static_def, &affected, &condition))
+    {
+        face.static_abilities
+            .push(build_unleash_cant_block_static(affected, condition));
+    }
+}
+
+fn build_unleash_cant_block_static(
+    affected: TargetFilter,
+    condition: StaticCondition,
+) -> StaticDefinition {
+    // CR 702.98a: "This permanent can't block as long as it has a +1/+1 counter on
+    // it." The condition is source-relative for printed Unleash and
+    // recipient-relative for static grants.
+    StaticDefinition::new(StaticMode::CantBlock)
+        .affected(affected)
+        .condition(condition)
+        .description("can't block as long as it has a +1/+1 counter on it".to_string())
+}
+
+fn is_unleash_cant_block_static(
+    static_def: &StaticDefinition,
+    affected: &TargetFilter,
+    condition: &StaticCondition,
+) -> bool {
+    static_def.mode == StaticMode::CantBlock
+        && static_def.affected.as_ref() == Some(affected)
+        && static_def.condition.as_ref() == Some(condition)
 }
 
 /// CR 702.93a: Undying — "When this permanent is put into a graveyard from the
@@ -4334,17 +4650,109 @@ fn is_poisonous_trigger(t: &TriggerDefinition, n: u32) -> bool {
         )
 }
 
+/// CR 702.115a: Ingest — "Whenever this creature deals combat damage to a
+/// player, that player exiles the top card of their library." Each instance
+/// triggers separately (CR 702.115b), so one trigger is synthesized per
+/// `Keyword::Ingest` instance.
+fn build_ingest_trigger() -> TriggerDefinition {
+    let exile = Effect::ExileTop {
+        player: TargetFilter::TriggeringPlayer,
+        count: QuantityExpr::Fixed { value: 1 },
+        face_down: false,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, exile).description(
+        "CR 702.115a: Ingest — that player exiles the top card of their library".to_string(),
+    );
+    TriggerDefinition::new(TriggerMode::DamageDone)
+        .damage_kind(DamageKindFilter::CombatOnly)
+        .valid_source(TargetFilter::SelfRef)
+        .valid_target(TargetFilter::Player)
+        .execute(execute)
+        .description(
+            "CR 702.115a: Ingest — whenever this creature deals combat damage to a player, \
+             that player exiles the top card of their library."
+                .to_string(),
+        )
+}
+
+/// CR 702.115a: An Ingest trigger — a source-scoped combat-damage-to-player
+/// trigger that exiles the top card of the damaged player's library. Used by
+/// `RemoveKeyword` symmetric removal so a granted-then-removed Ingest strips
+/// exactly its own trigger.
+fn is_ingest_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::DamageDone)
+        && matches!(t.damage_kind, DamageKindFilter::CombatOnly)
+        && matches!(t.valid_source, Some(TargetFilter::SelfRef))
+        && matches!(t.valid_target, Some(TargetFilter::Player))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::ExileTop {
+                player: TargetFilter::TriggeringPlayer,
+                count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
+            })
+        )
+}
+
+/// CR 702.115a: Synthesize Ingest into a combat-damage-to-player trigger that
+/// exiles the top card of the damaged player's library. CR 702.115b: multiple
+/// Ingest instances trigger separately.
+pub fn synthesize_ingest(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Ingest));
+}
+
 /// CR 702.101a: Extort — "Whenever you cast a spell, you may pay {W/B}.
 /// If you do, each opponent loses 1 life and you gain that much life."
 ///
 /// Each instance of Extort triggers separately (CR 702.101b), so one trigger
 /// is synthesized per `Keyword::Extort` instance.
+fn is_extort_mana_cost(cost: &ManaCost) -> bool {
+    matches!(
+        cost,
+        ManaCost::Cost {
+            shards,
+            generic: 0,
+        } if shards.as_slice() == [ManaCostShard::WhiteBlack]
+    )
+}
+
 fn is_extort_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::SpellCast)
         && matches!(t.valid_target, Some(TargetFilter::Controller))
-        && t.execute
-            .as_deref()
-            .is_some_and(|a| a.optional && a.cost.is_some())
+        && t.execute.as_deref().is_some_and(|a| {
+            a.optional
+                && matches!(
+                    &*a.effect,
+                    Effect::PayCost {
+                        cost: PaymentCost::AbilityCost {
+                            cost: AbilityCost::Mana { cost },
+                        },
+                        payer: TargetFilter::Controller,
+                    } if is_extort_mana_cost(cost)
+                )
+                && a.sub_ability.as_deref().is_some_and(|drain| {
+                    matches!(drain.player_scope, Some(PlayerFilter::Opponent))
+                        && drain.condition == Some(AbilityCondition::effect_performed())
+                        && matches!(
+                            &*drain.effect,
+                            Effect::LoseLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: None,
+                            }
+                        )
+                        && drain.sub_ability.as_deref().is_some_and(|gain| {
+                            matches!(
+                                &*gain.effect,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Ref {
+                                        qty: QuantityRef::PreviousEffectAmount,
+                                    },
+                                    player: TargetFilter::Controller,
+                                }
+                            )
+                        })
+                })
+        })
 }
 
 /// CR 702.191a: Intervening-if — this permanent is a creature and mana spent to
@@ -4430,12 +4838,13 @@ fn build_increment_trigger() -> TriggerDefinition {
 }
 
 fn build_extort_trigger() -> TriggerDefinition {
-    // The drain effect: each opponent loses 1 life, you gain that much.
-    // Use player_scope to iterate over opponents for the LoseLife,
-    // then sub_ability for the controller's GainLife.
-    let drain_effect = Effect::LoseLife {
-        amount: QuantityExpr::Fixed { value: 1 },
-        target: None,
+    // CR 702.101a: Optional {W/B} payment must resolve before the opponent drain.
+    // `AbilityDefinition::cost` is not carried into `ResolvedAbility`, so the
+    // payment is modeled as an optional `PayCost` parent (mirroring parsed
+    // "you may pay {cost}. If you do, …" chains) with the drain on the sub.
+    let wb_mana = ManaCost::Cost {
+        shards: vec![ManaCostShard::WhiteBlack],
+        generic: 0,
     };
     let gain_life = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -4446,20 +4855,33 @@ fn build_extort_trigger() -> TriggerDefinition {
             player: TargetFilter::Controller,
         },
     );
-    let execute = AbilityDefinition::new(AbilityKind::Spell, drain_effect)
-        .player_scope(PlayerFilter::Opponent)
-        .sub_ability(gain_life)
-        .optional()
-        .cost(AbilityCost::Mana {
-            cost: ManaCost::Cost {
-                shards: vec![ManaCostShard::WhiteBlack],
-                generic: 0,
+    let drain = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: None,
+        },
+    )
+    .player_scope(PlayerFilter::Opponent)
+    .sub_ability(gain_life)
+    .condition(AbilityCondition::effect_performed());
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Mana {
+                    cost: wb_mana.clone(),
+                },
             },
-        })
-        .description(
-            "CR 702.101a: Extort — pay {W/B}, each opponent loses 1 life, you gain that much life"
-                .to_string(),
-        );
+            payer: TargetFilter::Controller,
+        },
+    )
+    .optional()
+    .sub_ability(drain)
+    .description(
+        "CR 702.101a: Extort — pay {W/B}, each opponent loses 1 life, you gain that much life"
+            .to_string(),
+    );
     TriggerDefinition::new(TriggerMode::SpellCast)
         .valid_target(TargetFilter::Controller)
         .execute(execute)
@@ -6513,6 +6935,7 @@ fn bloodthirst_counter_quantity(value: &BloodthirstValue) -> QuantityExpr {
                 target: Box::new(bloodthirst_opponent_player_filter()),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
+                damage_kind: DamageKindFilter::Any,
             },
         },
     }
@@ -7038,12 +7461,23 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_specialize(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
+    // CR 702.128a / CR 702.129a: Embalm / Eternalize graveyard-activated
+    // token-copy abilities (self-contained building block in its own module).
+    crate::database::embalm_eternalize::synthesize_embalm_eternalize(face);
+    // CR 702.84a: Unearth graveyard-activated temporary reanimation (return with
+    // haste, exile at the next end step) — self-contained building block.
+    crate::database::unearth::synthesize_unearth(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);
     // CR 702.56a: Replicate — repeatable optional additional cost + SpellCast
     // copy trigger that makes one copy per replicate payment.
     synthesize_replicate(face);
+    // CR 702.69a: Gravestorm — copy this spell for each permanent put into a
+    // graveyard from the battlefield this turn.
+    synthesize_gravestorm(face);
+    // CR 702.144a: Demonstrate — optional self-copy on cast; if taken, a chosen
+    // opponent also copies the spell.
     synthesize_demonstrate(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
@@ -7067,6 +7501,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // haste. Static grants of Riot synthesize matching ETB replacements from
     // their affected filters.
     synthesize_riot(face);
+    // CR 702.98a: Unleash — optional ETB +1/+1 counter plus a "can't block while
+    // it has a +1/+1 counter" static. Sibling of Riot's optional-counter shape.
+    synthesize_unleash(face);
     // CR 702.93a: Undying — dies trigger that returns the permanent with a
     // +1/+1 counter, gated on having had no +1/+1 counter at death (LKI).
     synthesize_undying(face);
@@ -7119,6 +7556,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // cost to return this card from your graveyard to your hand; otherwise
     // exile it.
     synthesize_recover(face);
+    // CR 702.115a: Ingest — combat-damage-to-player trigger that exiles the top
+    // card of the damaged player's library.
+    synthesize_ingest(face);
     // CR 702.100a: Evolve — ETB trigger that puts a +1/+1 counter on the
     // creature whenever another creature you control enters with greater power
     // or toughness. CR 702.100d: each instance triggers separately.
@@ -11441,17 +11881,43 @@ mod extort_synthesis_tests {
             panic!("execute body required");
         };
         assert!(execute.optional, "extort must be optional (may pay)");
-        assert!(execute.cost.is_some(), "extort must have a mana cost");
+        let Effect::PayCost {
+            cost:
+                PaymentCost::AbilityCost {
+                    cost: AbilityCost::Mana { cost },
+                },
+            payer,
+        } = &*execute.effect
+        else {
+            panic!("extort must pay W/B via PayCost before draining");
+        };
+        assert_eq!(
+            cost,
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::WhiteBlack],
+                generic: 0,
+            }
+        );
+        assert!(matches!(payer, TargetFilter::Controller));
+
+        let Some(drain) = execute.sub_ability.as_deref() else {
+            panic!("extort must chain drain after payment");
+        };
         assert!(
-            matches!(execute.player_scope, Some(PlayerFilter::Opponent)),
+            matches!(drain.player_scope, Some(PlayerFilter::Opponent)),
             "drain must scope to opponents"
         );
+        assert_eq!(
+            drain.condition,
+            Some(AbilityCondition::effect_performed()),
+            "drain must be gated on successful W/B payment (If you do)"
+        );
         assert!(
-            matches!(&*execute.effect, Effect::LoseLife { .. }),
-            "primary effect must be LoseLife"
+            matches!(&*drain.effect, Effect::LoseLife { .. }),
+            "drain effect must be LoseLife"
         );
 
-        let Some(gain) = execute.sub_ability.as_deref() else {
+        let Some(gain) = drain.sub_ability.as_deref() else {
             panic!("extort must chain a gain-life rider");
         };
         let Effect::GainLife { amount, player } = &*gain.effect else {
@@ -11500,6 +11966,65 @@ mod extort_synthesis_tests {
             .filter(|t| is_extort_trigger(t))
             .count();
         assert_eq!(count, 2);
+    }
+
+    /// CR 604.1: the runtime-granted path (`triggers_for`) yields the same shape
+    /// as the printed path, and `trigger_matches_keyword_kind` recognizes exactly
+    /// that shape for symmetric removal.
+    #[test]
+    fn triggers_for_extort_matches_keyword_kind() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Extort);
+        assert_eq!(triggers.len(), 1);
+        assert!(is_extort_trigger(&triggers[0]));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Extort
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &build_dethrone_trigger(),
+            &Keyword::Extort
+        ));
+    }
+
+    /// The Extort matcher feeds runtime `RemoveKeyword`, so it must not strip a
+    /// coincidental spell-cast trigger with a different payment/drain shape.
+    #[test]
+    fn extort_matcher_rejects_non_extort_pay_and_drain_trigger() {
+        let gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let drain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+        )
+        .player_scope(PlayerFilter::Opponent)
+        .sub_ability(gain)
+        .condition(AbilityCondition::effect_performed());
+        let execute = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+        )
+        .optional()
+        .sub_ability(drain);
+        let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_target(TargetFilter::Controller)
+            .execute(execute);
+
+        assert!(!is_extort_trigger(&trigger));
     }
 
     /// CR 702.101a: "you gain that much life" means the total life actually
@@ -11759,6 +12284,131 @@ mod riot_synthesis_tests {
                 .any(|replacement| is_riot_replacement(replacement, &affected)),
             "static Riot grant should add ETB replacement for affected filter, got {:?}",
             face.replacements
+        );
+    }
+
+    #[test]
+    fn synthesize_unleash_adds_optional_etb_counter_and_cant_block_static() {
+        // CR 702.98a: both halves — the optional ETB +1/+1 counter and the
+        // "can't block while it has a +1/+1 counter" static.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Unleash);
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_unleash(&mut face);
+        assert!(
+            face.replacements
+                .iter()
+                .any(|replacement| is_unleash_replacement(replacement, &TargetFilter::SelfRef)),
+            "unleash should add an optional ETB +1/+1 counter replacement, got {:?}",
+            face.replacements
+        );
+        let condition = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        };
+        assert!(
+            face.static_abilities
+                .iter()
+                .any(|static_def| is_unleash_cant_block_static(
+                    static_def,
+                    &TargetFilter::SelfRef,
+                    &condition
+                )),
+            "unleash should add a counter-conditioned CantBlock static, got {:?}",
+            face.static_abilities
+        );
+    }
+
+    #[test]
+    fn synthesize_unleash_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Unleash);
+        synthesize_unleash(&mut face);
+        synthesize_unleash(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|replacement| is_unleash_replacement(replacement, &TargetFilter::SelfRef))
+                .count(),
+            1
+        );
+        let condition = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        };
+        assert_eq!(
+            face.static_abilities
+                .iter()
+                .filter(|static_def| is_unleash_cant_block_static(
+                    static_def,
+                    &TargetFilter::SelfRef,
+                    &condition
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_unleash_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_unleash(&mut face);
+        assert!(face
+            .replacements
+            .iter()
+            .all(|r| !is_unleash_replacement(r, &TargetFilter::SelfRef)));
+        let condition = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        };
+        assert!(face
+            .static_abilities
+            .iter()
+            .all(|s| !is_unleash_cant_block_static(s, &TargetFilter::SelfRef, &condition)));
+    }
+
+    #[test]
+    fn synthesize_unleash_static_grant_adds_replacement_and_recipient_cant_block_static() {
+        let mut face = CardFace::default();
+        let affected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::NonToken]),
+        );
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Unleash,
+                }]),
+        );
+        synthesize_unleash(&mut face);
+        assert!(
+            face.replacements
+                .iter()
+                .any(|replacement| is_unleash_replacement(replacement, &affected)),
+            "static Unleash grant should add ETB replacement for affected filter, got {:?}",
+            face.replacements
+        );
+        let condition = StaticCondition::RecipientHasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        };
+        assert!(
+            face.static_abilities
+                .iter()
+                .any(|static_def| is_unleash_cant_block_static(
+                    static_def,
+                    &affected,
+                    &condition
+                )),
+            "static Unleash grant should add recipient-gated CantBlock for affected filter, got {:?}",
+            face.static_abilities
         );
     }
 }
@@ -19825,6 +20475,216 @@ mod afflict_training_poisonous_synthesis_tests {
                 "{kw:?} must synthesize one trigger (was a silent no-op)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ingest_gravestorm_synthesis_tests {
+    //! CR 702.115a/b (Ingest) and CR 702.69a/b (Gravestorm) shape tests for
+    //! printed keyword synthesis plus runtime-grant trigger installation.
+    use super::*;
+
+    #[test]
+    fn ingest_synthesizes_combat_damage_exile() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Ingest);
+        assert_eq!(triggers.len(), 1, "CR 702.115b: one trigger per Ingest");
+        let t = &triggers[0];
+        assert!(matches!(t.mode, TriggerMode::DamageDone));
+        assert!(
+            matches!(t.damage_kind, DamageKindFilter::CombatOnly),
+            "CR 702.115a: only combat damage triggers Ingest"
+        );
+        assert!(matches!(t.valid_source, Some(TargetFilter::SelfRef)));
+        assert!(
+            matches!(t.valid_target, Some(TargetFilter::Player)),
+            "CR 702.115a: combat damage must be dealt to a player"
+        );
+
+        let effect = &*t.execute.as_deref().expect("execute body").effect;
+        let Effect::ExileTop {
+            player,
+            count,
+            face_down,
+        } = effect
+        else {
+            panic!("Ingest must exile the top card, got {effect:?}");
+        };
+        assert!(
+            matches!(player, TargetFilter::TriggeringPlayer),
+            "CR 702.115a: the damaged player exiles the card"
+        );
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+        assert!(!face_down, "CR 406.3: Ingest exiles face up by default");
+    }
+
+    #[test]
+    fn ingest_printed_keyword_synthesizes_trigger() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Ingest],
+            ..CardFace::default()
+        };
+        synthesize_ingest(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_ingest_trigger(trigger))
+                .count(),
+            1,
+            "printed Ingest must synthesize its combat-damage trigger"
+        );
+    }
+
+    #[test]
+    fn ingest_preserves_multiple_instances() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Ingest, Keyword::Ingest],
+            ..CardFace::default()
+        };
+        synthesize_ingest(&mut face);
+        synthesize_ingest(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_ingest_trigger(trigger))
+                .count(),
+            2,
+            "CR 702.115b: two Ingest instances trigger separately"
+        );
+    }
+
+    #[test]
+    fn ingest_matcher_roundtrips_and_is_distinct_from_renown() {
+        let ingest = KeywordTriggerInstaller::triggers_for(&Keyword::Ingest);
+        let renown = KeywordTriggerInstaller::triggers_for(&Keyword::Renown(1));
+
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &ingest[0],
+            &Keyword::Ingest
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &ingest[0],
+            &Keyword::Renown(1)
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &renown[0],
+            &Keyword::Ingest
+        ));
+    }
+
+    #[test]
+    fn synthesize_all_wires_printed_ingest_and_gravestorm() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Ingest, Keyword::Gravestorm],
+            ..CardFace::default()
+        };
+        synthesize_all(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_ingest_trigger(trigger))
+                .count(),
+            1,
+            "synthesize_all must install printed Ingest triggers"
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_gravestorm_trigger(trigger))
+                .count(),
+            1,
+            "synthesize_all must install printed Gravestorm triggers"
+        );
+    }
+
+    #[test]
+    fn gravestorm_synthesizes_zone_counted_copy_trigger() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Gravestorm],
+            ..CardFace::default()
+        };
+        synthesize_gravestorm(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|trigger| is_gravestorm_trigger(trigger))
+            .expect("printed Gravestorm must synthesize a copy trigger");
+        assert!(matches!(trigger.mode, TriggerMode::SpellCast));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(
+            trigger.trigger_zones.contains(&Zone::Stack),
+            "CR 702.69a: Gravestorm functions while the spell is on the stack"
+        );
+
+        let execute = trigger.execute.as_deref().expect("execute body");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                ..
+            }
+        ));
+        assert!(matches!(
+            execute.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Graveyard),
+                    filter,
+                }
+            }) if *filter == TargetFilter::Typed(TypedFilter::permanent())
+        ));
+    }
+
+    #[test]
+    fn gravestorm_preserves_multiple_instances() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Gravestorm, Keyword::Gravestorm],
+            ..CardFace::default()
+        };
+        synthesize_gravestorm(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_gravestorm_trigger(trigger))
+                .count(),
+            2,
+            "CR 702.69b: two Gravestorm instances trigger separately"
+        );
+    }
+
+    #[test]
+    fn gravestorm_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Gravestorm, Keyword::Gravestorm],
+            ..CardFace::default()
+        };
+        synthesize_gravestorm(&mut face);
+        synthesize_gravestorm(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_gravestorm_trigger(trigger))
+                .count(),
+            2,
+            "re-running synthesis must not duplicate Gravestorm triggers"
+        );
+    }
+
+    #[test]
+    fn gravestorm_noop_without_keyword() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Flying],
+            ..CardFace::default()
+        };
+        synthesize_gravestorm(&mut face);
+        assert!(face.triggers.is_empty());
     }
 }
 

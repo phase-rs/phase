@@ -509,7 +509,8 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::AddCounterOnEnter { .. } => {}
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::RemoveManaCost => {}
     }
 }
 
@@ -708,6 +709,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
         | Effect::EndCombatPhase
         | Effect::Populate

@@ -197,7 +197,28 @@ pub(crate) fn parse_except_body<'a>(
     if let Some((rest, keywords)) = parse_it_has_keywords(input) {
         return Some((rest, keywords));
     }
+    if let Some((rest, keywords)) = parse_has_keywords(input) {
+        return Some((rest, keywords));
+    }
     None
+}
+
+/// CR 707.9a: "except … and has defender" — keyword grant without the "it has "
+/// subject (Wall of Stolen Identity). Distinct from [`parse_it_has_keywords`],
+/// which requires the explicit "it has " anaphor.
+fn parse_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("has ").parse(input).ok()?;
+    let (kw_text, remainder) = split_at_body_boundary(rest);
+    let mut modifications = Vec::new();
+    for part in split_keyword_list(kw_text) {
+        if let Some(keyword) = parse_keyword_from_oracle(part.trim()) {
+            modifications.push(ContinuousModification::AddKeyword { keyword });
+        }
+    }
+    if modifications.is_empty() {
+        return None;
+    }
+    Some((remainder, modifications))
 }
 
 /// CR 707.9b + CR 707.2: "his/her/its name is ~" — emit a `SetName` override
@@ -1679,6 +1700,34 @@ mod tests {
             vec![ContinuousModification::AddSupertype {
                 supertype: Supertype::Legendary,
             }]
+        );
+    }
+
+    /// CR 707.9a: Wall of Stolen Identity — "and has defender" without "it has ".
+    #[test]
+    fn except_and_has_defender_shorthand() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a Wall in addition to its other types and has defender. \
+             When you do, tap the copied creature.",
+            "Wall of Stolen Identity",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        use crate::types::keywords::Keyword;
+        assert!(
+            mods.iter().any(
+                |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Wall")
+            ),
+            "expected AddSubtype Wall, got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Defender
+                }
+            )),
+            "expected AddKeyword Defender, got {mods:?}"
         );
     }
 

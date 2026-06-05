@@ -1233,8 +1233,90 @@ fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c + CR 701.20b: An effect that introduces a single per-player object
+/// referent which a later anaphoric clause ("that card", "it", "its mana value")
+/// in the same iteration binds to. `RevealTop` is the canonical case: it reveals
+/// one card per scoped player, captured into `effect_context_object` and exposed
+/// to later clauses as `Demonstrative`/`Anaphoric`/`ParentTarget`. This referent
+/// is rebuilt fresh each iteration, so a consuming sub-clause MUST run inside the
+/// same iteration as its introducer.
+fn effect_introduces_per_player_object_referent(effect: &Effect) -> bool {
+    matches!(effect, Effect::RevealTop { .. })
+}
+
+/// CR 608.2c: True when an effect (or its quantity/target) reads the parent's
+/// per-player object referent anaphorically — a `Demonstrative`/`Anaphoric`
+/// object scope in a quantity, or a `ParentTarget`/`ParentTargetSlot` target.
+/// Distinguishes a per-player anaphoric consumer (Duskmantle Seer's
+/// `LoseLife { that card's mana value }` and `ChangeZone { ParentTarget }`) from
+/// a cross-player aggregate sub-clause (Windfall's `Draw { PreviousEffectAmount }`),
+/// which references the table-wide outcome and must NOT be merged into one
+/// iteration.
+fn effect_consumes_parent_object_referent(effect: &Effect) -> bool {
+    // An anaphoric consumer reads the parent's per-player object either as a
+    // quantity ("loses life equal to that card's mana value") or as a target
+    // ("then puts it into their hand" → `ChangeZone { target: ParentTarget }`).
+    let mut quantities = Vec::new();
+    collect_effect_quantity_exprs(effect, &mut quantities);
+    let amount_is_anaphoric = quantities
+        .iter()
+        .any(|qty| quantity_expr_references_demonstrative(qty));
+    let target_is_anaphoric = match effect {
+        Effect::ChangeZone { target, .. } => filter_is_parent_object_anaphor(target),
+        _ => false,
+    };
+    amount_is_anaphoric || target_is_anaphoric
+}
+
+fn quantity_expr_references_demonstrative(qty: &QuantityExpr) -> bool {
+    match qty {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_references_demonstrative(qty),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        }
+        | QuantityExpr::DivideRounded { inner, .. } => {
+            quantity_expr_references_demonstrative(inner)
+        }
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_demonstrative),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_references_demonstrative(left)
+                || quantity_expr_references_demonstrative(right)
+        }
+    }
+}
+
+fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
+    use crate::types::ability::ObjectScope;
+    let scope = match qty {
+        QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope,
+        _ => return false,
+    };
+    matches!(scope, ObjectScope::Demonstrative | ObjectScope::Anaphoric)
+}
+
+fn filter_is_parent_object_anaphor(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+    )
+}
+
 fn detach_after_player_scope_local_chain(
     node: &mut ResolvedAbility,
+    scope: &PlayerFilter,
+    referent_introduced: bool,
 ) -> Option<Box<ResolvedAbility>> {
     let mut next = node.sub_ability.take()?;
     // CR 115.10 + CR 608.2c: a decline-branch sub-ability whose own condition is
@@ -1246,8 +1328,34 @@ fn detach_after_player_scope_local_chain(
         .condition
         .as_ref()
         .is_some_and(condition_depends_on_effect_performed);
-    if next_is_performed_gated || is_player_scope_local_continuation(&node.effect, &next.effect) {
-        let tail = detach_after_player_scope_local_chain(&mut next);
+    // CR 608.2c: When the parser distributes "each player reveals the top card
+    // of their library, loses life equal to that card's mana value, then puts
+    // it into their hand" it stamps the SAME `player_scope` onto every clause.
+    // The reveal introduces a PER-PLAYER object referent (`effect_context_object`)
+    // that EVERY following clause binds anaphorically ("that card's mana value",
+    // "it") — each consumer refers to the upstream introducer, not the clause
+    // immediately before it. That referent is rebuilt each iteration, so once
+    // an introducer has been seen, all downstream co-scoped anaphoric consumers
+    // MUST run inside the SAME iteration: never detached as the unscoped tail
+    // (which would run once) and never re-entering the driver to fan out a
+    // second loop (their redundant `player_scope` is cleared). This is strictly
+    // narrower than "shares the parent's scope": a co-scoped sub that reads a
+    // CROSS-PLAYER aggregate instead (Windfall's "then draws that many cards" →
+    // `PreviousEffectAmount`, the greatest discarded table-wide) is NOT a
+    // referent consumer, so it still runs as its own post-all-iterations loop.
+    let referent_in_scope =
+        referent_introduced || effect_introduces_per_player_object_referent(&node.effect);
+    let next_is_co_scoped_anaphoric_consumer = next.player_scope.as_ref() == Some(scope)
+        && referent_in_scope
+        && effect_consumes_parent_object_referent(&next.effect);
+    if next_is_co_scoped_anaphoric_consumer {
+        next.player_scope = None;
+    }
+    if next_is_performed_gated
+        || next_is_co_scoped_anaphoric_consumer
+        || is_player_scope_local_continuation(&node.effect, &next.effect)
+    {
+        let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
         node.sub_ability = Some(next);
         tail
     } else {
@@ -1257,10 +1365,11 @@ fn detach_after_player_scope_local_chain(
 
 fn split_player_scope_chain(
     ability: &ResolvedAbility,
+    scope: &PlayerFilter,
 ) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
     let mut scoped = ability.clone();
     scoped.player_scope = None;
-    let tail = detach_after_player_scope_local_chain(&mut scoped);
+    let tail = detach_after_player_scope_local_chain(&mut scoped, scope, false);
     (scoped, tail)
 }
 
@@ -1715,6 +1824,7 @@ pub fn resolve_effect(
         Effect::TimeTravel => Ok(()),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
+        Effect::ProliferateTarget { .. } => proliferate::resolve_target(state, ability, events),
         Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
         Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
@@ -2766,6 +2876,30 @@ fn ability_with_event_context_targets(
     pending
 }
 
+/// CR 603.2: When an ability's `targets` are still empty at resolution but its
+/// effect carries an event-context recipient (`TriggeringPlayer`, etc.), bind
+/// that referent into `targets` before payer/effect resolution. Shared by the
+/// unless-pay interceptor and the main effect path (issue #2361).
+fn hydrate_event_context_targets<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+) -> Cow<'a, ResolvedAbility> {
+    if !ability.targets.is_empty() {
+        return Cow::Borrowed(ability);
+    }
+    let Some(filter) = extract_event_context_filter(&ability.effect) else {
+        return Cow::Borrowed(ability);
+    };
+    let Some(target_ref) =
+        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+    else {
+        return Cow::Borrowed(ability);
+    };
+    let mut resolved = ability.clone();
+    resolved.targets = vec![target_ref];
+    Cow::Owned(resolved)
+}
+
 /// CR 603.2: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
@@ -2992,6 +3126,12 @@ pub fn resolve_ability_chain(
     // across unrelated ability resolutions.
     if depth == 0 {
         state.last_revealed_ids.clear();
+        // CR 701.20e: A new top-level resolution ends any prior private "look at"
+        // peek window — the looked-at card from an unrelated resolution must not
+        // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
+        // decision (which re-enters at depth 1) preserves the peek it depends on.
+        state.private_look_ids.clear();
+        state.private_look_player = None;
         state.last_zone_changed_ids.clear();
         // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
         // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
@@ -3191,7 +3331,7 @@ fn resolve_chain_body(
         .into_iter()
         .filter(|pid| matches_player_scope(state, *pid, scope, controller, ability.source_id))
         .collect();
-        let (scoped_template, after_scope) = split_player_scope_chain(ability);
+        let (scoped_template, after_scope) = split_player_scope_chain(ability, scope);
         let after_scope_needs_linked_exile = after_scope.as_ref().is_some_and(|tail| {
             crate::game::exile_links::ability_contains_linked_exile_consumer(tail)
         });
@@ -3221,7 +3361,15 @@ fn resolve_chain_body(
             // of this flag.
             state.cost_payment_failed_flag = false;
             scoped.set_original_controller_recursive(controller);
-            scoped.controller = *pid;
+            // CR 608.2: The scoped player is the acting controller for the
+            // WHOLE per-player chain, not just the top clause. A co-scoped
+            // sub-clause kept in this iteration (Duskmantle Seer's "loses life
+            // equal to that card's mana value, then puts it into their hand")
+            // must resolve its implicit-controller recipient and any generic
+            // handler against the iterating player — so rebind recursively. The
+            // printed controller is preserved via `original_controller` above,
+            // keeping "you" references stable (CR 109.5).
+            scoped.set_controller_recursive(*pid);
             scoped.set_scoped_player_recursive(*pid);
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
@@ -3239,7 +3387,10 @@ fn resolve_chain_body(
                 for &remaining_pid in remaining.iter().rev() {
                     let mut remaining_scoped = scoped_template.clone();
                     remaining_scoped.set_original_controller_recursive(controller);
-                    remaining_scoped.controller = remaining_pid;
+                    // CR 608.2: mirror the in-loop recursive controller rebind so
+                    // a co-scoped sub-clause resumed via continuation also acts as
+                    // the iterating player.
+                    remaining_scoped.set_controller_recursive(remaining_pid);
                     remaining_scoped.set_scoped_player_recursive(remaining_pid);
                     // CR 608.2c: each remaining player's clause is an INDEPENDENT
                     // following instruction, not a continuation of the prior
@@ -3612,11 +3763,17 @@ fn resolve_chain_body(
     // intercepted here for both tax triggers and counter-target-spell unless
     // costs. Post-fold, the cost is the unified `AbilityCost` taxonomy.
     if let Some(ref unless_pay) = ability.unless_pay {
+        // CR 603.2 + CR 118.12a: Hydrate event-context targets before payer
+        // resolution so trigger unless-costs ("that player ... unless they pay")
+        // do not silently fall through when `ability.targets` is still empty
+        // (issue #2361).
+        let ability_for_unless = hydrate_event_context_targets(state, ability);
         // CR 118.12a: `resolve_unless_payers` yields the APNAP-ordered poll
         // list — one player for ordinary unless-costs, every player for
         // "unless any player pays ...". The first entry is prompted now; the
         // rest ride along in `WaitingFor::UnlessPayment.remaining`.
-        let unless_payers = resolve_unless_payers(state, ability, &unless_pay.payer);
+        let unless_payers =
+            resolve_unless_payers(state, ability_for_unless.as_ref(), &unless_pay.payer);
         if let Some((&payer, remaining_payers)) = unless_payers.split_first() {
             // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
@@ -3766,29 +3923,8 @@ fn resolve_chain_body(
         ability.effect,
         Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }
     ) {
-        // CR 603.2: If the ability has empty targets but its effect uses an event-context
-        // target filter (TriggeringSpellController, TriggeringSource, etc.), resolve the
-        // filter into an actual TargetRef using the current trigger event context.
-        let resolved_ability = if ability.targets.is_empty() {
-            if let Some(filter) = extract_event_context_filter(&ability.effect) {
-                if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
-                    state,
-                    filter,
-                    ability.source_id,
-                ) {
-                    let mut resolved = ability.clone();
-                    resolved.targets = vec![target_ref];
-                    Some(resolved)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let effective = resolved_ability.as_ref().unwrap_or(ability);
+        let hydrated = hydrate_event_context_targets(state, ability);
+        let effective = hydrated.as_ref();
 
         // CR 608.2b: Validate SharesQuality group constraints before applying effects.
         // If targets don't share the required quality, skip the effect.
@@ -4363,6 +4499,26 @@ fn resolve_chain_body(
                     }
                 }
                 return Ok(());
+            }
+
+            // CR 608.2c + CR 603.7: An `If you do` boundary (`EffectOutcome
+            // { OptionalEffectPerformed }`) opens a new instruction clause —
+            // "you may [do X]. If you do, [rider]." Nothing the gating action X
+            // affected can be named by a "those cards" / "one of them" reference
+            // inside the rider, so the rider's tracked set must NOT unify with
+            // the gating action's. Reset the chain-scoped tracked-set identity
+            // here so the rider's own producer (e.g. ExileTop) starts a fresh
+            // set. Without this, Party Thrasher's "you may discard a card. If
+            // you do, exile the top two cards…, then choose one of them" would
+            // co-publish the discarded card (now in the graveyard) with the two
+            // exiled cards, offering three cards to choose from (issue #1977).
+            if matches!(
+                condition,
+                AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                }
+            ) {
+                state.chain_tracked_set_id = None;
             }
 
             // CR 603.12: When a deferred conditional sub-ability (WhenYouDo,
@@ -5399,16 +5555,19 @@ fn resolve_add_pending_etb_counters(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::synthesis::synthesize_extort;
+    use crate::game::ability_utils::build_resolved_from_def;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
-        CastingPermission, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission, ObjectProperty,
-        PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-        SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
-        UntilCondition,
+        CastingPermission, Chooser, ChosenAttribute, Comparator, ContinuousModification,
+        ControllerRef, DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission,
+        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::CardFace;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
@@ -5418,10 +5577,11 @@ mod tests {
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::{ManaColor, ManaCost};
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::{PlayerCounterKind, PlayerId};
     use crate::types::statics::CastFrequency;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     #[test]
@@ -6388,6 +6548,110 @@ mod tests {
         ));
     }
 
+    /// CR 118.12a + CR 603.2: Triggered unless-costs on event-context player
+    /// refs must hydrate targets before payer resolution (issue #2361).
+    #[test]
+    fn unless_pay_triggering_player_hydrates_before_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Esper Sentinel".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            payer: TargetFilter::TriggeringPlayer,
+        });
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(99),
+            controller: PlayerId(1),
+            object_id: ObjectId(99),
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("unless-pay interceptor should arm a payment prompt");
+
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, .. } => {
+                assert_eq!(*player, PlayerId(1));
+            }
+            other => panic!("expected UnlessPayment for triggering player, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12a + CR 701.9: Wrench Mind — "unless they discard an artifact
+    /// card" must surface `UnlessPayment` before the two-card discard (issue
+    /// #2361).
+    #[test]
+    fn unless_pay_wrench_mind_discard_artifact_prompts_payment() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wrench Mind".to_string(),
+            Zone::Stack,
+        );
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                format!("Hand{i}"),
+                Zone::Hand,
+            );
+        }
+        let artifact_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            ..Default::default()
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Player,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(artifact_filter),
+                random: false,
+                self_ref: false,
+            },
+            payer: TargetFilter::Player,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("unless-pay interceptor should arm a payment prompt");
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }),
+            "expected UnlessPayment prompt, got {:?}",
+            state.waiting_for
+        );
+    }
+
     /// CR 107.3a: a bare `{X}` unless-cost (`ManaDynamic` with `Variable("X")`)
     /// must resolve against the carrying ability's announced `chosen_x`. The
     /// interceptor folds the dynamic cost into a fixed `Mana` cost before
@@ -6624,6 +6888,115 @@ mod tests {
         assert_eq!(state.players[1].life, 18);
         // Controller drew a card
         assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    /// Regression (issue #1977, Party Thrasher): "you may discard a card. If you
+    /// do, exile the top two cards of your library, then choose one of them."
+    /// CR 608.2c + CR 603.7: the discard is a gating action behind the
+    /// `If you do` boundary; its discarded card must NOT unify into the tracked
+    /// set the rider's `ChooseFromZone` consumes. The choice must offer exactly
+    /// the two exiled cards — never three (the discard plus the two exiled).
+    #[test]
+    fn if_you_do_gate_resets_tracked_set_so_choice_excludes_gating_discard() {
+        let mut state = GameState::new_two_player(42);
+        // One card in hand — discarded by the gating action (lands in graveyard).
+        let discarded = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Discarded".to_string(),
+            Zone::Hand,
+        );
+        // Two cards on top of library — exiled by the rider.
+        let top_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Top A".to_string(),
+            Zone::Library,
+        );
+        let top_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Top B".to_string(),
+            Zone::Library,
+        );
+
+        // Rider: exile the top two cards, then choose one of them. The real
+        // Party Thrasher chain continues from this choice into
+        // GrantCastingPermission; the polluted tracked set first becomes
+        // user-visible at this choice boundary.
+        let choose = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let exile_top = ResolvedAbility::new(
+            Effect::ExileTop {
+                count: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+                face_down: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(choose)
+        // The "If you do" boundary between the gating discard and the rider.
+        .condition(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+
+        // Gating action: discard the specific hand card (non-interactive path).
+        let mut discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Object(discarded)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(exile_top);
+        // "you may discard … If you do" — seed the performed flag so the gate passes.
+        discard.context.optional_effect_performed = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &discard, &mut events, 0).unwrap();
+
+        // The discarded card is in the graveyard; the two exiled cards are in exile.
+        assert!(state.players[0].graveyard.contains(&discarded));
+        assert!(state.exile.contains(&top_a) && state.exile.contains(&top_b));
+
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert_eq!(
+                    cards.len(),
+                    2,
+                    "choice must offer exactly the two exiled cards, not the discarded one too"
+                );
+                assert!(cards.contains(&top_a) && cards.contains(&top_b));
+                assert!(
+                    !cards.contains(&discarded),
+                    "the gating discard must not be offered as a choice"
+                );
+            }
+            other => panic!("Expected ChooseFromZoneChoice, got {other:?}"),
+        }
     }
 
     /// CR 115.1d: With inherited object targets, `ParentTargetController` must
@@ -10934,6 +11307,207 @@ mod tests {
         assert_eq!(state.players[1].graveyard.len(), 1);
     }
 
+    /// CR 608.2c — building-block discriminator for the per-player reveal-anaphora
+    /// chain (issue #1534, Duskmantle Seer). `split_player_scope_chain` must keep a
+    /// co-scoped sub-clause that consumes the reveal's per-player object referent
+    /// ("loses life equal to that card's mana value", "puts it into their hand")
+    /// INSIDE the scoped template — and strip its redundant `player_scope` so it
+    /// resolves once per player in the same iteration — while a co-scoped sub-clause
+    /// that reads a CROSS-PLAYER aggregate (Windfall's `PreviousEffectAmount`)
+    /// detaches as the post-all-iterations tail.
+    #[test]
+    fn split_player_scope_keeps_reveal_anaphora_chain_but_detaches_aggregate() {
+        use crate::types::ability::ObjectScope;
+
+        let make_reveal = || {
+            ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 1,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+
+        // Reveal → LoseLife(that card's MV) → ChangeZone(it → Hand), all scope=All.
+        let mut anaphoric = make_reveal();
+        anaphoric.player_scope = Some(PlayerFilter::All);
+        let mut lose = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                target: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        lose.player_scope = Some(PlayerFilter::All);
+        let mut put = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        put.player_scope = Some(PlayerFilter::All);
+        lose.sub_ability = Some(Box::new(put));
+        anaphoric.sub_ability = Some(Box::new(lose));
+
+        let (scoped, tail) = split_player_scope_chain(&anaphoric, &PlayerFilter::All);
+        assert!(
+            tail.is_none(),
+            "the whole reveal-anaphora chain stays inside the scoped template"
+        );
+        let lose_in_scope = scoped
+            .sub_ability
+            .as_ref()
+            .expect("LoseLife stays attached");
+        assert!(
+            matches!(lose_in_scope.effect, Effect::LoseLife { .. }),
+            "LoseLife is the first kept sub-clause"
+        );
+        assert!(
+            lose_in_scope.player_scope.is_none(),
+            "the kept LoseLife's redundant player_scope is cleared so it does not re-loop"
+        );
+        let put_in_scope = lose_in_scope
+            .sub_ability
+            .as_ref()
+            .expect("ChangeZone stays attached after LoseLife");
+        assert!(
+            put_in_scope.player_scope.is_none(),
+            "the kept ChangeZone's redundant player_scope is cleared too"
+        );
+
+        // Reveal -> Draw(that card's MV), all scope=All. This is a latent
+        // sibling of the Duskmantle shape: no current card prints this exact
+        // per-player draw form, but it consumes the same per-iteration
+        // demonstrative quantity and must stay in the scoped template.
+        let mut draw_anaphoric = make_reveal();
+        draw_anaphoric.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        draw_anaphoric.sub_ability = Some(Box::new(draw));
+
+        let (scoped_draw, tail_draw) =
+            split_player_scope_chain(&draw_anaphoric, &PlayerFilter::All);
+        assert!(
+            tail_draw.is_none(),
+            "an anaphoric Draw quantity stays inside the reveal iteration"
+        );
+        let draw_in_scope = scoped_draw
+            .sub_ability
+            .as_ref()
+            .expect("Draw stays attached");
+        assert!(
+            matches!(draw_in_scope.effect, Effect::Draw { .. }),
+            "Draw is the kept sub-clause"
+        );
+        assert!(
+            draw_in_scope.player_scope.is_none(),
+            "the kept Draw's redundant player_scope is cleared"
+        );
+
+        // Reveal -> PutCounter(that card's MV counters), all scope=All. The
+        // target is deliberately non-anaphoric here; the quantity alone must be
+        // enough to keep the consumer in the scoped iteration.
+        let mut counter_anaphoric = make_reveal();
+        counter_anaphoric.player_scope = Some(PlayerFilter::All);
+        let mut put_counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        put_counter.player_scope = Some(PlayerFilter::All);
+        counter_anaphoric.sub_ability = Some(Box::new(put_counter));
+
+        let (scoped_counter, tail_counter) =
+            split_player_scope_chain(&counter_anaphoric, &PlayerFilter::All);
+        assert!(
+            tail_counter.is_none(),
+            "an anaphoric PutCounter quantity stays inside the reveal iteration"
+        );
+        let counter_in_scope = scoped_counter
+            .sub_ability
+            .as_ref()
+            .expect("PutCounter stays attached");
+        assert!(
+            matches!(counter_in_scope.effect, Effect::PutCounter { .. }),
+            "PutCounter is the kept sub-clause"
+        );
+        assert!(
+            counter_in_scope.player_scope.is_none(),
+            "the kept PutCounter's redundant player_scope is cleared"
+        );
+
+        // Reveal → Draw(PreviousEffectAmount): cross-player aggregate, scope=All.
+        let mut aggregate = make_reveal();
+        aggregate.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        aggregate.sub_ability = Some(Box::new(draw));
+
+        let (scoped_agg, tail_agg) = split_player_scope_chain(&aggregate, &PlayerFilter::All);
+        assert!(
+            scoped_agg.sub_ability.is_none(),
+            "the aggregate Draw is NOT merged into the reveal iteration"
+        );
+        let detached = tail_agg.expect("the aggregate Draw detaches as the unscoped tail");
+        assert_eq!(
+            detached.player_scope,
+            Some(PlayerFilter::All),
+            "the detached Draw keeps its own player_scope so it fans out post-all-reveals"
+        );
+    }
+
     #[test]
     fn player_scope_preserves_controller_for_you_quantities() {
         let mut state = GameState::new_two_player(42);
@@ -13274,6 +13848,110 @@ mod tests {
             "After discarding 1 of 2 and drawing 2, hand should have 3 cards, got {}. \
              IfYouDo sub-ability likely did not fire.",
             hand_after,
+        );
+    }
+
+    /// Issue #1972: Extort must prompt before draining, then pay {W/B}, drain each
+    /// opponent, and gain life equal to the total life lost.
+    #[test]
+    fn issue_1972_extort_optional_accept_drains_all_opponents_and_gains() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        synthesize_extort(&mut face);
+        let execute = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::SpellCast)
+                    && matches!(t.execute.as_deref().map(|e| e.optional), Some(true))
+            })
+            .and_then(|t| t.execute.as_deref())
+            .expect("synthesized extort trigger");
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source_id = ObjectId(100);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::White,
+            ObjectId(200),
+            false,
+            Vec::new(),
+        ));
+        let resolved = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "extort must prompt before draining, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            (state.players[1].life, state.players[2].life),
+            (20, 20),
+            "opponents must not lose life before the may-pay decision"
+        );
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].life, 22);
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 19);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    }
+
+    /// Accept extort with no {W/B} available — drain must not run (CR 702.101a).
+    #[test]
+    fn issue_1972_extort_accept_without_payable_mana_does_not_drain() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        synthesize_extort(&mut face);
+        let execute = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::SpellCast)
+                    && matches!(t.execute.as_deref().map(|e| e.optional), Some(true))
+            })
+            .and_then(|t| t.execute.as_deref())
+            .expect("synthesized extort trigger");
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source_id = ObjectId(100);
+        assert!(
+            state.players[0].mana_pool.mana.is_empty(),
+            "controller must have no mana to pay W/B"
+        );
+        let resolved = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "extort must prompt before draining, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            state.cost_payment_failed_flag,
+            "PayCost with no W/B must set cost_payment_failed_flag"
+        );
+        assert_eq!(
+            (
+                state.players[0].life,
+                state.players[1].life,
+                state.players[2].life
+            ),
+            (20, 20, 20),
+            "accepting without payable mana must not drain opponents or grant life"
         );
     }
 

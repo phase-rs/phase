@@ -37,10 +37,10 @@ use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
     is_cant_win_lose_compound, is_compound_turn_limit, is_defiler_cost_pattern,
-    is_enters_tapped_cant_untap_compound, is_flashback_equal_mana_cost, is_granted_static_line,
-    is_instead_replacement_line, is_opening_hand_begin_game, is_replacement_pattern,
-    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect,
+    is_enters_tapped_cant_untap_compound, is_enters_with_counter_trigger,
+    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
+    is_opening_hand_begin_game, is_replacement_pattern, is_spells_alternative_cost_pattern,
+    is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -62,7 +62,9 @@ use super::oracle_modal::{
     extract_ability_word_reminder_body, lower_oracle_block, parse_oracle_block, strip_ability_word,
     strip_ability_word_with_name,
 };
-use super::oracle_replacement::{lower_replacement_ir, parse_replacement_line};
+use super::oracle_replacement::{
+    find_copy_verb_present, lower_replacement_ir, parse_replacement_line,
+};
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
@@ -2214,14 +2216,25 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 5-pre: "Whenever you cast [spell], that [subject] enters with
-        // [counters] on it" is a replacement effect per CR 614.1c, not a
-        // triggered ability — despite the "whenever" framing. Intercept before
-        // the generic trigger dispatch routes it through the SpellCast matcher.
+        // Priority 5-pre: trigger-framed "… enters with [counters] on it" lines
+        // are CR 614.1c replacement effects, not triggered abilities — despite
+        // the "whenever"/"when" framing. Intercept before the generic trigger
+        // dispatch routes them through the SpellCast / ChangesZone matcher.
         // Applies to Wildgrowth Archaic and cousin cards (Runadi, Boreal
-        // Outrider, Torgal, …). `parse_replacement_line` handles all the
-        // compositional variants (fixed / X / "where X is …").
-        if has_trigger_prefix(&lower) && scan_contains(&lower, "enters with") {
+        // Outrider, Torgal, Dragon Broodmother, …). `parse_replacement_line`
+        // handles all the compositional variants (fixed / X / "where X is …").
+        //
+        // CR 603.2 exclusion: an ETB-with-counter TRIGGER ("… enters with a
+        // counter on it, <consequence>") watches for ANY (untyped) counter and
+        // is a real triggered ability (Murderous Redcap Avatar class). The
+        // typed/counted enters-with forms ("a +1/+1 counter", "X +1/+1
+        // counters", "an additional loyalty counter") are CR 614.1c
+        // replacements. `is_enters_with_counter_trigger` recognizes the untyped
+        // trigger and excludes it from this replacement interceptor.
+        if has_trigger_prefix(&lower)
+            && !is_enters_with_counter_trigger(&lower)
+            && scan_contains(&lower, "enters with")
+        {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                 result.replacements.push(rep_def);
                 i += 1;
@@ -2476,7 +2489,26 @@ pub(crate) fn parse_oracle_ir(
         // effect parser at Priority 9. Damage-verb lines are also deferred because
         // parse_effect_chain handles embedded statics via split_clause_sequence.
         if is_static_pattern(&lower) {
-            if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
+            // CR 614.1c / CR 707.9: Lines that are both static-shaped (e.g.
+            // trailing "doesn't untap during…" from a reflexive "When you do"
+            // clause) and a copy-replacement ("enter as a copy of") must route
+            // to the replacement parser first — Wall of Stolen Identity class.
+            // The copy-verb gate keeps static / prevent lines (Anthem of Rakdos,
+            // Pollen Lullaby, Subdue, Mikey & Don Party Planners) out of the
+            // replacement parsers; the legacy `as long as` precondition still
+            // routes the duration-gated replacement fallback.
+            if find_copy_verb_present(&lower) {
+                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
+                    result.replacements.extend(rep_defs);
+                    i += 1;
+                    continue;
+                }
+                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
+                    result.replacements.push(rep_def);
+                    i += 1;
+                    continue;
+                }
+            } else if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
                 if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                     result.replacements.push(rep_def);
                     i += 1;
@@ -4371,11 +4403,11 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-        Duration, FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-        MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount,
-        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-        RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition,
-        TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        Duration, Effect, FilterProp, ManaProduction, ManaSpendRestriction,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter,
+        PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind,
+        StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -4922,6 +4954,110 @@ mod tests {
         }
         assert_eq!(r.abilities.len(), 1);
         assert!(r.abilities[0].cost.is_none());
+    }
+
+    /// Issue #1965 — Eldritch Evolution: required creature sacrifice + library
+    /// search whose mana-value cap tracks the sacrificed creature (+2).
+    #[test]
+    fn eldritch_evolution_parses_sacrifice_cost_and_dynamic_search_filter() {
+        let r = parse(
+            "As an additional cost to cast this spell, sacrifice a creature.\n\
+             Search your library for a creature card with mana value X or less, where X is 2 plus the sacrificed creature's mana value. \
+             Put that card onto the battlefield, then shuffle. Exile Eldritch Evolution.",
+            "Eldritch Evolution",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) => {
+                assert_eq!(count, 1);
+                assert_eq!(target, TargetFilter::Typed(TypedFilter::creature()));
+            }
+            other => panic!("expected required sacrifice-creature cost, got {other:?}"),
+        }
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::SearchLibrary { filter, .. } = r.abilities[0].effect.as_ref() else {
+            panic!(
+                "expected SearchLibrary spell effect, got {:?}",
+                r.abilities[0].effect
+            );
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed search filter, got {filter:?}");
+        };
+        let cmc = typed
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+                _ => None,
+            })
+            .expect("search filter must carry Cmc bound");
+        assert_eq!(*cmc.0, Comparator::LE);
+        assert_eq!(
+            *cmc.1,
+            QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                }),
+                offset: 2,
+            }
+        );
+    }
+
+    /// Issue #1997 — Embiggen: +1/+1 per typeline component on the targeted creature.
+    #[test]
+    fn embiggen_parses_non_brushwagg_pump_scaled_by_typeline_components() {
+        use crate::types::ability::{ObjectScope, PtValue, TypeFilter};
+        let r = parse(
+            "Until end of turn, target non-Brushwagg creature gets +1/+1 for each supertype, card type, and subtype it has.",
+            "Embiggen",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        match r.abilities[0].effect.as_ref() {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                let PtValue::Quantity(expr) = power else {
+                    panic!("expected dynamic power, got {power:?}");
+                };
+                assert_eq!(toughness, &PtValue::Quantity(expr.clone()));
+                let TargetFilter::Typed(typed) = target else {
+                    panic!("expected typed creature target, got {target:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "must target creatures"
+                );
+                assert!(
+                    typed.type_filters.iter().any(|t| {
+                        matches!(
+                            t,
+                            TypeFilter::Non(inner)
+                                if matches!(inner.as_ref(), TypeFilter::Subtype(s) if s == "Brushwagg")
+                        )
+                    }),
+                    "must exclude Brushwagg, got {:?}",
+                    typed.type_filters
+                );
+                let crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::ObjectTypelineComponentCount { scope },
+                } = expr
+                else {
+                    panic!("expected typeline component count, got {expr:?}");
+                };
+                assert_eq!(*scope, ObjectScope::Recipient);
+            }
+            other => panic!("expected Pump, got {other:?}"),
+        }
     }
 
     #[test]
@@ -11576,6 +11712,23 @@ mod tests {
             result.map(|(r, _)| r),
             Some(ManaSpendRestriction::SpellType(
                 "Instant or Sorcery".to_string()
+            ))
+        );
+    }
+
+    // CR 106.6: Tablet of Discovery (issue #1975) phrases its restricted mana as
+    // "instant and sorcery spells". This must parse to the same two-type union
+    // the " or " phrasing yields so the runtime matcher accepts either type.
+    #[test]
+    fn mana_spend_restriction_instant_and_sorcery() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::ManaSpendRestriction;
+        let result =
+            parse_mana_spend_restriction("spend this mana only to cast instant and sorcery spells");
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellType(
+                "Instant and Sorcery".to_string()
             ))
         );
     }

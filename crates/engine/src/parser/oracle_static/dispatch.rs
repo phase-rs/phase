@@ -20,6 +20,23 @@ pub(crate) enum InvertedAsLongAs {
     Allow,
     Skip,
 }
+
+fn parse_each_other_players_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            space1,
+            alt((
+                tag("during each other player's untap step"),
+                tag("during each other player\u{2019}s untap step"),
+            )),
+            opt(tag(".")),
+            space0,
+        )),
+    )
+    .parse(input)
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -252,18 +269,11 @@ pub(crate) fn parse_static_line_inner(
         // which handles the full range of type + controller phrases.
         let (filter, remainder) = parse_type_phrase(rest.original);
         let remainder_lower = remainder.to_lowercase();
-        // Accept "during each other player's untap step" with straight and curly apostrophes.
-        let tail = remainder_lower.trim().trim_end_matches('.');
-        let during_ok = nom_on_lower(tail, tail, |i| {
-            value(
-                (),
-                alt((
-                    tag("during each other player's untap step"),
-                    tag("during each other player\u{2019}s untap step"),
-                )),
-            )
-            .parse(i)
-        })
+        let during_ok = nom_on_lower(
+            remainder,
+            &remainder_lower,
+            parse_each_other_players_untap_step_suffix,
+        )
         .is_some();
         // Require the subject filter to be controlled by "you" — rules text
         // variations outside this ("each player's permanents") would not be
@@ -278,6 +288,36 @@ pub(crate) fn parse_static_line_inner(
                     .affected(filter)
                     .description(text.to_string()),
             );
+        }
+    }
+
+    // --- "Untap this <permanent> during each other player's untap step." ---
+    // CR 502.3 + CR 113.6: the self-referential Seedborn-class variant (Bender's
+    // Waterskin: "Untap this artifact during each other player's untap step").
+    // Shares the runtime of the "untap all" form
+    // (`StaticMode::UntapsDuringEachOtherPlayersUntapStep`), but the affected
+    // filter is the source itself (`SelfRef`) so its controller untaps only it
+    // during every other player's untap step. Ordered after the "untap all" arm
+    // — the typed "you control" subject and these self-reference subjects are
+    // disjoint, so neither shadows the other.
+    if let Some(rest) = nom_tag_tp(&tp, "untap ") {
+        let self_subject =
+            nom_on_lower(rest.original, rest.lower, nom_target::parse_self_reference);
+        if let Some((TargetFilter::SelfRef, remainder)) = self_subject {
+            let remainder_lower = remainder.to_lowercase();
+            let during_ok = nom_on_lower(
+                remainder,
+                &remainder_lower,
+                parse_each_other_players_untap_step_suffix,
+            )
+            .is_some();
+            if during_ok {
+                return Some(
+                    StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+                        .affected(TargetFilter::SelfRef)
+                        .description(text.to_string()),
+                );
+            }
         }
     }
 
@@ -1492,23 +1532,34 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
-    // --- CR 604.3: "Players can't cast spells from [zones]" ---
-    // e.g., Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
+    // --- CR 601.3 + CR 101.2 + CR 109.5: "[subject] can't cast spells from [zones]" ---
+    // Two phrasings collapse here, discriminated by the zone clause:
+    // - Explicit list (Grafdigger's Cage): "Players can't cast spells from
+    //   graveyards or libraries." → prohibited = the listed zones.
+    // - Inverse "anywhere other than" (Drannith Magistrate): "Your opponents
+    //   can't cast spells from anywhere other than their hands." → prohibited =
+    //   every cast-capable zone except the named allowed zone.
+    // The subject prefix rides the `who` scope axis via the shared building block.
     if nom_primitives::scan_contains(tp.lower, "can't cast spells from") {
-        let zones = parse_zone_names_from_tp(&tp);
-        let affected = if zones.is_empty() {
-            TargetFilter::Any
-        } else {
-            TargetFilter::Typed(TypedFilter {
+        let who = strip_casting_prohibition_subject(tp.lower)
+            .map(|(scope, _)| scope)
+            .unwrap_or(ProhibitionScope::AllPlayers);
+        // CR 601.2a: Prefer the "anywhere other than" complement; fall back to the
+        // explicit zone list. An empty list (no recognized zone) yields no static —
+        // returning `TargetFilter::Any` here would over-block every zone.
+        let zones = parse_cast_from_anywhere_other_than_tp(&tp)
+            .unwrap_or_else(|| parse_zone_names_from_tp(&tp));
+        if !zones.is_empty() {
+            let affected = TargetFilter::Typed(TypedFilter {
                 properties: vec![FilterProp::InAnyZone { zones }],
                 ..TypedFilter::default()
-            })
-        };
-        return Some(
-            StaticDefinition::new(StaticMode::CantCastFrom)
-                .affected(affected)
-                .description(text.to_string()),
-        );
+            });
+            return Some(
+                StaticDefinition::new(StaticMode::CantCastFrom { who })
+                    .affected(affected)
+                    .description(text.to_string()),
+            );
+        }
     }
 
     // --- CR 101.2: Blanket casting prohibition ("can't cast [type] spells") ---
@@ -1785,15 +1836,12 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // --- "as though it/they had flash" (CR 702.8a) ---
-    if nom_primitives::scan_contains(tp.lower, "as though it had flash")
-        || nom_primitives::scan_contains(tp.lower, "as though they had flash")
-    {
-        return Some(
-            StaticDefinition::new(StaticMode::CastWithFlash)
-                .description(text.to_string())
-                .active_zones(vec![Zone::Battlefield]),
-        );
+    // --- "You may cast [type] spells as though they had flash" (CR 601.3b / CR 702.8a) ---
+    // Emits `CastWithKeyword { Flash }` with the spell-type filter — the only
+    // static mode the flash-timing path (granted_spell_keywords) reads, and the
+    // one that preserves the "creature spells" restriction (issue #1957).
+    if let Some(def) = parse_cast_as_though_flash_static(&tp, &text) {
+        return Some(def);
     }
 
     // --- "[Type] spells you cast [from zone] have [keyword]" (CR 702.51a) ---
@@ -1850,6 +1898,8 @@ pub(crate) fn parse_static_line_inner(
     // CR 603.2d: Trigger doubling — "triggers an additional time".
     //
     // Cause classification by phrasing:
+    // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
+    //   Prodigy (ControlledCreatureDealtDamage).
     // - "attacking causes" — Isshin, Two Heavens as One (CreatureAttacking).
     // - "entering" / "enters the battlefield" / "enters" — Panharmonicon-class
     //   (EntersBattlefield). Panharmonicon itself names "artifact or creature
@@ -1860,7 +1910,11 @@ pub(crate) fn parse_static_line_inner(
     //   unrestricted `Any` cause; the doubler's `affected` filter narrows
     //   which source's triggers qualify.
     if nom_primitives::scan_contains(tp.lower, "triggers an additional time") {
-        let cause = if nom_primitives::scan_contains(tp.lower, "attacking causes") {
+        let cause = if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
+            || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
+        {
+            TriggerCause::ControlledCreatureDealtDamage
+        } else if nom_primitives::scan_contains(tp.lower, "attacking causes") {
             TriggerCause::CreatureAttacking
         } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
             TriggerCause::CreatureDying

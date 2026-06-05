@@ -84,6 +84,29 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 701.34a (operation) + CR 122.1: Resolve `Effect::ProliferateTarget` — the
+/// forced single-target form ("for each kind of counter on target permanent or
+/// player, give that permanent or player another counter of that kind").
+///
+/// Unlike `resolve` (the chooser-driven `Proliferate`), the target is already
+/// fixed in `ability.targets`, so there is no `ProliferateChoice` prompt: it
+/// reuses `apply_proliferate` directly on the resolved target(s). It also does
+/// NOT emit `PlayerActionKind::Proliferate` — the card spells out the
+/// counter-add rather than using the proliferate keyword action, so it must not
+/// fire "whenever you proliferate" triggers.
+pub fn resolve_target(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    apply_proliferate(state, ability.controller, &ability.targets, events);
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+    Ok(())
+}
+
 /// Apply proliferate to the selected targets — adds one counter of each kind
 /// already present. Called from the engine handler after player makes their choice.
 pub fn apply_proliferate(
@@ -609,5 +632,74 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+
+    #[test]
+    fn resolve_target_adds_one_of_each_kind_without_prompt() {
+        use crate::types::ability::TargetFilter;
+
+        // CR 701.34a + CR 122.1: Skyship Plunderer — the forced single-target
+        // form adds one counter of each kind already present on the chosen
+        // target, with no ProliferateChoice prompt.
+        let mut state = GameState::new_two_player(42);
+        let obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let counters = &mut state.objects.get_mut(&obj).unwrap().counters;
+            counters.insert(CounterType::Plus1Plus1, 2);
+            counters.insert(CounterType::Generic("charge".to_string()), 1);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ProliferateTarget {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_target(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&obj].counters[&CounterType::Plus1Plus1], 3);
+        assert_eq!(
+            state.objects[&obj].counters[&CounterType::Generic("charge".to_string())],
+            2
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ProliferateChoice { .. }),
+            "the targeted form must not open a proliferate choice"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+
+    #[test]
+    fn resolve_target_adds_to_targeted_player() {
+        use crate::types::ability::TargetFilter;
+
+        // The target pool is "permanent or player": a poisoned player gets one
+        // more poison counter.
+        let mut state = GameState::new_two_player(42);
+        state.players[1].poison_counters = 2;
+
+        let ability = ResolvedAbility::new(
+            Effect::ProliferateTarget {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_target(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].poison_counters, 3);
     }
 }

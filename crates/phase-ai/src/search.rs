@@ -553,6 +553,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             side: engine::game::merge::MergeSide::Top,
         }),
 
+        // CR 702.99a: cipher encode — default to encoding on the first legal host
+        // (the candidate generator still explores declining and other hosts).
+        WaitingFor::CipherEncodeChoice { creatures, .. } => Some(GameAction::CipherEncode {
+            creature: creatures.first().copied(),
+        }),
+
         // CR 701.30b: clash opponent choice — fall back to the first candidate.
         WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
             .first()

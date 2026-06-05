@@ -74,6 +74,7 @@ import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { MutateMergeChoiceModalContent } from "../components/modal/MutateMergeChoiceModal.tsx";
+import { CipherEncodeChoiceModalContent } from "../components/modal/CipherEncodeChoiceModal.tsx";
 import { DialogHost, isClickThroughWaitingFor } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -108,6 +109,7 @@ import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
+import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
 import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
@@ -307,7 +309,8 @@ export function GamePage() {
         // If WE conceded, navigate to menu immediately
         if (event.player === useMultiplayerStore.getState().activePlayerId) {
           hasConcededRef.current = true;
-          if (gameId) clearGame(gameId);
+          clearPromptOverlayState();
+          if (gameId) void clearGame(gameId);
           navigate("/");
         }
         break;
@@ -834,8 +837,9 @@ function GamePageContent({
       handleConcede();
       return;
     }
+    clearPromptOverlayState();
     if (gameId) {
-      clearGame(gameId);
+      void clearGame(gameId);
     }
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);
@@ -1432,6 +1436,12 @@ function GamePageContent({
         {waitingFor?.type === "MutateMergeChoice" &&
           canActForWaitingState && (
             <MutateMergeModal />
+          )}
+
+        {/* CR 702.99a: cipher spell controller chooses a creature to encode on */}
+        {waitingFor?.type === "CipherEncodeChoice" &&
+          canActForWaitingState && (
+            <CipherEncodeModal />
           )}
 
         {waitingFor?.type === "UntapChoice" &&
@@ -2536,6 +2546,16 @@ function MutateMergeModal() {
   if (waitingFor?.type !== "MutateMergeChoice") return null;
 
   return <MutateMergeChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+function CipherEncodeModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "CipherEncodeChoice") return null;
+
+  return <CipherEncodeChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
 // ── Untap Choice Modal ─────────────────────────────────────────────────

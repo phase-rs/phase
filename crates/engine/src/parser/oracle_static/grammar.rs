@@ -188,6 +188,38 @@ pub(crate) fn parse_zone_names_from_tp(tp: &TextPair) -> Vec<Zone> {
     zones
 }
 
+/// CR 601.3 + CR 601.2a: Parse a "from anywhere other than <zone>" casting
+/// restriction into the explicit list of *prohibited* zones.
+///
+/// "Anywhere other than [hand]" is the inverse of `parse_zone_names_from_tp`'s
+/// "from [zone-list]" form: it names the single zone a spell *may* be cast from,
+/// so the prohibited set is "every cast-capable zone except that one". The only
+/// zones a spell can be cast from are Hand, Graveyard, Library, Exile, and
+/// Command (Stack/Battlefield are never cast-from zones — CR 601.2a moves a card
+/// "from where it is to the stack"), so the complement of `allowed` over that set
+/// is the prohibited list. Drannith Magistrate ("anywhere other than their
+/// hands") and the static half of the Avatar's Wrath class collapse here.
+///
+/// Returns `None` when the restriction is not of the "anywhere other than" form,
+/// so the caller falls back to the explicit zone-list parser.
+pub(crate) fn parse_cast_from_anywhere_other_than_tp(tp: &TextPair) -> Option<Vec<Zone>> {
+    if !nom_primitives::scan_contains(tp.lower, "from anywhere other than") {
+        return None;
+    }
+    // Currently only the "their hand(s)" allowed-zone phrasing is printed. The
+    // allowed zone is the hand; the prohibited set is its complement.
+    let allowed = if nom_primitives::scan_contains(tp.lower, "their hand")
+        || nom_primitives::scan_contains(tp.lower, "your hand")
+    {
+        Zone::Hand
+    } else {
+        return None;
+    };
+    Some(crate::parser::oracle_target::cast_capable_zones_except(
+        allowed,
+    ))
+}
+
 /// Parse a color name from Oracle text, delegating to the shared nom color combinator.
 ///
 /// Accepts leading/trailing whitespace and requires complete consumption (no trailing text
@@ -545,20 +577,24 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     }
 
     // CR 509.1b: "can't be blocked" on enchanted/equipped creature
-    let (body_tp, suffix_condition) =
-        if let Some((body_tp, condition_tp)) = pred_tp.split_around(" as long as ") {
-            let condition_text = condition_tp.original.trim().trim_end_matches('.');
-            (
-                body_tp,
-                Some(parse_attached_static_condition(condition_text).unwrap_or(
-                    StaticCondition::Unrecognized {
-                        text: condition_text.to_string(),
-                    },
-                )),
-            )
-        } else {
-            (pred_tp, None)
-        };
+    let (body_tp, suffix_condition) = if let Some((body_tp, _)) = pred_tp.split_around(" unless ") {
+        (
+            body_tp,
+            super::shared::parse_unless_static_condition(&pred_tp),
+        )
+    } else if let Some((body_tp, condition_tp)) = pred_tp.split_around(" as long as ") {
+        let condition_text = condition_tp.original.trim().trim_end_matches('.');
+        (
+            body_tp,
+            Some(parse_attached_static_condition(condition_text).unwrap_or(
+                StaticCondition::Unrecognized {
+                    text: condition_text.to_string(),
+                },
+            )),
+        )
+    } else {
+        (pred_tp, None)
+    };
     let body_lower = body_tp.lower;
 
     if nom_tag_lower(body_lower, body_lower, "can't be blocked").is_some() {
