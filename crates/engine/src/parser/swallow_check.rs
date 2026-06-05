@@ -1962,6 +1962,11 @@ fn detect_duration_this_turn(
         "OpponentGainedLife",
         "CastSpellThisTurn",
         "SpellsCastThisTurn",
+        // CR 305.2a + CR 603.4: "played a land this turn" / "played a land or cast a
+        // spell this turn from anywhere other than your hand" — the land-play count
+        // IS the "this turn" scope; `LandsPlayedThisTurn` in the AST means the clause
+        // was captured by the intervening-if condition parser, not swallowed.
+        "LandsPlayedThisTurn",
         "AttackedThisTurn",
         "CounterAddedThisTurn",
         "NthSpellThisTurn",
@@ -2589,6 +2594,26 @@ mod tests {
             "{T}: Draw a card. Activate only if you attacked with two or more creatures this turn.",
             "Test Keep",
             &["Land"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    /// CR 305.2a + CR 603.4: Spider-Man 2099's end-step trigger has "this turn"
+    /// in its intervening-if condition ("if you've played a land or cast a spell
+    /// this turn from anywhere other than your hand"). Both arms of the disjunction
+    /// are turn-history quantities (`LandsPlayedThisTurn` / `SpellsCastThisTurn`)
+    /// — not forward-looking durations — so `detect_duration_this_turn` must not
+    /// fire even after the casting restriction parses cleanly (no Unimplemented
+    /// shield).
+    #[test]
+    fn duration_this_turn_accepts_land_or_spell_this_turn_disjunction_condition() {
+        let parsed = parse_named(
+            "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.\n\
+             Double strike, vigilance\n\
+             At the beginning of your end step, if you've played a land or cast a spell this turn from anywhere other than your hand, ~ deals damage equal to its power to any target.",
+            "Spider-Man 2099",
+            &["Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
