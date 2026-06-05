@@ -2328,6 +2328,56 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         }
     }
 
+    // CR 611.2a: Duration mid-clause before a trailing conjunct, variable
+    // definition, or alternative expiry. End-of-string durations are handled
+    // above. Do NOT treat " unless " as a boundary here — unless-pay parsers
+    // (`try_parse_unless_player_have_deal_damage`, `extract_resolution_unless_pay_modifier`)
+    // own that tail and must see the full phrase.
+    for (phrase, duration) in [
+        (" until end of turn", Duration::UntilEndOfTurn),
+        (" this turn", Duration::UntilEndOfTurn),
+        (" until end of combat", Duration::UntilEndOfCombat),
+        (
+            " until the end of your next turn",
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until the end of their next turn",
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until their next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until your next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until ~ leaves the battlefield",
+            Duration::UntilHostLeavesPlay,
+        ),
+        (
+            " until this creature leaves the battlefield",
+            Duration::UntilHostLeavesPlay,
+        ),
+    ] {
+        for delimiter in [", or ", ", where "] {
+            let pattern = format!("{phrase}{delimiter}");
+            if let Some(pos) = lower.find(&pattern) {
+                return (text[..pos].trim_end(), Some(duration));
+            }
+        }
+    }
+
     // CR 611.2b: "for as long as [condition]" — extract condition from trailing phrase.
     if let Some(pos) = lower.rfind(" for as long as ") {
         let condition_text = &lower[pos + " for as long as ".len()..];

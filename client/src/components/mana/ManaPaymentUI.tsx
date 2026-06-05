@@ -250,7 +250,7 @@ export function ManaPaymentUI() {
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4"
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4"
         initial={{ y: 80, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         exit={{ y: 80, opacity: 0 }}
