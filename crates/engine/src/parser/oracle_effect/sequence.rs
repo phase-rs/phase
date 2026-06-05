@@ -1227,12 +1227,22 @@ fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool 
     if result.is_ok() {
         return true;
     }
-    // "{type phrase} you control each " — mirror `parse_controlled_creature_each_second_subject`.
-    if let Some(pos) = lower.find(" you control each ") {
-        let type_phrase = lower[..pos].trim();
-        return !type_phrase.is_empty() && !type_phrase.contains(" and ");
-    }
-    false
+    controlled_creature_each_subject_starts(&lower)
+}
+
+fn controlled_creature_each_subject_starts(lower: &str) -> bool {
+    let Ok((_, type_phrase)) = terminated(
+        take_until::<_, _, OracleError<'_>>(" you control each "),
+        tag::<_, _, OracleError<'_>>(" you control each "),
+    )
+    .parse(lower) else {
+        return false;
+    };
+    let type_phrase = type_phrase.trim();
+    !type_phrase.is_empty()
+        && take_until::<_, _, OracleError<'_>>(" and ")
+            .parse(type_phrase)
+            .is_err()
 }
 
 /// Restricted clause-start check for bare " and " splitting (not after comma).
@@ -1545,10 +1555,13 @@ fn combat_requirement_conjunct_prepend(
     remainder_trimmed: &str,
 ) -> Option<String> {
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    let cant_be_blocked_restriction =
+        super::subject::is_cant_be_blocked_restriction_predicate(&remainder_lower);
     if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
         && !super::subject::is_can_block_extra_predicate(&remainder_lower)
         && !super::subject::is_can_attack_despite_defender_predicate(&remainder_lower)
-        && !super::subject::is_cant_be_blocked_restriction_predicate(&remainder_lower)
+        && !(cant_be_blocked_restriction
+            && cant_be_blocked_restriction_needs_subject_reattach(&remainder_lower))
     {
         return None;
     }
@@ -1579,8 +1592,9 @@ fn combat_requirement_conjunct_prepend(
             alt((tag::<_, _, OracleError<'_>>(" gains "), tag(" gain ")))
                 .parse(after)
                 .ok()?;
-            // Map the verb position back onto the original-case slice.
-            let subject = before_and[..before_verb.len()].trim();
+            // Map the verb position back onto the original-case slice and keep
+            // only the local sentence's subject.
+            let subject = local_subject_before_continuous_verb(before_and, before_verb.len())?;
             (!subject.is_empty()).then_some(subject)
         })
         .or_else(|| {
@@ -1592,8 +1606,10 @@ fn combat_requirement_conjunct_prepend(
                     alt((tag::<_, _, OracleError<'_>>(" gets "), tag(" get ")))
                         .parse(after)
                         .ok()?;
-                    // Map the verb position back onto the original-case slice.
-                    let subject = before_and[..before_verb.len()].trim();
+                    // Map the verb position back onto the original-case slice
+                    // and keep only the local sentence's subject.
+                    let subject =
+                        local_subject_before_continuous_verb(before_and, before_verb.len())?;
                     (!subject.is_empty()).then_some(subject)
                 })
         })?;
@@ -1610,6 +1626,29 @@ fn combat_requirement_conjunct_prepend(
     } else {
         Some(format!("{subject_text} "))
     }
+}
+
+fn cant_be_blocked_restriction_needs_subject_reattach(remainder_lower: &str) -> bool {
+    // Plain inline evasion grants are owned by `parse_continuous_modifications`
+    // and must stay in one static definition. The where-suffixed form needs a
+    // split so the first conjunct's duration is not hidden behind the trailing
+    // variable definition.
+    nom_primitives::scan_contains(remainder_lower, "where ")
+}
+
+fn local_subject_before_continuous_verb(before_and: &str, before_verb_len: usize) -> Option<&str> {
+    let mut subject = before_and[..before_verb_len].trim();
+    let mut remaining = subject;
+    while let Ok((after_sentence, _)) = terminated(
+        take_until::<_, _, OracleError<'_>>(". "),
+        tag::<_, _, OracleError<'_>>(". "),
+    )
+    .parse(remaining)
+    {
+        subject = after_sentence.trim();
+        remaining = subject;
+    }
+    (!subject.is_empty()).then_some(subject)
 }
 
 /// CR 121.1 / CR 119.1: Returns true when the token immediately following a

@@ -8889,8 +8889,8 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 /// <subject-B> each <body>" into an AbilityDefinition chain whose halves apply
 /// `<body>` to two different recipients.
 ///
-/// Recognized subject axes (each is one `alt()` call; permutations are never
-/// enumerated):
+/// Recognized static subject axes (each is one `alt()` call; permutations are
+/// never enumerated):
 /// - First subject: `you` → `OriginalController` (player axis), or `~` →
 ///   `SelfRef` (object axis — the ability source, e.g. Gogo).
 /// - Second subject: `that player` → `ScopedPlayer` (the iterated voter for
@@ -8918,9 +8918,9 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 /// returned and the caller falls through to Unimplemented.
 /// CR 109.5 + CR 608.2c: Parse the compound-subject distribution prefix
 /// (`"<A> and <B> each "`), returning the two authoritatively-bound recipient
-/// filters and the remaining body text offset. Composed from independent
-/// dimensions (first-subject × second-subject × "each"); each axis is one
-/// `alt()` call so new compound forms extend without enumerating permutations.
+/// filters and the remaining body text offset. Static dimensions are composed
+/// from independent `alt()` axes; the dynamic controlled-creature subject is a
+/// fallback for type phrases such as "Drakes you control each".
 ///
 /// Shared by `try_parse_compound_subject_each` (which builds the distributed
 /// chain) and `text_is_compound_subject_distribution` (the chunk-loop guard
@@ -8929,14 +8929,16 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 /// and the distributor never drift.
 /// Second-subject axis: "{type phrase} you control each " (Alandra, Sky Dreamer:
 /// "~ and Drakes you control each get +X/+X until end of turn").
-fn parse_controlled_creature_each_second_subject(
-    rest: &str,
-) -> Option<(usize, TargetFilter)> {
+fn parse_controlled_creature_each_second_subject(rest: &str) -> Option<(usize, TargetFilter)> {
     const SUFFIX: &str = " you control each ";
-    let lower = rest.to_ascii_lowercase();
-    let pos = lower.find(SUFFIX)?;
-    let type_phrase = rest[..pos].trim();
-    if type_phrase.is_empty() || type_phrase.contains(" and ") {
+    let (remaining, type_phrase) = terminated(
+        take_until::<_, _, OracleError<'_>>(SUFFIX),
+        tag::<_, _, OracleError<'_>>(SUFFIX),
+    )
+    .parse(rest)
+    .ok()?;
+    let type_phrase = type_phrase.trim();
+    if type_phrase.is_empty() || type_phrase_has_compound_conjunction(type_phrase) {
         return None;
     }
     let normalized = format!("all {type_phrase} you control");
@@ -8944,36 +8946,65 @@ fn parse_controlled_creature_each_second_subject(
     if !remainder.trim().is_empty() || matches!(filter, TargetFilter::None) {
         return None;
     }
-    Some((pos + SUFFIX.len(), filter))
+    Some((rest.len() - remaining.len(), filter))
+}
+
+fn type_phrase_has_compound_conjunction(type_phrase: &str) -> bool {
+    take_until::<_, _, OracleError<'_>>(" and ")
+        .parse(type_phrase)
+        .is_ok()
+}
+
+fn parse_static_compound_subject_prefix(
+    lower: &str,
+) -> Option<(usize, TargetFilter, TargetFilter)> {
+    let (remaining, (first_filter, second_filter)) = (
+        alt((
+            value(
+                TargetFilter::OriginalController,
+                tag::<_, _, OracleError<'_>>("you and "),
+            ),
+            value(TargetFilter::SelfRef, tag("~ and ")),
+        )),
+        alt((
+            value(
+                TargetFilter::ScopedPlayer,
+                tag::<_, _, OracleError<'_>>("that player each "),
+            ),
+            value(TargetFilter::Player, tag("target opponent each ")),
+            value(TargetFilter::Player, tag("target player each ")),
+            value(TargetFilter::ParentTarget, tag("that creature each ")),
+        )),
+    )
+        .parse(lower)
+        .ok()?;
+    Some((lower.len() - remaining.len(), first_filter, second_filter))
+}
+
+fn parse_dynamic_compound_subject_prefix(
+    lower: &str,
+) -> Option<(usize, TargetFilter, TargetFilter)> {
+    let (remaining, first_filter) = alt((
+        value(
+            TargetFilter::OriginalController,
+            tag::<_, _, OracleError<'_>>("you and "),
+        ),
+        value(TargetFilter::SelfRef, tag("~ and ")),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (second_consumed, second_filter) =
+        parse_controlled_creature_each_second_subject(remaining)?;
+    Some((
+        lower.len() - remaining.len() + second_consumed,
+        first_filter,
+        second_filter,
+    ))
 }
 
 fn parse_compound_subject_prefix(lower: &str) -> Option<(usize, TargetFilter, TargetFilter)> {
-    for (first_tag, first_filter) in [
-        ("you and ", TargetFilter::OriginalController),
-        ("~ and ", TargetFilter::SelfRef),
-    ] {
-        let Some(rest) = lower.strip_prefix(first_tag) else {
-            continue;
-        };
-        for (second_tag, second_filter) in [
-            ("that player each ", TargetFilter::ScopedPlayer),
-            ("target opponent each ", TargetFilter::Player),
-            ("target player each ", TargetFilter::Player),
-            ("that creature each ", TargetFilter::ParentTarget),
-        ] {
-            if rest.starts_with(second_tag) {
-                let consumed = first_tag.len() + second_tag.len();
-                return Some((consumed, first_filter.clone(), second_filter));
-            }
-        }
-        if let Some((second_consumed, second_filter)) =
-            parse_controlled_creature_each_second_subject(rest)
-        {
-            let consumed = first_tag.len() + second_consumed;
-            return Some((consumed, first_filter, second_filter));
-        }
-    }
-    None
+    parse_static_compound_subject_prefix(lower)
+        .or_else(|| parse_dynamic_compound_subject_prefix(lower))
 }
 
 /// CR 109.5 + CR 608.2c: True when `text` opens with a compound-subject
@@ -8992,11 +9023,9 @@ fn try_parse_compound_subject_each(
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    // Compose the prefix from independent dimensions via the shared
-    //   first-subject × " and " × second-subject × " each " × <body>
-    // grammar in `parse_compound_subject_prefix` (kept in lockstep with the
-    // chunk-loop guard `text_is_compound_subject_distribution`). Each axis is
-    // one alt() call; we never enumerate the permutations.
+    // Compose the prefix through the shared grammar in
+    // `parse_compound_subject_prefix` (kept in lockstep with the chunk-loop guard
+    // `text_is_compound_subject_distribution`).
     let (consumed_prefix, first_filter, second_filter) =
         parse_compound_subject_prefix(lower.as_str())?;
 

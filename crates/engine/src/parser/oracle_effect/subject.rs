@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
-use nom::combinator::{all_consuming, map, opt, value, verify};
+use nom::combinator::{all_consuming, map, opt, rest, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -657,21 +657,7 @@ pub(super) fn is_can_attack_despite_defender_predicate(lower: &str) -> bool {
 /// `combat_requirement_conjunct_prepend` to re-attach the subject.
 pub(super) fn is_cant_be_blocked_restriction_predicate(lower: &str) -> bool {
     let trimmed = lower.trim().trim_end_matches('.').trim();
-    let blocked_tail = trimmed
-        .strip_prefix("can't be blocked ")
-        .or_else(|| trimmed.strip_prefix("cannot be blocked "));
-    let Some(mut tail) = blocked_tail else {
-        return false;
-    };
-    tail = tail
-        .strip_prefix("this turn ")
-        .or_else(|| tail.strip_prefix("this combat "))
-        .unwrap_or(tail);
-    if tail.is_empty() {
-        return true;
-    }
-    tail.starts_with("except by ")
-        || tail.starts_with("by ")
+    parse_cant_be_blocked_restriction_predicate(trimmed).is_ok()
         || parse_restriction_modes(trimmed).is_some_and(|modes| {
             modes.iter().any(|mode| {
                 matches!(
@@ -682,6 +668,20 @@ pub(super) fn is_cant_be_blocked_restriction_predicate(lower: &str) -> bool {
                 )
             })
         })
+}
+
+fn parse_cant_be_blocked_restriction_predicate(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("can't be blocked"),
+        tag("cannot be blocked"),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(alt((tag(" this turn"), tag(" this combat")))).parse(input)?;
+    if input.is_empty() {
+        return Ok((input, ()));
+    }
+    let (input, _) = (tag(" "), alt((tag("except by "), tag("by "))), rest).parse(input)?;
+    Ok((input, ()))
 }
 
 fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {

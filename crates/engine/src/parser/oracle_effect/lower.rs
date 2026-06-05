@@ -2361,7 +2361,10 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
                 player: PlayerScope::Controller,
             },
         ),
-        (" until ~ leaves the battlefield", Duration::UntilHostLeavesPlay),
+        (
+            " until ~ leaves the battlefield",
+            Duration::UntilHostLeavesPlay,
+        ),
         (
             " until this creature leaves the battlefield",
             Duration::UntilHostLeavesPlay,
