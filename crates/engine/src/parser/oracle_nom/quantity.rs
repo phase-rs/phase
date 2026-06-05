@@ -21,8 +21,9 @@ use crate::parser::oracle_target::{
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
-    CountScope, DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerScope, QuantityExpr,
-    QuantityRef, RoundingMode, SharedQuality, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    CountScope, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty, ObjectScope,
+    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality, TargetFilter, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterMatch;
 use crate::types::player::PlayerCounterKind;
@@ -418,6 +419,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_cards_in_zone_ref,
         parse_self_power_ref,
         parse_self_toughness_ref,
+        parse_damage_dealt_this_turn_ref,
         parse_life_lost_ref,
         parse_life_gained_ref,
         parse_starting_life_ref,
@@ -1276,6 +1278,30 @@ fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
+/// Parse damage-history references such as Chandra's Incinerator's
+/// "total amount of noncombat damage dealt to your opponents this turn".
+fn parse_damage_dealt_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = opt(tag("the ")).parse(input)?;
+    let (input, _) =
+        tag("total amount of noncombat damage dealt to your opponents this turn").parse(input)?;
+
+    Ok((
+        input,
+        QuantityRef::DamageDealtThisTurn {
+            source: Box::new(TargetFilter::Any),
+            target: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                ],
+            }),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: DamageKindFilter::NoncombatOnly,
+        },
+    ))
+}
+
 /// Parse life-lost references: "the life you've lost this turn", "life you've lost", etc.
 /// Includes duration-stripped forms (without "this turn") for post-duration-stripping contexts.
 /// Accepts an optional "(the) amount of " prefix so phrases like
@@ -1824,6 +1850,7 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_counter_added_this_turn_for_each,
         parse_object_colors_for_each,
         parse_object_name_word_count_for_each,
+        parse_object_typeline_component_count_for_each,
         parse_mana_symbols_in_object_mana_cost_for_each,
         parse_distinct_card_types_in_zone,
         parse_foretold_cards_owned_in_exile,
@@ -2155,6 +2182,20 @@ fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
         ),
     ))
     .parse(rest)
+}
+
+/// CR 205.4a + CR 205.2a + CR 205.3: Parse "supertype, card type, and subtype
+/// <object> has" (Embiggen) into a scoped typeline-component count.
+fn parse_object_typeline_component_count_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) =
+        tag::<_, _, OracleError<'_>>("supertype, card type, and subtype ").parse(input)?;
+    let (rest, scope) = parse_object_typeline_scope(rest)?;
+    let (rest, _) = tag(" has").parse(rest)?;
+    Ok((rest, QuantityRef::ObjectTypelineComponentCount { scope }))
+}
+
+fn parse_object_typeline_scope(input: &str) -> OracleResult<'_, ObjectScope> {
+    alt((parse_object_color_of_scope, parse_object_possessive_scope)).parse(input)
 }
 
 /// CR 201.1 + CR 201.2: Parse
@@ -2504,7 +2545,7 @@ fn parse_for_each_recipient_shared_quality(input: &str) -> OracleResult<'_, Quan
         opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
     let (rest, type_filter) = parse_type_filter_word(rest)?;
     let (rest, _) = tag(" on the battlefield ").parse(rest)?;
-    let (rest, shared_quality) = parse_shared_quality_clause(rest)?;
+    let (rest, shared_quality) = parse_shared_quality_clause(rest, &ParseContext::default())?;
 
     let mut properties = Vec::new();
     if has_other.is_some() {
@@ -2879,6 +2920,94 @@ mod tests {
             },
             other => panic!("expected ObjectCount, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_for_each_clause_expr_other_attacking_creature_sharing_type() {
+        let expr = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other attacking creature that shares a creature type with it",
+        )
+        .expect("for-each expr");
+        assert!(matches!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_for_each_other_attacking_creature_sharing_via_oracle_quantity_fallback() {
+        let qty = crate::parser::oracle_quantity::parse_for_each_clause(
+            "other attacking creature that shares a creature type with it",
+        )
+        .expect("oracle_quantity type-phrase fallback should parse Shared Animosity for-each");
+        let QuantityRef::ObjectCount { filter } = qty else {
+            panic!("expected object count");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed");
+        };
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn parse_for_each_other_attacking_goblin_via_type_phrase_fallback() {
+        let qty = crate::parser::oracle_quantity::parse_for_each_clause("other attacking Goblin")
+            .expect("oracle_quantity fallback should parse other attacking Goblin");
+        assert!(matches!(
+            qty,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_for_each_other_attacking_creature_sharing_type_with_it() {
+        use crate::types::ability::{
+            ControllerRef, FilterProp, SharedQuality, SharedQualityRelation, TargetFilter,
+            TypeFilter, TypedFilter,
+        };
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            ..Default::default()
+        };
+        let qty = crate::parser::oracle_quantity::parse_for_each_clause_with_context(
+            "other attacking creature that shares a creature type with it",
+            &ctx,
+        )
+        .expect("for-each clause with trigger subject");
+        let QuantityRef::ObjectCount { filter } = qty else {
+            panic!("expected object count");
+        };
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) = filter
+        else {
+            panic!("expected typed filter");
+        };
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert!(properties.contains(&FilterProp::Another));
+        assert!(properties.contains(&FilterProp::Attacking));
+        assert!(properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
+        )));
     }
 
     #[test]
@@ -3274,6 +3403,19 @@ mod tests {
             q,
             QuantityRef::PartySize {
                 player: PlayerScope::Controller
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_for_each_typeline_components_it_has() {
+        let (rest, q) =
+            parse_for_each("for each supertype, card type, and subtype it has").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectTypelineComponentCount {
+                scope: crate::types::ability::ObjectScope::Recipient,
             }
         );
         assert_eq!(rest, "");

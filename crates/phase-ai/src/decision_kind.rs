@@ -124,6 +124,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // CR 702.140c + CR 730.2a: mutate top/bottom merge side — a forced
         // mid-resolution choice; route to the ability catch-all.
         | WaitingFor::MutateMergeChoice { .. }
+        // CR 702.99a: cipher encode-on-resolve — a mid-resolution selection;
+        // route to the same ability catch-all as the mutate merge choice.
+        | WaitingFor::CipherEncodeChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }

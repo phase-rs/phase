@@ -118,6 +118,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SpecializeColor { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::MutateMergeChoice { .. }
+            | WaitingFor::CipherEncodeChoice { .. }
             | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
@@ -2496,6 +2497,17 @@ pub(super) fn handle_resolution_choice(
             let waiting =
                 crate::game::merge::handle_mutate_merge_choice(state, player, side, events)?;
             ResolutionChoiceOutcome::WaitingFor(waiting)
+        }
+        // CR 702.99a: The resolving Cipher spell's controller chose a creature to
+        // encode the card on (or declined). `cipher::handle_encode_choice`
+        // exiles+links on accept or routes the card to its graveyard on decline,
+        // then resolution is complete — return to priority so the resulting zone
+        // change's triggers/SBAs are processed.
+        (WaitingFor::CipherEncodeChoice { card_id, .. }, GameAction::CipherEncode { creature }) => {
+            crate::game::cipher::handle_encode_choice(state, card_id, creature, events);
+            ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                player: state.active_player,
+            })
         }
         // CR 903.9a: Owner decides whether to return their commander to the command zone.
         // Accept = move to command zone; Decline = leave in current zone (marked as

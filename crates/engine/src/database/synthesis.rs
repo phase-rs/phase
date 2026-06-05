@@ -14,11 +14,11 @@ use crate::types::ability::{
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration,
     Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
+    StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -2735,6 +2735,165 @@ fn static_grants_haste_to_self(static_def: &StaticDefinition) -> bool {
         })
 }
 
+/// CR 702.98a: Unleash represents two static abilities — the permanent "may enter
+/// with an additional +1/+1 counter on it" and "can't block as long as it has a
+/// +1/+1 counter on it." The first mirrors `synthesize_riot`'s optional ETB +1/+1
+/// counter (here with no decline branch); the second is a `CantBlock` static gated
+/// on the creature carrying any +1/+1 counter (CR 702.98a keys on *any* such
+/// counter, not only the unleash one). Static grants of Unleash synthesize the
+/// same shape from the static's affected filter, mirroring `synthesize_riot`.
+pub fn synthesize_unleash(face: &mut CardFace) {
+    let printed_count = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Unleash))
+        .count();
+    add_unleash_replacements(face, TargetFilter::SelfRef, printed_count);
+    if printed_count > 0 {
+        add_unleash_cant_block_static(
+            face,
+            TargetFilter::SelfRef,
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                minimum: 1,
+                maximum: None,
+            },
+        );
+    }
+
+    let static_grants: Vec<TargetFilter> = face
+        .static_abilities
+        .iter()
+        .filter(|static_def| static_grants_unleash(static_def))
+        .map(|static_def| static_def.affected.clone().unwrap_or(TargetFilter::Any))
+        .collect();
+    for filter in static_grants {
+        add_unleash_replacements(face, filter.clone(), 1);
+        add_unleash_cant_block_static(
+            face,
+            filter,
+            StaticCondition::RecipientHasCounters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                minimum: 1,
+                maximum: None,
+            },
+        );
+    }
+}
+
+fn static_grants_unleash(static_def: &StaticDefinition) -> bool {
+    static_def.mode == StaticMode::Continuous
+        && static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Unleash
+                }
+            )
+        })
+}
+
+fn add_unleash_replacements(face: &mut CardFace, valid_card: TargetFilter, needed: usize) {
+    let existing = face
+        .replacements
+        .iter()
+        .filter(|replacement| is_unleash_replacement(replacement, &valid_card))
+        .count();
+    for _ in existing..needed {
+        face.replacements
+            .push(build_unleash_replacement(valid_card.clone()));
+    }
+}
+
+fn build_unleash_replacement(valid_card: TargetFilter) -> ReplacementDefinition {
+    // CR 702.98a: "You may have this permanent enter with an additional +1/+1
+    // counter on it."
+    let counter_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("This permanent enters with an additional +1/+1 counter on it".to_string());
+
+    ReplacementDefinition {
+        event: ReplacementEvent::Moved,
+        execute: Some(Box::new(counter_branch)),
+        mode: crate::types::ability::ReplacementMode::Optional { decline: None },
+        valid_card: Some(valid_card),
+        destination_zone: Some(Zone::Battlefield),
+        description: Some(
+            "CR 702.98a: Unleash — this permanent may enter with an additional +1/+1 counter on it."
+                .to_string(),
+        ),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    }
+}
+
+fn is_unleash_replacement(replacement: &ReplacementDefinition, valid_card: &TargetFilter) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || replacement.valid_card.as_ref() != Some(valid_card)
+        || replacement.destination_zone != Some(Zone::Battlefield)
+        || !matches!(
+            replacement.mode,
+            crate::types::ability::ReplacementMode::Optional { decline: None }
+        )
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    )
+}
+
+fn add_unleash_cant_block_static(
+    face: &mut CardFace,
+    affected: TargetFilter,
+    condition: StaticCondition,
+) {
+    if !face
+        .static_abilities
+        .iter()
+        .any(|static_def| is_unleash_cant_block_static(static_def, &affected, &condition))
+    {
+        face.static_abilities
+            .push(build_unleash_cant_block_static(affected, condition));
+    }
+}
+
+fn build_unleash_cant_block_static(
+    affected: TargetFilter,
+    condition: StaticCondition,
+) -> StaticDefinition {
+    // CR 702.98a: "This permanent can't block as long as it has a +1/+1 counter on
+    // it." The condition is source-relative for printed Unleash and
+    // recipient-relative for static grants.
+    StaticDefinition::new(StaticMode::CantBlock)
+        .affected(affected)
+        .condition(condition)
+        .description("can't block as long as it has a +1/+1 counter on it".to_string())
+}
+
+fn is_unleash_cant_block_static(
+    static_def: &StaticDefinition,
+    affected: &TargetFilter,
+    condition: &StaticCondition,
+) -> bool {
+    static_def.mode == StaticMode::CantBlock
+        && static_def.affected.as_ref() == Some(affected)
+        && static_def.condition.as_ref() == Some(condition)
+}
+
 /// CR 702.93a: Undying — "When this permanent is put into a graveyard from the
 /// battlefield, if it had no +1/+1 counters on it, return it to the battlefield
 /// under its owner's control with a +1/+1 counter on it."
@@ -4377,12 +4536,53 @@ pub fn synthesize_ingest(face: &mut CardFace) {
 ///
 /// Each instance of Extort triggers separately (CR 702.101b), so one trigger
 /// is synthesized per `Keyword::Extort` instance.
+fn is_extort_mana_cost(cost: &ManaCost) -> bool {
+    matches!(
+        cost,
+        ManaCost::Cost {
+            shards,
+            generic: 0,
+        } if shards.as_slice() == [ManaCostShard::WhiteBlack]
+    )
+}
+
 fn is_extort_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::SpellCast)
         && matches!(t.valid_target, Some(TargetFilter::Controller))
-        && t.execute
-            .as_deref()
-            .is_some_and(|a| a.optional && a.cost.is_some())
+        && t.execute.as_deref().is_some_and(|a| {
+            a.optional
+                && matches!(
+                    &*a.effect,
+                    Effect::PayCost {
+                        cost: PaymentCost::AbilityCost {
+                            cost: AbilityCost::Mana { cost },
+                        },
+                        payer: TargetFilter::Controller,
+                    } if is_extort_mana_cost(cost)
+                )
+                && a.sub_ability.as_deref().is_some_and(|drain| {
+                    matches!(drain.player_scope, Some(PlayerFilter::Opponent))
+                        && drain.condition == Some(AbilityCondition::effect_performed())
+                        && matches!(
+                            &*drain.effect,
+                            Effect::LoseLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: None,
+                            }
+                        )
+                        && drain.sub_ability.as_deref().is_some_and(|gain| {
+                            matches!(
+                                &*gain.effect,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Ref {
+                                        qty: QuantityRef::PreviousEffectAmount,
+                                    },
+                                    player: TargetFilter::Controller,
+                                }
+                            )
+                        })
+                })
+        })
 }
 
 /// CR 702.191a: Intervening-if — this permanent is a creature and mana spent to
@@ -4468,12 +4668,13 @@ fn build_increment_trigger() -> TriggerDefinition {
 }
 
 fn build_extort_trigger() -> TriggerDefinition {
-    // The drain effect: each opponent loses 1 life, you gain that much.
-    // Use player_scope to iterate over opponents for the LoseLife,
-    // then sub_ability for the controller's GainLife.
-    let drain_effect = Effect::LoseLife {
-        amount: QuantityExpr::Fixed { value: 1 },
-        target: None,
+    // CR 702.101a: Optional {W/B} payment must resolve before the opponent drain.
+    // `AbilityDefinition::cost` is not carried into `ResolvedAbility`, so the
+    // payment is modeled as an optional `PayCost` parent (mirroring parsed
+    // "you may pay {cost}. If you do, …" chains) with the drain on the sub.
+    let wb_mana = ManaCost::Cost {
+        shards: vec![ManaCostShard::WhiteBlack],
+        generic: 0,
     };
     let gain_life = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -4484,20 +4685,33 @@ fn build_extort_trigger() -> TriggerDefinition {
             player: TargetFilter::Controller,
         },
     );
-    let execute = AbilityDefinition::new(AbilityKind::Spell, drain_effect)
-        .player_scope(PlayerFilter::Opponent)
-        .sub_ability(gain_life)
-        .optional()
-        .cost(AbilityCost::Mana {
-            cost: ManaCost::Cost {
-                shards: vec![ManaCostShard::WhiteBlack],
-                generic: 0,
+    let drain = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: None,
+        },
+    )
+    .player_scope(PlayerFilter::Opponent)
+    .sub_ability(gain_life)
+    .condition(AbilityCondition::effect_performed());
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Mana {
+                    cost: wb_mana.clone(),
+                },
             },
-        })
-        .description(
-            "CR 702.101a: Extort — pay {W/B}, each opponent loses 1 life, you gain that much life"
-                .to_string(),
-        );
+            payer: TargetFilter::Controller,
+        },
+    )
+    .optional()
+    .sub_ability(drain)
+    .description(
+        "CR 702.101a: Extort — pay {W/B}, each opponent loses 1 life, you gain that much life"
+            .to_string(),
+    );
     TriggerDefinition::new(TriggerMode::SpellCast)
         .valid_target(TargetFilter::Controller)
         .execute(execute)
@@ -6551,6 +6765,7 @@ fn bloodthirst_counter_quantity(value: &BloodthirstValue) -> QuantityExpr {
                 target: Box::new(bloodthirst_opponent_player_filter()),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
+                damage_kind: DamageKindFilter::Any,
             },
         },
     }
@@ -7110,6 +7325,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // haste. Static grants of Riot synthesize matching ETB replacements from
     // their affected filters.
     synthesize_riot(face);
+    // CR 702.98a: Unleash — optional ETB +1/+1 counter plus a "can't block while
+    // it has a +1/+1 counter" static. Sibling of Riot's optional-counter shape.
+    synthesize_unleash(face);
     // CR 702.93a: Undying — dies trigger that returns the permanent with a
     // +1/+1 counter, gated on having had no +1/+1 counter at death (LKI).
     synthesize_undying(face);
@@ -11487,17 +11705,43 @@ mod extort_synthesis_tests {
             panic!("execute body required");
         };
         assert!(execute.optional, "extort must be optional (may pay)");
-        assert!(execute.cost.is_some(), "extort must have a mana cost");
+        let Effect::PayCost {
+            cost:
+                PaymentCost::AbilityCost {
+                    cost: AbilityCost::Mana { cost },
+                },
+            payer,
+        } = &*execute.effect
+        else {
+            panic!("extort must pay W/B via PayCost before draining");
+        };
+        assert_eq!(
+            cost,
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::WhiteBlack],
+                generic: 0,
+            }
+        );
+        assert!(matches!(payer, TargetFilter::Controller));
+
+        let Some(drain) = execute.sub_ability.as_deref() else {
+            panic!("extort must chain drain after payment");
+        };
         assert!(
-            matches!(execute.player_scope, Some(PlayerFilter::Opponent)),
+            matches!(drain.player_scope, Some(PlayerFilter::Opponent)),
             "drain must scope to opponents"
         );
+        assert_eq!(
+            drain.condition,
+            Some(AbilityCondition::effect_performed()),
+            "drain must be gated on successful W/B payment (If you do)"
+        );
         assert!(
-            matches!(&*execute.effect, Effect::LoseLife { .. }),
-            "primary effect must be LoseLife"
+            matches!(&*drain.effect, Effect::LoseLife { .. }),
+            "drain effect must be LoseLife"
         );
 
-        let Some(gain) = execute.sub_ability.as_deref() else {
+        let Some(gain) = drain.sub_ability.as_deref() else {
             panic!("extort must chain a gain-life rider");
         };
         let Effect::GainLife { amount, player } = &*gain.effect else {
@@ -11546,6 +11790,65 @@ mod extort_synthesis_tests {
             .filter(|t| is_extort_trigger(t))
             .count();
         assert_eq!(count, 2);
+    }
+
+    /// CR 604.1: the runtime-granted path (`triggers_for`) yields the same shape
+    /// as the printed path, and `trigger_matches_keyword_kind` recognizes exactly
+    /// that shape for symmetric removal.
+    #[test]
+    fn triggers_for_extort_matches_keyword_kind() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Extort);
+        assert_eq!(triggers.len(), 1);
+        assert!(is_extort_trigger(&triggers[0]));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Extort
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &build_dethrone_trigger(),
+            &Keyword::Extort
+        ));
+    }
+
+    /// The Extort matcher feeds runtime `RemoveKeyword`, so it must not strip a
+    /// coincidental spell-cast trigger with a different payment/drain shape.
+    #[test]
+    fn extort_matcher_rejects_non_extort_pay_and_drain_trigger() {
+        let gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let drain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+        )
+        .player_scope(PlayerFilter::Opponent)
+        .sub_ability(gain)
+        .condition(AbilityCondition::effect_performed());
+        let execute = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+        )
+        .optional()
+        .sub_ability(drain);
+        let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_target(TargetFilter::Controller)
+            .execute(execute);
+
+        assert!(!is_extort_trigger(&trigger));
     }
 
     /// CR 702.101a: "you gain that much life" means the total life actually
@@ -11805,6 +12108,131 @@ mod riot_synthesis_tests {
                 .any(|replacement| is_riot_replacement(replacement, &affected)),
             "static Riot grant should add ETB replacement for affected filter, got {:?}",
             face.replacements
+        );
+    }
+
+    #[test]
+    fn synthesize_unleash_adds_optional_etb_counter_and_cant_block_static() {
+        // CR 702.98a: both halves — the optional ETB +1/+1 counter and the
+        // "can't block while it has a +1/+1 counter" static.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Unleash);
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_unleash(&mut face);
+        assert!(
+            face.replacements
+                .iter()
+                .any(|replacement| is_unleash_replacement(replacement, &TargetFilter::SelfRef)),
+            "unleash should add an optional ETB +1/+1 counter replacement, got {:?}",
+            face.replacements
+        );
+        let condition = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        };
+        assert!(
+            face.static_abilities
+                .iter()
+                .any(|static_def| is_unleash_cant_block_static(
+                    static_def,
+                    &TargetFilter::SelfRef,
+                    &condition
+                )),
+            "unleash should add a counter-conditioned CantBlock static, got {:?}",
+            face.static_abilities
+        );
+    }
+
+    #[test]
+    fn synthesize_unleash_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Unleash);
+        synthesize_unleash(&mut face);
+        synthesize_unleash(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|replacement| is_unleash_replacement(replacement, &TargetFilter::SelfRef))
+                .count(),
+            1
+        );
+        let condition = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        };
+        assert_eq!(
+            face.static_abilities
+                .iter()
+                .filter(|static_def| is_unleash_cant_block_static(
+                    static_def,
+                    &TargetFilter::SelfRef,
+                    &condition
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_unleash_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_unleash(&mut face);
+        assert!(face
+            .replacements
+            .iter()
+            .all(|r| !is_unleash_replacement(r, &TargetFilter::SelfRef)));
+        let condition = StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        };
+        assert!(face
+            .static_abilities
+            .iter()
+            .all(|s| !is_unleash_cant_block_static(s, &TargetFilter::SelfRef, &condition)));
+    }
+
+    #[test]
+    fn synthesize_unleash_static_grant_adds_replacement_and_recipient_cant_block_static() {
+        let mut face = CardFace::default();
+        let affected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::NonToken]),
+        );
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Unleash,
+                }]),
+        );
+        synthesize_unleash(&mut face);
+        assert!(
+            face.replacements
+                .iter()
+                .any(|replacement| is_unleash_replacement(replacement, &affected)),
+            "static Unleash grant should add ETB replacement for affected filter, got {:?}",
+            face.replacements
+        );
+        let condition = StaticCondition::RecipientHasCounters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            minimum: 1,
+            maximum: None,
+        };
+        assert!(
+            face.static_abilities
+                .iter()
+                .any(|static_def| is_unleash_cant_block_static(
+                    static_def,
+                    &affected,
+                    &condition
+                )),
+            "static Unleash grant should add recipient-gated CantBlock for affected filter, got {:?}",
+            face.static_abilities
         );
     }
 }

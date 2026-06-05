@@ -10024,7 +10024,10 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         | QuantityRef::Toughness { scope }
         | QuantityRef::ObjectManaValue { scope }
         | QuantityRef::ObjectColorCount { scope }
-        | QuantityRef::ObjectNameWordCount { scope } => matches!(scope, ObjectScope::Source),
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope } => {
+            matches!(scope, ObjectScope::Source)
+        }
         // Conservative default: any ref not positively known to be
         // board/controller-relative (Variable/X, target-relative scopes,
         // cast/trigger-event context, etc.) makes the condition non-evaluable

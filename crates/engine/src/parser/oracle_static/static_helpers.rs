@@ -41,7 +41,8 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
 
     let (base_part, qual_props) = if let Ok((_, (before, suffix))) = that_split {
         let suffix = suffix.trim_start();
-        let (props, consumed) = crate::parser::oracle_target::parse_that_clause_suffix(suffix)?;
+        let (props, consumed) =
+            crate::parser::oracle_target::parse_that_clause_suffix(suffix, None)?;
         if !suffix[consumed..].trim().is_empty() {
             return None;
         }
@@ -795,6 +796,7 @@ pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticConditio
         "its controller's untap step",
         "its controller\u{2019}s untap step",
         "their controllers' untap steps",
+        "their controllers\u{2019} untap steps",
         "your untap step",
     ];
     let mut after_untap = None;

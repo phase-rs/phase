@@ -1491,6 +1491,7 @@ impl GameRunner {
                 }
             },
             WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
+            WaitingFor::CipherEncodeChoice { .. } => "CipherEncodeChoice",
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
             WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",

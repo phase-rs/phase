@@ -1571,6 +1571,25 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 702.99a: Cipher encode — encode on each legal host creature, or
+        // decline (`creature: None`, card → graveyard).
+        WaitingFor::CipherEncodeChoice {
+            player, creatures, ..
+        } => std::iter::once(candidate(
+            GameAction::CipherEncode { creature: None },
+            TacticalClass::Selection,
+            Some(*player),
+        ))
+        .chain(creatures.iter().map(|id| {
+            candidate(
+                GameAction::CipherEncode {
+                    creature: Some(*id),
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            )
+        }))
+        .collect(),
         WaitingFor::CastingVariantChoice {
             player, options, ..
         } => options

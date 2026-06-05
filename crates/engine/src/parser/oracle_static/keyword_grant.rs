@@ -173,7 +173,7 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         );
         // CR 105.2: trailing "that's one or more colors"/"that's exactly N colors" relative clause → ColorCount.
         let color_props = if let Some((props, consumed)) =
-            crate::parser::oracle_target::parse_that_clause_suffix(cursor)
+            crate::parser::oracle_target::parse_that_clause_suffix(cursor, None)
         {
             cursor = cursor[consumed..].trim_start();
             props
