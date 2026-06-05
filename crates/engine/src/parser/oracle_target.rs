@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
+use nom::character::complete::space1;
 use nom::combinator::{opt, peek, value};
 use nom::multi::many0;
 use nom::Parser;
@@ -1794,6 +1795,20 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Some((prop, consumed)) = parse_counter_suffix(&lower[pos..]) {
         properties.push(prop);
         pos += consumed;
+    }
+
+    // CR 113.1 + CR 113.3: "<type> with no abilities" — an object with none of the
+    // four ability categories. Narrow predicate combinator lives in oracle_nom/filter.rs;
+    // this arm supplies the "with " lead + offset handling, mirroring parse_counter_suffix.
+    {
+        let after_ws = lower[pos..].trim_start();
+        let ws = lower[pos..].len() - after_ws.len();
+        if let Ok((with_rest, _)) = (tag::<_, _, OracleError<'_>>("with"), space1).parse(after_ws) {
+            if let Ok((rest, prop)) = nom_filter::parse_no_abilities(with_rest) {
+                properties.push(prop);
+                pos += ws + (after_ws.len() - rest.len());
+            }
+        }
     }
 
     if let Some((keyword_props, consumed)) = parse_without_keyword_suffix(&lower[pos..]) {
@@ -5872,6 +5887,33 @@ mod tests {
                 }
             ]))
         );
+    }
+
+    #[test]
+    fn no_abilities_suffix_plural() {
+        // CR 113.1 + CR 113.3: "creatures with no abilities" → Creature type +
+        // HasNoAbilities property, fully consumed (Muraganda Petroglyphs anthem
+        // subject).
+        let (f, rest) = parse_type_phrase("creatures with no abilities");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::HasNoAbilities));
+    }
+
+    #[test]
+    fn no_abilities_suffix_singular() {
+        // CR 113.1 + CR 113.3: singular "creature with no abilities" parses the
+        // same predicate.
+        let (f, rest) = parse_type_phrase("creature with no abilities");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::HasNoAbilities));
     }
 
     #[test]

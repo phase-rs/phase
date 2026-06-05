@@ -745,6 +745,43 @@ fn static_merfolk_lord() {
         .contains(&ContinuousModification::AddPower { value: 1 }));
 }
 
+/// CR 113.1 + CR 113.3 + CR 604.1: Muraganda Petroglyphs' battlefield-wide anthem
+/// "Creatures with no abilities get +2/+2." — a `Continuous` static (CR 604.1: always
+/// true, re-evaluated each time) affecting every player's creatures (no controller
+/// restriction) that have none of the four ability categories, granting +2/+2.
+#[test]
+fn static_muraganda_petroglyphs() {
+    let def = parse_static_line("Creatures with no abilities get +2/+2.").expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "must affect creatures, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::HasNoAbilities),
+                "must filter on no abilities, got {:?}",
+                tf.properties
+            );
+            // CR 604.1: no controller restriction → applies to ALL players' creatures.
+            assert_eq!(
+                tf.controller, None,
+                "anthem must affect every player's creatures, got {:?}",
+                tf.controller
+            );
+        }
+        other => panic!("expected Typed(creatures with no abilities), got {other:?}"),
+    }
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 2 }));
+}
+
 /// CR 509.1b + CR 609.4 + CR 702.14c: Ur-Drago's landwalk canceller produces
 /// `StaticMode::IgnoreLandwalkForBlocking { qualifier: Some("Swamp") }`.
 #[test]

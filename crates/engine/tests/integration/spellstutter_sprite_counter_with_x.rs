@@ -24,9 +24,6 @@
 //! `strip_trailing_where_x` + `apply_where_x_to_filter` +
 //! `QuantityRef::ObjectCount`.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use engine::database::card_db::CardDatabase;
 use engine::game::targeting::find_legal_targets;
 use engine::game::zones::create_object;
@@ -41,14 +38,7 @@ use engine::types::PlayerId;
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Extract the `Effect::Counter` target filter from Spellstutter Sprite's
 /// parsed card definition. There are two ability slots on Spellstutter Sprite
