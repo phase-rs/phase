@@ -790,6 +790,24 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
     activatable_object_mana_actions_for_player(state, player)
 }
 
+fn can_use_tap_land_shortcut(
+    state: &GameState,
+    object_id: ObjectId,
+    option: &mana_sources::ManaSourceOption,
+) -> bool {
+    if option.atomic_combination.is_some() {
+        return false;
+    }
+    let Some(ability_index) = option.ability_index else {
+        return true;
+    };
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+        .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
+}
+
 pub(super) fn activatable_object_mana_actions_for_player(
     state: &GameState,
     player: PlayerId,
@@ -806,7 +824,11 @@ pub(super) fn activatable_object_mana_actions_for_player(
         let mut handled_indices = HashSet::new();
         if obj.card_types.core_types.contains(&CoreType::Land) {
             let options = mana_sources::activatable_land_mana_options(state, obj_id, player);
-            if options.len() == 1 {
+            if options.len() == 1
+                && options
+                    .first()
+                    .is_some_and(|option| can_use_tap_land_shortcut(state, obj_id, option))
+            {
                 actions.push(GameAction::TapLandForMana { object_id: obj_id });
                 if let Some(ability_index) = options[0].ability_index {
                     handled_indices.insert(ability_index);
