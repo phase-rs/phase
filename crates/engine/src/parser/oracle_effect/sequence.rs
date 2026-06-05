@@ -1042,10 +1042,49 @@ fn starts_you_control_subject_predicate(s: &str) -> bool {
     .is_ok()
 }
 
+/// CR 613.1b + CR 110.2: True when `s` is a "<player-subject> gains control of …"
+/// clause — i.e. the control-handoff predicate where a *player* (not the acting
+/// controller) takes control of an object. The subject axis is the full set of
+/// player-noun phrases (`an opponent`, `an opponent of your choice`, `target
+/// opponent`, `that player`, `each opponent`, …) recognized by
+/// `subject::starts_with_subject_prefix`; the predicate is the fixed verb phrase
+/// "gains control of ". A player subject followed by this conjugated predicate is
+/// always a standalone subject-predicate clause that lowers to
+/// `Effect::GiveControl` (via the `GainControl → GiveControl` subject rewrite in
+/// `oracle_effect::mod`), never a noun-phrase continuation of the prior conjunct.
+/// So both the comma splitter and the bare-`and` splitter must peel it off as its
+/// own clause — otherwise the control transfer is silently dropped (Slicer, Hired
+/// Muscle: "untap it, goad it, and an opponent of your choice gains control of
+/// it"). Scoped to the "gains control of" verb so plain GainControl (the acting
+/// controller steals) stays on the un-split imperative path.
+fn starts_player_gains_control_clause(s: &str) -> bool {
+    let Ok((_predicate, subject)) =
+        take_until::<_, _, OracleError<'_>>(" gains control of ").parse(s)
+    else {
+        return false;
+    };
+    if subject.trim().is_empty() {
+        return false;
+    }
+    // The span before the predicate must be a recognized player-subject phrase.
+    // Include the boundary space consumed by `take_until`; the predicate match
+    // above guarantees the next byte is the ASCII space before "gains".
+    let subject_phrase = &s[..subject.len() + 1];
+    super::subject::starts_with_subject_prefix(subject_phrase)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_clause_text_lower(s: &str) -> bool {
     if starts_multiword_keyword_continuation(s) {
         return false;
+    }
+
+    // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
+    // clause (Slicer, Hired Muscle). A player subject + "gains control of"
+    // predicate is never a noun-phrase continuation, so it must split off as its
+    // own clause to reach the GiveControl subject-rewrite path.
+    if starts_player_gains_control_clause(s) {
+        return true;
     }
 
     // Table-driven prefix check via nom tag() — try all imperative verbs and
@@ -1203,6 +1242,15 @@ pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
 
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
+    // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
+    // clause (Slicer, Hired Muscle: "untap it, goad it, and an opponent of your
+    // choice gains control of it"). A player subject + "gains control of"
+    // predicate is always a standalone subject-predicate clause, never a
+    // noun-phrase continuation of the prior conjunct — split it off so it reaches
+    // the GiveControl subject-rewrite path instead of being dropped.
+    if starts_player_gains_control_clause(s) {
+        return true;
+    }
     // Split into multiple alt() groups chained with .or() for nom's tuple limit.
     let has_verb_prefix = alt((
         value((), tag::<_, _, OracleError<'_>>("add ")),

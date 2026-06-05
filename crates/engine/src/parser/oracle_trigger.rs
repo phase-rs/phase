@@ -26550,3 +26550,120 @@ mod snapshot_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod slicer_control_handoff_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{AbilityDefinition, ControllerRef, Effect, TargetFilter};
+    use crate::types::TriggerMode;
+
+    /// Walk a chained `AbilityDefinition` collecting one effect per node (parent
+    /// then each nested `sub_ability`). Lets the regression assert the FULL set
+    /// of sub-effects in a "you may pay; if you do, A, B, and C" chain — the
+    /// Slicer defect dropped the trailing conjunct entirely (issue #2032).
+    fn flatten_effects(def: &AbilityDefinition) -> Vec<&Effect> {
+        let mut out = Vec::new();
+        let mut node = Some(def);
+        while let Some(d) = node {
+            out.push(&*d.effect);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+
+    /// CR 613.1b + CR 110.2 (issue #2032): Slicer, Hired Muscle's attack trigger
+    /// is "you may pay {2}. If you do, untap it, goad it, and an opponent of your
+    /// choice gains control of it." Before the fix the chunk splitter failed to
+    /// recognize the trailing "an opponent of your choice gains control of it"
+    /// conjunct as a clause, so the control-handoff sub-effect was silently
+    /// dropped — Slicer untapped (and goaded) but never changed control. The
+    /// trigger must lower to ALL of Untap + Goad + GiveControl(recipient=Opponent).
+    #[test]
+    fn slicer_attack_trigger_includes_all_three_sub_effects() {
+        let parsed = parse_oracle_text(
+            "Whenever Slicer, Hired Muscle attacks, you may pay {2}. If you do, untap it, goad it, and an opponent of your choice gains control of it.",
+            "Slicer, Hired Muscle",
+            &[],
+            &["Artifact".into(), "Creature".into()],
+            &["Equipment".into()],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Attacks))
+            .expect("attack trigger must parse");
+        let execute = trigger.execute.as_ref().expect("execute must be Some");
+        let effects = flatten_effects(execute);
+
+        // PayCost → Untap → Goad → GiveControl, all present.
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Untap { .. })),
+            "untap sub-effect must be present, got {effects:#?}",
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Goad { .. })),
+            "goad sub-effect must be present, got {effects:#?}",
+        );
+        // The trailing conjunct — the sub-effect that was being dropped.
+        let give = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::GiveControl { recipient, .. } => Some(recipient),
+                _ => None,
+            })
+            .expect("control-handoff (GiveControl) sub-effect must not be dropped");
+        assert_eq!(
+            *give,
+            TargetFilter::Typed(
+                crate::types::ability::TypedFilter::default().controller(ControllerRef::Opponent)
+            ),
+            "GiveControl recipient must be an opponent (CR 110.2), got {give:?}",
+        );
+    }
+
+    /// Building-block coverage: a bare-`and` two-clause chain "untap it and an
+    /// opponent gains control of it" must also split the player-subject control
+    /// handoff into its own clause (not an `Unimplemented { name: "an" }`
+    /// fallback that drops the transfer). Exercises the
+    /// `starts_player_gains_control_clause` recognizer on the bare-`and` boundary
+    /// independent of the comma form. The control transfer may lower either to a
+    /// direct `GiveControl` (when the recipient is fully determined, e.g. "an
+    /// opponent of your choice") or to a `Choose(Opponent)` + `GainControl` pair
+    /// (when "an opponent" needs an explicit selection step) — both are correct
+    /// CR 110.2 handoffs; what must never happen is the clause being dropped.
+    #[test]
+    fn player_gains_control_splits_on_bare_and() {
+        let parsed = parse_oracle_text(
+            "Whenever ~ attacks, untap it and an opponent gains control of it.",
+            "Test Card",
+            &[],
+            &["Artifact".into(), "Creature".into()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Attacks))
+            .expect("attack trigger must parse");
+        let effects = flatten_effects(trigger.execute.as_ref().expect("execute"));
+        // The untap clause must survive…
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Untap { .. })),
+            "untap sub-effect must be present, got {effects:#?}",
+        );
+        // …and the control handoff must be present in some valid lowered form,
+        // never an Unimplemented drop.
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::GiveControl { .. } | Effect::GainControl { .. })),
+            "bare-and player control handoff must lower to a control transfer, got {effects:#?}",
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "control-handoff clause must not be dropped as Unimplemented, got {effects:#?}",
+        );
+    }
+}
