@@ -45,6 +45,7 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
         alt((
             value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
             value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
+            value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
         ))
         .parse(i)
     })?

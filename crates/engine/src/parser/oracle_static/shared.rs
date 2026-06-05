@@ -329,6 +329,7 @@ pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
 pub(crate) enum GraveyardGrantedKeywordKind {
     Flashback,
     Escape,
+    Mayhem,
 }
 
 impl GraveyardGrantedKeywordKind {
@@ -339,6 +340,10 @@ impl GraveyardGrantedKeywordKind {
             }
             GraveyardGrantedKeywordKind::Escape => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Escape
+            }
+            // CR 702.187b: Green Goblin grants Mayhem to graveyard cards.
+            GraveyardGrantedKeywordKind::Mayhem => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
             }
         }
     }
