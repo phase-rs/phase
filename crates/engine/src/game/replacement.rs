@@ -9553,6 +9553,112 @@ mod tests {
         assert_eq!(count_subtype("Food"), 2, "Food batch doubled once");
     }
 
+    /// CR 614.1a + CR 109.5: Academy Manufactor's "If *you* would create..."
+    /// is scoped to the source's controller. When a different player creates a
+    /// Treasure token, the replacement must NOT fire — only the single Treasure
+    /// is created, with no Clue or Food (issue #1967). Mirrors the
+    /// `token_owner_scope` enforcement in the main applicability loop.
+    #[test]
+    fn academy_manufactor_does_not_apply_to_other_players_tokens_cr_614_1a() {
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        fn artifact_spec(name: &str) -> TokenSpec {
+            TokenSpec {
+                characteristics: TokenCharacteristics {
+                    display_name: name.to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Artifact],
+                    subtypes: vec![name.to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: name.to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: None,
+            }
+        }
+
+        let manufactor = ObjectId(700);
+        // CR 614.1a + CR 109.5: `token_owner_scope(You)` is what the parser now
+        // emits for the "if you would create" Manufactor shape.
+        let manufactor_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .condition(ReplacementCondition::TokenSubtypeMatches {
+                subtypes: vec![
+                    "Clue".to_string(),
+                    "Food".to_string(),
+                    "Treasure".to_string(),
+                ],
+            })
+            .token_owner_scope(ControllerRef::You)
+            .ensure_token_specs(vec![
+                artifact_spec("Clue"),
+                artifact_spec("Food"),
+                artifact_spec("Treasure"),
+            ]);
+
+        // Manufactor is controlled by PlayerId(0); the opponent PlayerId(1)
+        // will be the one creating a Treasure.
+        let mut state =
+            test_state_with_object(manufactor, Zone::Battlefield, vec![manufactor_repl]);
+
+        let mut treasure = artifact_spec("Treasure");
+        treasure.source_id = manufactor;
+        treasure.controller = PlayerId(1);
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            spec: Box::new(treasure),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute; got {:?}", result);
+        };
+        crate::game::effects::token::apply_create_token_after_replacement(
+            &mut state,
+            primary,
+            &mut events,
+        );
+
+        let count_subtype = |sub: &str| {
+            state
+                .objects
+                .values()
+                .filter(|o| o.is_token && o.card_types.subtypes.iter().any(|s| s == sub))
+                .count()
+        };
+
+        // The opponent's lone Treasure is created unmodified; Manufactor does
+        // not bolt on a Clue and a Food because it does not own the event.
+        assert_eq!(
+            count_subtype("Treasure"),
+            1,
+            "opponent's single Treasure is created unmodified"
+        );
+        assert_eq!(
+            count_subtype("Clue"),
+            0,
+            "Manufactor must not add a Clue to another player's token creation"
+        );
+        assert_eq!(
+            count_subtype("Food"),
+            0,
+            "Manufactor must not add a Food to another player's token creation"
+        );
+    }
+
     /// CR 616.1: When candidates have both commuting Count modifications
     /// AND non-commutative EnterTapped modifications, the set must still
     /// be material and trigger a prompt. This catches the early-return bug

@@ -4399,6 +4399,10 @@ fn parse_xorn_subtype_token_replacement(
             .condition(ReplacementCondition::TokenSubtypeMatches {
                 subtypes: vec![canonical_subtype],
             })
+            // CR 614.1a + CR 109.5: "If *you* would create..." scopes the
+            // replacement to the source's controller — it must not fire for
+            // tokens created by other players (issue #1967).
+            .token_owner_scope(ControllerRef::You)
             .additional_token_spec(spec)
             .description(original_text.to_string()),
     )
@@ -4475,6 +4479,10 @@ fn parse_manufactor_ensure_all_token_replacement(
             .condition(ReplacementCondition::TokenSubtypeMatches {
                 subtypes: condition_subtypes,
             })
+            // CR 614.1a + CR 109.5: "If *you* would create..." scopes the
+            // replacement to the source's controller — it must not fire for
+            // tokens created by other players (issue #1967).
+            .token_owner_scope(ControllerRef::You)
             .ensure_token_specs(specs)
             .description(original_text.to_string()),
     )
@@ -10396,6 +10404,14 @@ mod tests {
             }
             other => panic!("Expected TokenSubtypeMatches, got {other:?}"),
         }
+        // CR 614.1a + CR 109.5: "If you would create..." is scoped to the
+        // source's controller, so the replacement must not fire for tokens
+        // created by other players (issue #1967).
+        assert_eq!(
+            def.token_owner_scope,
+            Some(ControllerRef::You),
+            "Xorn 'if you would create' must scope to the controller's tokens"
+        );
         let spec = def
             .additional_token_spec
             .as_ref()
@@ -10437,6 +10453,15 @@ mod tests {
             }
             other => panic!("Expected TokenSubtypeMatches, got {other:?}"),
         }
+
+        // CR 614.1a + CR 109.5: "If you would create..." is scoped to the
+        // source's controller, so the replacement must not fire for tokens
+        // created by other players (issue #1967).
+        assert_eq!(
+            def.token_owner_scope,
+            Some(ControllerRef::You),
+            "Manufactor 'if you would create' must scope to the controller's tokens"
+        );
 
         let specs = def
             .ensure_token_specs

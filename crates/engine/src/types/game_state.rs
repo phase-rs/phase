@@ -5078,6 +5078,22 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
 
+    /// CR 701.20e: Cards the controller is privately "looking at" during the
+    /// current resolution — the looker-scoped peek window of a bare
+    /// "look at the top card of your library" (Dig with `keep_count == 0`,
+    /// `reveal == false`). Unlike `revealed_cards` (public, all players) and
+    /// `last_revealed_ids` (condition bookkeeping, not viewer-scoped), these ids
+    /// are surfaced by `filter_state_for_viewer` ONLY to `private_look_player`,
+    /// so the looking player can see the card while deciding a subsequent
+    /// "you may reveal that card" optional, without leaking it to opponents.
+    /// Cleared at depth 0 of `resolve_ability_chain` and at action boundaries
+    /// once no optional-effect decision that depends on the peek is pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_look_ids: Vec<ObjectId>,
+    /// CR 701.20e: The player to whom `private_look_ids` is visible (the looker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_look_player: Option<PlayerId>,
+
     /// ObjectIds of objects moved by the most recent zone-change effect.
     /// Used by AbilityCondition::ZoneChangedThisWay to gate sub_abilities on
     /// whether the parent effect moved an object matching a type filter.
@@ -5738,6 +5754,8 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            private_look_ids: Vec::new(),
+            private_look_player: None,
             last_zone_changed_ids: Vec::new(),
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
@@ -5905,17 +5923,22 @@ impl GameState {
             player.library.len().hash(&mut h);
             player.graveyard.len().hash(&mut h);
         }
-        // Per-object tapped/damage rollup (id-sorted) cheaply distinguishes
-        // tap/untap and damage-ping states without a full content hash.
-        let mut ids: Vec<ObjectId> = self.objects.keys().copied().collect();
-        ids.sort_unstable_by_key(|id| id.0);
-        for id in &ids {
-            if let Some(object) = self.objects.get(id) {
-                id.0.hash(&mut h);
-                object.tapped.hash(&mut h);
-                object.damage_marked.hash(&mut h);
-            }
+        // Per-object tapped/damage rollup cheaply distinguishes tap/untap and
+        // damage-ping states without a full content hash. Folded together with XOR
+        // so the rollup is order-independent (im::HashMap iteration order is not
+        // stable across states) in O(N) with zero allocation — sorting the id set
+        // on every call was the hot-path cost on large boards (~2,936 permanents).
+        // Each per-object hash folds in the unique id, so equal (tapped, damage)
+        // on different objects never cancels.
+        let mut objects_rollup = 0u64;
+        for (id, object) in &self.objects {
+            let mut object_hash = rustc_hash::FxHasher::default();
+            id.0.hash(&mut object_hash);
+            object.tapped.hash(&mut object_hash);
+            object.damage_marked.hash(&mut object_hash);
+            objects_rollup ^= object_hash.finish();
         }
+        objects_rollup.hash(&mut h);
         // Any randomness consumed ⇒ different stream position ⇒ no collision.
         self.rng.get_word_pos().hash(&mut h);
         h.finish()
@@ -5962,6 +5985,11 @@ fn objects_content_eq(
                     && x.face_down == y.face_down
                     && x.flipped == y.flipped
                     && x.transformed == y.transformed
+                    // CR 702.26: phasing is mutable per-object status that leaves
+                    // zone and objects.len() unchanged, so two states differing only
+                    // in phased-in/out must not compare equal — else a loop that
+                    // phases a permanent in and out is a wrongful CR 104.4b draw.
+                    && x.phase_status == y.phase_status
                     && x.damage_marked == y.damage_marked
                     && x.dealt_deathtouch_damage == y.dealt_deathtouch_damage
                     && x.attached_to == y.attached_to
@@ -6129,6 +6157,8 @@ impl PartialEq for GameState {
             && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
+            && self.private_look_ids == other.private_look_ids
+            && self.private_look_player == other.private_look_player
             && self.last_zone_changed_ids == other.last_zone_changed_ids
             && self.last_vote_ballots == other.last_vote_ballots
             && self.player_actions_this_way == other.player_actions_this_way

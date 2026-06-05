@@ -11631,6 +11631,15 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return clause;
     }
 
+    // CR 400.11 + CR 400.11a + CR 701.23j: "play/cast a … card you own from
+    // outside the game [this turn]" (Wish, M19) draws from the sideboard /
+    // wishboard pool, not from an in-game zone. Probe it before the generic
+    // cast parser so it lowers to `Effect::SearchOutsideGame` instead of a
+    // `CastFromZone` that would target an in-game permanent (issue #1976).
+    if let Some(effect) = imperative::try_parse_play_from_outside_game(tp.lower, ctx) {
+        return parsed_clause(effect);
+    }
+
     // CR 601.2a + CR 118.9: "cast it/that card without paying its mana cost"
     if let Some(effect) = try_parse_cast_effect(tp.lower) {
         return parsed_clause(effect);
