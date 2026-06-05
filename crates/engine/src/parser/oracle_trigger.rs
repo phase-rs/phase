@@ -2883,6 +2883,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LandsPlayedThisTurn {
                         player: PlayerScope::Controller,
+                        from_zones: None,
                     },
                 },
                 comparator: Comparator::GE,
@@ -22986,6 +22987,57 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             }
         );
+    }
+
+    #[test]
+    fn combinator_handles_played_land_or_cast_spell_from_outside_hand_this_turn() {
+        let (cleaned, cond) = extract_if_condition(
+            "if you've played a land or cast a spell this turn from anywhere other than your hand, ~ deals damage equal to its power to any target",
+        );
+        assert_eq!(cleaned, "~ deals damage equal to its power to any target");
+
+        let TriggerCondition::Or { conditions } = cond.unwrap() else {
+            panic!("expected Or trigger condition");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            &conditions[0],
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LandsPlayedThisTurn {
+                        player: PlayerScope::Controller,
+                        from_zones: Some(_),
+                    }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        ));
+
+        let TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::SpellsCastThisTurn {
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            ..
+                        },
+                },
+            ..
+        } = &conditions[1]
+        else {
+            panic!(
+                "expected spell-history quantity condition, got {:?}",
+                conditions[1]
+            );
+        };
+        let zones = properties.iter().find_map(|prop| match prop {
+            FilterProp::InAnyZone { zones } => Some(zones),
+            _ => None,
+        });
+        let zones = zones.expect("expected InAnyZone origin qualifier");
+        assert!(!zones.contains(&crate::types::zones::Zone::Hand));
+        assert!(zones.contains(&crate::types::zones::Zone::Exile));
     }
 
     #[test]

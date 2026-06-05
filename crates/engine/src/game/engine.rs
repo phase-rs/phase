@@ -7,7 +7,7 @@ use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode, CostResume, GameState,
-    PayCostKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    LandPlayRecord, PayCostKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -4718,6 +4718,20 @@ fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: 
     }
 }
 
+fn record_land_played_from_zone(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    zone: Zone,
+) {
+    mark_land_played_from_zone(state, object_id, zone);
+    state
+        .lands_played_this_turn_by_player
+        .entry(player)
+        .or_default()
+        .push_back(LandPlayRecord { from_zone: zone });
+}
+
 fn handle_play_land(
     state: &mut GameState,
     object_id: ObjectId,
@@ -4986,7 +5000,7 @@ fn handle_play_land(
                     )
                 {
                     state.lands_played_this_turn += 1;
-                    mark_land_played_from_zone(state, object_id, origin_zone);
+                    record_land_played_from_zone(state, player, object_id, origin_zone);
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     record_exile_play_permission(state, exile_permission_source);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
@@ -5014,7 +5028,7 @@ fn handle_play_land(
             // Increment counters now — the land play is committed, only the ETB
             // effect is pending.
             state.lands_played_this_turn += 1;
-            mark_land_played_from_zone(state, object_id, origin_zone);
+            record_land_played_from_zone(state, player, object_id, origin_zone);
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
             record_exile_play_permission(state, exile_permission_source);
@@ -5038,7 +5052,7 @@ fn handle_play_land(
 
     // Increment land counter
     state.lands_played_this_turn += 1;
-    mark_land_played_from_zone(state, object_id, origin_zone);
+    record_land_played_from_zone(state, player, object_id, origin_zone);
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
     record_exile_play_permission(state, exile_permission_source);

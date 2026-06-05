@@ -4811,6 +4811,22 @@ pub(crate) fn parse_zone_suffix(
     Some((props, ctrl, leading_ws + consumed))
 }
 
+/// CR 601.2a: The zones a spell can be cast from, excluding the named allowed
+/// zone. Used for "from anywhere other than <zone>" cast-origin predicates.
+pub(crate) fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
+    const CAST_CAPABLE_ZONES: [Zone; 5] = [
+        Zone::Hand,
+        Zone::Graveyard,
+        Zone::Library,
+        Zone::Exile,
+        Zone::Command,
+    ];
+    CAST_CAPABLE_ZONES
+        .into_iter()
+        .filter(|zone| *zone != allowed)
+        .collect()
+}
+
 fn parse_zone_suffix_nom(
     i: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>)> {
