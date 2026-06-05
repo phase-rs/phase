@@ -1224,7 +1224,15 @@ fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool 
         value((), tag("that creature each ")),
     ))
     .parse(lower.as_str());
-    result.is_ok()
+    if result.is_ok() {
+        return true;
+    }
+    // "{type phrase} you control each " — mirror `parse_controlled_creature_each_second_subject`.
+    if let Some(pos) = lower.find(" you control each ") {
+        let type_phrase = lower[..pos].trim();
+        return !type_phrase.is_empty() && !type_phrase.contains(" and ");
+    }
+    false
 }
 
 /// Restricted clause-start check for bare " and " splitting (not after comma).
@@ -1540,6 +1548,7 @@ fn combat_requirement_conjunct_prepend(
     if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
         && !super::subject::is_can_block_extra_predicate(&remainder_lower)
         && !super::subject::is_can_attack_despite_defender_predicate(&remainder_lower)
+        && !super::subject::is_cant_be_blocked_restriction_predicate(&remainder_lower)
     {
         return None;
     }

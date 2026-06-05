@@ -2037,7 +2037,7 @@ fn try_parse_unless_player_have_deal_damage(
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let (before_unless, _, after_unless) =
-        nom_primitives::scan_preceded(tp.lower, |i| tag(" unless a player has ").parse(i))?;
+        nom_primitives::scan_preceded(tp.lower, |i| tag("unless a player has ").parse(i))?;
     let cost = parse_unless_player_have_deal_damage_cost(after_unless)?;
     let cleaned = tp.original[..before_unless.trim_end().len()].trim();
     let diagnostics_snapshot = ctx.diagnostics.len();
@@ -8927,24 +8927,53 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 /// that protects the bound recipients from post-distribution anaphoric
 /// re-targeting). Keeping the prefix grammar in one place ensures the guard
 /// and the distributor never drift.
+/// Second-subject axis: "{type phrase} you control each " (Alandra, Sky Dreamer:
+/// "~ and Drakes you control each get +X/+X until end of turn").
+fn parse_controlled_creature_each_second_subject(
+    rest: &str,
+) -> Option<(usize, TargetFilter)> {
+    const SUFFIX: &str = " you control each ";
+    let lower = rest.to_ascii_lowercase();
+    let pos = lower.find(SUFFIX)?;
+    let type_phrase = rest[..pos].trim();
+    if type_phrase.is_empty() || type_phrase.contains(" and ") {
+        return None;
+    }
+    let normalized = format!("all {type_phrase} you control");
+    let (filter, remainder) = parse_target(&normalized);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::None) {
+        return None;
+    }
+    Some((pos + SUFFIX.len(), filter))
+}
+
 fn parse_compound_subject_prefix(lower: &str) -> Option<(usize, TargetFilter, TargetFilter)> {
-    let parser: nom::IResult<&str, (TargetFilter, TargetFilter), OracleError<'_>> = (
-        alt((
-            value(TargetFilter::OriginalController, tag("you and ")),
-            value(TargetFilter::SelfRef, tag("~ and ")),
-        )),
-        alt((
-            value(TargetFilter::ScopedPlayer, tag("that player ")),
-            value(TargetFilter::Player, tag("target opponent ")),
-            value(TargetFilter::Player, tag("target player ")),
-            value(TargetFilter::ParentTarget, tag("that creature ")),
-        )),
-        value((), tag("each ")),
-    )
-        .parse(lower)
-        .map(|(rest, (first, second, ()))| (rest, (first, second)));
-    let (lower_rest, (first_filter, second_filter)) = parser.ok()?;
-    Some((lower.len() - lower_rest.len(), first_filter, second_filter))
+    for (first_tag, first_filter) in [
+        ("you and ", TargetFilter::OriginalController),
+        ("~ and ", TargetFilter::SelfRef),
+    ] {
+        let Some(rest) = lower.strip_prefix(first_tag) else {
+            continue;
+        };
+        for (second_tag, second_filter) in [
+            ("that player each ", TargetFilter::ScopedPlayer),
+            ("target opponent each ", TargetFilter::Player),
+            ("target player each ", TargetFilter::Player),
+            ("that creature each ", TargetFilter::ParentTarget),
+        ] {
+            if rest.starts_with(second_tag) {
+                let consumed = first_tag.len() + second_tag.len();
+                return Some((consumed, first_filter.clone(), second_filter));
+            }
+        }
+        if let Some((second_consumed, second_filter)) =
+            parse_controlled_creature_each_second_subject(rest)
+        {
+            let consumed = first_tag.len() + second_consumed;
+            return Some((consumed, first_filter, second_filter));
+        }
+    }
+    None
 }
 
 /// CR 109.5 + CR 608.2c: True when `text` opens with a compound-subject
@@ -16428,6 +16457,24 @@ fn extract_resolution_unless_pay_modifier(
         .is_ok()
     {
         return (text.to_string(), None);
+    }
+
+    // CR 118.12a: "[Effect] unless a player has [~] deal N to them" (Barbarian
+    // Bully). Checked before the generic "unless " scan so the player-have-deal
+    // shape is not misclassified as a mana-payment unless.
+    if let Some((before_unless, _, after_unless_lower)) =
+        nom_primitives::scan_preceded(&lower, |i| tag("unless a player has ").parse(i))
+    {
+        if let Some(cost) = parse_unless_player_have_deal_damage_cost(after_unless_lower) {
+            let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost,
+                    payer: TargetFilter::AllPlayers,
+                }),
+            );
+        }
     }
 
     // CR 118.12a: "[Effect] unless they X [or Y]" — the targeted player is
