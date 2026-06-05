@@ -25695,6 +25695,7 @@ mod tests {
 /// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
 #[cfg(test)]
 mod snapshot_tests {
+    use crate::parser::oracle_nom::quantity::parse_quantity_ref;
     use crate::types::ability::AbilityCondition;
 
     use super::*;
@@ -25723,8 +25724,6 @@ mod snapshot_tests {
     /// `QuantityCheck { Power(CostPaidObject) GE N }` gate (Eshki, Temur's Roar).
     #[test]
     fn eshki_that_spell_power_gates_chained_effects() {
-        use crate::types::ability::{Comparator, ObjectScope, QuantityExpr, QuantityRef};
-
         let power_ge = |n: i32| AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::Power {
@@ -25768,9 +25767,6 @@ mod snapshot_tests {
     /// mana value", scoped to the trigger-condition referent (CostPaidObject).
     #[test]
     fn that_spell_power_toughness_quantity_refs() {
-        use crate::parser::oracle_nom::quantity::parse_quantity_ref;
-        use crate::types::ability::{ObjectScope, QuantityRef};
-
         assert_eq!(
             parse_quantity_ref("that spell's power"),
             Ok((
