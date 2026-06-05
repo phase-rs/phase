@@ -2648,6 +2648,9 @@ fn parse_total_mana_value_target_constraint(text: &str) -> Option<TargetSelectio
 pub(super) fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
+    if let Some((_, spec)) = strip_bounded_targets_placeholder(after_each_of) {
+        return Some(spec);
+    }
     let (_, multi_target) = strip_optional_target_prefix(after_each_of);
     multi_target
 }
@@ -2727,6 +2730,11 @@ fn parse_each_of_up_to_damage_target<'a>(
         .ok()?;
     let consumed = lower.len() - after_each_of_lower.len();
     let after_each_of = &target_phrase[consumed..];
+    if let Some((remainder, _)) = strip_bounded_targets_placeholder(after_each_of) {
+        if remainder.is_empty() {
+            return Some((TargetFilter::Any, ""));
+        }
+    }
     let (target_text, multi_target) = strip_optional_target_prefix(after_each_of);
     multi_target.as_ref()?;
     let (target, remainder) = parse_target_with_ctx(target_text, ctx);
@@ -2781,6 +2789,23 @@ fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> 
         value(QuantityExpr::Fixed { value: 6 }, tag("six ")),
     ))
     .parse(input)
+}
+
+/// CR 115.1d: Bare target-count placeholders after "each of" — "one or two
+/// targets" (Prismari Charm: "deals 1 damage to each of one or two targets").
+/// Returns the unconsumed remainder and a bounded `MultiTargetSpec` with min ≥ 1.
+fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpec)> {
+    let lower = text.to_ascii_lowercase();
+    for (phrase, min, max) in [
+        ("one or two targets", 1usize, 2usize),
+        ("one, two, or three targets", 1, 3),
+    ] {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
+            let consumed = lower.len() - rest.len();
+            return Some((text[consumed..].trim_start(), MultiTargetSpec::fixed(min, max)));
+        }
+    }
+    None
 }
 
 /// CR 115.1d: Strip optional target-count prefixes before a targeted phrase.

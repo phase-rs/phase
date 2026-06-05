@@ -24500,6 +24500,28 @@ mod tests {
         );
     }
 
+    /// Issue #2434 — Prismari Charm mode 2: "deals 1 damage to each of one or two
+    /// targets" must prompt for 1–2 target selections, not DamageAll every creature.
+    #[test]
+    fn deal_damage_each_of_one_or_two_targets_is_multi_targeted() {
+        let clause = parse_effect_clause(
+            "~ deals 1 damage to each of one or two targets",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)));
+        let Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        } = clause.effect
+        else {
+            panic!(
+                "Expected targeted DealDamage with multi_target, got {:?}",
+                clause.effect
+            );
+        };
+    }
+
     #[test]
     fn deal_damage_each_of_up_to_two_target_creatures_is_multi_targeted() {
         let clause = parse_effect_clause(

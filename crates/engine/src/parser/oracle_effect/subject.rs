@@ -829,6 +829,21 @@ pub(super) fn parse_subject_application(
         {
             return subject_filter_application(TargetFilter::ParentTarget, false);
         }
+        // CR 115.1d: "each of one or two targets" — bounded multi-target selection
+        // where the effect applies to each chosen target (Prismari Charm).
+        for (phrase, min, max) in [
+            ("one or two targets", 1usize, 2usize),
+            ("one, two, or three targets", 1, 3),
+        ] {
+            if tag::<_, _, OracleError<'_>>(phrase)
+                .parse(remainder)
+                .is_ok()
+            {
+                let mut application = subject_filter_application(TargetFilter::Any, true)?;
+                application.multi_target = Some(MultiTargetSpec::fixed(min, max));
+                return Some(application);
+            }
+        }
         // Fallback: strip "of " and re-route through parse_target as "each <remainder>"
         let normalized = format!("each {remainder}");
         let (filter, _) = parse_target(&normalized);
