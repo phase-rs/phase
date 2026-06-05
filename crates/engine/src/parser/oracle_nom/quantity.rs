@@ -353,6 +353,17 @@ fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     }
 }
 
+fn parse_quantity_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(ControllerRef::You, tag(" you control")),
+        value(
+            ControllerRef::SourceChosenPlayer,
+            tag(" the chosen player controls"),
+        ),
+    ))
+    .parse(input)
+}
+
 /// Parse an optional ", rounded up/down" / ", round up/down" suffix.
 ///
 /// CR 107.1a: Oracle text must specify rounding direction for fractional
@@ -751,15 +762,12 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
 /// source via `ChosenAttribute::Player` (Skyshroud War Beast, Lost Order of
 /// Jarkeld), distinct from the controller ("you control").
 fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
+    if let Ok(parsed) = parse_number_of_qualified_controlled_type(input) {
+        return Ok(parsed);
+    }
+
     let (rest, head) = parse_type_filter_word(input)?;
-    let (rest, controller) = alt((
-        value(ControllerRef::You, tag(" you control")),
-        value(
-            ControllerRef::SourceChosenPlayer,
-            tag(" the chosen player controls"),
-        ),
-    ))
-    .parse(rest)?;
+    let (rest, controller) = parse_quantity_controller_suffix(rest)?;
     // CR 205.2b: "<head> you control that are <t1> and/or <t2>" restricts the
     // controlled population to objects that have any of the listed card types.
     // CR 205.2b makes a multi-type object satisfy any of its types, so a
@@ -784,6 +792,24 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
             }),
         },
     ))
+}
+
+/// CR 201.2 + CR 109.2: Parse qualified controlled object counts like
+/// "permanents named Food Fight you control". The named/card-quality parser owns
+/// the object description; this quantity parser owns the trailing controller
+/// scope for "the number of ... you control".
+fn parse_number_of_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (mut filter, rest) = parse_type_phrase(input);
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    let (rest, controller) = parse_quantity_controller_suffix(rest)?;
+    attach_controller_to_quantity_filter(&mut filter, controller);
+    Ok((rest, QuantityRef::ObjectCount { filter }))
 }
 
 /// CR 604.3 + CR 613.1: Parse "<type> of the chosen type [on the battlefield]"
@@ -5440,6 +5466,27 @@ mod tests {
                     type_filters: vec![TypeFilter::Artifact],
                     controller: Some(ControllerRef::You),
                     properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// CR 201.2: "named <card name>" ends before the controller suffix in a
+    /// controlled object-count quantity. Food Fight.
+    #[test]
+    fn parse_quantity_ref_controlled_named_type_keeps_controller_out_of_name() {
+        let (rest, q) =
+            parse_quantity_ref("the number of permanents named food fight you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::Named {
+                        name: "food fight".to_string(),
+                    }],
                 }),
             }
         );
