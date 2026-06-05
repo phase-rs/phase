@@ -22441,6 +22441,7 @@ mod tests {
                 special,
                 source_text: String::new(),
                 target_selection_mode: Default::default(),
+                target_chooser: None,
             }
         }
 

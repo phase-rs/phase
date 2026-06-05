@@ -4590,7 +4590,13 @@ pub(super) fn begin_pending_trigger_target_selection(
     }
 
     let ability = trigger.ability.clone();
-    let player = trigger.controller;
+    // CR 601.2c + CR 603.3d + CR 109.5: a targeted "of their choice" trigger routes
+    // target selection to the scoped (upkeep) player, not the source's controller.
+    let player = ability
+        .target_chooser
+        .as_ref()
+        .and_then(|f| crate::game::targeting::resolve_effect_player_ref(state, &ability, f))
+        .unwrap_or(trigger.controller);
     let source_id = trigger.source_id;
     let target_constraints = trigger.target_constraints.clone();
     let description = trigger.description.clone();

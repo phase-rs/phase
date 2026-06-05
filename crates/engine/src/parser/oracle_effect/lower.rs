@@ -370,6 +370,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // `parse_target_with_ctx` during chunk parse. `Random` flips the engine
         // off the controller-choice path at target-selection time.
         def.target_selection_mode = clause_ir.target_selection_mode;
+        // CR 601.2c + CR 603.3d: copy the per-clause target chooser captured by
+        // `parse_target_with_ctx` during chunk parse, so a targeted "of their
+        // choice" routes target selection to the scoped (upkeep) player.
+        def.target_chooser = clause_ir.target_chooser.clone();
         let clause_sub = if is_target_only {
             def.sub_ability = clause_ir.parsed.sub_ability.clone();
             None

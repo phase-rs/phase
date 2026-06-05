@@ -2078,6 +2078,14 @@ pub fn parse_type_phrase_with_ctx<'a>(
             .is_ok()
         {
             pos += choice_offset + suffix.len();
+            // CR 601.2c + CR 603.3d: a TARGETED "of their choice" whose target filter
+            // is controlled by the phase-trigger active player ("destroy target X that
+            // player controls of their choice") announces its target at stack placement —
+            // the chooser is that scoped player. Distinct from CR 608.2d resolution-time
+            // sacrifices (controller not ScopedPlayer → stays None).
+            if controller.as_ref() == Some(&ControllerRef::ScopedPlayer) {
+                ctx.target_chooser = Some(TargetFilter::ScopedPlayer);
+            }
             break;
         }
     }

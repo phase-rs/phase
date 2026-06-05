@@ -101,6 +101,10 @@ pub fn build_resolved_from_def_with_targets(
     // through to the resolved ability so target-selection sites can short-circuit
     // `WaitingFor::TargetSelection` for `Random` abilities.
     resolved.target_selection_mode = def.target_selection_mode;
+    // CR 601.2c + CR 603.3d: Carry the parser-stamped target chooser through so the
+    // trigger target-selection site can route a targeted "of their choice" to the
+    // scoped (upkeep) player instead of the source's controller.
+    resolved.target_chooser = def.target_chooser.clone();
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
@@ -170,6 +174,7 @@ pub(crate) fn apply_instead_swap(
     overridden.unless_pay = sub.unless_pay.clone();
     overridden.distribution = sub.distribution.clone();
     overridden.target_selection_mode = sub.target_selection_mode;
+    overridden.target_chooser = sub.target_chooser.clone();
     overridden
 }
 

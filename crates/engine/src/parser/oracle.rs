@@ -4657,6 +4657,77 @@ mod tests {
         ));
     }
 
+    /// CR 601.2c + CR 603.3d: a TARGETED "of their choice" whose filter is
+    /// controlled by the phase-trigger active player ("destroy target X that
+    /// player controls of their choice") routes target selection to that scoped
+    /// player. The parser stamps `target_chooser = Some(ScopedPlayer)` so the
+    /// trigger target-selection site can override the chooser away from the
+    /// source's controller (Magus of the Abyss / The Abyss deadlock). Tests the
+    /// `controller == ScopedPlayer` discriminator (the building block), not the
+    /// card name — any phase-trigger "that player controls of their choice"
+    /// target qualifies.
+    #[test]
+    fn scoped_player_of_their_choice_marks_target_chooser() {
+        use crate::types::ability::TargetFilter;
+        let r = parse(
+            "At the beginning of each player's upkeep, destroy target nonartifact creature that player controls of their choice. It can't be regenerated.",
+            "Magus of the Abyss",
+            &[],
+            &["Creature"],
+            &["Human", "Wizard"],
+        );
+        // The phase trigger's effect lives in `trigger.execute`; the parser
+        // stamps the chooser onto that lowered `AbilityDefinition`.
+        assert!(
+            r.triggers.iter().any(|t| t
+                .execute
+                .as_ref()
+                .and_then(|e| e.target_chooser.as_ref())
+                == Some(&TargetFilter::ScopedPlayer)),
+            "expected a trigger whose execute.target_chooser == Some(ScopedPlayer); triggers: {:#?}",
+            r.triggers
+                .iter()
+                .map(|t| t.execute.as_ref().map(|e| &e.target_chooser))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// CR 601.2c: an ordinary "destroy target creature" has no scoped-player
+    /// chooser — controller chooses (default `None`). Negative guard so a
+    /// regression that always stamps the chooser cannot pass silently.
+    #[test]
+    fn ordinary_destroy_target_creature_leaves_chooser_none() {
+        let r = parse(
+            "Destroy target creature.",
+            "Test Card",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].target_chooser, None);
+    }
+
+    /// CR 608.2d: a resolution-time "of their choice" sacrifice (not a targeted
+    /// stack-placement choice) must NOT set `target_chooser` — the chooser
+    /// override is reserved for `ControllerRef::ScopedPlayer`-controlled target
+    /// filters. "each player sacrifices a creature of their choice" iterates a
+    /// player scope and chooses at resolution, so the chooser stays `None`.
+    #[test]
+    fn resolution_time_of_their_choice_sacrifice_leaves_chooser_none() {
+        let r = parse(
+            "Each player sacrifices a creature of their choice.",
+            "Test Card",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            r.abilities.iter().all(|a| a.target_chooser.is_none()),
+            "resolution-time sacrifice must not set target_chooser",
+        );
+    }
+
     #[test]
     fn leadership_vacuum_returns_target_players_commanders_to_command_zone() {
         let r = parse(

@@ -5,6 +5,7 @@ import { AppShell } from "./components/chrome/AppShell";
 import { HostControlTile } from "./components/chrome/HostControlTile";
 import { EngineLostModal } from "./components/modal/EngineLostModal";
 import { NonFatalPanicToast } from "./components/modal/NonFatalPanicToast";
+import { StuckDecisionToast } from "./components/modal/StuckDecisionToast";
 import { SplashScreen } from "./components/splash/SplashScreen";
 import { useFeedInitialization } from "./hooks/useFeedInitialization";
 import { useHostingSession } from "./hooks/useHostingSession";
@@ -120,6 +121,7 @@ function AppContent() {
       <HostControlTile />
       <EngineLostModal />
       <NonFatalPanicToast />
+      <StuckDecisionToast />
     </div>
   );
 }
