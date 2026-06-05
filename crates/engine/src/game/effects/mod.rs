@@ -2993,6 +2993,12 @@ pub fn resolve_ability_chain(
     // across unrelated ability resolutions.
     if depth == 0 {
         state.last_revealed_ids.clear();
+        // CR 701.20e: A new top-level resolution ends any prior private "look at"
+        // peek window — the looked-at card from an unrelated resolution must not
+        // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
+        // decision (which re-enters at depth 1) preserves the peek it depends on.
+        state.private_look_ids.clear();
+        state.private_look_player = None;
         state.last_zone_changed_ids.clear();
         // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
         // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
@@ -4366,6 +4372,26 @@ fn resolve_chain_body(
                 return Ok(());
             }
 
+            // CR 608.2c + CR 603.7: An `If you do` boundary (`EffectOutcome
+            // { OptionalEffectPerformed }`) opens a new instruction clause —
+            // "you may [do X]. If you do, [rider]." Nothing the gating action X
+            // affected can be named by a "those cards" / "one of them" reference
+            // inside the rider, so the rider's tracked set must NOT unify with
+            // the gating action's. Reset the chain-scoped tracked-set identity
+            // here so the rider's own producer (e.g. ExileTop) starts a fresh
+            // set. Without this, Party Thrasher's "you may discard a card. If
+            // you do, exile the top two cards…, then choose one of them" would
+            // co-publish the discarded card (now in the graveyard) with the two
+            // exiled cards, offering three cards to choose from (issue #1977).
+            if matches!(
+                condition,
+                AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                }
+            ) {
+                state.chain_tracked_set_id = None;
+            }
+
             // CR 603.12: When a deferred conditional sub-ability (WhenYouDo,
             // QuantityCheck) has its condition met and needs player-selected targets,
             // create a reflexive trigger that goes on the stack for target selection.
@@ -5405,11 +5431,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
-        CastingPermission, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission, ObjectProperty,
-        PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-        SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
-        UntilCondition,
+        CastingPermission, Chooser, ChosenAttribute, Comparator, ContinuousModification,
+        ControllerRef, DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission,
+        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -6629,6 +6655,115 @@ mod tests {
         assert_eq!(state.players[1].life, 18);
         // Controller drew a card
         assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    /// Regression (issue #1977, Party Thrasher): "you may discard a card. If you
+    /// do, exile the top two cards of your library, then choose one of them."
+    /// CR 608.2c + CR 603.7: the discard is a gating action behind the
+    /// `If you do` boundary; its discarded card must NOT unify into the tracked
+    /// set the rider's `ChooseFromZone` consumes. The choice must offer exactly
+    /// the two exiled cards — never three (the discard plus the two exiled).
+    #[test]
+    fn if_you_do_gate_resets_tracked_set_so_choice_excludes_gating_discard() {
+        let mut state = GameState::new_two_player(42);
+        // One card in hand — discarded by the gating action (lands in graveyard).
+        let discarded = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Discarded".to_string(),
+            Zone::Hand,
+        );
+        // Two cards on top of library — exiled by the rider.
+        let top_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Top A".to_string(),
+            Zone::Library,
+        );
+        let top_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Top B".to_string(),
+            Zone::Library,
+        );
+
+        // Rider: exile the top two cards, then choose one of them. The real
+        // Party Thrasher chain continues from this choice into
+        // GrantCastingPermission; the polluted tracked set first becomes
+        // user-visible at this choice boundary.
+        let choose = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let exile_top = ResolvedAbility::new(
+            Effect::ExileTop {
+                count: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+                face_down: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(choose)
+        // The "If you do" boundary between the gating discard and the rider.
+        .condition(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+
+        // Gating action: discard the specific hand card (non-interactive path).
+        let mut discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Object(discarded)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(exile_top);
+        // "you may discard … If you do" — seed the performed flag so the gate passes.
+        discard.context.optional_effect_performed = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &discard, &mut events, 0).unwrap();
+
+        // The discarded card is in the graveyard; the two exiled cards are in exile.
+        assert!(state.players[0].graveyard.contains(&discarded));
+        assert!(state.exile.contains(&top_a) && state.exile.contains(&top_b));
+
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert_eq!(
+                    cards.len(),
+                    2,
+                    "choice must offer exactly the two exiled cards, not the discarded one too"
+                );
+                assert!(cards.contains(&top_a) && cards.contains(&top_b));
+                assert!(
+                    !cards.contains(&discarded),
+                    "the gating discard must not be offered as a choice"
+                );
+            }
+            other => panic!("Expected ChooseFromZoneChoice, got {other:?}"),
+        }
     }
 
     /// CR 115.1d: With inherited object targets, `ParentTargetController` must

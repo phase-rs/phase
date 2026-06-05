@@ -60,6 +60,19 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         HashSet::new()
     };
 
+    // CR 701.20e: A bare "look at the top card" peek (Dig with keep_count == 0,
+    // reveal == false) privately reveals the card(s) to the looking player only.
+    // `dig.rs` records the looker in `private_look_player`; surface the peeked
+    // cards to that player so they can see the card while deciding a subsequent
+    // "you may reveal that card" optional (Delver of Secrets), without leaking it
+    // to opponents.
+    let private_look_visible: HashSet<ObjectId> = match state.private_look_player {
+        Some(looker) if can_view_private_for_player(looker) => {
+            state.private_look_ids.iter().copied().collect()
+        }
+        _ => HashSet::new(),
+    };
+
     let search_visible: HashSet<ObjectId> =
         if let WaitingFor::SearchChoice {
             player, ref cards, ..
@@ -111,6 +124,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         let owner = state.objects.get(&obj_id).map(|o| o.owner);
         let visible = manifest_dread_visible.contains(&obj_id)
             || dig_visible.contains(&obj_id)
+            || private_look_visible.contains(&obj_id)
             || search_visible.contains(&obj_id)
             // CR 701.20b: Revealed cards are visible to all players. For reveal-digs
             // ("reveal the top N"), dig cards are also in revealed_cards and must remain
