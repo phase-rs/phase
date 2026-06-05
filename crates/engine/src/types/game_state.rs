@@ -5078,7 +5078,7 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
 
-    /// CR 701.20a: Cards the controller is privately "looking at" during the
+    /// CR 701.20e: Cards the controller is privately "looking at" during the
     /// current resolution — the looker-scoped peek window of a bare
     /// "look at the top card of your library" (Dig with `keep_count == 0`,
     /// `reveal == false`). Unlike `revealed_cards` (public, all players) and
@@ -5090,7 +5090,7 @@ pub struct GameState {
     /// once no optional-effect decision that depends on the peek is pending.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub private_look_ids: Vec<ObjectId>,
-    /// CR 701.20a: The player to whom `private_look_ids` is visible (the looker).
+    /// CR 701.20e: The player to whom `private_look_ids` is visible (the looker).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_look_player: Option<PlayerId>,
 

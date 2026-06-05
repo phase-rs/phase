@@ -60,7 +60,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         HashSet::new()
     };
 
-    // CR 701.20a: A bare "look at the top card" peek (Dig with keep_count == 0,
+    // CR 701.20e: A bare "look at the top card" peek (Dig with keep_count == 0,
     // reveal == false) privately reveals the card(s) to the looking player only.
     // `dig.rs` records the looker in `private_look_player`; surface the peeked
     // cards to that player so they can see the card while deciding a subsequent

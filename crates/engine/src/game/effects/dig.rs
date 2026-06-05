@@ -85,13 +85,13 @@ pub fn resolve(
         .collect::<Vec<_>>();
     let keep_count = keep_num.min(cards.len());
 
-    // CR 701.20a: Pure-peek pattern (keep_count = 0): "look at the top card" with no
+    // CR 701.20e: Pure-peek pattern (keep_count = 0): "look at the top card" with no
     // player selection — the sub_ability condition decides whether to take it. Set
     // last_revealed_ids so RevealedHasCardType can evaluate, then return without
     // creating a DigChoice interaction.
     if keep_count == 0 && !is_reveal {
         state.last_revealed_ids = cards.clone();
-        // CR 701.20a: "look at" privately reveals the cards to the looking
+        // CR 701.20e: "look at" privately reveals the cards to the looking
         // player. The looker is the ability controller (e.g. Delver of Secrets'
         // "look at the top card of your library"). Record the looker-scoped peek
         // window so `filter_state_for_viewer` keeps these cards visible to the
@@ -277,13 +277,13 @@ mod tests {
         assert_eq!(state.objects[&top_card].zone, Zone::Library);
         assert_eq!(state.players[1].library.front(), Some(&top_card));
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-        // CR 701.20a: the looker is the ability controller, not the library
+        // CR 701.20e: the looker is the ability controller, not the library
         // owner — the peeked opponent card is visible to the controller only.
         assert_eq!(state.private_look_ids, vec![top_card]);
         assert_eq!(state.private_look_player, Some(PlayerId(0)));
     }
 
-    /// CR 701.20a (issue #2021, Delver of Secrets): a bare "look at the top card
+    /// CR 701.20e (issue #2021, Delver of Secrets): a bare "look at the top card
     /// of your library" peek must privately reveal the card to the looking
     /// player, so they can SEE it before deciding a subsequent "you may reveal
     /// that card" optional. The peek records a looker-scoped window
@@ -324,7 +324,7 @@ mod tests {
 
         assert_eq!(state.private_look_ids, vec![top_card]);
         assert_eq!(state.private_look_player, Some(PlayerId(0)));
-        // CR 701.20a: a private "look at" must NOT publicly reveal the card.
+        // CR 701.20e: a private "look at" must NOT publicly reveal the card.
         assert!(!state.revealed_cards.contains(&top_card));
 
         // The looking player (PlayerId(0)) can see the peeked card's identity.

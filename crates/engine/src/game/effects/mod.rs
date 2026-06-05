@@ -2993,7 +2993,7 @@ pub fn resolve_ability_chain(
     // across unrelated ability resolutions.
     if depth == 0 {
         state.last_revealed_ids.clear();
-        // CR 701.20a: A new top-level resolution ends any prior private "look at"
+        // CR 701.20e: A new top-level resolution ends any prior private "look at"
         // peek window — the looked-at card from an unrelated resolution must not
         // stay visible. Cleared here (depth 0 only) so a resumed optional-reveal
         // decision (which re-enters at depth 1) preserves the peek it depends on.

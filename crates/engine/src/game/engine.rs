@@ -1286,7 +1286,7 @@ fn apply_action(
         state.revealed_cards.clear();
     }
 
-    // CR 701.20a: A bare "look at the top card" peek is visible to the looker
+    // CR 701.20e: A bare "look at the top card" peek is visible to the looker
     // only until they act on it. The peek window must survive the action that
     // serves the dependent "you may reveal that card" optional (the looked-at
     // card is shown while that `OptionalEffectChoice` is pending), then clear on
