@@ -361,6 +361,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::Transform { .. }
         | GameAction::PlayFaceDown { .. }
         | GameAction::TurnFaceUp { .. }
+        | GameAction::LookAtFaceDownCard { .. }
         | GameAction::ChoosePlayDraw { .. }
         | GameAction::ChoosePile { .. }
         | GameAction::ChooseBranch { .. }
