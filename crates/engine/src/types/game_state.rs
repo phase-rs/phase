@@ -5879,6 +5879,102 @@ impl GameState {
                 Some(crate::types::ability::PostReplacementContinuation::Template(template));
         }
     }
+
+    /// CR 104.4b: a cheap pre-filter fingerprint of loop-mutable state. It need
+    /// NOT be complete — a confirmation pass (`loop_states_equal`) deep-compares
+    /// before any draw, so a fingerprint collision can never cause a wrongful
+    /// draw; the fingerprint only decides *when to bother confirming*. Includes
+    /// the RNG stream position so a loop that consumes randomness (shuffle, coin
+    /// flip) gets a distinct fingerprint and is never confirmed — CR 104.4b
+    /// excludes loops containing a nondeterministic action.
+    pub(crate) fn loop_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        self.turn_number.hash(&mut h);
+        self.phase.hash(&mut h);
+        self.active_player.hash(&mut h);
+        self.priority_player.hash(&mut h);
+        self.stack.len().hash(&mut h);
+        self.objects.len().hash(&mut h);
+        // im::Vector<ObjectId>: Hash, ordered.
+        self.battlefield.hash(&mut h);
+        for player in &self.players {
+            player.id.hash(&mut h);
+            player.life.hash(&mut h);
+            player.hand.len().hash(&mut h);
+            player.library.len().hash(&mut h);
+            player.graveyard.len().hash(&mut h);
+        }
+        // Per-object tapped/damage rollup (id-sorted) cheaply distinguishes
+        // tap/untap and damage-ping states without a full content hash.
+        let mut ids: Vec<ObjectId> = self.objects.keys().copied().collect();
+        ids.sort_unstable_by_key(|id| id.0);
+        for id in &ids {
+            if let Some(object) = self.objects.get(id) {
+                id.0.hash(&mut h);
+                object.tapped.hash(&mut h);
+                object.damage_marked.hash(&mut h);
+            }
+        }
+        // Any randomness consumed ⇒ different stream position ⇒ no collision.
+        self.rng.get_word_pos().hash(&mut h);
+        h.finish()
+    }
+
+    /// Clone with the volatile, monotonically-advancing fields the `PartialEq`
+    /// impl compares zeroed/canonicalized, so two states reached at different
+    /// times can compare equal on everything a mandatory action could change.
+    pub(crate) fn normalize_for_loop(&self) -> GameState {
+        let mut clone = self.clone();
+        clone.state_revision = 0;
+        clone.next_timestamp = 0;
+        clone.next_object_id = 0;
+        clone.layers_dirty = LayersDirty::full();
+        clone.public_state_dirty = PublicStateDirty::all_dirty();
+        clone
+    }
+}
+
+/// CR 104.4b confirmation between two states that have BOTH already been
+/// `normalize_for_loop`d. Reuses `PartialEq` for the ~95 non-object fields and
+/// supplements its `objects.len()`-only object check with per-object content
+/// equality. Only a true match permits a draw, so the cheap `loop_fingerprint`
+/// can never cause a wrongful draw.
+pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
+    a == b && objects_content_eq(&a.objects, &b.objects)
+}
+
+/// CR 104.4b: per-object mutable-content equality — supplements `GameState`'s
+/// `objects.len()`-only `PartialEq` object check. Card-intrinsic fields
+/// (`base_*`, abilities, definitions) are immutable for a given object id within
+/// a game and so cannot differ between two states; only the fields a mandatory
+/// action could change are compared.
+fn objects_content_eq(
+    a: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
+    b: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
+) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(id, x)| {
+            b.get(id).is_some_and(|y| {
+                x.controller == y.controller
+                    && x.zone == y.zone
+                    && x.tapped == y.tapped
+                    && x.face_down == y.face_down
+                    && x.flipped == y.flipped
+                    && x.transformed == y.transformed
+                    && x.damage_marked == y.damage_marked
+                    && x.dealt_deathtouch_damage == y.dealt_deathtouch_damage
+                    && x.attached_to == y.attached_to
+                    && x.attachments == y.attachments
+                    && x.paired_with == y.paired_with
+                    && x.counters == y.counters
+                    && x.power == y.power
+                    && x.toughness == y.toughness
+                    && x.loyalty == y.loyalty
+                    && x.defense == y.defense
+                    && x.name == y.name
+            })
+        })
 }
 
 impl Default for GameState {
@@ -6056,6 +6152,95 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter,
     };
+
+    /// CR 104.4b: the loop fingerprint must distinguish object tap state — else a
+    /// tap/untap loop's two phases would be indistinguishable. (A false negative
+    /// is safe; this guards detection quality, not correctness.)
+    #[test]
+    fn loop_fingerprint_reflects_object_tap_state() {
+        let mut state = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(500), object);
+        state.battlefield.push_back(ObjectId(500));
+
+        let untapped = state.loop_fingerprint();
+        if let Some(object) = state.objects.get_mut(&ObjectId(500)) {
+            object.tapped = true;
+        }
+        assert_ne!(
+            untapped,
+            state.loop_fingerprint(),
+            "tapping an object must change the loop fingerprint"
+        );
+    }
+
+    /// CR 104.4b: any randomness consumed advances the RNG stream position, which
+    /// the fingerprint includes — so a loop containing a shuffle/coin flip never
+    /// collides and is correctly NOT drawn.
+    #[test]
+    fn loop_fingerprint_reflects_rng_consumption() {
+        let mut state = GameState::new_two_player(7);
+        let before = state.loop_fingerprint();
+        state.rng.set_word_pos(4096);
+        assert_ne!(
+            before,
+            state.loop_fingerprint(),
+            "advancing the RNG stream must change the loop fingerprint"
+        );
+    }
+
+    /// CR 104.4b confirmation: two states reached at different times (advancing
+    /// the volatile counters PartialEq compares) but otherwise identical must
+    /// confirm as equal — else a real loop could never be confirmed and drawn.
+    #[test]
+    fn loop_states_equal_ignores_volatile_counters() {
+        let base = GameState::new_two_player(7);
+        let mut later = base.clone();
+        later.state_revision = 99;
+        later.next_timestamp = 42;
+        later.next_object_id = base.next_object_id + 5;
+
+        assert!(
+            loop_states_equal(&base.normalize_for_loop(), &later.normalize_for_loop()),
+            "states differing only in volatile counters must confirm as a repeat"
+        );
+    }
+
+    /// CR 104.4b confirmation must NOT treat two states as equal when an object's
+    /// mutable content differs — guards the `objects.len()`-only `PartialEq` gap
+    /// that would otherwise permit a wrongful draw.
+    #[test]
+    fn loop_states_equal_detects_object_content_difference() {
+        let mut a = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        a.objects.insert(ObjectId(500), object);
+        a.battlefield.push_back(ObjectId(500));
+        let mut b = a.clone();
+        if let Some(object) = b.objects.get_mut(&ObjectId(500)) {
+            object.tapped = true;
+        }
+
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &a.normalize_for_loop()),
+            "identical states must confirm as a repeat"
+        );
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "a tapped-vs-untapped object difference must NOT confirm (no wrongful draw)"
+        );
+    }
 
     #[test]
     fn default_creates_two_player_game() {

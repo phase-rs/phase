@@ -1047,6 +1047,15 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
     let events_baseline = result.events.len();
     let objects_baseline = state.objects.len();
 
+    // CR 104.4b: bounded-state mandatory-loop detection. Fingerprinting starts
+    // only after this many mandatory iterations (normal resolution settles far
+    // sooner, so it pays nothing); stored normalized snapshots are capped so a
+    // non-repeating mandatory sequence falls through to the Phase-1 backstop.
+    const FINGERPRINT_AFTER_ITERS: usize = 32;
+    const MAX_LOOP_WINDOW: usize = 128;
+    let mut mandatory_iters = 0usize;
+    let mut loop_window: Vec<(u64, GameState)> = Vec::new();
+
     let max_iterations = auto_pass_loop_max_iterations(state);
     let mut iteration = 0usize;
     loop {
@@ -1110,6 +1119,42 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                             emit_resolution_halt(state, result);
                             return;
                         }
+
+                        // CR 104.4b: detect a repeating mandatory loop. Every
+                        // iteration here is mandatory by construction (a
+                        // meaningful action would have broken the loop), so the
+                        // window never spans an optional action. A cheap
+                        // fingerprint pre-filters; a true repeat is CONFIRMED by
+                        // deep state equality before any draw, so a fingerprint
+                        // collision can never cause a wrongful draw.
+                        mandatory_iters += 1;
+                        if mandatory_iters >= FINGERPRINT_AFTER_ITERS
+                            && matches!(result.waiting_for, WaitingFor::Priority { .. })
+                        {
+                            let fingerprint = state.loop_fingerprint();
+                            let normalized = state.normalize_for_loop();
+                            if loop_window.iter().any(|(fp, prior)| {
+                                *fp == fingerprint
+                                    && crate::types::game_state::loop_states_equal(
+                                        &normalized,
+                                        prior,
+                                    )
+                            }) {
+                                // CR 104.4b + CR 732.4: a mandatory action
+                                // repeated a prior state with no way to stop — a
+                                // draw. CR 801.16: limited-range partial draw N/A
+                                // while format_config.range_of_influence is None.
+                                result.events.push(GameEvent::GameOver { winner: None });
+                                result.waiting_for = WaitingFor::GameOver { winner: None };
+                                state.waiting_for = WaitingFor::GameOver { winner: None };
+                                match_flow::handle_game_over_transition(state);
+                                return;
+                            }
+                            if loop_window.len() < MAX_LOOP_WINDOW {
+                                loop_window.push((fingerprint, normalized));
+                            }
+                        }
+
                         if stack_empty_or_grew {
                             break;
                         }
