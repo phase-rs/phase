@@ -1715,14 +1715,18 @@ mod tests {
         .unwrap();
         use crate::types::keywords::Keyword;
         assert!(
-            mods.iter()
-                .any(|m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Wall")),
+            mods.iter().any(
+                |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Wall")
+            ),
             "expected AddSubtype Wall, got {mods:?}"
         );
         assert!(
-            mods.iter().any(
-                |m| matches!(m, ContinuousModification::AddKeyword { keyword: Keyword::Defender })
-            ),
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Defender
+                }
+            )),
             "expected AddKeyword Defender, got {mods:?}"
         );
     }

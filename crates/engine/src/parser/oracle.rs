@@ -2488,8 +2488,7 @@ pub(crate) fn parse_oracle_ir(
             // and replacement-shaped ("enter as a copy of") must route to the
             // replacement parser first — Wall of Stolen Identity class.
             if is_replacement_pattern(&lower) {
-                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name)
-                {
+                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
                     result.replacements.extend(rep_defs);
                     i += 1;
                     continue;

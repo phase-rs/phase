@@ -9130,7 +9130,12 @@ mod tests {
                     "expected Wall subtype addition, got {additional_modifications:?}"
                 );
                 assert!(additional_modifications.iter().any(|m| {
-                    matches!(m, ContinuousModification::AddKeyword { keyword: Keyword::Defender })
+                    matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Defender
+                        }
+                    )
                 }));
             }
             other => panic!("expected BecomeCopy, got {other:?}"),

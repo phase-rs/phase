@@ -1696,10 +1696,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         | "away"
                         | "off"
                 );
-            if short_name.len() >= 3
-                && !is_common_english_word
-                && !is_subtype_word(&lower_short)
-            {
+            if short_name.len() >= 3 && !is_common_english_word && !is_subtype_word(&lower_short) {
                 result = replace_all_words(&result, short_name, "~");
             }
         }
