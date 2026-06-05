@@ -2,7 +2,8 @@
 //! Uncivil Unrest — keywords/replacements/triggers reported not working.
 
 use engine::database::synthesis::synthesize_all;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::combat::can_block_pair;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
 use engine::types::ability::{ContinuousModification, DamageModification, Effect, TargetFilter};
 use engine::types::actions::GameAction;
@@ -228,5 +229,107 @@ fn uncivil_unrest_granted_riot_decline_grants_haste() {
             .keywords
             .contains(&Keyword::Haste),
         "declining Riot counter should make the creature gain haste"
+    );
+}
+
+fn cast_zero_cost_dog_with_tesak_unleash_grant() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Tesak, Judith's Hellhound",
+        3,
+        3,
+        "Other Dogs you control have unleash.",
+    );
+    let dog = scenario
+        .add_creature_to_hand(P0, "Helpful Dog", 2, 2)
+        .with_subtypes(vec!["Dog"])
+        .with_mana_cost(engine::types::mana::ManaCost::generic(0))
+        .id();
+    let attacker = scenario.add_creature(P1, "Attacker", 2, 2).id();
+
+    let mut runner = scenario.build();
+    let dog_card_id = runner.state().objects[&dog].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: dog,
+            card_id: dog_card_id,
+            targets: vec![],
+        })
+        .expect("cast should succeed");
+
+    while matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        && !runner.state().stack.is_empty()
+    {
+        runner.pass_both_players();
+    }
+
+    (runner, dog, attacker)
+}
+
+fn assert_unleash_replacement_choice(runner: &GameRunner) {
+    let WaitingFor::ReplacementChoice {
+        candidate_count,
+        candidate_descriptions,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "granted Unleash should prompt as an ETB replacement; waiting_for={:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*candidate_count, 2);
+    assert!(
+        candidate_descriptions
+            .iter()
+            .any(|description| description.contains("Unleash")),
+        "replacement choice should identify Unleash, got {:?}",
+        candidate_descriptions
+    );
+}
+
+#[test]
+fn tesak_granted_unleash_accept_counter_prevents_blocking() {
+    let (mut runner, dog, attacker) = cast_zero_cost_dog_with_tesak_unleash_grant();
+    assert_unleash_replacement_choice(&runner);
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("choose Unleash counter");
+    assert_eq!(
+        runner.state().objects[&dog]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(1),
+        "accepting Unleash should make the Dog enter with a +1/+1 counter"
+    );
+    assert!(
+        !can_block_pair(runner.state(), dog, attacker),
+        "a creature with granted Unleash and a +1/+1 counter can't block"
+    );
+}
+
+#[test]
+fn tesak_granted_unleash_decline_counter_allows_blocking() {
+    let (mut runner, dog, attacker) = cast_zero_cost_dog_with_tesak_unleash_grant();
+    assert_unleash_replacement_choice(&runner);
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("decline Unleash counter");
+    assert_eq!(
+        runner.state().objects[&dog]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        None,
+        "declining Unleash should not add a +1/+1 counter"
+    );
+    assert!(
+        can_block_pair(runner.state(), dog, attacker),
+        "a creature with granted Unleash but no +1/+1 counter can still block"
     );
 }

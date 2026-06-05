@@ -512,6 +512,13 @@ pub enum GameAction {
     ChooseMutateMergeSide {
         side: crate::game::merge::MergeSide,
     },
+    /// CR 702.99a: As a Cipher spell resolves, the controller chooses a creature
+    /// to encode the card on (`Some`) or declines (`None`, card → graveyard).
+    /// Resolved by `cipher::handle_encode_choice`.
+    CipherEncode {
+        #[serde(default)]
+        creature: Option<ObjectId>,
+    },
     /// CR 704.5j: Choose which legendary permanent to keep.
     ChooseLegend {
         keep: ObjectId,
@@ -1252,6 +1259,7 @@ impl GameAction {
             | GameAction::CascadeChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
             | GameAction::ChooseMutateMergeSide { .. }
+            | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }

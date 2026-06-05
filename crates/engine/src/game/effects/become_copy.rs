@@ -52,13 +52,34 @@ pub fn resolve(
         .get(&target_id)
         .and_then(|o| o.printed_ref.clone());
 
-    // CR 122.1 + CR 614.1c: `AddCounterOnEnter` is consumed at resolution
-    // (not layered) — partition the modifications so the layer pipeline only
-    // sees the layered variants and the counter-on-enter variants are
-    // applied via the counter primitive after layer evaluation.
-    let (counter_mods, layered_mods): (Vec<_>, Vec<_>) = additional_modifications
-        .into_iter()
-        .partition(|m| matches!(m, ContinuousModification::AddCounterOnEnter { .. }));
+    // CR 202.1b + CR 707.9: "except it has no mana cost" is a copy-value
+    // exception consumed at resolution — strip the copied mana cost from the
+    // values themselves so the continuous copy carries mana value 0 on every
+    // layer pass (BecomeCopy re-applies `CopyValues` each pass; a one-shot bake
+    // would be overwritten). Mirrors token_copy.rs, which bakes the strip into
+    // the freshly created token's base mana cost.
+    let mut values = values;
+    if additional_modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::RemoveManaCost))
+    {
+        values.mana_cost = crate::types::mana::ManaCost::NoCost;
+    }
+
+    // CR 122.1 + CR 614.1c + CR 202.1b: `AddCounterOnEnter` (counter placement)
+    // and `RemoveManaCost` (consumed above) are resolution-time exceptions, not
+    // layered modifications — partition them out so the layer pipeline only sees
+    // the layered variants. The counter-on-enter variants are applied via the
+    // counter primitive after layer evaluation; RemoveManaCost is already
+    // consumed into `values`, so it is dropped here.
+    let (resolution_mods, layered_mods): (Vec<_>, Vec<_>) =
+        additional_modifications.into_iter().partition(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddCounterOnEnter { .. }
+                    | ContinuousModification::RemoveManaCost
+            )
+        });
 
     let mut modifications = vec![ContinuousModification::CopyValues {
         values: Box::new(values),
@@ -85,8 +106,10 @@ pub fn resolve(
     // (Doubling Season etc. apply normally).
     crate::game::layers::evaluate_layers(state);
 
-    if !counter_mods.is_empty() {
-        for modification in counter_mods {
+    if !resolution_mods.is_empty() {
+        for modification in resolution_mods {
+            // RemoveManaCost was already consumed into `values`; only the
+            // counter-placement exceptions remain to apply here.
             if let ContinuousModification::AddCounterOnEnter {
                 counter_type,
                 count,
@@ -494,6 +517,64 @@ mod tests {
         assert!(source.card_types.subtypes.contains(&"Bear".to_string()));
         assert!(source.card_types.subtypes.contains(&"Bird".to_string()));
         assert!(source.keywords.contains(&Keyword::Flying));
+    }
+
+    /// CR 202.1b + CR 707.9: a BecomeCopy "except it has no mana cost" exception
+    /// strips the copied mana cost from the copy's copiable values. Because
+    /// BecomeCopy re-applies `CopyValues` on every layer pass, the strip must
+    /// survive re-evaluation — a one-shot bake would be overwritten with the
+    /// copied {4}{R}{R}.
+    #[test]
+    fn become_copy_strips_mana_cost_and_survives_layer_reeval() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pricey Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let target = state.objects.get_mut(&target_id).unwrap();
+            target.base_name = "Pricey Source".to_string();
+            target.base_power = Some(3);
+            target.base_toughness = Some(3);
+            target.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Dragon".to_string()],
+            };
+            target.base_mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+                generic: 4,
+            };
+        }
+        let clone_id = create_creature(&mut state, 2, PlayerId(0), "Clone", 0, 0);
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::RemoveManaCost],
+            },
+            vec![TargetRef::Object(target_id)],
+            clone_id,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // Gains the source's characteristics but with no mana cost (mana value 0).
+        assert_eq!(state.objects[&clone_id].name, "Pricey Source");
+        assert_eq!(state.objects[&clone_id].mana_cost, ManaCost::NoCost);
+
+        // The strip rides on the copied values, not a one-shot bake, so a second
+        // layer pass must NOT restore the copied {4}{R}{R}.
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&clone_id].mana_cost, ManaCost::NoCost);
     }
 
     // ── Plan test 3/8: Chained copies ─────────────────────────────────────

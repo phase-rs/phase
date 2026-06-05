@@ -1872,7 +1872,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     }
 
     // "that share(s) a creature type" / "that has/have [keyword]" relative clause.
-    if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..]) {
+    if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..], Some(ctx)) {
         properties.extend(that_props);
         pos += consumed;
     }
@@ -3799,14 +3799,14 @@ pub(crate) fn parse_shared_quality(
     .parse(input)
 }
 
-fn parse_shared_quality_reference(
-    input: &str,
-) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
-    // Shared-quality clauses ("creatures that share a type with the sacrificed
-    // creature") only ever back-reference a *sacrificed* cost object; the
-    // context-gated "exiled" participle is irrelevant here, so a default
-    // `ParseContext` (no exile cost) is correct — "exiled" stays a fall-through.
-    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input, &ParseContext::default()) {
+fn parse_shared_quality_reference<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
+    // Shared-quality clauses can back-reference the current ability's
+    // cost-paid object ("the sacrificed creature"; "the exiled card" for
+    // exile-cost abilities), so preserve the caller's cost context.
+    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input, ctx) {
         return Ok((rest, filter));
     }
 
@@ -3826,6 +3826,11 @@ fn parse_shared_quality_reference(
     .parse(input)
     {
         return Ok((rest, filter));
+    }
+
+    if let Ok((rest, ())) = parse_word_bounded(input, "it") {
+        let mut ctx_mut = ctx.clone();
+        return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
     }
 
     let (filter, rest) = parse_target(input);
@@ -3917,9 +3922,10 @@ fn zone_for_scope(props: &[FilterProp]) -> Option<Zone> {
     })
 }
 
-pub(crate) fn parse_shared_quality_clause(
-    input: &str,
-) -> nom::IResult<&str, FilterProp, OracleError<'_>> {
+pub(crate) fn parse_shared_quality_clause<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> nom::IResult<&'a str, FilterProp, OracleError<'a>> {
     type Vbe<'a> = OracleError<'a>;
     let (rest, _) = tag::<_, _, Vbe>("that ").parse(input)?;
     let (rest, relation) = alt((
@@ -3946,10 +3952,9 @@ pub(crate) fn parse_shared_quality_clause(
     .parse(rest)?;
     let (rest, _) = opt(alt((tag::<_, _, Vbe>("a "), tag("at least one ")))).parse(rest)?;
     let (rest, quality) = parse_shared_quality(rest)?;
-    let (rest, reference) = opt(nom::sequence::preceded(
-        tag::<_, _, Vbe>(" with "),
-        parse_shared_quality_reference,
-    ))
+    let (rest, reference) = opt(nom::sequence::preceded(tag::<_, _, Vbe>(" with "), |i| {
+        parse_shared_quality_reference(i, ctx)
+    }))
     .parse(rest)?;
 
     Ok((
@@ -4006,7 +4011,12 @@ pub(crate) fn attachment_kinds_filter_prop(
 /// - CR 301.5 + CR 303.4: "that are enchanted or equipped" → attachment predicate
 ///
 /// Returns `(properties, bytes_consumed)` or `None` if the text doesn't match.
-pub(crate) fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+pub(crate) fn parse_that_clause_suffix(
+    text: &str,
+    ctx: Option<&ParseContext>,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let default_ctx = ParseContext::default();
+    let ctx = ctx.unwrap_or(&default_ctx);
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
@@ -4048,7 +4058,7 @@ pub(crate) fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, u
         return Some(parsed);
     }
 
-    if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed) {
+    if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed, ctx) {
         let consumed = trimmed.len() - rest.len();
         return Some((vec![prop], leading_ws + consumed));
     }
@@ -5298,6 +5308,37 @@ mod tests {
             |d| matches!(d, OracleDiagnostic::TargetFallback { context, text, .. }
                 if context == "parse_target could not classify" && text == "foobar")
         ));
+    }
+
+    #[test]
+    fn parse_type_phrase_other_attacking_creature_shares_type_with_it() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            ..Default::default()
+        };
+        let (filter, remainder) = parse_type_phrase_with_ctx(
+            "other attacking creature that shares a creature type with it",
+            &mut ctx,
+        );
+        assert!(
+            remainder.trim().is_empty(),
+            "expected full consume, remainder: '{remainder}' filter: {filter:?}"
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter");
+        };
+        assert!(tf.properties.contains(&FilterProp::Another));
+        assert!(tf.properties.contains(&FilterProp::Attacking));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(reference),
+                ..
+            } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
+        )));
     }
 
     #[test]
@@ -9103,7 +9144,7 @@ mod tests {
 
     #[test]
     fn that_s_enchanted_or_equipped_emits_disjunction() {
-        let result = parse_that_clause_suffix(" that's enchanted or equipped");
+        let result = parse_that_clause_suffix(" that's enchanted or equipped", None);
         let (props, _consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         match &props[0] {
@@ -9120,7 +9161,7 @@ mod tests {
 
     #[test]
     fn that_s_equipped_or_enchanted_emits_disjunction() {
-        let result = parse_that_clause_suffix(" that's equipped or enchanted");
+        let result = parse_that_clause_suffix(" that's equipped or enchanted", None);
         let (props, _consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9133,7 +9174,7 @@ mod tests {
 
     #[test]
     fn that_are_enchanted_or_equipped_emits_disjunction() {
-        let result = parse_that_clause_suffix(" that are enchanted or equipped");
+        let result = parse_that_clause_suffix(" that are enchanted or equipped", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(consumed, " that are enchanted or equipped".len());
         assert!(matches!(
@@ -9146,7 +9187,7 @@ mod tests {
 
     #[test]
     fn that_s_enchanted_only_emits_single_kind() {
-        let result = parse_that_clause_suffix(" that's enchanted");
+        let result = parse_that_clause_suffix(" that's enchanted", None);
         let (props, _consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9161,7 +9202,7 @@ mod tests {
 
     #[test]
     fn that_s_equipped_only_emits_single_kind() {
-        let result = parse_that_clause_suffix(" that's equipped");
+        let result = parse_that_clause_suffix(" that's equipped", None);
         let (props, _consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9176,7 +9217,7 @@ mod tests {
 
     #[test]
     fn that_s_red_or_green_emits_color_disjunction() {
-        let result = parse_that_clause_suffix(" that's red or green");
+        let result = parse_that_clause_suffix(" that's red or green", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(consumed, " that's red or green".len());
         assert_eq!(
@@ -9201,7 +9242,7 @@ mod tests {
     /// handled in any relative-clause parser. Regression guard for the negation.
     #[test]
     fn that_arent_legendary_emits_not_supertype() {
-        let result = parse_that_clause_suffix(" that aren't legendary");
+        let result = parse_that_clause_suffix(" that aren't legendary", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(consumed, " that aren't legendary".len());
         assert_eq!(
@@ -9217,7 +9258,7 @@ mod tests {
     /// reported negation.
     #[test]
     fn thats_legendary_emits_has_supertype() {
-        let result = parse_that_clause_suffix(" that's legendary");
+        let result = parse_that_clause_suffix(" that's legendary", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(consumed, " that's legendary".len());
         assert_eq!(
@@ -9269,7 +9310,7 @@ mod tests {
     fn that_clause_suffix_exactly_three_colors() {
         // CR 105.2: "that's exactly three colors" → ColorCount{EQ,3}.
         let (props, consumed) =
-            parse_that_clause_suffix("that's exactly three colors").expect("must parse");
+            parse_that_clause_suffix("that's exactly three colors", None).expect("must parse");
         assert_eq!(
             props,
             vec![FilterProp::ColorCount {
@@ -9284,7 +9325,7 @@ mod tests {
     fn that_clause_suffix_one_or_more_colors() {
         // CR 105.2: "that's one or more colors" → ColorCount{GE,1}.
         let (props, consumed) =
-            parse_that_clause_suffix("that's one or more colors").expect("must parse");
+            parse_that_clause_suffix("that's one or more colors", None).expect("must parse");
         assert_eq!(
             props,
             vec![FilterProp::ColorCount {
@@ -9339,7 +9380,7 @@ mod tests {
 
     #[test]
     fn that_targets_only_self_ref() {
-        let result = parse_that_clause_suffix(" that targets only ~");
+        let result = parse_that_clause_suffix(" that targets only ~", None);
         let (props, _consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9350,7 +9391,7 @@ mod tests {
 
     #[test]
     fn that_targets_only_it() {
-        let result = parse_that_clause_suffix(" that targets only it,");
+        let result = parse_that_clause_suffix(" that targets only it,", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9363,7 +9404,7 @@ mod tests {
 
     #[test]
     fn that_targets_only_you() {
-        let result = parse_that_clause_suffix(" that targets only you,");
+        let result = parse_that_clause_suffix(" that targets only you,", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9376,7 +9417,8 @@ mod tests {
 
     #[test]
     fn that_targets_only_single_creature_you_control() {
-        let result = parse_that_clause_suffix(" that targets only a single creature you control,");
+        let result =
+            parse_that_clause_suffix(" that targets only a single creature you control,", None);
         let (props, consumed) = result.expect("should parse");
         // Should produce TargetsOnly + HasSingleTarget
         assert_eq!(props.len(), 2);
@@ -9398,7 +9440,8 @@ mod tests {
 
     #[test]
     fn that_targets_only_single_permanent_or_player() {
-        let result = parse_that_clause_suffix(" that targets only a single permanent or player");
+        let result =
+            parse_that_clause_suffix(" that targets only a single permanent or player", None);
         let (props, _consumed) = result.expect("should parse");
         assert_eq!(props.len(), 2);
         assert!(matches!(&props[0], FilterProp::TargetsOnly { .. }));
@@ -9441,7 +9484,7 @@ mod tests {
 
     #[test]
     fn that_targets_self_ref() {
-        let result = parse_that_clause_suffix(" that targets this creature,");
+        let result = parse_that_clause_suffix(" that targets this creature,", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9453,7 +9496,7 @@ mod tests {
 
     #[test]
     fn that_targets_tilde() {
-        let result = parse_that_clause_suffix(" that targets ~,");
+        let result = parse_that_clause_suffix(" that targets ~,", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9465,7 +9508,7 @@ mod tests {
 
     #[test]
     fn that_targets_this_permanent() {
-        let result = parse_that_clause_suffix(" that targets this permanent,");
+        let result = parse_that_clause_suffix(" that targets this permanent,", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9477,7 +9520,7 @@ mod tests {
 
     #[test]
     fn that_targets_you() {
-        let result = parse_that_clause_suffix(" that targets you,");
+        let result = parse_that_clause_suffix(" that targets you,", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         assert!(matches!(
@@ -9489,7 +9532,7 @@ mod tests {
 
     #[test]
     fn that_targets_you_or_a_creature() {
-        let result = parse_that_clause_suffix(" that targets you or a creature you control,");
+        let result = parse_that_clause_suffix(" that targets you or a creature you control,", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         if let FilterProp::Targets { filter } = &props[0] {
@@ -9517,7 +9560,8 @@ mod tests {
     #[test]
     fn that_targets_one_or_more_creatures() {
         // "one or more" prefix is stripped (redundant with .any() semantics)
-        let result = parse_that_clause_suffix(" that targets one or more creatures you control,");
+        let result =
+            parse_that_clause_suffix(" that targets one or more creatures you control,", None);
         let (props, consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
         if let FilterProp::Targets { filter } = &props[0] {

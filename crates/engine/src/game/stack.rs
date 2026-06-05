@@ -382,6 +382,25 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
+    // `Keyword::Cipher`, is represented by a card, and its controller has a
+    // creature to host it, pause for the optional "exile this card encoded on a
+    // creature you control" choice. The card is held off the stack until the
+    // choice completes (mirroring the Mutate merge pause); the choice handler
+    // exiles+encodes on accept, or routes the card to its graveyard on decline.
+    // Skipped (resolution proceeds to graveyard normally) when there is no legal
+    // host. `is_spell` gates out triggered/activated stack entries.
+    if is_spell && super::cipher::begin_encode_choice(state, entry.id, entry.controller) {
+        events.push(GameEvent::StackResolved {
+            object_id: entry.id,
+        });
+        state.current_trigger_event = None;
+        state.current_trigger_events.clear();
+        state.current_trigger_match_count = None;
+        state.die_result_this_resolution = None;
+        return;
+    }
+
     // CR 702.xxx: Paradigm (Strixhaven) — first-resolution hook. If the
     // resolving spell carries `Keyword::Paradigm` and this is the first
     // resolution of any spell with this name by the controller (per the

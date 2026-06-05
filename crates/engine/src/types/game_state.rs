@@ -651,6 +651,15 @@ pub enum ExileLinkKind {
     /// copy on the stack (CR 707.10f), not a re-cast of the original. Assign
     /// when WotC publishes SOS CR update.
     ParadigmSource { player: PlayerId },
+    /// CR 702.99b: Cipher — the exiled card (`exiled_id`) is *encoded* on the
+    /// creature (`source_id`). While the card stays in exile and the creature
+    /// stays on the battlefield, the creature has "Whenever this creature deals
+    /// combat damage to a player, its controller may cast a copy of the encoded
+    /// card without paying its mana cost" (CR 702.99c). The link is pruned
+    /// automatically when the card leaves exile (`zones.rs` exile-exit) or the
+    /// creature leaves the battlefield (`zones.rs` battlefield-exit, since this
+    /// is not an `UntilSourceLeaves` link) — exactly CR 702.99c's lifetime.
+    Cipher,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2497,6 +2506,16 @@ pub enum WaitingFor {
         merging_id: ObjectId,
         target_id: ObjectId,
     },
+    /// CR 702.99a: A resolving Cipher spell offers "you may exile this card
+    /// encoded on a creature you control". `card_id` is the resolving spell
+    /// (held in limbo off the stack until the choice completes, mirroring
+    /// `MutateMergeChoice`); `creatures` are the legal hosts the controller may
+    /// pick from, or decline (sending the card to its graveyard).
+    CipherEncodeChoice {
+        player: PlayerId,
+        card_id: ObjectId,
+        creatures: Vec<ObjectId>,
+    },
     /// CR 601.2b: Player chooses which legal cast permission / variant to use
     /// when more than one applies to the same spell from the same zone.
     CastingVariantChoice {
@@ -3343,6 +3362,7 @@ impl WaitingFor {
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::AlternativeCastChoice { player, .. }
             | WaitingFor::MutateMergeChoice { player, .. }
+            | WaitingFor::CipherEncodeChoice { player, .. }
             | WaitingFor::CastingVariantChoice { player, .. }
             | WaitingFor::ChoosePermanentTypeSlot { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }

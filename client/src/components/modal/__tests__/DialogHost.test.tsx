@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DialogHost } from "../DialogHost.tsx";
 import { DialogShell } from "../DialogShell.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
 import type { WaitingFor } from "../../../adapter/types.ts";
 
 function setWaitingFor(waitingFor: WaitingFor | null) {
@@ -28,6 +29,7 @@ describe("DialogHost", () => {
     cleanup();
     setWaitingFor(null);
     useGameStore.setState({ gameState: null });
+    useUiStore.setState({ pendingAbilityChoice: null, enchantmentsDialogPlayer: null });
   });
 
   it("hides the peek-restore tab while the dialog is visible (un-peeked)", () => {
@@ -109,6 +111,31 @@ describe("DialogHost", () => {
     expect(wrapper?.className ?? "").toMatch(/fixed/);
     expect(wrapper?.className ?? "").toMatch(/z-40/);
     expect(wrapper?.style.pointerEvents).toBe("none");
+  });
+
+  it("restores host pointer events during convoke when a UI modal is open (#1532)", () => {
+    // Issue #1532: convoke payment is click-through so board taps reach creatures,
+    // but an ability picker opened mid-payment (mana dork + convoke-eligible) must
+    // stay interactive — not inherit pointer-events:none from the host.
+    setWaitingFor({
+      type: "ManaPayment",
+      data: { player: 0, convoke_mode: "Convoke" },
+    } as never);
+    useUiStore.setState({
+      pendingAbilityChoice: {
+        objectId: 41,
+        actions: [{ type: "TapForConvoke", data: { object_id: 41, mana_type: "Green" } }],
+      },
+    });
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.className ?? "").toMatch(/z-40/);
+    expect(wrapper?.style.pointerEvents).not.toBe("none");
   });
 
   it("keeps the viewport wrapper for plain mana payment without convoke", () => {

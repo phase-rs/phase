@@ -548,6 +548,50 @@ fn block_restriction_statics_against<'a>(
         })
 }
 
+/// CR 509.1a: A blocker declaration is illegal if any functioning static says
+/// that creature can't block. The static may live on the blocker itself or on
+/// another battlefield/command-zone source whose `affected` filter matches the
+/// blocker, so this mirrors the attacker-side CantAttack check while preserving
+/// intrinsic `None` = SelfRef semantics.
+fn blocker_restriction_statics_for<'a>(
+    state: &'a GameState,
+    blocker_id: ObjectId,
+) -> impl Iterator<Item = (&'a GameObject, &'a StaticDefinition)> + 'a {
+    super::functioning_abilities::game_functioning_statics(state)
+        .filter(|(_, def)| {
+            matches!(
+                def.mode,
+                StaticMode::CantBlock | StaticMode::CantAttackOrBlock
+            )
+        })
+        .filter(move |(src, def)| match def.affected.as_ref() {
+            None => src.id == blocker_id,
+            Some(filter) => matches_target_filter(
+                state,
+                blocker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ),
+        })
+        .filter(move |(src, def)| {
+            def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    blocker_id,
+                )
+            })
+        })
+}
+
+fn blocker_has_cant_block_static(state: &GameState, blocker_id: ObjectId) -> bool {
+    blocker_restriction_statics_for(state, blocker_id)
+        .next()
+        .is_some()
+}
+
 /// CR 509.1c: Static abilities that force blockers onto `attacker_id` — e.g.
 /// "must be blocked if able" on the attacker itself, or on an Aura/Equipment
 /// whose `affected` filter matches the enchanted/equipped creature (Predatory
@@ -704,12 +748,7 @@ pub fn validate_blockers_for_player(
         if blocker.has_keyword(&Keyword::Decayed) {
             return Err(format!("{:?} has decayed and can't block", blocker_id));
         }
-        if super::functioning_abilities::active_static_definitions(state, blocker).any(|sd| {
-            matches!(
-                sd.mode,
-                StaticMode::CantBlock | StaticMode::CantAttackOrBlock
-            )
-        }) {
+        if blocker_has_cant_block_static(state, blocker_id) {
             return Err(format!("{:?} can't block", blocker_id));
         }
 
@@ -1088,12 +1127,7 @@ pub fn validate_blockers_for_player(
             if obj.has_keyword(&Keyword::Decayed) {
                 continue;
             }
-            if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
-                matches!(
-                    sd.mode,
-                    StaticMode::CantBlock | StaticMode::CantAttackOrBlock
-                )
-            }) {
+            if blocker_has_cant_block_static(state, obj_id) {
                 continue;
             }
             // CR 701.35a: Detained creatures can't block.
@@ -1141,12 +1175,7 @@ pub fn validate_blockers_for_player(
             if obj.tapped
                 || obj.has_keyword(&Keyword::Decayed)
                 || !obj.detained_by.is_empty()
-                || super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
-                    matches!(
-                        sd.mode,
-                        StaticMode::CantBlock | StaticMode::CantAttackOrBlock
-                    )
-                })
+                || blocker_has_cant_block_static(state, obj_id)
             {
                 continue;
             }
@@ -2419,12 +2448,7 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     let Some(attacker) = state.objects.get(&attacker_id) else {
         return false;
     };
-    if super::functioning_abilities::active_static_definitions(state, blocker).any(|sd| {
-        matches!(
-            sd.mode,
-            StaticMode::CantBlock | StaticMode::CantAttackOrBlock
-        )
-    }) {
+    if blocker_has_cant_block_static(state, blocker_id) {
         return false;
     }
     // CR 702.147a: Decayed means "This creature can't block."
@@ -2912,9 +2936,10 @@ mod tests {
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
         Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
 
@@ -4516,6 +4541,53 @@ mod tests {
             .static_definitions
             .push(StaticDefinition::new(StaticMode::CantBlock));
 
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
+    }
+
+    #[test]
+    fn affected_cant_block_static_checks_recipient_condition() {
+        let mut state = setup();
+        let source = create_creature(&mut state, PlayerId(0), "Unleash Grant", 3, 3);
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBlock)
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent),
+                    ))
+                    .condition(StaticCondition::RecipientHasCounters {
+                        counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                        minimum: 1,
+                        maximum: None,
+                    }),
+            );
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        assert!(
+            can_block_pair(&state, blocker, attacker),
+            "recipient-gated CantBlock should stay dormant before the blocker has a counter"
+        );
+
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        assert!(
+            !can_block_pair(&state, blocker, attacker),
+            "recipient-gated CantBlock should apply to the affected blocker with a +1/+1 counter"
+        );
         assert!(validate_blockers(&state, &[(blocker, attacker)]).is_err());
     }
 

@@ -264,7 +264,7 @@ fn try_parse_subject_continuous_clause(
         return Some(clause);
     }
     let application = parse_subject_application(subject, ctx)?;
-    build_continuous_clause(application, predicate)
+    build_continuous_clause(application, predicate, ctx)
 }
 
 fn additive_type_subject_application(
@@ -1506,6 +1506,7 @@ pub(super) fn is_single_object_ref(filter: &TargetFilter) -> bool {
 fn try_split_pump_compound(
     normalized: &str,
     application: &SubjectApplication,
+    ctx: &ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = normalized.to_lowercase();
     // Find " and " that separates two independent clauses after a pump+duration.
@@ -1515,7 +1516,8 @@ fn try_split_pump_compound(
     let remainder = remainder_tp.original.trim();
 
     // Parse the pump clause first to check whether it carries its own duration.
-    let (power, toughness, duration) = super::parse_pump_clause(pump_part)?;
+    let (power, toughness, duration) =
+        super::lower::parse_pump_clause_with_context(pump_part, ctx)?;
 
     // Guard: when the pump part has NO duration (e.g., "get +2/+2 and gain flying
     // until end of turn"), the trailing duration is shared across both clauses.
@@ -1626,6 +1628,7 @@ fn build_keyword_choice_clause(
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
+    ctx: &ParseContext,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
 
@@ -1646,7 +1649,9 @@ fn build_continuous_clause(
     }
 
     // Try the full predicate first (simple pump with no compound).
-    if let Some((power, toughness, duration)) = super::parse_pump_clause(&normalized) {
+    if let Some((power, toughness, duration)) =
+        super::lower::parse_pump_clause_with_context(&normalized, ctx)
+    {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
             effect,
@@ -1663,7 +1668,7 @@ fn build_continuous_clause(
     // Compound: "get +1/+1 until end of turn and you gain 1 life"
     // Split on " and " that follows a duration marker, producing a pump
     // with a chained sub_ability for the remainder.
-    if let Some(clause) = try_split_pump_compound(&normalized, &application) {
+    if let Some(clause) = try_split_pump_compound(&normalized, &application, ctx) {
         return Some(clause);
     }
 

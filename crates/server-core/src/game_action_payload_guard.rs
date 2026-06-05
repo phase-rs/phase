@@ -404,6 +404,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         // CR 702.140c: mutate merge side carries a single typed enum — nothing
         // client-controlled to bound.
         | GameAction::ChooseMutateMergeSide { .. }
+        // CR 702.99a: cipher encode carries a single optional object id — nothing
+        // unbounded to validate.
+        | GameAction::CipherEncode { .. }
         | GameAction::ChooseLegend { .. }
         | GameAction::ChooseBattleProtector { .. }
         | GameAction::SetAutoPass { .. }

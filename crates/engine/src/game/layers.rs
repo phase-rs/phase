@@ -3083,7 +3083,8 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. } => None,
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::RemoveManaCost => None,
     }
 }
 
@@ -3540,6 +3541,17 @@ fn apply_continuous_effect_filtered(
                 debug_assert!(
                     false,
                     "AddCounterOnEnter must be consumed at resolution time, \
+                     not via apply_continuous_effect"
+                );
+            }
+            // CR 707.9 + CR 202.1b: the "has no mana cost" copy exception is
+            // consumed at copy resolution (token_copy.rs bakes it into the token;
+            // become_copy.rs strips it from the copied values), never via a
+            // continuous effect. Reaching this arm means a wiring bug.
+            ContinuousModification::RemoveManaCost => {
+                debug_assert!(
+                    false,
+                    "RemoveManaCost must be consumed at copy resolution time, \
                      not via apply_continuous_effect"
                 );
             }

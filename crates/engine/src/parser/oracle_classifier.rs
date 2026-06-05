@@ -291,6 +291,17 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // false-positive into other pattern classes.
     "is every creature type",
     "are every creature type",
+    // CR 502.3 + CR 113.6: Seedborn-class untap permission — "untap <subject>
+    // during each other player's untap step" is always a continuous static, so
+    // route it to `parse_static_line` regardless of subject (covers the self-ref
+    // form "Untap this artifact …" on Bender's Waterskin, not just the "untap
+    // all <type> you control" subject that already matched other patterns).
+    // Lines that merely *trigger* at an untap step lead with "at the beginning
+    // of …" and are caught by the trigger-prefix check before this point, so
+    // this contains-scan stays specific to the static body. Both apostrophe
+    // forms are listed because the source text is not apostrophe-normalized.
+    "during each other player's untap step",
+    "during each other player\u{2019}s untap step",
 ];
 
 const STATIC_PREFIX_PATTERNS: &[&str] = &[

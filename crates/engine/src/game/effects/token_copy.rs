@@ -655,6 +655,16 @@ fn apply_token_modifications(
                     token.base_color = colors.clone();
                 }
             }
+            // CR 707.9 + CR 202.1b: "except it has no mana cost" — strip the
+            // copied mana cost so the token's mana value is 0 (Embalm
+            // CR 702.128a, Eternalize CR 702.129a). Set both live and base so
+            // the override is part of the token's copiable values.
+            ContinuousModification::RemoveManaCost => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.mana_cost = crate::types::mana::ManaCost::NoCost;
+                    token.base_mana_cost = crate::types::mana::ManaCost::NoCost;
+                }
+            }
             // CR 707.9b + CR 613.1e: a copy exception that adds color
             // ("in addition to its other colors") becomes part of the token's
             // copiable values without removing the copied color.
