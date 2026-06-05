@@ -15,7 +15,7 @@
 //! `parser/oracle_quantity.rs`), the retained anaphora referents split across
 //! two `ObjectScope` variants:
 //!
-//! - **155** cards retain `ObjectScope::Anaphoric` — the *pronoun* "its"
+//! - **153** cards retain `ObjectScope::Anaphoric` — the *pronoun* "its"
 //!   (categories 1-3 below), which the subject-injection rewrite may rebind.
 //! - **111** cards retain `ObjectScope::Demonstrative` — the bare *demonstrative
 //!   / definite* possessive ("that creature's toughness", "that card's mana
@@ -217,7 +217,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "huatli's final strike",
     "hunter's edge",
     "hunter's mark",
-    "immersturm",
     "infernal reckoning",
     "jenova, ancient calamity",
     "judgment of alexander",
@@ -249,7 +248,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "packsong pup",
     "pain for all",
     "paladin of atonement",
-    "pandemonium",
     "phthisis",
     "polukranos, world eater",
     "predatory urge",
@@ -498,19 +496,23 @@ fn anaphoric_scope_set_is_frozen() {
     // them) moved 95 cards from this set into DEMONSTRATIVE_SCOPE_CARDS, and
     // Steadfast Armasaur's "its toughness" rebound to `Source` (the LKI-toughness
     // fix), taking the count 252 -> 156; the Optional_YouMay capture fix
-    // (#2277) then dropped "ian the reckless" to 155. If #512/#511 land, this
-    // shrinks further.
+    // (#2277) then dropped "ian the reckless" to 155. The "may have" causative
+    // optional fix (#2313) restructured the optional sub-effect of Pandemonium /
+    // Immersturm ("...may have it deal damage equal to its power..."), letting the
+    // anaphoric rebind resolve "its power" to `EventSource` (the entering
+    // creature, CR 603.2) — the category-2 trigger-subject fix #512 anticipated —
+    // dropping both to 153. If #512/#511 land, this shrinks further.
     assert_eq!(
         observed.len(),
-        155,
-        "Expected exactly 155 cards retaining ObjectScope::Anaphoric (pronoun \
+        153,
+        "Expected exactly 153 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        155,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 155 cards."
+        153,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 153 cards."
     );
 }
 
