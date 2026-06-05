@@ -1513,6 +1513,7 @@ fn collect_pending_triggers(
                         Effect::CopySpell {
                             target: TargetFilter::SelfRef,
                             retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            copier: None,
                         },
                         Vec::new(),
                         *cast_obj_id,
