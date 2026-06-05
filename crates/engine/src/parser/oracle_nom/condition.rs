@@ -2734,6 +2734,22 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_youve_life_history_condition,
         parse_youve_combat_history_condition,
         parse_youve_player_action_history_condition,
+        // CR 305.2a + CR 603.4: "you've played a land [this turn]" — land-play
+        // history condition. Backs intervening-if predicates like Spider-Man
+        // 2099's "if you've played a land or cast a spell this turn from
+        // anywhere other than your hand".
+        // The " this turn" suffix is optional so the combinator also serves as
+        // the LHS of `parse_condition_disjunction` when "played a land" is
+        // followed by " or" rather than " this turn".
+        map((tag("played a land"), opt(tag(" this turn"))), |_| {
+            make_quantity_ge(
+                QuantityRef::LandsPlayedThisTurn {
+                    player: PlayerScope::Controller,
+                    from_zones: None,
+                },
+                1,
+            )
+        }),
     ))
     .parse(rest)
 }
