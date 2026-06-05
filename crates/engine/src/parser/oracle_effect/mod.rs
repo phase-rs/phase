@@ -4521,8 +4521,7 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
             | "~"
             | "enchanted"
             | "equipped"
-    ) || after_have.starts_with("this artifact ")
-        || after_have.starts_with("that creature ");
+    );
     if !is_subject_ref {
         return None;
     }

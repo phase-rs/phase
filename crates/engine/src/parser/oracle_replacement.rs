@@ -9096,7 +9096,7 @@ mod tests {
         }
     }
 
-    /// CR 707.9a + CR 702.7: Wall of Stolen Identity — clone except adds Wall
+    /// CR 707.9a + CR 702.3: Wall of Stolen Identity — clone except adds Wall
     /// subtype and defender via the "and has defender" shorthand.
     #[test]
     fn clone_wall_of_stolen_identity_except_defender() {

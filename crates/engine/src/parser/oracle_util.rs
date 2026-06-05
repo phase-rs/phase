@@ -2117,7 +2117,7 @@ mod tests {
             "Wall of Stolen Identity",
         );
         assert!(
-            result.contains("it's a Wall in addition"),
+            result.contains("it's a Wall in addition"), // allow-noncombinator: test assertion, not parsing dispatch
             "creature subtype Wall must survive normalization, got: {result}"
         );
     }
