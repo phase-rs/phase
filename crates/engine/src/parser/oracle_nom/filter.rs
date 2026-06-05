@@ -122,6 +122,15 @@ pub fn parse_with_property(input: &str) -> OracleResult<'_, FilterProp> {
     preceded((tag("with"), space1), parse_with_inner).parse(input)
 }
 
+/// CR 113.1 + CR 113.3: an object with none of the four ability categories
+/// (spell, activated, triggered, static) — i.e. "no abilities". Narrow primitive
+/// shared by the target-suffix scanner (oracle_target.rs) and the search-library
+/// filter scanner (oracle_effect/search.rs); each call site supplies its own
+/// surrounding "with " grammar, so this matches the bare predicate only.
+pub fn parse_no_abilities(input: &str) -> OracleResult<'_, FilterProp> {
+    value(FilterProp::HasNoAbilities, tag("no abilities")).parse(input)
+}
+
 /// Parse the inner content of a "with" clause.
 fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
     alt((
@@ -426,6 +435,29 @@ mod tests {
     #[test]
     fn test_parse_property_filter_failure() {
         assert!(parse_property_filter("flying").is_err());
+    }
+
+    #[test]
+    fn test_parse_no_abilities() {
+        // CR 113.1 + CR 113.3: bare "no abilities" predicate → HasNoAbilities,
+        // fully consumed.
+        let (rest, prop) = parse_no_abilities("no abilities").unwrap();
+        assert_eq!(prop, FilterProp::HasNoAbilities);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_no_abilities_residual() {
+        // Only the bare predicate is consumed; trailing grammar is left for the
+        // call site's scanner.
+        let (rest, prop) = parse_no_abilities("no abilities and more").unwrap();
+        assert_eq!(prop, FilterProp::HasNoAbilities);
+        assert_eq!(rest, " and more");
+    }
+
+    #[test]
+    fn test_parse_no_abilities_failure() {
+        assert!(parse_no_abilities("flying").is_err());
     }
 
     #[test]

@@ -1865,6 +1865,17 @@ pub(super) fn handle_resolution_choice(
                 effects::publish_tracked_set(state, discarded_to_graveyard);
             }
 
+            // CR 608.2c: "discard a card. If you do, [effect]" — the IfYouDo
+            // sub_ability condition evaluates against optional_effect_performed.
+            // Set it on the stashed continuation before draining so the gate
+            // evaluates true when at least one card was actually discarded.
+            // Mirrors the recursive AutoMayChoice::Accept path in effects/mod.rs.
+            if !chosen.is_empty() {
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain.set_optional_effect_performed_recursive(true);
+                }
+            }
+
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,

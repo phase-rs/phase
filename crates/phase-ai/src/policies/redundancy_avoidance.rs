@@ -528,6 +528,10 @@ fn redundancy_delta(
         // CR 701.51 + CR 701.52: Attraction open/visit — deck state dependent.
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
+        // CR 701.34a + CR 122.1: targeted proliferate adds one counter of each
+        // kind already present — adding counters is virtually always beneficial,
+        // so there is no "does nothing" static-redundancy signal here.
+        | Effect::ProliferateTarget { .. }
         | Effect::ProcessRadCounters => None,
     }
 }

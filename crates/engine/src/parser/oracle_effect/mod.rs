@@ -2978,7 +2978,11 @@ fn try_parse_have_causative(
     // second player" must reach the anaphor-target arm, not collapse to
     // `target: Player`).
     let after_have = nom_on_lower(tp.original, tp.lower, |input| {
-        value((), alt((tag("have it "), tag("have ~ ")))).parse(input)
+        value(
+            (),
+            alt((tag("have it "), tag("have ~ "), tag("have this artifact "))),
+        )
+        .parse(input)
     });
     if let Some((_, rest_orig)) = after_have {
         let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
@@ -3008,6 +3012,16 @@ fn try_parse_have_causative(
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,
                         target: TargetFilter::Player,
+                        damage_source: None,
+                    }));
+                }
+                // CR 608.2d: "have this artifact deal 1 damage to it" (Requiem
+                // Monolith) — optional self-damage the targeted creature's
+                // controller may cause the source artifact to deal.
+                if after_damage.trim_end_matches('.').trim() == "it" {
+                    return Some(parsed_clause(Effect::DealDamage {
+                        amount,
+                        target: TargetFilter::ParentTarget,
                         damage_source: None,
                     }));
                 }
@@ -4200,6 +4214,16 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         if let Some(clause) = try_parse_distribute_counters(&lower, text) {
             return clause;
         }
+    }
+
+    // CR 701.34a + CR 122.1: targeted proliferate — "for each kind of counter on
+    // target permanent or player, give that permanent or player another counter
+    // of that kind" (Skyship Plunderer, Maulfist Revolutionary). Must precede the
+    // generic `for each` splitter below, which would otherwise lift "kind of
+    // counter on target permanent or player" into a repeat-iteration and drop the
+    // target, leaving an Unimplemented "give … counter of that kind" body.
+    if let Some(effect) = try_parse_proliferate_target(text) {
+        return parsed_clause(effect);
     }
 
     // "for each" patterns: "draw a card for each [filter]", etc.
@@ -7032,6 +7056,53 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
 }
 
 #[tracing::instrument(level = "debug")]
+/// CR 701.34a (operation) + CR 122.1: "For each kind of counter on target
+/// permanent or player, give that permanent or player another counter of that
+/// kind." — the proliferate counter-add forced on a single chosen target
+/// (Skyship Plunderer, Maulfist Revolutionary). The card
+/// spells out the operation rather than using the proliferate keyword, and it
+/// always targets exactly one permanent-or-player, so it lowers to the targeted
+/// `Effect::ProliferateTarget` (not `Effect::Proliferate`, which prompts a
+/// chooser and fires "whenever you proliferate" triggers).
+fn try_parse_proliferate_target(text: &str) -> Option<Effect> {
+    type E<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    // Consume the leading "for each kind of counter on " phrase, then read the
+    // target with the shared target parser ("target permanent or player").
+    let (_, after_on) = nom_on_lower(text, &lower, |i| {
+        value((), tag::<_, _, E>("for each kind of counter on ")).parse(i)
+    })?;
+    let (target, remainder) = parse_target(after_on);
+
+    // The tail re-states the target as an anaphor and adds one counter of each
+    // kind it already has: "give that permanent or player another counter of
+    // that kind".
+    let rem_lower = remainder
+        .trim_start_matches([',', ' '])
+        .to_lowercase()
+        .trim_end_matches(['.', ' '])
+        .to_string();
+    let (rem, _) = tag::<_, _, E>("give ").parse(rem_lower.as_str()).ok()?;
+    let (rem, _) = alt((
+        tag::<_, _, E>("that permanent or player"),
+        tag("that permanent"),
+        tag("that player"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(rem)
+    .ok()?;
+    let (rem, _) = tag::<_, _, E>(" another counter of that kind")
+        .parse(rem)
+        .ok()?;
+    if !rem.is_empty() {
+        return None;
+    }
+
+    Some(Effect::ProliferateTarget { target })
+}
+
 fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     if let Some(effect) = try_parse_drawn_this_turn_choice(text) {
         return parsed_clause(effect);
@@ -14639,7 +14710,17 @@ pub(crate) fn parse_effect_chain_ir(
         }
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
-        let (repeat_for, text) = strip_for_each_prefix(&text);
+        // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
+        // target permanent or player, give … another counter of that kind"
+        // clause intact so the targeted-proliferate recognizer in
+        // `parse_effect_clause` claims it. The generic `for each` strip would
+        // otherwise lift the counter-kind iteration into `repeat_for` and drop
+        // the target, leaving an Unimplemented "give … counter" body.
+        let (repeat_for, text) = if try_parse_proliferate_target(&text).is_some() {
+            (None, text)
+        } else {
+            strip_for_each_prefix(&text)
+        };
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
             let (without_where_x, where_x_expression) =
@@ -21826,6 +21907,54 @@ mod tests {
                 qty: QuantityRef::Variable { .. }
             })
         ));
+    }
+
+    #[test]
+    fn effect_proliferate_target_single_target() {
+        // CR 701.34a + CR 122.1: Skyship Plunderer / Maulfist Revolutionary —
+        // forced single-target proliferate. Must target a permanent-or-player
+        // (a concrete filter, not `Any`) so a target slot is requested.
+        let e = parse_effect(
+            "For each kind of counter on target permanent or player, give that permanent or player another counter of that kind.",
+        );
+        let Effect::ProliferateTarget { target } = &e else {
+            panic!("expected ProliferateTarget, got {e:?}");
+        };
+        assert_ne!(
+            *target,
+            TargetFilter::Any,
+            "target must be a concrete permanent-or-player filter so a target slot is built"
+        );
+        assert!(
+            e.target_filter().is_some(),
+            "ProliferateTarget must surface a target filter"
+        );
+    }
+
+    #[test]
+    fn effect_proliferate_target_in_combat_damage_trigger() {
+        // CR 603.2: Skyship Plunderer's full ability — the targeted proliferate
+        // is the executed body of the combat-damage trigger.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flying\nWhenever this creature deals combat damage to a player, for each kind of counter on target permanent or player, give that permanent or player another counter of that kind.",
+            "Skyship Plunderer",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("should produce the combat-damage trigger");
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("trigger has an execute body");
+        assert!(
+            matches!(&*execute.effect, Effect::ProliferateTarget { .. }),
+            "combat-damage trigger body must be ProliferateTarget, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]

@@ -1253,6 +1253,17 @@ fn find_copy_verb(norm_lower: &str) -> Option<(&str, &str, bool)> {
     Some((&norm_lower[..pos], &norm_lower[pos + len..], tapped))
 }
 
+/// CR 707.9 / CR 614.1c: whether `lower` contains a copy replacement verb
+/// ("enter as a copy of", "become a copy of", "enter tapped as a copy of").
+/// Used by the Priority 7 dispatcher to gate the copy-replacement first-pass so
+/// static / prevent lines never mis-route into the replacement parsers.
+///
+/// Intentionally takes UN-normalized lowercase: the copy verbs never contain the
+/// card name, so `~`-normalization is irrelevant to this check.
+pub(crate) fn find_copy_verb_present(lower: &str) -> bool {
+    find_copy_verb(lower).is_some()
+}
+
 /// Split the post-"enter as a copy of " remainder into (type_text, suffix, source_zone).
 /// Recognises both the battlefield form ("... on the battlefield, ...") and the
 /// graveyard forms ("... in a graveyard, ...", "... in any graveyard, ..."). The
@@ -5662,6 +5673,25 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
 
+    #[test]
+    fn find_copy_verb_present_recognizes_copy_replacement() {
+        // CR 707.9 / CR 614.1c: copy replacement verbs are recognized.
+        assert!(find_copy_verb_present(
+            "you may have ~ enter as a copy of any creature on the battlefield"
+        ));
+        assert!(find_copy_verb_present("become a copy of target creature"));
+        // Static / prevent lines are NOT copy replacements.
+        assert!(!find_copy_verb_present(
+            "prevent all combat damage that would be dealt this turn"
+        ));
+        assert!(!find_copy_verb_present(
+            "if a source you control would deal damage to a permanent or player"
+        ));
+        assert!(!find_copy_verb_present(
+            "prevent all damage that would be dealt this turn unless its controller wins a clash"
+        ));
+    }
+
     /// CR 614.12 + CR 614.1a: Phial of Galadriel — "If you would gain life
     /// while you have 5 or less life, you gain twice that much life instead."
     /// The `while [condition]` clause in the antecedent must lift to a typed
@@ -9094,6 +9124,56 @@ mod tests {
             }
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
+    }
+
+    /// CR 707.9a + CR 702.3: Wall of Stolen Identity — clone except adds Wall
+    /// subtype and defender via the "and has defender" shorthand.
+    #[test]
+    fn clone_wall_of_stolen_identity_except_defender() {
+        let def = parse_replacement_line(
+            "You may have this creature enter as a copy of any creature on the battlefield, \
+             except it's a Wall in addition to its other types and has defender. \
+             When you do, tap the copied creature and it doesn't untap during its controller's \
+             untap step for as long as you control this creature.",
+            "Wall of Stolen Identity",
+        )
+        .unwrap();
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                use crate::types::keywords::Keyword;
+                assert!(
+                    !additional_modifications.is_empty(),
+                    "expected except-clause modifications, got {additional_modifications:?}"
+                );
+                assert!(
+                    additional_modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Wall")
+                    }),
+                    "expected Wall subtype addition, got {additional_modifications:?}"
+                );
+                assert!(additional_modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Defender
+                        }
+                    )
+                }));
+            }
+            other => panic!("expected BecomeCopy, got {other:?}"),
+        }
+        assert!(
+            execute.sub_ability.is_some(),
+            "When you do reflexive trigger should be sub_ability"
+        );
     }
 
     #[test]

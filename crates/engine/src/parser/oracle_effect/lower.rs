@@ -1393,6 +1393,17 @@ pub(super) fn strip_optional_effect_prefix(
                 (None, Some(PlayerFilter::TriggeringPlayer)),
                 tag("the first player may "),
             ),
+            // CR 608.2d: "Target opponent may have ~ deal … to them" (Risk Factor).
+            value(
+                (None, Some(PlayerFilter::Opponent)),
+                tag("target opponent may "),
+            ),
+            // CR 608.2d: "That creature's controller may have this artifact deal …"
+            // (Requiem Monolith) — the targeted creature's controller chooses.
+            value(
+                (None, Some(PlayerFilter::ParentObjectTargetController)),
+                tag("that creature's controller may "),
+            ),
         ))
         .parse(input)
     }) {

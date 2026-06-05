@@ -12,9 +12,6 @@
 //! Step 6 (`source_matches_protection_target`), or Step 7b
 //! (`player_protection_from`) independently breaks a distinct assertion.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use engine::database::card_db::CardDatabase;
 use engine::game::effects::deal_damage;
 use engine::game::layers::evaluate_layers;
@@ -35,14 +32,7 @@ use engine::types::zones::Zone;
 
 const P1: PlayerId = PlayerId(1);
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Place a bare object with a single core type on the battlefield — used as a
 /// damage/targeting *source* whose card type drives the protection check.
