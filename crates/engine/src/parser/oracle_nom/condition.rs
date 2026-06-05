@@ -2730,6 +2730,21 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_youve_life_history_condition,
         parse_youve_combat_history_condition,
         parse_youve_player_action_history_condition,
+        // CR 305.2a + CR 603.4: "you've played a land [this turn]" — land-play
+        // history condition. Backs intervening-if predicates like Spider-Man
+        // 2099's "if you've played a land or cast a spell this turn from
+        // anywhere other than your hand".
+        // The " this turn" suffix is optional so the combinator also serves as
+        // the LHS of `parse_condition_disjunction` when "played a land" is
+        // followed by " or" rather than " this turn".
+        map((tag("played a land"), opt(tag(" this turn"))), |_| {
+            make_quantity_ge(
+                QuantityRef::LandsPlayedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                1,
+            )
+        }),
     ))
     .parse(rest)
 }
@@ -3730,6 +3745,13 @@ fn parse_one_spell_this_turn_filter(input: &str) -> OracleResult<'_, Option<Targ
     let (rest, _) = parse_article(input)?;
     let (rest, type_text) = take_until(" this turn").parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
+    // CR 601.2a + CR 400.1: "from anywhere other than <zone>" is a cast-origin
+    // negation that can follow "this turn". Consume it so the rest of the clause
+    // (comma, period, action text) parses cleanly. The zone constraint is not yet
+    // represented in the filter — recorded as a known approximation; SpellsCastThisTurn
+    // with filter=None is conservative (may trigger on spells cast from the excluded
+    // zone, i.e. fires more often than it should), not silent.
+    let (rest, _) = opt(tag(" from anywhere other than your hand")).parse(rest)?;
     if let Ok((empty, _)) = tag::<_, _, OracleError<'_>>("spell").parse(type_text) {
         if empty.trim().is_empty() {
             return Ok((rest, None));
