@@ -303,6 +303,72 @@ fn cant_attack_split_declines_scoped_restrictions() {
     );
 }
 
+/// CR 702.5: Consecrate Land — "Enchanted land has indestructible and can't be
+/// enchanted by other Auras." must decompose into BOTH the indestructible grant
+/// AND a `CantBeEnchanted` static affecting the enchanted permanent. Previously
+/// the attach prohibition was dropped, so other Auras could still be attached.
+#[test]
+fn cant_be_attached_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted land has indestructible and can't be enchanted by other Auras.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string())),
+        "expected a CantBeEnchanted static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the indestructible grant must be preserved"
+    );
+}
+
+/// CR 702.5: Anti-Magic Aura — "Enchanted creature can't be the target of spells
+/// and can't be enchanted by other Auras." splits into BOTH the targeting
+/// restriction AND a `CantBeEnchanted` static.
+#[test]
+fn cant_be_attached_static_splits_from_restriction() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature can't be the target of spells and can't be enchanted by other Auras.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string()))
+        .expect("expected a CantBeEnchanted static");
+    assert!(
+        cant.affected.is_some(),
+        "CantBeEnchanted companion must share the first clause's affected set"
+    );
+    assert!(
+        defs.len() >= 2,
+        "the first clause must be preserved alongside CantBeEnchanted, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 702.5 + CR 702.6: A compound "can't be equipped or enchanted" tail yields
+/// BOTH attach prohibitions (equipped-first, matching the standalone dispatch).
+#[test]
+fn cant_be_attached_static_splits_both_prohibitions() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't be equipped or enchanted.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEquipped".to_string())),
+        "expected CantBeEquipped, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string())),
+        "expected CantBeEnchanted, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
 /// blocked by more than one creature." must decompose into BOTH the P/T grant
 /// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted

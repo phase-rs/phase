@@ -45,6 +45,7 @@ mod doran_attack_block_pump;
 mod double_strike_first_strike_trigger_removes_attacker;
 mod dralnu_dealt_damage_sacrifice;
 mod dredgers_insight_mill_from_among;
+mod duskmantle_seer_each_player_reveal;
 mod elemental_spectacle_regression;
 mod elusive_otter_repro;
 mod embiggen_typeline_pump;

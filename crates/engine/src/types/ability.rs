@@ -12452,6 +12452,25 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2: Rebind the acting controller across this ability and every
+    /// sub/else branch. Used by the `player_scope` driver: when a compound
+    /// "each player <verb1>, <verb2>, then <verb3>" instruction iterates, the
+    /// SCOPED player is the acting controller for the WHOLE chain, not just the
+    /// top clause — so a co-scoped sub-clause's implicit-controller recipient
+    /// (e.g. `LoseLife { target: None }`, "each player ... loses life") and any
+    /// generic handler that reads `controller` resolve to the iterating player.
+    /// The printed ability controller is preserved separately via
+    /// `original_controller` (CR 109.5), so "you" references are unaffected.
+    pub fn set_controller_recursive(&mut self, player: PlayerId) {
+        self.controller = player;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_controller_recursive(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_controller_recursive(player);
+        }
+    }
+
     /// CR 608.2c + CR 109.4: Propagate the resolution-scoped chosen-players
     /// list across this ability and every sub/else branch. Called by the
     /// `WaitingFor::NamedChoice` answer handler after appending a freshly
