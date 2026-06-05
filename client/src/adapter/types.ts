@@ -721,6 +721,12 @@ export interface GameObject {
    */
   is_token?: boolean;
   /**
+   * CR 707.10 / CR 707.12a: Whether this object is a copy of a card/spell and so
+   * is not "represented by a card" (mirrors the engine's `is_copy`). Present
+   * only when true; the frontend does not read it (display only).
+   */
+  is_copy?: boolean;
+  /**
    * Image-lookup routing hint from the engine. "Card" → look up the image
    * in the real-card database (default; also covers token-copies of real
    * cards like Twinflame/Helm of the Host). "Token" → look up the image
@@ -1101,6 +1107,9 @@ export type WaitingFor =
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
+  // CR 702.99a: resolving Cipher spell — controller may exile this card encoded
+  // on a creature they control (or decline, sending it to the graveyard).
+  | { type: "CipherEncodeChoice"; data: { player: PlayerId; card_id: ObjectId; creatures: ObjectId[] } }
   | { type: "CastingVariantChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; options: CastingVariantChoiceOption[] } }
   | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; payment_mode?: CastPaymentMode; available_slots: CoreType[] } }
   | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
@@ -1510,6 +1519,8 @@ export type GameAction =
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   // CR 702.140c + CR 730.2a: answer to MutateMergeChoice — top or bottom.
   | { type: "ChooseMutateMergeSide"; data: { side: "Top" | "Bottom" } }
+  // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
+  | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }

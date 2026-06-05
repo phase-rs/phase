@@ -2155,7 +2155,7 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, prop)) = parse_shared_quality_clause(remaining) {
+        if let Ok((rest, prop)) = parse_shared_quality_clause(remaining, &ParseContext::default()) {
             last_shared_quality_reference = match &prop {
                 FilterProp::SharesQuality {
                     reference: Some(reference),

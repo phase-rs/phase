@@ -37,9 +37,9 @@ use crate::types::ability::{
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, Effect, FilterProp, ObjectScope, OriginConstraint, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -4449,6 +4449,38 @@ fn split_trigger(tp: TextPair<'_>) -> (String, String) {
     }
 }
 
+fn spell_quality_equal_to_chosen_number_tail<'a>(
+    input: &'a str,
+) -> nom::IResult<&'a str, (), OracleError<'a>> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("equal to the chosen number"),
+        tag("equal to that number"),
+    ))
+    .parse(input)?;
+    Ok((rest, ()))
+}
+
+/// CR 202.3 + CR 208.1: Commas inside a spell-quality disjunction
+/// ("mana value, power, or toughness equal to …") are not the condition/effect
+/// boundary. Talion, the Kindly Lord is the motivating card.
+fn continues_spell_quality_disjunction(after_comma: &str) -> bool {
+    let trimmed = after_comma.trim_start();
+
+    alt((
+        preceded(
+            tag::<_, _, OracleError<'_>>("power, or toughness "),
+            spell_quality_equal_to_chosen_number_tail,
+        ),
+        preceded(
+            tag::<_, _, OracleError<'_>>("or toughness "),
+            spell_quality_equal_to_chosen_number_tail,
+        ),
+    ))
+    .parse(trimmed)
+    .map(|(rest, _)| rest.is_empty() || tag::<_, _, OracleError<'_>>(", ").parse(rest).is_ok())
+    .unwrap_or(false)
+}
+
 fn find_effect_boundary(lower: &str) -> Option<usize> {
     use super::oracle_nom::primitives::split_once_on;
     let mut search_start = 0;
@@ -4457,6 +4489,7 @@ fn find_effect_boundary(lower: &str) -> Option<usize> {
         if !continues_player_action_list(after)
             && !continues_disjunctive_zone_change_condition(after)
             && !continues_serial_event_condition(after)
+            && !continues_spell_quality_disjunction(after)
         {
             return Some(comma_pos);
         }
@@ -4599,6 +4632,68 @@ fn is_new_sentence_not_type_continuation(text: &str) -> bool {
 fn make_base() -> TriggerDefinition {
     TriggerDefinition::new(TriggerMode::Unknown("unknown".to_string()))
         .trigger_zones(vec![Zone::Battlefield])
+}
+
+/// CR 202.3 + CR 208.1: Spell-cast quality suffix comparing mana value and/or
+/// power/toughness against the source's chosen number (Talion class).
+fn parse_spell_chosen_number_quality(spell_clause: &str) -> Option<TypedFilter> {
+    const SUFFIXES: &[(&str, bool)] = &[
+        (
+            "with mana value, power, or toughness equal to the chosen number",
+            true,
+        ),
+        (
+            "with mana value, power, or toughness equal to that number",
+            true,
+        ),
+        ("with mana value equal to the chosen number", false),
+        ("with mana value equal to that number", false),
+    ];
+    let (rest, include_pt) = SUFFIXES.iter().find_map(|(suffix, include_pt)| {
+        spell_clause
+            .strip_suffix(suffix) // allow-noncombinator: structural suffix on tokenized spell-quality chunk
+            .map(|rest| (rest.trim(), *include_pt))
+    })?;
+    let base_tf = if rest.is_empty() || rest == "spell" {
+        TypedFilter::default()
+    } else {
+        let (filter, _) = parse_type_phrase(rest);
+        match filter {
+            TargetFilter::Typed(tf) => tf,
+            _ => TypedFilter::default(),
+        }
+    };
+    let chosen = QuantityExpr::Ref {
+        qty: QuantityRef::ChosenNumber,
+    };
+    let props = if include_pt {
+        vec![FilterProp::AnyOf {
+            props: vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: chosen.clone(),
+                },
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::EQ,
+                    value: chosen.clone(),
+                },
+                FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::EQ,
+                    value: chosen,
+                },
+            ],
+        }]
+    } else {
+        vec![FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value: chosen,
+        }]
+    };
+    Some(base_tf.properties(props))
 }
 
 /// CR 603.4: AND-compose a newly extracted trigger condition onto any existing
@@ -5129,7 +5224,15 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         ))
         .parse(after_quantifier)
         {
-            return (filter, rest.trim_start());
+            // CR 603.2c: "one or more opponents/players each <verb>" — the
+            // distributive "each" belongs to the subject phrase.  Strip it here
+            // at the subject seam so every event-verb parser (draws, loses life,
+            // etc.) sees a bare verb without a stray "each " prefix.
+            let trimmed = rest.trim_start();
+            let (trimmed, _) = opt(tag::<_, _, OracleError<'_>>("each "))
+                .parse(trimmed)
+                .unwrap_or((trimmed, None));
+            return (filter, trimmed);
         }
 
         let (filter, rest) = parse_type_phrase(after_quantifier);
@@ -6396,21 +6499,42 @@ fn try_parse_event(
     // Vito, Thorn of the Dusk Rose ("Whenever you gain life, each opponent loses..."),
     // Bloodchief Ascension-adjacent cards, and Moonstone Harbinger-style combined
     // life-change triggers.
-    fn parse_life_verb(input: &str) -> OracleResult<'_, TriggerMode> {
-        alt((
-            value(TriggerMode::LifeChanged, tag("gains or loses life")),
+    fn parse_life_verb(input: &str) -> OracleResult<'_, (TriggerMode, Option<(Comparator, u32)>)> {
+        // Combined "gain or lose" form carries no amount qualifier.
+        if let Ok((rest, mode)) = alt((
+            value(
+                TriggerMode::LifeChanged,
+                tag::<_, _, OracleError<'_>>("gains or loses life"),
+            ),
             value(TriggerMode::LifeChanged, tag("gain or lose life")),
-            value(TriggerMode::LifeLost, tag("loses life")),
-            value(TriggerMode::LifeLost, tag("lose life")),
-            value(TriggerMode::LifeGained, tag("gains life")),
-            value(TriggerMode::LifeGained, tag("gain life")),
         ))
         .parse(input)
+        {
+            return Ok((rest, (mode, None)));
+        }
+
+        // CR 119.3: singular life verb + optional magnitude qualifier + "life"
+        // ("loses exactly 1 life", "lose 3 or more life"). "loses"/"gains" must
+        // precede "lose"/"gain" so the longer conjugation wins.
+        let (rest, mode) = alt((
+            value(
+                TriggerMode::LifeLost,
+                alt((tag::<_, _, OracleError<'_>>("loses"), tag("lose"))),
+            ),
+            value(TriggerMode::LifeGained, alt((tag("gains"), tag("gain")))),
+        ))
+        .parse(input)?;
+        let (rest, _) = tag(" ").parse(rest)?;
+        let (rest, amount) = opt(parse_event_amount_quantifier).parse(rest)?;
+        let (rest, _) = tag("life").parse(rest)?;
+        Ok((rest, (mode, amount)))
     }
-    if let Ok((tail, mode)) = parse_life_verb.parse(rest) {
+    if let Ok((tail, (mode, amount))) = parse_life_verb.parse(rest) {
         let mut def = make_base();
         def.mode = mode.clone();
         def.valid_target = Some(subject.clone());
+        // CR 119.3: per-event magnitude constraint ("loses exactly N life").
+        def.life_amount = amount;
         // CR 603.4 + CR 102.1: "gains life during their turn" / "loses life
         // during their turn" — the trailing timing tail restricts the trigger
         // to the acting player's own turn. Composed with the shared typed
@@ -6826,19 +6950,20 @@ fn parse_damage_predicate_tail(
     input: &str,
 ) -> OracleResult<'_, (DamageKindFilter, Option<(Comparator, u32)>)> {
     let (rest, kind) = opt(parse_damage_kind_adjective).parse(input)?;
-    let (rest, amount) = opt(parse_damage_amount_quantifier).parse(rest)?;
+    let (rest, amount) = opt(parse_event_amount_quantifier).parse(rest)?;
     let (rest, _) = tag("damage").parse(rest)?;
     Ok((rest, (kind.unwrap_or(DamageKindFilter::Any), amount)))
 }
 
-/// CR 603.2 + CR 120.1: Parse a damage-amount quantifier
-/// ("`5 or more `" / "`exactly 5 `") and return the resulting
-/// `(Comparator, threshold)` pair to store on `TriggerDefinition::damage_amount`.
-/// The trailing space is consumed so the caller can chain directly into
-/// `tag("damage")`.
+/// CR 603.2: Parse an event-magnitude quantifier ("`5 or more `" / "`exactly 5 `")
+/// that precedes a head noun, returning the resulting `(Comparator, threshold)`
+/// pair. The trailing space is consumed so the caller can chain directly into
+/// the head noun (`tag("damage")` for CR 120.1 damage triggers,
+/// `tag("life")` for CR 119.3 life triggers). Event-agnostic by design — the
+/// caller decides which constraint field the pair lands on.
 ///
 /// `"less than N"` slots in here via the same axis when needed.
-fn parse_damage_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, u32)> {
+fn parse_event_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, u32)> {
     fn parse_or_more(input: &str) -> OracleResult<'_, (Comparator, u32)> {
         let (rest, n) = nom_primitives::parse_number(input)?;
         let (rest, _) = tag(" or more ").parse(rest)?;
@@ -8641,17 +8766,16 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
             // Parse the spell quality generically (e.g., "creature spell", "multicolored spell")
             // using the same parse_type_phrase building block as the "you cast" branch above.
-            // Truncate at ", " to avoid passing the effect clause (e.g., ", you gain 1 life")
-            // into parse_type_phrase where it would cause infinite recursion.
+            // The condition/effect boundary was already split by `split_trigger`; do not
+            // truncate on ", " here — spell qualities may contain commas (Talion:
+            // "mana value, power, or toughness equal to the chosen number").
             let after_casts = &lower[who.len() + " casts a".len()..].trim_start();
             let after_article = value((), tag::<_, _, OracleError<'_>>("n ")) // "an" → strip the trailing "n "
                 .parse(after_casts)
                 .map(|(rest, _)| rest)
                 .unwrap_or(after_casts)
                 .trim_start();
-            let spell_clause = nom_primitives::split_once_on(after_article, ", ")
-                .map(|(_, (before, _))| before)
-                .unwrap_or(after_article);
+            let spell_clause = after_article;
             // CR 601.2a: pre-extract the "from <zone>" cast-origin tail (see
             // the rationale in the "you cast a/an" branch above). Without
             // this, the zone constraint is silently dropped (Ghostly Pilferer
@@ -8672,28 +8796,10 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                     Err(_) => (spell_clause, OriginConstraint::Any),
                 };
             def.spell_cast_origin = cast_origin;
-            // Handle "with mana value equal to the chosen number" (Talion, the Kindly Lord)
-            // CR 202.3: Mana value comparison against a dynamic reference quantity.
-            let chosen = spell_clause.strip_suffix("with mana value equal to the chosen number"); // allow-noncombinator: structural suffix on tokenized spell-quality chunk
-            let that = spell_clause.strip_suffix("with mana value equal to that number"); // allow-noncombinator: structural suffix on tokenized spell-quality chunk
-            if let Some(rest) = chosen.or(that) {
-                let rest = rest.trim();
-                // Parse the base type if present (e.g., "creature spell with mana value...")
-                let mut base_tf = if rest.is_empty() || rest == "spell" {
-                    TypedFilter::default()
-                } else {
-                    let (filter, _) = parse_type_phrase(rest);
-                    match filter {
-                        TargetFilter::Typed(tf) => tf,
-                        _ => TypedFilter::default(),
-                    }
-                };
-                base_tf = base_tf.properties(vec![FilterProp::Cmc {
-                    comparator: Comparator::EQ,
-                    value: QuantityExpr::Ref {
-                        qty: QuantityRef::ChosenNumber,
-                    },
-                }]);
+            // Handle "with mana value [, power, or toughness] equal to the chosen number"
+            // (Talion, the Kindly Lord). CR 202.3 + CR 208.1: disjunctive match on
+            // mana value, power, or toughness against the source's chosen number.
+            if let Some(base_tf) = parse_spell_chosen_number_quality(spell_clause) {
                 def.valid_card = Some(TargetFilter::Typed(base_tf));
                 return Some((TriggerMode::SpellCast, def));
             }
@@ -10867,16 +10973,21 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, BounceSelection,
-        CastingPermission, Comparator, ContinuousModification, ControllerRef, CountScope,
-        DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
-        ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter, TypedFilter,
+        CastingPermission, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
+        CountScope, DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
+        FilterProp, ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::game_state::WaitingFor;
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::CastFrequency;
 
@@ -14069,6 +14180,69 @@ mod tests {
     }
 
     #[test]
+    fn shared_animosity_attack_pump_for_each_other_attacker_sharing_type() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control attacks, it gets +1/+0 until end of turn for each other attacking creature that shares a creature type with it.",
+            "Shared Animosity",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        let exec = def.execute.as_ref().expect("execute");
+        match &*exec.effect {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TriggeringSource,
+                    "attacker anaphor should be TriggeringSource"
+                );
+                assert_eq!(*toughness, PtValue::Fixed(0));
+                let PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                }) = power
+                else {
+                    panic!("power should be for-each count, got {power:?}");
+                };
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("filter should be typed, got {filter:?}");
+                };
+                assert!(tf.properties.contains(&FilterProp::Another));
+                assert!(tf.properties.contains(&FilterProp::Attacking));
+                let shares = tf.properties.iter().find(|p| {
+                    matches!(
+                        p,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::CreatureType,
+                            ..
+                        }
+                    )
+                });
+                let Some(FilterProp::SharesQuality { reference, .. }) = shares else {
+                    panic!(
+                        "for-each filter must include SharesQuality, properties: {:?}",
+                        tf.properties
+                    );
+                };
+                assert_eq!(
+                    reference.as_deref(),
+                    Some(&TargetFilter::TriggeringSource),
+                    "shares-type reference should bind to the attacking creature"
+                );
+            }
+            other => panic!("expected Pump, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn trigger_attacker_it_gets_is_single_target_pump() {
         // CR 608.2c: "Whenever a creature you control attacks, it gets +2/+0 until end of turn."
         // "it" refers to the triggering attacker → single-object TriggeringSource,
@@ -16142,6 +16316,80 @@ mod tests {
     }
 
     #[test]
+    fn trigger_one_or_more_opponents_each_lose_exactly_one_life() {
+        // CR 119.3 + CR 603.2c: Ob Nixilis, Captive Kingpin — batched
+        // "one or more opponents each" subject plus an "exactly 1" magnitude
+        // constraint on the life-loss event.
+        let def = parse_trigger_line(
+            "Whenever one or more opponents each lose exactly 1 life, put a +1/+1 counter on this creature.",
+            "Ob Nixilis, Captive Kingpin",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert!(
+            def.batched,
+            "CR 603.2c: 'one or more … each' is a batched trigger"
+        );
+        assert_eq!(
+            def.life_amount,
+            Some((Comparator::EQ, 1)),
+            "the 'exactly 1' qualifier must constrain the life-loss magnitude"
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_one_or_more_opponents_each_draw_generalizes() {
+        // CR 603.2c: Prove the "each" seam-move generalizes to non-life verbs.
+        // The distributive "each" is stripped at the subject seam (parse_single_subject),
+        // so parse_draws_card sees "draw a card" directly without any "each " prefix.
+        let def = parse_trigger_line(
+            "Whenever one or more opponents each draw a card, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert!(
+            def.batched,
+            "CR 603.2c: 'one or more … each' is a batched trigger"
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_life_loss_or_more_threshold() {
+        // CR 119.3: the magnitude qualifier composes with "N or more" too — the
+        // same building block that powers "exactly N", proving the class is
+        // generalized rather than special-cased to one card.
+        let def = parse_trigger_line(
+            "Whenever an opponent loses 3 or more life, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(def.life_amount, Some((Comparator::GE, 3)));
+    }
+
+    #[test]
+    fn trigger_plain_life_loss_has_no_amount_constraint() {
+        // Regression: an unqualified life-loss trigger must leave `life_amount`
+        // None so every loss fires it.
+        let def = parse_trigger_line(
+            "Whenever an opponent loses life, you gain that much life.",
+            "Exquisite Blood",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(def.life_amount, None);
+    }
+
+    #[test]
     fn trigger_you_gain_or_lose_life_during_your_turn() {
         let def = parse_trigger_line(
             "Whenever you gain or lose life during your turn, this creature gets +1/+0 until end of turn.",
@@ -17315,6 +17563,216 @@ mod tests {
             },
             other => panic!("expected Bounce effect, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn continues_spell_quality_disjunction_talion_segments() {
+        assert!(continues_spell_quality_disjunction(
+            "power, or toughness equal to the chosen number, that player loses 2 life",
+        ));
+        assert!(continues_spell_quality_disjunction(
+            "or toughness equal to the chosen number, that player loses 2 life",
+        ));
+        assert!(!continues_spell_quality_disjunction("you draw a card"));
+    }
+
+    #[test]
+    fn find_effect_boundary_does_not_skip_unrelated_power_or_comma() {
+        let line = "Whenever an opponent casts a red spell, you draw a card";
+        let lower = line.to_lowercase();
+        let boundary = find_effect_boundary(&lower).expect("effect boundary");
+        let suffix = &lower[boundary..];
+        let expected = ", you draw";
+        assert_eq!(
+            &suffix[..expected.len()],
+            expected,
+            "comma after spell type should split condition/effect, got {suffix:?}"
+        );
+    }
+
+    #[test]
+    fn find_effect_boundary_skips_spell_quality_comma() {
+        let line = "Whenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life";
+        let lower = line.to_lowercase();
+        let boundary = find_effect_boundary(&lower).expect("effect boundary");
+        let suffix = &lower[boundary..];
+        let expected = ", that player";
+        assert_eq!(
+            &suffix[..expected.len()],
+            expected,
+            "boundary should follow the spell-quality clause, got {suffix:?}"
+        );
+    }
+
+    #[test]
+    fn parse_spell_chosen_number_quality_talion_suffix() {
+        let tf = parse_spell_chosen_number_quality(
+            "spell with mana value, power, or toughness equal to the chosen number",
+        )
+        .expect("suffix should parse");
+        assert!(tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::AnyOf { .. })));
+    }
+
+    #[test]
+    fn talion_opponent_spell_cast_chosen_number_or_filter() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.",
+            "Talion, the Kindly Lord",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        let valid_card = def.valid_card.as_ref().expect("spell quality filter");
+        let TargetFilter::Typed(tf) = valid_card else {
+            panic!("expected typed spell filter, got {valid_card:?}");
+        };
+        let props = tf
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::AnyOf { props } => Some(props.as_slice()),
+                _ => None,
+            })
+            .expect("expected AnyOf cmc/pt props");
+        assert_eq!(props.len(), 3);
+        assert!(props.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ChosenNumber
+                    }
+                }
+            )
+        }));
+        assert!(props.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ChosenNumber
+                    },
+                    ..
+                }
+            )
+        }));
+        assert!(props.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Toughness,
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ChosenNumber
+                    },
+                    ..
+                }
+            )
+        }));
+        let execute = def.execute.as_ref().expect("execute");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: Some(TargetFilter::TriggeringPlayer),
+                }
+            ),
+            "head effect: {:?}",
+            execute.effect
+        );
+        let draw = execute
+            .sub_ability
+            .as_ref()
+            .expect("draw chained after life loss");
+        assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn talion_kindly_lord_full_oracle_no_swallowed_clause() {
+        let text = "Flying\nAs Talion, the Kindly Lord enters the battlefield, choose a number between 1 and 10.\nWhenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.";
+        let parsed = parse_oracle_text(
+            text,
+            "Talion, the Kindly Lord",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Faerie".to_string(), "Noble".to_string()],
+        );
+        let swallowed: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter(|w| w.category_name() == "swallowed-clause")
+            .collect();
+        assert!(
+            swallowed.is_empty(),
+            "Talion should parse without swallowed-clause warnings: {swallowed:?}"
+        );
+    }
+
+    #[test]
+    fn talion_runtime_triggers_only_for_matching_spell_quality() {
+        let run = |name: &str, creature_pt: Option<(i32, i32)>, mana_value: u32| {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_library_top(P0, &["Drawn Card"]);
+            let talion = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Talion, the Kindly Lord",
+                    3,
+                    4,
+                    "Flying\nAs Talion, the Kindly Lord enters the battlefield, choose a number between 1 and 10.\nWhenever an opponent casts a spell with mana value, power, or toughness equal to the chosen number, that player loses 2 life and you draw a card.",
+                )
+                .id();
+            let spell = if let Some((power, toughness)) = creature_pt {
+                scenario
+                    .add_creature_to_hand_from_oracle(P1, name, power, toughness, "")
+                    .with_mana_cost(ManaCost::generic(mana_value))
+                    .id()
+            } else {
+                scenario
+                    .add_spell_to_hand_from_oracle(P1, name, true, "")
+                    .with_mana_cost(ManaCost::generic(mana_value))
+                    .id()
+            };
+            scenario.with_mana_pool(
+                P1,
+                (0..mana_value)
+                    .map(|_| ManaUnit::new(ManaType::Colorless, talion, false, Vec::new()))
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            {
+                let state = runner.state_mut();
+                state
+                    .objects
+                    .get_mut(&talion)
+                    .expect("Talion source exists")
+                    .chosen_attributes
+                    .push(ChosenAttribute::Number(3));
+                state.active_player = P1;
+                state.priority_player = P1;
+                state.waiting_for = WaitingFor::Priority { player: P1 };
+            }
+
+            let outcome = runner.cast(spell).resolve();
+            (outcome.life_delta(P1), outcome.hand_drawn(P0))
+        };
+
+        assert_eq!(run("Three-Mana Instant", None, 3), (-2, 1));
+        assert_eq!(run("Three-Power Creature", Some((3, 1)), 1), (-2, 1));
+        assert_eq!(run("Three-Toughness Creature", Some((1, 3)), 1), (-2, 1));
+        assert_eq!(run("One-One Creature", Some((1, 1)), 1), (0, 0));
     }
 
     #[test]
@@ -19128,6 +19586,45 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::BeginCombat));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    /// Issue #1993: Halana and Alena, Partners — X in the counter clause must bind
+    /// to source power, not an unresolved Variable name.
+    #[test]
+    fn halana_alena_partners_combat_trigger_puts_source_power_counters() {
+        let def = parse_trigger_line(
+            "At the beginning of combat on your turn, put X +1/+1 counters on another target creature you control, where X is Halana and Alena's power. That creature gains haste until end of turn.",
+            "Halana and Alena, Partners",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::BeginCombat));
+        let execute = def.execute.as_ref().expect("execute");
+        match execute.effect.as_ref() {
+            Effect::PutCounter {
+                count,
+                counter_type,
+                target,
+            } => {
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                    "where X is printed name's power must bind to Source, got {count:?}"
+                );
+                assert!(
+                    matches!(target, TargetFilter::Typed(_)),
+                    "expected typed creature target, got {target:?}"
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
     }
 
     #[test]

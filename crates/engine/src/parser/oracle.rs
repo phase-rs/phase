@@ -4924,6 +4924,58 @@ mod tests {
         assert!(r.abilities[0].cost.is_none());
     }
 
+    /// Issue #1997 — Embiggen: +1/+1 per typeline component on the targeted creature.
+    #[test]
+    fn embiggen_parses_non_brushwagg_pump_scaled_by_typeline_components() {
+        use crate::types::ability::{ObjectScope, PtValue, TypeFilter};
+        let r = parse(
+            "Until end of turn, target non-Brushwagg creature gets +1/+1 for each supertype, card type, and subtype it has.",
+            "Embiggen",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        match r.abilities[0].effect.as_ref() {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                let PtValue::Quantity(expr) = power else {
+                    panic!("expected dynamic power, got {power:?}");
+                };
+                assert_eq!(toughness, &PtValue::Quantity(expr.clone()));
+                let TargetFilter::Typed(typed) = target else {
+                    panic!("expected typed creature target, got {target:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "must target creatures"
+                );
+                assert!(
+                    typed.type_filters.iter().any(|t| {
+                        matches!(
+                            t,
+                            TypeFilter::Non(inner)
+                                if matches!(inner.as_ref(), TypeFilter::Subtype(s) if s == "Brushwagg")
+                        )
+                    }),
+                    "must exclude Brushwagg, got {:?}",
+                    typed.type_filters
+                );
+                let crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::ObjectTypelineComponentCount { scope },
+                } = expr
+                else {
+                    panic!("expected typeline component count, got {expr:?}");
+                };
+                assert_eq!(*scope, ObjectScope::Recipient);
+            }
+            other => panic!("expected Pump, got {other:?}"),
+        }
+    }
+
     #[test]
     fn toxic_deluge_full_oracle_parses_x_life_cost_and_x_pump() {
         let r = parse(

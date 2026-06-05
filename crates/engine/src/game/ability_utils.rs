@@ -4193,9 +4193,9 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
         CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification, CountScope,
-        CounterTransferMode, Duration, Effect, FilterProp, GameRestriction, LibraryPosition,
-        ModalChoice, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope,
-        ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        CounterTransferMode, DamageKindFilter, Duration, Effect, FilterProp, GameRestriction,
+        LibraryPosition, ModalChoice, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
+        ObjectScope, ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality,
         SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
         UnlessPayModifier,
@@ -6810,6 +6810,7 @@ mod tests {
                 target: Box::new(target_power_filter()),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
+                damage_kind: DamageKindFilter::Any,
             },
         };
         assert!(quantity_expr_references_target_creature(&damage));

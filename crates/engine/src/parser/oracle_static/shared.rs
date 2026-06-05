@@ -621,6 +621,23 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1c: "<grant> and can't attack" pairs a P/T (or keyword) grant with an
+    // attacking restriction under one subject (Cagemail). Split so the CantAttack
+    // clause is not dropped. The terminal-phrase guard keeps the scoped
+    // "can't attack alone / you / planeswalkers / its owner …" forms with their
+    // own handlers.
+    if let Some(defs) = try_split_and_cant_attack(&stripped) {
+        return defs;
+    }
+
+    // CR 502.3: "<grant> and doesn't untap during its controller's untap step"
+    // pairs a continuous grant with an untap restriction under one subject (Flood
+    // the Engine). Split so the CantUntap clause is not dropped. (The "enters
+    // tapped and doesn't untap" replacement+static compound is carved out earlier.)
+    if let Some(defs) = try_split_and_doesnt_untap(&stripped) {
+        return defs;
+    }
+
     // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
     // ("enchanted creature ...", "equipped creature ...") may decompose into more
     // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).
@@ -1564,7 +1581,7 @@ pub(crate) fn parse_creatures_you_control_that_clause<'a>(
     lower: &str,
     is_other: bool,
 ) -> Option<(TargetFilter, &'a str)> {
-    let (mut properties, consumed) = parse_that_clause_suffix(lower)?;
+    let (mut properties, consumed) = parse_that_clause_suffix(lower, None)?;
     if is_other {
         properties.push(FilterProp::Another);
     }

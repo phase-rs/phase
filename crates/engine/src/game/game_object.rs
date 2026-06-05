@@ -635,6 +635,16 @@ pub struct GameObject {
     #[serde(default)]
     pub is_token: bool,
 
+    /// CR 707.10 + CR 707.12a: Whether this object is a COPY of a card or spell
+    /// and is therefore NOT "represented by a card". Set by copy-creation effects
+    /// that keep `is_token = false` (notably `Effect::CastCopyOfCard`, used by
+    /// Mizzix's Mastery and Cipher's recast); token copies are marked via
+    /// `is_token` instead. Read through [`GameObject::is_represented_by_a_card`]
+    /// by abilities gated on "if this spell is represented by a card" (e.g.
+    /// Cipher's encode-on-resolution, CR 702.99a).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_copy: bool,
+
     /// Image-lookup routing hint for the display layer. See `DisplaySource`
     /// for the rationale. Independent of `is_token` — a token-copy of a
     /// real card carries `is_token = true` AND `DisplaySource::Card`.
@@ -998,6 +1008,7 @@ impl GameObject {
             is_renowned: false,
             is_emblem: false,
             is_token: false,
+            is_copy: false,
             display_source: DisplaySource::Card,
             modal: None,
             additional_cost: None,
@@ -1295,6 +1306,14 @@ impl GameObject {
             ChosenAttribute::Player(p) => Some(*p),
             _ => None,
         })
+    }
+
+    /// CR 111.1 + CR 707.10 + CR 707.12a: Whether this object is "represented by
+    /// a card" — i.e. a real card, not a token (CR 111.1) and not a copy
+    /// (CR 707.10/707.12a). Abilities that act "if this spell is represented by a
+    /// card" (Cipher's encode-on-resolution, CR 702.99a) gate on this.
+    pub fn is_represented_by_a_card(&self) -> bool {
+        !self.is_token && !self.is_copy
     }
 
     /// CR 714.1: Returns the final chapter number for a Saga, or None if not a Saga.
