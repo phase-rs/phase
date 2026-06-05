@@ -19,6 +19,7 @@ import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore"
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
+import { clearPromptOverlayState } from "../game/sessionCleanup";
 import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
@@ -502,6 +503,11 @@ export function GameProvider({
     // is about to populate the store via initGame/resumeGame, and a fire from
     // the previous cleanup would null out the state we just wrote.
     cancelPendingStoreReset();
+    // Issue #2369: convoke ManaPayment + pendingAbilityChoice must not survive
+    // across sessions while initGame/resumeGame is still in flight — canceling
+    // the deferred reset alone leaves stale overlays clickable until the engine
+    // responds.
+    clearPromptOverlayState();
 
     const { initGame, resumeGame, resumeP2PHost, reset, setGameMode } = useGameStore.getState();
     setGameMode(mode);
@@ -1253,6 +1259,9 @@ export function GameProvider({
       cancelled = true;
       if (controller) controller.dispose();
       audioManager.setContext("menu");
+      // Issue #2369: drop prompt overlays synchronously so the next mount's
+      // `cancelPendingStoreReset` cannot resurrect convoke payment UI.
+      clearPromptOverlayState();
       // Clear store state but keep the shared WASM worker alive — its V8
       // TurboFan-compiled code, card database, and AI pool persist for reuse.
       const adapter = useGameStore.getState().adapter;

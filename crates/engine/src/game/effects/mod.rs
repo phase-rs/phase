@@ -1233,8 +1233,90 @@ fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c + CR 701.20b: An effect that introduces a single per-player object
+/// referent which a later anaphoric clause ("that card", "it", "its mana value")
+/// in the same iteration binds to. `RevealTop` is the canonical case: it reveals
+/// one card per scoped player, captured into `effect_context_object` and exposed
+/// to later clauses as `Demonstrative`/`Anaphoric`/`ParentTarget`. This referent
+/// is rebuilt fresh each iteration, so a consuming sub-clause MUST run inside the
+/// same iteration as its introducer.
+fn effect_introduces_per_player_object_referent(effect: &Effect) -> bool {
+    matches!(effect, Effect::RevealTop { .. })
+}
+
+/// CR 608.2c: True when an effect (or its quantity/target) reads the parent's
+/// per-player object referent anaphorically — a `Demonstrative`/`Anaphoric`
+/// object scope in a quantity, or a `ParentTarget`/`ParentTargetSlot` target.
+/// Distinguishes a per-player anaphoric consumer (Duskmantle Seer's
+/// `LoseLife { that card's mana value }` and `ChangeZone { ParentTarget }`) from
+/// a cross-player aggregate sub-clause (Windfall's `Draw { PreviousEffectAmount }`),
+/// which references the table-wide outcome and must NOT be merged into one
+/// iteration.
+fn effect_consumes_parent_object_referent(effect: &Effect) -> bool {
+    // An anaphoric consumer reads the parent's per-player object either as a
+    // quantity ("loses life equal to that card's mana value") or as a target
+    // ("then puts it into their hand" → `ChangeZone { target: ParentTarget }`).
+    let mut quantities = Vec::new();
+    collect_effect_quantity_exprs(effect, &mut quantities);
+    let amount_is_anaphoric = quantities
+        .iter()
+        .any(|qty| quantity_expr_references_demonstrative(qty));
+    let target_is_anaphoric = match effect {
+        Effect::ChangeZone { target, .. } => filter_is_parent_object_anaphor(target),
+        _ => false,
+    };
+    amount_is_anaphoric || target_is_anaphoric
+}
+
+fn quantity_expr_references_demonstrative(qty: &QuantityExpr) -> bool {
+    match qty {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => quantity_ref_references_demonstrative(qty),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        }
+        | QuantityExpr::DivideRounded { inner, .. } => {
+            quantity_expr_references_demonstrative(inner)
+        }
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_demonstrative),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_references_demonstrative(left)
+                || quantity_expr_references_demonstrative(right)
+        }
+    }
+}
+
+fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
+    use crate::types::ability::ObjectScope;
+    let scope = match qty {
+        QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => scope,
+        _ => return false,
+    };
+    matches!(scope, ObjectScope::Demonstrative | ObjectScope::Anaphoric)
+}
+
+fn filter_is_parent_object_anaphor(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+    )
+}
+
 fn detach_after_player_scope_local_chain(
     node: &mut ResolvedAbility,
+    scope: &PlayerFilter,
+    referent_introduced: bool,
 ) -> Option<Box<ResolvedAbility>> {
     let mut next = node.sub_ability.take()?;
     // CR 115.10 + CR 608.2c: a decline-branch sub-ability whose own condition is
@@ -1246,8 +1328,34 @@ fn detach_after_player_scope_local_chain(
         .condition
         .as_ref()
         .is_some_and(condition_depends_on_effect_performed);
-    if next_is_performed_gated || is_player_scope_local_continuation(&node.effect, &next.effect) {
-        let tail = detach_after_player_scope_local_chain(&mut next);
+    // CR 608.2c: When the parser distributes "each player reveals the top card
+    // of their library, loses life equal to that card's mana value, then puts
+    // it into their hand" it stamps the SAME `player_scope` onto every clause.
+    // The reveal introduces a PER-PLAYER object referent (`effect_context_object`)
+    // that EVERY following clause binds anaphorically ("that card's mana value",
+    // "it") — each consumer refers to the upstream introducer, not the clause
+    // immediately before it. That referent is rebuilt each iteration, so once
+    // an introducer has been seen, all downstream co-scoped anaphoric consumers
+    // MUST run inside the SAME iteration: never detached as the unscoped tail
+    // (which would run once) and never re-entering the driver to fan out a
+    // second loop (their redundant `player_scope` is cleared). This is strictly
+    // narrower than "shares the parent's scope": a co-scoped sub that reads a
+    // CROSS-PLAYER aggregate instead (Windfall's "then draws that many cards" →
+    // `PreviousEffectAmount`, the greatest discarded table-wide) is NOT a
+    // referent consumer, so it still runs as its own post-all-iterations loop.
+    let referent_in_scope =
+        referent_introduced || effect_introduces_per_player_object_referent(&node.effect);
+    let next_is_co_scoped_anaphoric_consumer = next.player_scope.as_ref() == Some(scope)
+        && referent_in_scope
+        && effect_consumes_parent_object_referent(&next.effect);
+    if next_is_co_scoped_anaphoric_consumer {
+        next.player_scope = None;
+    }
+    if next_is_performed_gated
+        || next_is_co_scoped_anaphoric_consumer
+        || is_player_scope_local_continuation(&node.effect, &next.effect)
+    {
+        let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
         node.sub_ability = Some(next);
         tail
     } else {
@@ -1257,10 +1365,11 @@ fn detach_after_player_scope_local_chain(
 
 fn split_player_scope_chain(
     ability: &ResolvedAbility,
+    scope: &PlayerFilter,
 ) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
     let mut scoped = ability.clone();
     scoped.player_scope = None;
-    let tail = detach_after_player_scope_local_chain(&mut scoped);
+    let tail = detach_after_player_scope_local_chain(&mut scoped, scope, false);
     (scoped, tail)
 }
 
@@ -3198,7 +3307,7 @@ fn resolve_chain_body(
         .into_iter()
         .filter(|pid| matches_player_scope(state, *pid, scope, controller, ability.source_id))
         .collect();
-        let (scoped_template, after_scope) = split_player_scope_chain(ability);
+        let (scoped_template, after_scope) = split_player_scope_chain(ability, scope);
         let after_scope_needs_linked_exile = after_scope.as_ref().is_some_and(|tail| {
             crate::game::exile_links::ability_contains_linked_exile_consumer(tail)
         });
@@ -3228,7 +3337,15 @@ fn resolve_chain_body(
             // of this flag.
             state.cost_payment_failed_flag = false;
             scoped.set_original_controller_recursive(controller);
-            scoped.controller = *pid;
+            // CR 608.2: The scoped player is the acting controller for the
+            // WHOLE per-player chain, not just the top clause. A co-scoped
+            // sub-clause kept in this iteration (Duskmantle Seer's "loses life
+            // equal to that card's mana value, then puts it into their hand")
+            // must resolve its implicit-controller recipient and any generic
+            // handler against the iterating player — so rebind recursively. The
+            // printed controller is preserved via `original_controller` above,
+            // keeping "you" references stable (CR 109.5).
+            scoped.set_controller_recursive(*pid);
             scoped.set_scoped_player_recursive(*pid);
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
@@ -3246,7 +3363,10 @@ fn resolve_chain_body(
                 for &remaining_pid in remaining.iter().rev() {
                     let mut remaining_scoped = scoped_template.clone();
                     remaining_scoped.set_original_controller_recursive(controller);
-                    remaining_scoped.controller = remaining_pid;
+                    // CR 608.2: mirror the in-loop recursive controller rebind so
+                    // a co-scoped sub-clause resumed via continuation also acts as
+                    // the iterating player.
+                    remaining_scoped.set_controller_recursive(remaining_pid);
                     remaining_scoped.set_scoped_player_recursive(remaining_pid);
                     // CR 608.2c: each remaining player's clause is an INDEPENDENT
                     // following instruction, not a continuation of the prior
@@ -11072,6 +11192,207 @@ mod tests {
         assert_eq!(state.players[1].hand.len(), 3);
         assert_eq!(state.players[0].graveyard.len(), 3);
         assert_eq!(state.players[1].graveyard.len(), 1);
+    }
+
+    /// CR 608.2c — building-block discriminator for the per-player reveal-anaphora
+    /// chain (issue #1534, Duskmantle Seer). `split_player_scope_chain` must keep a
+    /// co-scoped sub-clause that consumes the reveal's per-player object referent
+    /// ("loses life equal to that card's mana value", "puts it into their hand")
+    /// INSIDE the scoped template — and strip its redundant `player_scope` so it
+    /// resolves once per player in the same iteration — while a co-scoped sub-clause
+    /// that reads a CROSS-PLAYER aggregate (Windfall's `PreviousEffectAmount`)
+    /// detaches as the post-all-iterations tail.
+    #[test]
+    fn split_player_scope_keeps_reveal_anaphora_chain_but_detaches_aggregate() {
+        use crate::types::ability::ObjectScope;
+
+        let make_reveal = || {
+            ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 1,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+
+        // Reveal → LoseLife(that card's MV) → ChangeZone(it → Hand), all scope=All.
+        let mut anaphoric = make_reveal();
+        anaphoric.player_scope = Some(PlayerFilter::All);
+        let mut lose = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                target: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        lose.player_scope = Some(PlayerFilter::All);
+        let mut put = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        put.player_scope = Some(PlayerFilter::All);
+        lose.sub_ability = Some(Box::new(put));
+        anaphoric.sub_ability = Some(Box::new(lose));
+
+        let (scoped, tail) = split_player_scope_chain(&anaphoric, &PlayerFilter::All);
+        assert!(
+            tail.is_none(),
+            "the whole reveal-anaphora chain stays inside the scoped template"
+        );
+        let lose_in_scope = scoped
+            .sub_ability
+            .as_ref()
+            .expect("LoseLife stays attached");
+        assert!(
+            matches!(lose_in_scope.effect, Effect::LoseLife { .. }),
+            "LoseLife is the first kept sub-clause"
+        );
+        assert!(
+            lose_in_scope.player_scope.is_none(),
+            "the kept LoseLife's redundant player_scope is cleared so it does not re-loop"
+        );
+        let put_in_scope = lose_in_scope
+            .sub_ability
+            .as_ref()
+            .expect("ChangeZone stays attached after LoseLife");
+        assert!(
+            put_in_scope.player_scope.is_none(),
+            "the kept ChangeZone's redundant player_scope is cleared too"
+        );
+
+        // Reveal -> Draw(that card's MV), all scope=All. This is a latent
+        // sibling of the Duskmantle shape: no current card prints this exact
+        // per-player draw form, but it consumes the same per-iteration
+        // demonstrative quantity and must stay in the scoped template.
+        let mut draw_anaphoric = make_reveal();
+        draw_anaphoric.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        draw_anaphoric.sub_ability = Some(Box::new(draw));
+
+        let (scoped_draw, tail_draw) =
+            split_player_scope_chain(&draw_anaphoric, &PlayerFilter::All);
+        assert!(
+            tail_draw.is_none(),
+            "an anaphoric Draw quantity stays inside the reveal iteration"
+        );
+        let draw_in_scope = scoped_draw
+            .sub_ability
+            .as_ref()
+            .expect("Draw stays attached");
+        assert!(
+            matches!(draw_in_scope.effect, Effect::Draw { .. }),
+            "Draw is the kept sub-clause"
+        );
+        assert!(
+            draw_in_scope.player_scope.is_none(),
+            "the kept Draw's redundant player_scope is cleared"
+        );
+
+        // Reveal -> PutCounter(that card's MV counters), all scope=All. The
+        // target is deliberately non-anaphoric here; the quantity alone must be
+        // enough to keep the consumer in the scoped iteration.
+        let mut counter_anaphoric = make_reveal();
+        counter_anaphoric.player_scope = Some(PlayerFilter::All);
+        let mut put_counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        put_counter.player_scope = Some(PlayerFilter::All);
+        counter_anaphoric.sub_ability = Some(Box::new(put_counter));
+
+        let (scoped_counter, tail_counter) =
+            split_player_scope_chain(&counter_anaphoric, &PlayerFilter::All);
+        assert!(
+            tail_counter.is_none(),
+            "an anaphoric PutCounter quantity stays inside the reveal iteration"
+        );
+        let counter_in_scope = scoped_counter
+            .sub_ability
+            .as_ref()
+            .expect("PutCounter stays attached");
+        assert!(
+            matches!(counter_in_scope.effect, Effect::PutCounter { .. }),
+            "PutCounter is the kept sub-clause"
+        );
+        assert!(
+            counter_in_scope.player_scope.is_none(),
+            "the kept PutCounter's redundant player_scope is cleared"
+        );
+
+        // Reveal → Draw(PreviousEffectAmount): cross-player aggregate, scope=All.
+        let mut aggregate = make_reveal();
+        aggregate.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        aggregate.sub_ability = Some(Box::new(draw));
+
+        let (scoped_agg, tail_agg) = split_player_scope_chain(&aggregate, &PlayerFilter::All);
+        assert!(
+            scoped_agg.sub_ability.is_none(),
+            "the aggregate Draw is NOT merged into the reveal iteration"
+        );
+        let detached = tail_agg.expect("the aggregate Draw detaches as the unscoped tail");
+        assert_eq!(
+            detached.player_scope,
+            Some(PlayerFilter::All),
+            "the detached Draw keeps its own player_scope so it fans out post-all-reveals"
+        );
     }
 
     #[test]

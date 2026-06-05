@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-04T00:00:00Z",
+  "updated": "2026-06-05T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -320,75 +320,51 @@
       "author": "MTGGoldfish",
       "colors": [
         "R",
-        "G"
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 1,
+          "name": "Arid Mesa"
+        },
+        {
           "count": 2,
           "name": "Artist's Talent"
         },
         {
-          "count": 3,
-          "name": "Glimpse the Impossible"
-        },
-        {
           "count": 4,
-          "name": "Reckless Impulse"
-        },
-        {
-          "count": 4,
-          "name": "Wrenn's Resolve"
-        },
-        {
-          "count": 1,
-          "name": "Flashback"
-        },
-        {
-          "count": 1,
           "name": "Bloodstained Mire"
         },
         {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
+          "count": 4,
+          "name": "Desperate Ritual"
         },
         {
           "count": 2,
-          "name": "Commercial District"
+          "name": "Elegant Parlor"
         },
         {
           "count": 1,
-          "name": "Gemstone Caverns"
+          "name": "Grapeshot"
         },
         {
-          "count": 5,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Pinnacle Monk"
-        },
-        {
-          "count": 2,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 1,
-          "name": "Stomping Ground"
-        },
-        {
-          "count": 2,
-          "name": "Valakut Awakening"
+          "count": 4,
+          "name": "Manamorphose"
         },
         {
           "count": 3,
-          "name": "Wooded Foothills"
+          "name": "Mountain"
         },
         {
-          "count": 1,
-          "name": "Goblin Anarchomancer"
+          "count": 3,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
         },
         {
           "count": 4,
@@ -396,61 +372,73 @@
         },
         {
           "count": 4,
+          "name": "Reckless Impulse"
+        },
+        {
+          "count": 4,
           "name": "Ruby Medallion"
         },
         {
-          "count": 1,
-          "name": "Grapeshot"
+          "count": 2,
+          "name": "Sacred Foundry"
         },
         {
-          "count": 3,
-          "name": "Past in Flames"
+          "count": 4,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 1,
+          "name": "Sunbaked Canyon"
+        },
+        {
+          "count": 2,
+          "name": "Valakut Awakening"
         },
         {
           "count": 2,
           "name": "Wish"
         },
         {
-          "count": 4,
-          "name": "Desperate Ritual"
+          "count": 1,
+          "name": "Thundering Falls"
         },
         {
           "count": 4,
-          "name": "Manamorphose"
+          "name": "Heroes' Hangout"
         },
         {
           "count": 4,
-          "name": "Pyretic Ritual"
+          "name": "Wrenn's Resolve"
         }
       ],
       "sideboard": [
+        {
+          "count": 4,
+          "name": "Orim's Chant"
+        },
+        {
+          "count": 3,
+          "name": "Untimely Malfunction"
+        },
+        {
+          "count": 2,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 1,
+          "name": "Wear // Tear"
+        },
         {
           "count": 1,
           "name": "Brotherhood's End"
         },
         {
           "count": 1,
-          "name": "Empty the Warrens"
-        },
-        {
-          "count": 1,
-          "name": "Galvanic Relay"
+          "name": "Past in Flames"
         },
         {
           "count": 1,
           "name": "Grapeshot"
-        },
-        {
-          "count": 4,
-          "name": "Nature's Claim"
-        },
-        {
-          "count": 1,
-          "name": "Noxious Revival"
-        },
-        {
-          "count": 1,
-          "name": "Past in Flames"
         },
         {
           "count": 1,
@@ -458,15 +446,7 @@
         },
         {
           "count": 1,
-          "name": "Surgical Extraction"
-        },
-        {
-          "count": 1,
-          "name": "Untimely Malfunction"
-        },
-        {
-          "count": 2,
-          "name": "Veil of Summer"
+          "name": "Empty the Warrens"
         }
       ]
     },

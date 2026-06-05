@@ -729,6 +729,74 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
     Some(defs)
 }
 
+/// CR 702.5 / CR 702.6: Decompose `"<grant or restriction> and can't be
+/// enchanted [or equipped] [by other Auras]"` (and the "equipped" lead-in) into
+/// the first conjunct's static(s) plus the matching attach-prohibition
+/// static(s) — `Other("CantBeEquipped")` / `Other("CantBeEnchanted")` — sharing
+/// the same `affected` set.
+///
+/// Without this split the trailing attach prohibition was dropped: Anti-Magic
+/// Aura ("Enchanted creature can't be the target of spells and can't be
+/// enchanted by other Auras.") and Consecrate Land ("Enchanted land has
+/// indestructible and can't be enchanted by other Auras.") parsed to only the
+/// first clause, so other Auras could still be attached — half the card
+/// vanished. Mirrors `try_split_and_cant_block`; the classifier matches the
+/// standalone attach-prohibition dispatch (equipped-first ordering) so a
+/// compound "equipped or enchanted" yields both prohibitions.
+pub(crate) fn try_split_and_cant_be_attached(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        // Match both the ASCII and typographic U+2019 apostrophe.
+        let (i, _) = alt((
+            tag::<_, _, VE>("and can't be "),
+            tag::<_, _, VE>("and can\u{2019}t be "),
+        ))
+        .parse(i)?;
+        let (i, _) = alt((tag::<_, _, VE>("enchanted"), tag::<_, _, VE>("equipped"))).parse(i)?;
+        Ok((i, ()))
+    })?;
+
+    // Classify the attach prohibition(s) from the full second clause, mirroring
+    // the standalone dispatch (`dispatch.rs` / `shared.rs`): "equipped" → host
+    // can't be equipped (CR 702.6), "enchanted" → can't be enchanted (CR 702.5);
+    // a compound "equipped or enchanted" yields both, equipped-first.
+    let attach_clause = &lower[before.len()..];
+    let mut modes: Vec<StaticMode> = Vec::new();
+    if nom_primitives::scan_contains(attach_clause, "equipped") {
+        modes.push(StaticMode::Other("CantBeEquipped".to_string()));
+    }
+    if nom_primitives::scan_contains(attach_clause, "enchanted") {
+        modes.push(StaticMode::Other("CantBeEnchanted".to_string()));
+    }
+    if modes.is_empty() {
+        return None;
+    }
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    for mode in modes {
+        defs.push(
+            StaticDefinition::new(mode)
+                .affected(affected.clone())
+                .description(text.to_string()),
+        );
+    }
+    Some(defs)
+}
+
 /// CR 509.1b: Classify a "can't be blocked …" evasion predicate (lowercased,
 /// starting with "can't be blocked") into the corresponding `StaticMode` and
 /// optional evasion condition, composing the same building blocks the standalone

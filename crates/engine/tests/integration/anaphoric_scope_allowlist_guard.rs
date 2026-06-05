@@ -496,6 +496,10 @@ fn anaphoric_scope_set_is_frozen() {
     // them) moved 95 cards from this set into DEMONSTRATIVE_SCOPE_CARDS, and
     // Steadfast Armasaur's "its toughness" rebound to `Source` (the LKI-toughness
     // fix), taking the count 252 -> 156; the Optional_YouMay capture fix
+    // (#2277) then dropped "ian the reckless" to 155. The causative "may have"
+    // parser (#2313) then rebound Immersturm/Pandemonium to
+    // ParentObjectTargetController, taking the count to 153. If #512/#511 land,
+    // this shrinks further.
     // (#2277) then dropped "ian the reckless" to 155. The "may have" causative
     // optional fix (#2313) restructured the optional sub-effect of Pandemonium /
     // Immersturm ("...may have it deal damage equal to its power..."), letting the

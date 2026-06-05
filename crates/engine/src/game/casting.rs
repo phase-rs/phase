@@ -2554,10 +2554,12 @@ fn prepare_spell_cast_with_variant_override_inner(
         ));
     }
 
-    // CR 604.3 + CR 101.2: "Can't" beats "can" — check CantCastFrom statics.
+    // CR 601.3 + CR 101.2 + CR 109.5: "Can't" beats "can" — check CantCastFrom statics.
     // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
-    // This overrides graveyard/library casting permissions (Escape, Lurrus, etc.).
-    if mode == CastingMode::Actual && is_blocked_from_casting_from_zone(state, obj) {
+    // Drannith Magistrate: "Your opponents can't cast spells from anywhere other
+    // than their hands." This overrides graveyard/library/exile/command casting
+    // permissions (Escape, Lurrus, flashback, foretell, commander, etc.).
+    if mode == CastingMode::Actual && is_blocked_from_casting_from_zone(state, obj, player) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents casting from this zone".to_string(),
         ));
@@ -8194,6 +8196,26 @@ pub(super) fn can_feasibly_pay_mana_cost(
     source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
 ) -> bool {
+    // CR 601.2f + CR 107.1b: Affordability must check a concrete X value, not
+    // the symbolic `{X}` shard left in the cost (issue #2011: Kozilek's Command
+    // `{X}{C}{C}` with only Eldrazi Temple was treated as uncastable). X only
+    // adds generic mana, so X=0 is the cheapest concrete affordability probe.
+    if let Some(sid) = source_id {
+        if super::casting_costs::cost_has_x(cost) {
+            let mut concrete = cost.clone();
+            concrete.concretize_x(0);
+            return can_feasibly_pay_mana_cost_without_x(state, player, Some(sid), &concrete);
+        }
+    }
+    can_feasibly_pay_mana_cost_without_x(state, player, source_id, cost)
+}
+
+fn can_feasibly_pay_mana_cost_without_x(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
     // CR 117.1d: Auto-tap path remains the fast path. Anything that can be
     // paid with only `{T}` activations was castable before this predicate
     // existed and must continue to be castable now.
@@ -10876,25 +10898,36 @@ fn casting_prohibition_scope_matches(
     super::static_abilities::prohibition_scope_matches_player(who, caster, source_obj.id, state)
 }
 
-/// CR 604.3 + CR 101.2: Check if any active CantCastFrom static prevents casting
-/// the given object from its current zone.
-/// e.g., Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
+/// CR 601.3 + CR 101.2 + CR 109.5: Check if any active CantCastFrom static prevents
+/// `caster` from casting the given object out of its current zone.
+/// - Grafdigger's Cage ("Players can't cast spells from graveyards or libraries"):
+///   `who = AllPlayers`, prohibited zones = {Graveyard, Library}.
+/// - Drannith Magistrate ("Your opponents can't cast spells from anywhere other
+///   than their hands"): `who = Opponents`, prohibited zones = every cast-capable
+///   zone except the hand. The `who` axis means the static's own controller is
+///   unaffected and only opponents are locked out of graveyard/exile/command casts.
 fn is_blocked_from_casting_from_zone(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
+    caster: PlayerId,
 ) -> bool {
-    // Only applies to non-hand, non-command zones (graveyard, library, exile)
-    if obj.zone == Zone::Hand || obj.zone == Zone::Command {
+    // CR 601.2a: Casting from hand is never restricted by this class — the hand is
+    // every printed allowed zone. Guard it before any filter evaluation.
+    if obj.zone == Zone::Hand {
         return false;
     }
 
     let object_id = obj.id;
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_active_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        if def.mode != StaticMode::CantCastFrom {
+        let StaticMode::CantCastFrom { ref who } = def.mode else {
+            continue;
+        };
+        // CR 109.5: The player axis — is the caster within the static's scope?
+        if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
             continue;
         }
-        // The affected filter encodes zone restrictions via InAnyZone.
+        // CR 601.3: The affected filter encodes the prohibited zones via InAnyZone.
         if let Some(ref filter) = def.affected {
             if super::filter::matches_target_filter(
                 state,
@@ -11303,7 +11336,7 @@ mod tests {
         BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
         CostCategory, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
-        ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
+        ManaSpendPermission, ManaSpendRestriction, ModalChoice, ModalSelectionCondition,
         ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtValue,
         QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
         RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
@@ -25589,6 +25622,159 @@ mod tests {
         source
     }
 
+    /// Install a `CantCastFrom` static permanent controlled by `controller` whose
+    /// prohibited-zone list covers every cast-capable zone except the hand (the
+    /// Drannith Magistrate shape). `who` scopes the player axis.
+    fn add_cant_cast_from_hand_only_permanent(
+        state: &mut GameState,
+        controller: PlayerId,
+        who: ProhibitionScope,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            "Drannith Magistrate".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::CantCastFrom { who }).affected(TargetFilter::Typed(
+                crate::types::ability::TypedFilter {
+                    properties: vec![FilterProp::InAnyZone {
+                        zones: vec![Zone::Graveyard, Zone::Library, Zone::Exile, Zone::Command],
+                    }],
+                    ..crate::types::ability::TypedFilter::default()
+                },
+            )),
+        );
+        id
+    }
+
+    /// Place a castable card object owned by `owner` into `zone` and return its id.
+    fn add_card_in_zone(state: &mut GameState, owner: PlayerId, zone: Zone) -> ObjectId {
+        create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Some Spell".to_string(),
+            zone,
+        )
+    }
+
+    /// CR 601.3 + CR 109.5: Drannith Magistrate — an opponent of the static's
+    /// controller can't cast a spell from their graveyard.
+    #[test]
+    fn drannith_magistrate_opponent_blocked_from_graveyard() {
+        let mut state = setup_game_at_main_phase();
+        add_cant_cast_from_hand_only_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+        );
+        let card = add_card_in_zone(&mut state, PlayerId(1), Zone::Graveyard);
+        let obj = state.objects.get(&card).unwrap();
+        assert!(is_blocked_from_casting_from_zone(&state, obj, PlayerId(1)));
+    }
+
+    /// CR 601.3 + CR 109.5: Drannith Magistrate restricts only opponents — its own
+    /// controller may still cast from their graveyard (escape, flashback, etc.).
+    #[test]
+    fn drannith_magistrate_controller_can_cast_from_graveyard() {
+        let mut state = setup_game_at_main_phase();
+        add_cant_cast_from_hand_only_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+        );
+        let card = add_card_in_zone(&mut state, PlayerId(0), Zone::Graveyard);
+        let obj = state.objects.get(&card).unwrap();
+        assert!(!is_blocked_from_casting_from_zone(&state, obj, PlayerId(0)));
+    }
+
+    /// CR 601.2a: The hand is the one allowed zone — opponents may still cast from
+    /// hand under Drannith Magistrate.
+    #[test]
+    fn drannith_magistrate_opponent_can_cast_from_hand() {
+        let mut state = setup_game_at_main_phase();
+        add_cant_cast_from_hand_only_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+        );
+        let card = add_card_in_zone(&mut state, PlayerId(1), Zone::Hand);
+        let obj = state.objects.get(&card).unwrap();
+        assert!(!is_blocked_from_casting_from_zone(&state, obj, PlayerId(1)));
+    }
+
+    /// CR 601.3 + CR 113.6: Drannith Magistrate also locks opponents out of
+    /// command-zone casts (commander, foretell, adventure-from-exile, etc.).
+    #[test]
+    fn drannith_magistrate_opponent_blocked_from_command_zone() {
+        let mut state = setup_game_at_main_phase();
+        add_cant_cast_from_hand_only_permanent(
+            &mut state,
+            PlayerId(0),
+            ProhibitionScope::Opponents,
+        );
+        let card = add_card_in_zone(&mut state, PlayerId(1), Zone::Command);
+        let obj = state.objects.get(&card).unwrap();
+        assert!(is_blocked_from_casting_from_zone(&state, obj, PlayerId(1)));
+    }
+
+    /// Regression: Grafdigger's Cage (`who = AllPlayers`, zones = {Graveyard,
+    /// Library}) still blocks every player from graveyard casts, and never the
+    /// command zone (its filter omits Command).
+    #[test]
+    fn grafdiggers_cage_blocks_all_players_from_graveyard_not_command() {
+        let mut state = setup_game_at_main_phase();
+        let cage_card = CardId(state.next_object_id);
+        let cage = create_object(
+            &mut state,
+            cage_card,
+            PlayerId(0),
+            "Grafdigger's Cage".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&cage)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantCastFrom {
+                    who: ProhibitionScope::AllPlayers,
+                })
+                .affected(TargetFilter::Typed(
+                    crate::types::ability::TypedFilter {
+                        properties: vec![FilterProp::InAnyZone {
+                            zones: vec![Zone::Graveyard, Zone::Library],
+                        }],
+                        ..crate::types::ability::TypedFilter::default()
+                    },
+                )),
+            );
+        // Both the controller and the opponent are blocked from graveyard casts.
+        let gy_owner = add_card_in_zone(&mut state, PlayerId(0), Zone::Graveyard);
+        let gy_opp = add_card_in_zone(&mut state, PlayerId(1), Zone::Graveyard);
+        assert!(is_blocked_from_casting_from_zone(
+            &state,
+            state.objects.get(&gy_owner).unwrap(),
+            PlayerId(0)
+        ));
+        assert!(is_blocked_from_casting_from_zone(
+            &state,
+            state.objects.get(&gy_opp).unwrap(),
+            PlayerId(1)
+        ));
+        // Command-zone casts are unaffected (Cage's filter omits Command).
+        let cmd = add_card_in_zone(&mut state, PlayerId(1), Zone::Command);
+        assert!(!is_blocked_from_casting_from_zone(
+            &state,
+            state.objects.get(&cmd).unwrap(),
+            PlayerId(1)
+        ));
+    }
+
     #[test]
     fn cant_cast_during_runtime_opponent_blocked_on_controllers_turn() {
         let mut state = setup_game_at_main_phase();
@@ -35513,6 +35699,74 @@ mod tests {
             );
         }
 
+        /// Issue #1957 regression: the PRINTED static "You may cast creature
+        /// spells as though they had flash." (Vivien, Champion of the Wilds)
+        /// must let the controller cast a CREATURE spell at instant speed —
+        /// and must NOT grant flash timing to a non-creature spell.
+        ///
+        /// CR 601.3b + CR 702.8a: this parses to a battlefield `CastWithKeyword
+        /// { Flash }` static carrying a creature spell filter, read by
+        /// `granted_spell_keywords`. The bug was that the line parsed to the
+        /// dead `CastWithFlash` mode (no filter, never consumed) — so the grant
+        /// silently did nothing.
+        #[test]
+        fn vivien_creature_flash_static_scopes_to_creature_spells() {
+            let mut state = setup_game_at_main_phase();
+
+            // P0 controls Vivien, Champion of the Wilds (only the static line
+            // matters here). Install the parsed static onto a battlefield object.
+            let vivien = create_object(
+                &mut state,
+                CardId(900),
+                PlayerId(0),
+                "Vivien, Champion of the Wilds".to_string(),
+                Zone::Battlefield,
+            );
+            let parsed = parse_oracle_text(
+                "You may cast creature spells as though they had flash.",
+                "Vivien, Champion of the Wilds",
+                &[],
+                &["Planeswalker".to_string()],
+                &["Vivien".to_string()],
+            );
+            assert_eq!(
+                parsed.statics.len(),
+                1,
+                "the flash-permission line must parse to exactly one static, got {:?}",
+                parsed.statics
+            );
+            state.objects.get_mut(&vivien).unwrap().static_definitions =
+                parsed.statics.clone().into();
+
+            // A creature spell and a sorcery in P0's hand.
+            let creature = create_object(
+                &mut state,
+                CardId(901),
+                PlayerId(0),
+                "Test Creature".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&creature).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.mana_cost = ManaCost::generic(1);
+            }
+            let sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(902));
+
+            // CR 601.3b: the creature spell gains flash timing via the static.
+            assert!(
+                effective_spell_keyword_kinds(&state, PlayerId(0), creature)
+                    .contains(&KeywordKind::Flash),
+                "creature spell must gain Flash from Vivien's static"
+            );
+            // The filter scopes to creature spells — the sorcery is unaffected.
+            assert!(
+                !effective_spell_keyword_kinds(&state, PlayerId(0), sorcery)
+                    .contains(&KeywordKind::Flash),
+                "sorcery must NOT gain Flash (static is creature-scoped)"
+            );
+        }
+
         /// (g) CR 611.2c regression lock: the grant is bound to the grantee via
         /// the outer `SpecificPlayer` gate, so it must survive an opponent GAINING
         /// CONTROL of Teferi (not just Teferi leaving play — that is test (b)).
@@ -35582,5 +35836,114 @@ mod tests {
                 "stealing Teferi must not hand the grant to the thief"
             );
         }
+    }
+
+    /// Issue #2011: `{X}{C}{C}` Kozilek's Command must be castable when Eldrazi
+    /// Temple is the only colorless source (restricted `{C}{C}` covers `{C}{C}` at X=0).
+    #[test]
+    fn issue_2011_kozilek_command_castable_with_only_eldrazi_temple() {
+        let mut state = setup_game_at_main_phase();
+        let temple = create_object(
+            &mut state,
+            CardId(9200),
+            PlayerId(0),
+            "Eldrazi Temple".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&temple).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).extend([
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                            "Colorless Eldrazi".to_string(),
+                        )],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            ]);
+        }
+
+        let command = create_object(
+            &mut state,
+            CardId(9201),
+            PlayerId(0),
+            "Kozilek's Command".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&command).unwrap();
+            obj.card_types.core_types.push(CoreType::Kindred);
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.card_types.subtypes.push("Eldrazi".to_string());
+            obj.color.clear();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::X,
+                    ManaCostShard::Colorless,
+                    ManaCostShard::Colorless,
+                ],
+                generic: 0,
+            };
+            obj.modal = Some(ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 4,
+                ..ModalChoice::default()
+            });
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        let cost = state.objects[&command].mana_cost.clone();
+        let max_x = super::casting_costs::max_x_value_excluding(
+            &state,
+            PlayerId(0),
+            &cost,
+            Some(command),
+            &HashSet::new(),
+        );
+        assert_eq!(max_x, 0, "only Temple should afford X=0 for {{C}}{{C}}");
+
+        let mut concrete = cost.clone();
+        concrete.concretize_x(0);
+        assert!(
+            can_pay_cost_after_auto_tap(&state, PlayerId(0), command, &concrete),
+            "auto-tap must cover {{C}}{{C}} with Eldrazi Temple restricted mana"
+        );
+        assert!(
+            can_feasibly_pay_mana_cost_without_x(&state, PlayerId(0), Some(command), &concrete),
+            "X=0 concrete cost must be feasible via Temple restricted mana"
+        );
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), command),
+            "can_cast_object_now must be true (issue #2011)"
+        );
     }
 }

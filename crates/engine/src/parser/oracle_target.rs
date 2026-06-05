@@ -1280,15 +1280,21 @@ fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> 
 }
 
 /// CR 201.2: Match a clause boundary that ends a card name in a board-filter
-/// "X named <CardName> …" phrase, scanned at word boundaries (every arm begins
-/// with a space). A bare comma or " and " is NOT a terminator — card names
-/// embed both ("Bruna, the Fading Light"; "Gisa and Geralf") — so the name is
-/// never split on internal punctuation. The name ends only at a *clause-joining*
-/// connective: the controller suffix ("… you control"), a relative pronoun
-/// ("… that has flying"), or the predicate verb that opens the enclosing
-/// relative clause ("… draws a card", "… loses 3 life"). This mirrors
-/// `oracle_effect::search::parse_name_terminator` (the search-zone analogue) but
-/// covers the board-filter predicate verbs rather than search follow-up actions.
+/// "X named <CardName> …" phrase, scanned at word boundaries (most arms begin
+/// with a space; the comma arm begins with ","). A bare comma or " and " is NOT
+/// a terminator on its own — card names embed both ("Bruna, the Fading Light";
+/// "Gisa and Geralf") — so the name is never split on internal punctuation. The
+/// name ends only at a *clause-joining* connective: the controller suffix
+/// ("… you control"), a relative pronoun ("… that has flying"), the predicate
+/// verb that opens the enclosing relative clause ("… draws a card", "… loses 3
+/// life"), or a comma that introduces a *referential* clause about the named
+/// object ("…, it gains", "…, they draw"). The comma arm is pronoun-guarded:
+/// a legendary epithet after a comma is a noun phrase ("…, the Fading Light"),
+/// never a bare referential pronoun, so comma-bearing names stay whole while
+/// "Falkenrath Gorger, it gains" still terminates at "Falkenrath Gorger". This
+/// mirrors `oracle_effect::search::parse_name_terminator` (the search-zone
+/// analogue) but covers the board-filter predicate verbs rather than search
+/// follow-up actions.
 ///
 /// The verb arms are third-person singular/plural present forms because the
 /// enclosing subject is a singular "permanent/creature named X" or the
@@ -1314,22 +1320,47 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" has ")),
         value((), tag(" have ")),
         // Per-player / per-permanent action predicates (issue #2016 class:
-        // "… draws a card", "… loses N life", "… gains", "… gets", "… sacrifices").
-        // Plural/modal board-filter predicates ("get", "can't") are split
-        // upstream by the static parser before this name terminator sees them.
+        // "… draws a card", "… loses N life", "… sacrifices a permanent").
+        // Excludes conjugated verbs that occur verbatim inside real card
+        // names — matching them would truncate the name: "gains" (Ill-Gotten
+        // Gains), "gets" (Bird Gets the Worm), "deals" (Orzhova, the Church of
+        // Deals). Plural/modal board-filter predicates ("get", "can't") are
+        // split upstream by the static parser before this terminator sees them.
         value(
             (),
             (
                 tag(" "),
                 alt((
                     tag("draws "),
-                    tag("gains "),
                     tag("loses "),
-                    tag("gets "),
                     tag("sacrifices "),
                     tag("discards "),
                     tag("creates "),
                     tag("mills "),
+                    tag("destroys "),
+                    tag("exiles "),
+                    tag("puts "),
+                    tag("reveals "),
+                    tag("searches "),
+                )),
+            ),
+        ),
+        // CR 201.2: A comma that opens a referential clause about the named
+        // object ("Falkenrath Gorger, it gains"). Pronoun-guarded so a
+        // name-internal comma followed by an epithet noun phrase ("Bruna, the
+        // Fading Light") is preserved — legendary epithets never begin with a
+        // bare referential pronoun.
+        value(
+            (),
+            (
+                tag(", "),
+                alt((
+                    tag("it "),
+                    tag("they "),
+                    tag("he "),
+                    tag("she "),
+                    tag("you "),
+                    tag("its "),
                 )),
             ),
         ),
@@ -2121,13 +2152,14 @@ pub fn parse_type_phrase_with_ctx<'a>(
         // card" produced `Named { name: "Bonder's Ornament draws a card" }` — the
         // predicate verb was swallowed into the name, so the controls-predicate
         // matched nobody and the whole "who controls …" scope was dropped, making
-        // *every* player draw. Scan word boundaries and stop at the first
-        // clause-joining terminator (see `parse_named_filter_terminator`), which
-        // preserves comma/and-bearing names while ending the name at the
-        // controller suffix, relative pronoun, or predicate verb that follows it.
+        // *every* player draw. Scan word boundaries (spaces, and commas for the
+        // pronoun-guarded comma-clause arm) and stop at the first clause-joining
+        // terminator (see `parse_named_filter_terminator`), which preserves
+        // comma/and-bearing names while ending the name at the controller
+        // suffix, relative pronoun, predicate verb, or referential comma clause.
         let name_end = name_text
             .char_indices()
-            .filter(|&(_, c)| c == ' ')
+            .filter(|&(_, c)| c == ' ' || c == ',')
             .find(|&(idx, _)| parse_named_filter_terminator(&name_text[idx..]).is_ok())
             .map_or_else(
                 || name_text.find(['.', ':', ';']).unwrap_or(name_text.len()),
@@ -4849,6 +4881,22 @@ pub(crate) fn parse_zone_suffix(
     let (rest, (props, ctrl)) = parse_zone_suffix_nom(&lower).ok()?;
     let consumed = lower.len() - rest.len();
     Some((props, ctrl, leading_ws + consumed))
+}
+
+/// CR 601.2a: The zones a spell can be cast from, excluding the named allowed
+/// zone. Used for "from anywhere other than <zone>" cast-origin predicates.
+pub(crate) fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
+    const CAST_CAPABLE_ZONES: [Zone; 5] = [
+        Zone::Hand,
+        Zone::Graveyard,
+        Zone::Library,
+        Zone::Exile,
+        Zone::Command,
+    ];
+    CAST_CAPABLE_ZONES
+        .into_iter()
+        .filter(|zone| *zone != allowed)
+        .collect()
 }
 
 fn parse_zone_suffix_nom(
@@ -10654,5 +10702,43 @@ mod tests {
                 "leg {tf:?} missing superlative Cmc/Aggregate prop"
             );
         }
+    }
+
+    /// Issue #2016: "a permanent named Bonder's Ornament draws a card" must
+    /// terminate the card name at the verb "draws" so the remainder carries
+    /// the verb phrase. Without the verb-boundary scan, the name swallows
+    /// "draws a card" and the remainder is empty.
+    #[test]
+    fn named_card_terminates_at_verb_boundary() {
+        let (filter, rest) = parse_type_phrase("a permanent named Bonder's Ornament draws a card");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Named { name } if name == "Bonder's Ornament"
+            )),
+            "expected Named prop with 'Bonder's Ornament', got {tf:?}"
+        );
+        assert_eq!(rest.trim(), "draws a card");
+    }
+
+    /// Ensure the verb-boundary scan does not fire on card names that happen
+    /// to contain verb-like substrings when followed by a comma delimiter.
+    #[test]
+    fn named_card_with_comma_delimiter_still_works() {
+        let (filter, rest) = parse_type_phrase("a creature named Falkenrath Gorger, it gains");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Named { name } if name == "Falkenrath Gorger"
+            )),
+            "expected Named prop with 'Falkenrath Gorger', got {tf:?}"
+        );
+        assert_eq!(rest.trim_start_matches([',', ' ']), "it gains");
     }
 }
