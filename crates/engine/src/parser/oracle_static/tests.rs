@@ -12706,7 +12706,7 @@ fn parse_unless_condition_excludes_unless_pay_from_not_wrap() {
     );
 }
 
-/// CR 509.1h: Awesome Presence — block tax with defending-player payer and
+/// CR 509.1c: Awesome Presence — block tax with defending-player payer and
 /// per-blocking-creature scaling.
 #[test]
 fn awesome_presence_block_tax_unless_pay() {
@@ -12724,36 +12724,41 @@ fn awesome_presence_block_tax_unless_pay() {
     );
 }
 
-/// CR 508.1d: Chained Throatseeker — defending-player poison gate.
+/// Chained Throatseeker's defending-player poison gate is preserved as an
+/// undecomposed unless rider until attack legality can evaluate the candidate
+/// defending player before attackers are committed.
 #[test]
-fn chained_throatseeker_defending_player_poisoned() {
+fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
     let def = parse_static_line("This creature can't attack unless defending player is poisoned.")
         .expect("Chained Throatseeker should parse");
     assert_eq!(def.mode, StaticMode::CantAttack);
     let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
-        panic!(
-            "expected Not(DefendingPlayerPoisonAtLeast), got {:?}",
-            def.condition
-        );
+        panic!("expected Not(Unrecognized), got {:?}", def.condition);
     };
-    assert!(matches!(
-        condition.as_ref(),
-        StaticCondition::DefendingPlayerPoisonAtLeast { count: 1 }
-    ));
+    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
+        panic!("expected preserved unrecognized rider, got {condition:?}");
+    };
+    assert_eq!(text, "unless defending player is poisoned");
 }
 
-/// CR 508.1d: Arboria — creatures can't attack a player with an unless rider.
+/// Arboria's turn-history rider is preserved in the AST, but not yet decomposed
+/// into runtime semantics.
 #[test]
-fn arboria_cant_attack_player_unless_rider() {
+fn arboria_cant_attack_player_unless_rider_preserved_not_decomposed() {
     let def = parse_static_line(
         "Creatures can't attack a player unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn.",
     )
     .expect("Arboria should parse");
     assert_eq!(def.mode, StaticMode::CantAttack);
-    assert!(
-        def.condition.is_some(),
-        "unless rider must bind to condition, got {:?}",
-        def.condition
+    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+        panic!("expected Not(Unrecognized), got {:?}", def.condition);
+    };
+    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
+        panic!("expected preserved unrecognized rider, got {condition:?}");
+    };
+    assert_eq!(
+        text,
+        "unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn"
     );
 }
 

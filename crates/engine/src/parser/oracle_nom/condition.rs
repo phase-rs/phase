@@ -503,21 +503,7 @@ fn parse_speed_threshold_condition(input: &str) -> OracleResult<'_, StaticCondit
 }
 
 fn parse_opponent_poison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
-    alt((
-        parse_defending_player_poisoned,
-        parse_opponent_poison_at_least,
-    ))
-    .parse(input)
-}
-
-/// CR 702.90c + CR 508.1d: "defending player is poisoned" — the player being
-/// attacked has at least one poison counter (Chained Throatseeker).
-fn parse_defending_player_poisoned(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("defending player is poisoned").parse(input)?;
-    Ok((
-        rest,
-        StaticCondition::DefendingPlayerPoisonAtLeast { count: 1 },
-    ))
+    parse_opponent_poison_at_least(input)
 }
 
 fn parse_opponent_poison_at_least(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -4973,7 +4959,7 @@ fn parse_unless_pay_condition(input: &str) -> OracleResult<'_, StaticCondition> 
         tag("its controller pays "),
         tag("their controller pays "),
         tag("that player pays "),
-        // CR 509.1h: block-tax payer on the defending player (Awesome Presence).
+        // CR 509.1c: block-tax payer on the defending player (Awesome Presence).
         tag("defending player pays "),
     ))
     .parse(input)?;
