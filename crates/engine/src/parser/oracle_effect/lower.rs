@@ -2281,6 +2281,11 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     for (suffix, duration) in [
         (" this turn", Duration::UntilEndOfTurn),
         (" until end of turn", Duration::UntilEndOfTurn),
+        // CR 119.7 + CR 104.1: permanent restrictions worded "... for the
+        // rest of the game" (Screaming Nemesis: "can't gain life for the
+        // rest of the game"). One-shot effect creating a continuous
+        // restriction with no expiry.
+        (" for the rest of the game", Duration::Permanent),
         (
             // CR 514.2: cleanup-pruned next-turn duration.
             " until the end of your next turn",
