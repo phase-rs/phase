@@ -86,6 +86,7 @@ mod issue_2361_unless_pay_choice;
 mod issue_2371_triskaidekaphile;
 mod issue_2374_fblthp_library_origin;
 mod issue_2376_pyromancers_ascension;
+mod issue_2415_rottenmouth_viper_sacrifice_cost;
 mod issue_2417_satoru_intervening_if;
 mod issue_2439_wayta_trigger_doubling;
 mod issue_580_solitude_evoke_prompt;

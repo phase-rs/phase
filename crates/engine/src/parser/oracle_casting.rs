@@ -1,3 +1,4 @@
+use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
@@ -12,6 +13,22 @@ use crate::types::ability::{
     AbilityCost, AdditionalCost, CastingRestriction, Comparator, ParsedCondition, QuantityExpr,
     QuantityRef, SpellCastingOption,
 };
+
+/// Split a combined additional-cost line from its trailing self-spell cost
+/// reduction (Rottenmouth Viper class: "...sacrifice N. This spell costs {1}
+/// less to cast for each permanent sacrificed this way.").
+pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
+    line: &'a str,
+    lower: &'a str,
+) -> (&'a str, Option<&'a str>) {
+    let Some(((), reduction_text)) = nom_on_lower(line, lower, |input| {
+        value((), (take_until(". this spell costs "), tag(". "))).parse(input)
+    }) else {
+        return (line, None);
+    };
+    let activation_len = line.len() - ". ".len() - reduction_text.len();
+    (line[..activation_len].trim(), Some(reduction_text))
+}
 
 /// Parse "As an additional cost to cast this spell, ..." into an `AdditionalCost`.
 ///
@@ -1121,6 +1138,41 @@ mod tests {
             }) => {}
             other => panic!("Expected Optional(Sacrifice), got {:?}", other),
         }
+    }
+
+    /// Issue #2415: Rottenmouth Viper — optional sacrifice any number + trailing reduction.
+    #[test]
+    fn parse_additional_cost_optional_sacrifice_any_number_nonland() {
+        let lower = "as an additional cost to cast this spell, you may sacrifice any number of nonland permanents.";
+        let raw =
+            "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Optional {
+                cost:
+                    AbilityCost::Sacrifice {
+                        count: u32::MAX, ..
+                    },
+                repeatable: false,
+            }) => {}
+            other => panic!("Expected Optional(Sacrifice any number), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn split_rottenmouth_additional_cost_trailing_reduction() {
+        let raw = "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents. This spell costs {1} less to cast for each permanent sacrificed this way.";
+        let lower = raw.to_lowercase();
+        let (cost_line, trailing) = split_additional_cost_trailing_spell_reduction(raw, &lower);
+        let trailing = trailing.expect("trailing cost-reduction sentence");
+        assert_eq!(
+            cost_line,
+            "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents"
+        );
+        assert_eq!(
+            trailing,
+            "This spell costs {1} less to cast for each permanent sacrificed this way."
+        );
     }
 
     #[test]
