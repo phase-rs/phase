@@ -92,7 +92,7 @@ fn thoughtweft_buffed_trample_excess_reaches_player() {
 
     buff_attacker_like_thoughtweft(&mut runner, attacker);
 
-    // CR 613.7 (layer 7c) + CR 702.19a: layers show the attacker at 3/3 with the
+    // CR 613.4c (layer 7c) + CR 702.19a: layers show the attacker at 3/3 with the
     // granted trample keyword before combat damage is assigned.
     {
         let obj = runner.state().objects.get(&attacker).unwrap();
