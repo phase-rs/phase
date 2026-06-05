@@ -85,12 +85,21 @@ pub fn resolve(
         .collect::<Vec<_>>();
     let keep_count = keep_num.min(cards.len());
 
-    // CR 701.20a: Pure-peek pattern (keep_count = 0): "look at the top card" with no
+    // CR 701.20e: Pure-peek pattern (keep_count = 0): "look at the top card" with no
     // player selection — the sub_ability condition decides whether to take it. Set
     // last_revealed_ids so RevealedHasCardType can evaluate, then return without
     // creating a DigChoice interaction.
     if keep_count == 0 && !is_reveal {
         state.last_revealed_ids = cards.clone();
+        // CR 701.20e: "look at" privately reveals the cards to the looking
+        // player. The looker is the ability controller (e.g. Delver of Secrets'
+        // "look at the top card of your library"). Record the looker-scoped peek
+        // window so `filter_state_for_viewer` keeps these cards visible to the
+        // looker — and only the looker — through any subsequent "you may reveal
+        // that card" optional decision, instead of leaving the looking player to
+        // choose blind.
+        state.private_look_ids = cards.clone();
+        state.private_look_player = Some(ability.controller);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -268,6 +277,69 @@ mod tests {
         assert_eq!(state.objects[&top_card].zone, Zone::Library);
         assert_eq!(state.players[1].library.front(), Some(&top_card));
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        // CR 701.20e: the looker is the ability controller, not the library
+        // owner — the peeked opponent card is visible to the controller only.
+        assert_eq!(state.private_look_ids, vec![top_card]);
+        assert_eq!(state.private_look_player, Some(PlayerId(0)));
+    }
+
+    /// CR 701.20e (issue #2021, Delver of Secrets): a bare "look at the top card
+    /// of your library" peek must privately reveal the card to the looking
+    /// player, so they can SEE it before deciding a subsequent "you may reveal
+    /// that card" optional. The peek records a looker-scoped window
+    /// (`private_look_ids` / `private_look_player`) that `filter_state_for_viewer`
+    /// surfaces to the looker and hides from opponents.
+    #[test]
+    fn look_at_top_card_makes_peek_visible_to_looker_only() {
+        use crate::game::visibility::filter_state_for_viewer;
+
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Delver Top Card".to_string(),
+            Zone::Library,
+        );
+        let top_card = state.players[0].library[0];
+
+        // "look at the top card of your library" — Dig keep_count 0, no reveal.
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: None,
+                keep_count: Some(0),
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.private_look_ids, vec![top_card]);
+        assert_eq!(state.private_look_player, Some(PlayerId(0)));
+        // CR 701.20e: a private "look at" must NOT publicly reveal the card.
+        assert!(!state.revealed_cards.contains(&top_card));
+
+        // The looking player (PlayerId(0)) can see the peeked card's identity.
+        let looker_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            looker_view.objects[&top_card].name, "Delver Top Card",
+            "the looking player must see the card they looked at"
+        );
+
+        // The opponent (PlayerId(1)) must NOT see it — the library card is hidden.
+        let opp_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert_ne!(
+            opp_view.objects[&top_card].name, "Delver Top Card",
+            "the private look must not leak the card to opponents"
+        );
     }
 
     #[test]

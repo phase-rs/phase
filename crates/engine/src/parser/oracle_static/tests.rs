@@ -745,6 +745,43 @@ fn static_merfolk_lord() {
         .contains(&ContinuousModification::AddPower { value: 1 }));
 }
 
+/// CR 113.1 + CR 113.3 + CR 604.1: Muraganda Petroglyphs' battlefield-wide anthem
+/// "Creatures with no abilities get +2/+2." — a `Continuous` static (CR 604.1: always
+/// true, re-evaluated each time) affecting every player's creatures (no controller
+/// restriction) that have none of the four ability categories, granting +2/+2.
+#[test]
+fn static_muraganda_petroglyphs() {
+    let def = parse_static_line("Creatures with no abilities get +2/+2.").expect("static def");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "must affect creatures, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::HasNoAbilities),
+                "must filter on no abilities, got {:?}",
+                tf.properties
+            );
+            // CR 604.1: no controller restriction → applies to ALL players' creatures.
+            assert_eq!(
+                tf.controller, None,
+                "anthem must affect every player's creatures, got {:?}",
+                tf.controller
+            );
+        }
+        other => panic!("expected Typed(creatures with no abilities), got {other:?}"),
+    }
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 2 }));
+}
+
 /// CR 509.1b + CR 609.4 + CR 702.14c: Ur-Drago's landwalk canceller produces
 /// `StaticMode::IgnoreLandwalkForBlocking { qualifier: Some("Swamp") }`.
 #[test]
@@ -4405,9 +4442,104 @@ fn static_players_cant_gain_life() {
 
 #[test]
 fn static_cast_as_though_flash() {
-    // CR 702.8a: Flash-granting static
+    // CR 601.3b + CR 702.8a: "You may cast [type] spells as though they had
+    // flash" must emit a `CastWithKeyword { Flash }` static — the only mode the
+    // flash-timing path (granted_spell_keywords) reads — with the spell-type
+    // filter preserved. Issue #1957: Vivien, Champion of the Wilds restricts the
+    // grant to CREATURE spells, and the dead `CastWithFlash` mode dropped both
+    // the timing grant and the type restriction.
     let def = parse_static_line("You may cast creature spells as though they had flash.").unwrap();
-    assert_eq!(def.mode, StaticMode::CastWithFlash);
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!(
+            "affected must be a Typed creature filter, got {:?}",
+            def.affected
+        );
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "filter must constrain to creature spells, got {:?}",
+        tf.type_filters
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::You),
+        "grant must scope to spells you cast"
+    );
+    assert_eq!(def.active_zones, vec![Zone::Battlefield]);
+}
+
+#[test]
+fn static_cast_as_though_flash_all_spells() {
+    // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
+    // Orrery) grants flash to every spell the controller casts.
+    let def = parse_static_line("You may cast spells as though they had flash.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+}
+
+#[test]
+fn static_cast_as_though_flash_compound_spell_types_scope_each_leg_to_you() {
+    let def = parse_static_line(
+        "You may cast legendary spells and artifact spells as though they had flash.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Or { filters }) = &def.affected else {
+        panic!("expected Or affected filter, got {:?}", def.affected);
+    };
+    assert!(
+        filters.iter().all(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            })
+        )),
+        "each disjunct must be scoped to spells you cast, got {filters:?}"
+    );
+}
+
+#[test]
+fn static_cast_as_though_flash_players_may_forms_are_unscoped() {
+    for text in [
+        "Players may cast enchantment spells as though they had flash.",
+        "Any player may cast Sliver spells as though they had flash.",
+    ] {
+        let def = parse_static_line(text).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, None, "{text}: must apply to every player");
+            }
+            other => panic!("{text}: expected Typed affected filter, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -8158,9 +8290,24 @@ fn static_cant_cast_players_during_combat() {
 
 #[test]
 fn static_cant_cast_from_still_works() {
-    // Regression: CantCastFrom (zone-based) must not be affected
+    // Regression: CantCastFrom (zone-based) must not be affected. "Players" → AllPlayers.
     let def = parse_static_line("Players can't cast spells from graveyards or libraries.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantCastFrom);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    // The prohibited zones ride the affected filter via InAnyZone.
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(ref tf))
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Graveyard) && zones.contains(&Zone::Library)
+            ))
+    ));
 }
 
 #[test]
@@ -8469,7 +8616,46 @@ fn per_turn_cast_limit_does_not_affect_cant_cast_during() {
 fn per_turn_cast_limit_does_not_affect_cant_cast_from() {
     // Regression: CantCastFrom must still parse correctly
     let def = parse_static_line("Players can't cast spells from graveyards or libraries.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantCastFrom);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+}
+
+#[test]
+fn static_cant_cast_from_anywhere_other_than_hand_drannith_magistrate() {
+    // CR 601.3 + CR 109.5: Drannith Magistrate — "Your opponents can't cast spells
+    // from anywhere other than their hands." Subject → Opponents scope; the inverse
+    // "anywhere other than [hand]" clause expands to every cast-capable zone except
+    // the hand (graveyard, library, exile, command) on the affected filter.
+    let def =
+        parse_static_line("Your opponents can't cast spells from anywhere other than their hands.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected typed affected filter, got {:?}", def.affected);
+    };
+    let zones = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            _ => None,
+        })
+        .expect("expected InAnyZone prohibited-zone list");
+    // Hand is the only allowed zone; every other cast-capable zone is prohibited.
+    assert!(!zones.contains(&Zone::Hand));
+    assert!(zones.contains(&Zone::Graveyard));
+    assert!(zones.contains(&Zone::Library));
+    assert!(zones.contains(&Zone::Exile));
+    assert!(zones.contains(&Zone::Command));
 }
 
 // --- MustAttack / MustBlock additional combat requirement tests ---
@@ -10760,6 +10946,80 @@ fn static_instant_and_sorcery_spells_have_affinity_for_creatures() {
     }
 }
 
+// CR 702.74a + CR 613.1f: Ashling, the Limitless line 1 — "Elemental permanent
+// spells you cast from your hand gain evoke {4} as you cast them." Exercises the
+// new " gain " grant verb, the trailing " as you cast them" strip, and the
+// granted-evoke keyword payload. The static must yield CastWithKeyword(Evoke).
+#[test]
+fn static_elemental_permanent_spells_gain_evoke() {
+    use crate::types::keywords::{EvokeCost, Keyword};
+
+    let def = parse_static_line(
+        "Elemental permanent spells you cast from your hand gain evoke {4} as you cast them.",
+    )
+    .unwrap();
+    match &def.mode {
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Evoke(EvokeCost::Mana(cost)),
+        } => {
+            assert_eq!(
+                cost.mana_value(),
+                4,
+                "granted evoke must carry the {{4}} cost, got {cost:?}"
+            );
+        }
+        other => panic!("expected CastWithKeyword(Evoke(Mana({{4}}))), got {other:?}"),
+    }
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "expected Permanent type filter, got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.get_subtype(),
+                Some("Elemental"),
+                "expected Elemental subtype, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties
+                    .contains(&FilterProp::InZone { zone: Zone::Hand }),
+                "expected InZone(Hand) property, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(Elemental permanent you cast), got {other:?}"),
+    }
+    assert_eq!(def.active_zones, vec![Zone::Battlefield]);
+}
+
+// Building-block test: the new " gain " separator is general, not Ashling-
+// specific. "Creature spells you cast gain trample" → CastWithKeyword(Trample).
+#[test]
+fn static_creature_spells_gain_trample() {
+    let def = parse_static_line("Creature spells you cast gain trample.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Trample,
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature type filter, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("expected Typed(Creature you cast), got {other:?}"),
+    }
+}
+
 #[test]
 fn static_spells_with_mana_value_ge_have_cascade() {
     // Imoti, Celebrant of Bounty: "Spells you cast with mana value 6 or greater have cascade."
@@ -12703,6 +12963,62 @@ fn parse_unless_condition_excludes_unless_pay_from_not_wrap() {
     assert!(
         matches!(c, StaticCondition::Not { .. }),
         "non-UnlessPay condition must be Not-wrapped, got {c:?}"
+    );
+}
+
+/// CR 509.1c: Awesome Presence — block tax with defending-player payer and
+/// per-blocking-creature scaling.
+#[test]
+fn awesome_presence_block_tax_unless_pay() {
+    let def = parse_static_line(
+        "Enchanted creature can't be blocked unless defending player pays {3} for each creature they control that's blocking it.",
+    )
+    .expect("Awesome Presence should parse");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    let Some(StaticCondition::UnlessPay { scaling, .. }) = def.condition.as_ref() else {
+        panic!("expected UnlessPay, got {:?}", def.condition);
+    };
+    assert_eq!(
+        *scaling,
+        crate::types::ability::UnlessPayScaling::PerAffectedCreature
+    );
+}
+
+/// Chained Throatseeker's defending-player poison gate is preserved as an
+/// undecomposed unless rider until attack legality can evaluate the candidate
+/// defending player before attackers are committed.
+#[test]
+fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
+    let def = parse_static_line("This creature can't attack unless defending player is poisoned.")
+        .expect("Chained Throatseeker should parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+        panic!("expected Not(Unrecognized), got {:?}", def.condition);
+    };
+    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
+        panic!("expected preserved unrecognized rider, got {condition:?}");
+    };
+    assert_eq!(text, "unless defending player is poisoned");
+}
+
+/// Arboria's turn-history rider is preserved in the AST, but not yet decomposed
+/// into runtime semantics.
+#[test]
+fn arboria_cant_attack_player_unless_rider_preserved_not_decomposed() {
+    let def = parse_static_line(
+        "Creatures can't attack a player unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn.",
+    )
+    .expect("Arboria should parse");
+    assert_eq!(def.mode, StaticMode::CantAttack);
+    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+        panic!("expected Not(Unrecognized), got {:?}", def.condition);
+    };
+    let StaticCondition::Unrecognized { text } = condition.as_ref() else {
+        panic!("expected preserved unrecognized rider, got {condition:?}");
+    };
+    assert_eq!(
+        text,
+        "unless that player cast a spell or put a nontoken permanent onto the battlefield during their last turn"
     );
 }
 

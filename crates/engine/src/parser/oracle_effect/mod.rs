@@ -2029,6 +2029,49 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 /// When this text appears on a permanent as a static ability, the static parser handles it.
 /// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
 /// it needs to create an emblem to produce a persistent game-state effect.
+/// CR 118.12a: "[effect] unless a player has [~] deal N damage to them" — any
+/// player may have the source deal damage instead of the primary effect
+/// (Barbarian Bully).
+fn try_parse_unless_player_have_deal_damage(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let (before_unless, _, after_unless) =
+        nom_primitives::scan_preceded(tp.lower, |i| tag(" unless a player has ").parse(i))?;
+    let cost = parse_unless_player_have_deal_damage_cost(after_unless)?;
+    let cleaned = tp.original[..before_unless.trim_end().len()].trim();
+    let diagnostics_snapshot = ctx.diagnostics.len();
+    let mut clause = parse_effect_clause(cleaned, ctx);
+    if matches!(clause.effect, Effect::Unimplemented { .. }) {
+        ctx.diagnostics.truncate(diagnostics_snapshot);
+        return None;
+    }
+    clause.unless_pay = Some(UnlessPayModifier {
+        cost,
+        payer: TargetFilter::AllPlayers,
+    });
+    Some(clause)
+}
+
+fn parse_unless_player_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("this creature "),
+        tag::<_, _, OracleError<'_>>("~ "),
+    ))
+    .parse(after_unless)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("deal ").parse(rest).ok()?;
+    let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
+    parse_deal_damage_to_them_tail(tail)?;
+    Some(AbilityCost::EffectCost {
+        effect: Box::new(Effect::DealDamage {
+            amount,
+            target: TargetFilter::Player,
+            damage_source: None,
+        }),
+    })
+}
+
 /// CR 700.2 + CR 608.2d: "[DEFAULT] unless that player [A] or [B]" —
 /// three-branch forced choice. The scoped player picks an avoidance option or
 /// accepts the default consequence. Called before `try_parse_choose_one_of_inline`
@@ -2935,7 +2978,11 @@ fn try_parse_have_causative(
     // second player" must reach the anaphor-target arm, not collapse to
     // `target: Player`).
     let after_have = nom_on_lower(tp.original, tp.lower, |input| {
-        value((), alt((tag("have it "), tag("have ~ ")))).parse(input)
+        value(
+            (),
+            alt((tag("have it "), tag("have ~ "), tag("have this artifact "))),
+        )
+        .parse(input)
     });
     if let Some((_, rest_orig)) = after_have {
         let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
@@ -2965,6 +3012,16 @@ fn try_parse_have_causative(
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,
                         target: TargetFilter::Player,
+                        damage_source: None,
+                    }));
+                }
+                // CR 608.2d: "have this artifact deal 1 damage to it" (Requiem
+                // Monolith) — optional self-damage the targeted creature's
+                // controller may cause the source artifact to deal.
+                if after_damage.trim_end_matches('.').trim() == "it" {
+                    return Some(parsed_clause(Effect::DealDamage {
+                        amount,
+                        target: TargetFilter::ParentTarget,
                         damage_source: None,
                     }));
                 }
@@ -3820,6 +3877,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 700.2 + CR 118.12a: "[DEFAULT] unless a player has ~ deal N to them".
+    if let Some(clause) = try_parse_unless_player_have_deal_damage(tp, ctx) {
+        return clause;
+    }
+
     // CR 700.2 + CR 608.2d: Three-branch "[DEFAULT] unless that player A or B"
     // forced choice — checked BEFORE the two-branch splitter so the more-specific
     // "unless that player" pattern is matched before the left half is misread as
@@ -4152,6 +4214,16 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         if let Some(clause) = try_parse_distribute_counters(&lower, text) {
             return clause;
         }
+    }
+
+    // CR 701.34a + CR 122.1: targeted proliferate — "for each kind of counter on
+    // target permanent or player, give that permanent or player another counter
+    // of that kind" (Skyship Plunderer, Maulfist Revolutionary). Must precede the
+    // generic `for each` splitter below, which would otherwise lift "kind of
+    // counter on target permanent or player" into a repeat-iteration and drop the
+    // target, leaving an Unimplemented "give … counter of that kind" body.
+    if let Some(effect) = try_parse_proliferate_target(text) {
+        return parsed_clause(effect);
     }
 
     // "for each" patterns: "draw a card for each [filter]", etc.
@@ -6984,6 +7056,53 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
 }
 
 #[tracing::instrument(level = "debug")]
+/// CR 701.34a (operation) + CR 122.1: "For each kind of counter on target
+/// permanent or player, give that permanent or player another counter of that
+/// kind." — the proliferate counter-add forced on a single chosen target
+/// (Skyship Plunderer, Maulfist Revolutionary). The card
+/// spells out the operation rather than using the proliferate keyword, and it
+/// always targets exactly one permanent-or-player, so it lowers to the targeted
+/// `Effect::ProliferateTarget` (not `Effect::Proliferate`, which prompts a
+/// chooser and fires "whenever you proliferate" triggers).
+fn try_parse_proliferate_target(text: &str) -> Option<Effect> {
+    type E<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    // Consume the leading "for each kind of counter on " phrase, then read the
+    // target with the shared target parser ("target permanent or player").
+    let (_, after_on) = nom_on_lower(text, &lower, |i| {
+        value((), tag::<_, _, E>("for each kind of counter on ")).parse(i)
+    })?;
+    let (target, remainder) = parse_target(after_on);
+
+    // The tail re-states the target as an anaphor and adds one counter of each
+    // kind it already has: "give that permanent or player another counter of
+    // that kind".
+    let rem_lower = remainder
+        .trim_start_matches([',', ' '])
+        .to_lowercase()
+        .trim_end_matches(['.', ' '])
+        .to_string();
+    let (rem, _) = tag::<_, _, E>("give ").parse(rem_lower.as_str()).ok()?;
+    let (rem, _) = alt((
+        tag::<_, _, E>("that permanent or player"),
+        tag("that permanent"),
+        tag("that player"),
+        tag("them"),
+        tag("it"),
+    ))
+    .parse(rem)
+    .ok()?;
+    let (rem, _) = tag::<_, _, E>(" another counter of that kind")
+        .parse(rem)
+        .ok()?;
+    if !rem.is_empty() {
+        return None;
+    }
+
+    Some(Effect::ProliferateTarget { target })
+}
+
 fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     if let Some(effect) = try_parse_drawn_this_turn_choice(text) {
         return parsed_clause(effect);
@@ -10384,7 +10503,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         } if *fight_subject == TargetFilter::SelfRef => {
             *fight_subject = subject_filter;
         }
-        // CR 613.3 + CR 110.2: "[Player] gains control of [object]" — when the
+        // CR 613.1b + CR 110.2: "[Player] gains control of [object]" — when the
         // acting subject is a non-controller player (e.g. "an opponent of your
         // choice gains control of it"), the semantics are GIVE (the current
         // controller transfers the object to that player), not TAKE (the
@@ -11510,6 +11629,15 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // parser (issue #878).
     if let Some(clause) = try_parse_cast_as_though_flash_permission(tp) {
         return clause;
+    }
+
+    // CR 400.11 + CR 400.11a + CR 701.23j: "play/cast a … card you own from
+    // outside the game [this turn]" (Wish, M19) draws from the sideboard /
+    // wishboard pool, not from an in-game zone. Probe it before the generic
+    // cast parser so it lowers to `Effect::SearchOutsideGame` instead of a
+    // `CastFromZone` that would target an in-game permanent (issue #1976).
+    if let Some(effect) = imperative::try_parse_play_from_outside_game(tp.lower, ctx) {
+        return parsed_clause(effect);
     }
 
     // CR 601.2a + CR 118.9: "cast it/that card without paying its mana cost"
@@ -14591,7 +14719,17 @@ pub(crate) fn parse_effect_chain_ir(
         }
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
-        let (repeat_for, text) = strip_for_each_prefix(&text);
+        // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
+        // target permanent or player, give … another counter of that kind"
+        // clause intact so the targeted-proliferate recognizer in
+        // `parse_effect_clause` claims it. The generic `for each` strip would
+        // otherwise lift the counter-kind iteration into `repeat_for` and drop
+        // the target, leaving an Unimplemented "give … counter" body.
+        let (repeat_for, text) = if try_parse_proliferate_target(&text).is_some() {
+            (None, text)
+        } else {
+            strip_for_each_prefix(&text)
+        };
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
             let (without_where_x, where_x_expression) =
@@ -16244,6 +16382,42 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     Some(AbilityCost::Mana { cost })
 }
 
+/// CR 118.12a: Tail of "deal N damage to them" unless-cost alternatives.
+fn parse_deal_damage_to_them_tail(input: &str) -> Option<()> {
+    all_consuming(terminated(
+        (
+            tag::<_, _, OracleError<'_>>("damage to "),
+            tag::<_, _, OracleError<'_>>("them"),
+        ),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(input)
+    .ok()
+    .map(|_| ())
+}
+
+/// CR 118.12a: "unless that creature's controller has [~] deal N damage to them"
+/// (Blazing Salvo) — the controller may take the damage instead of the creature.
+fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that creature's controller has ")
+        .parse(after_unless)
+        .ok()?;
+    let (rest, _) = take_until::<_, _, OracleError<'_>>(" deal ")
+        .parse(rest)
+        .ok()?;
+    // `take_until` leaves the matched delimiter on the input (" deal N ...").
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" deal ").parse(rest).ok()?;
+    let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
+    parse_deal_damage_to_them_tail(tail)?;
+    Some(AbilityCost::EffectCost {
+        effect: Box::new(Effect::DealDamage {
+            amount,
+            target: TargetFilter::Player,
+            damage_source: None,
+        }),
+    })
+}
+
 fn extract_resolution_unless_pay_modifier(
     text: &str,
     player_scope: Option<&PlayerFilter>,
@@ -16267,6 +16441,16 @@ fn extract_resolution_unless_pay_modifier(
     if let Some((before_unless, _, after_unless_lower)) =
         nom_primitives::scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>("unless ").parse(i))
     {
+        if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless_lower) {
+            let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost,
+                    payer: TargetFilter::ParentTargetController,
+                }),
+            );
+        }
         if let Some(cost) =
             crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(after_unless_lower)
         {
@@ -20297,6 +20481,30 @@ mod tests {
     /// `targeting::resolve_effect_player_ref`). Without this the parser's
     /// `try_parse_choose_one_of_inline` would misfire on the inner ` or ` and
     /// split the imperative into two malformed branches.
+    /// CR 118.12a: Blazing Salvo — unless the target's controller takes the damage.
+    #[test]
+    fn blazing_salvo_unless_have_deal_damage() {
+        let def = parse_effect_chain(
+            "Blazing Salvo deals 3 damage to target creature unless that creature's controller has Blazing Salvo deal 5 damage to them.",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def
+            .unless_pay
+            .as_ref()
+            .expect("Blazing Salvo must attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        match &unless_pay.cost {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    ..
+                } => {}
+                other => panic!("expected DealDamage 5, got {other:?}"),
+            },
+            other => panic!("expected EffectCost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn effect_chain_rhystic_lightning_unless_dual_payer_is_parent_target_controller() {
         use crate::types::mana::ManaCost;
@@ -21708,6 +21916,54 @@ mod tests {
                 qty: QuantityRef::Variable { .. }
             })
         ));
+    }
+
+    #[test]
+    fn effect_proliferate_target_single_target() {
+        // CR 701.34a + CR 122.1: Skyship Plunderer / Maulfist Revolutionary —
+        // forced single-target proliferate. Must target a permanent-or-player
+        // (a concrete filter, not `Any`) so a target slot is requested.
+        let e = parse_effect(
+            "For each kind of counter on target permanent or player, give that permanent or player another counter of that kind.",
+        );
+        let Effect::ProliferateTarget { target } = &e else {
+            panic!("expected ProliferateTarget, got {e:?}");
+        };
+        assert_ne!(
+            *target,
+            TargetFilter::Any,
+            "target must be a concrete permanent-or-player filter so a target slot is built"
+        );
+        assert!(
+            e.target_filter().is_some(),
+            "ProliferateTarget must surface a target filter"
+        );
+    }
+
+    #[test]
+    fn effect_proliferate_target_in_combat_damage_trigger() {
+        // CR 603.2: Skyship Plunderer's full ability — the targeted proliferate
+        // is the executed body of the combat-damage trigger.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flying\nWhenever this creature deals combat damage to a player, for each kind of counter on target permanent or player, give that permanent or player another counter of that kind.",
+            "Skyship Plunderer",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("should produce the combat-damage trigger");
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("trigger has an execute body");
+        assert!(
+            matches!(&*execute.effect, Effect::ProliferateTarget { .. }),
+            "combat-damage trigger body must be ProliferateTarget, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]
@@ -24271,6 +24527,69 @@ mod tests {
         );
     }
 
+    /// Issue #1978 — Shatterskull Smashing: "deals X damage divided as you choose
+    /// among up to two target creatures and/or planeswalkers". CR 115.1d caps the
+    /// number of targets at two (independent of the X damage pool), CR 601.2d makes
+    /// the controller divide damage among them. Regression: the distribute-damage
+    /// path only honored "any number of" and dropped the "up to N" target cap,
+    /// leaving multi_target = None so only a single target could be selected.
+    #[test]
+    fn deal_damage_divided_among_up_to_two_target_creatures_planeswalkers() {
+        let clause = parse_effect_clause(
+            "~ deals 5 damage divided as you choose among up to two target creatures and/or planeswalkers",
+            &mut ParseContext::default(),
+        );
+        // CR 115.1d: up to two targets (min 0, max 2), not the damage amount.
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
+        // CR 601.2d: damage divided as the controller chooses.
+        assert_eq!(clause.distribute, Some(DistributionUnit::Damage));
+        let Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 5 },
+            target: TargetFilter::Or { filters },
+            damage_source: None,
+        } = clause.effect
+        else {
+            panic!(
+                "Expected divided DealDamage with multi_target, got {:?}",
+                clause.effect
+            );
+        };
+        assert_eq!(
+            filters,
+            vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+            ]
+        );
+    }
+
+    /// Issue #1978 — the variable-X form on the real card: "deals X damage divided
+    /// as you choose among up to two target creatures and/or planeswalkers". The
+    /// target cap stays two even though the damage amount is the variable X.
+    #[test]
+    fn deal_damage_divided_x_among_up_to_two_targets() {
+        let clause = parse_effect_clause(
+            "Shatterskull Smashing deals X damage divided as you choose among up to two target creatures and/or planeswalkers",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
+        assert_eq!(clause.distribute, Some(DistributionUnit::Damage));
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    },
+                    target: TargetFilter::Or { .. },
+                    damage_source: None,
+                }
+            ),
+            "Expected divided X DealDamage with multi_target, got {:?}",
+            clause.effect
+        );
+    }
+
     #[test]
     fn exile_top_of_your_library_parses_as_exile_top() {
         let effect = parse_effect("Exile the top card of your library");
@@ -24544,6 +24863,46 @@ mod tests {
     // `apply_where_x_effect_expression` → `apply_where_x_quantity_expression`
     // UpTo recursion that routes the where-clause through the shared
     // `ControlsCount` quantity combinator.
+    /// Issue #1965 — Eldritch Evolution: "creature card with mana value X or
+    /// less, where X is 2 plus the sacrificed creature's mana value" must bind
+    /// the search filter's `Cmc` bound to the cost-paid sacrifice, not leave
+    /// `Variable("X")` (which resolves to 0 and skips the search).
+    #[test]
+    fn eldritch_evolution_search_binds_sacrificed_creature_mana_value_plus_two() {
+        let def = parse_effect_chain_with_context(
+            "Search your library for a creature card with mana value X or less, where X is 2 plus the sacrificed creature's mana value. Put that card onto the battlefield, then shuffle. Exile Eldritch Evolution.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let Effect::SearchLibrary { filter, .. } = &*def.effect else {
+            panic!("expected SearchLibrary, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        let cmc = typed
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+                _ => None,
+            })
+            .expect("expected Cmc bound");
+        assert_eq!(*cmc.0, Comparator::LE);
+        assert_eq!(
+            *cmc.1,
+            QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                }),
+                offset: 2,
+            }
+        );
+    }
+
     #[test]
     fn search_up_to_x_where_x_is_players_who_control_more_lands_binds_controls_count() {
         use crate::types::ability::PlayerRelation;
@@ -30971,6 +31330,44 @@ mod tests {
         }
     }
 
+    /// Issue #2016: Bonder's Ornament — "each player who controls a permanent
+    /// named Bonder's Ornament draws a card" must produce ControlsCount with a
+    /// Named filter and deconjugated result "draw a card".
+    #[test]
+    fn strip_each_player_subject_named_permanent() {
+        use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
+        let (scope, result) = strip_each_player_subject(
+            "each player who controls a permanent named Bonder's Ornament draws a card",
+        );
+        assert_eq!(result, "draw a card");
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                filter,
+                comparator,
+                count,
+            }) => {
+                assert_eq!(relation, PlayerRelation::All);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                match &filter {
+                    TargetFilter::Typed(tf) => {
+                        assert!(
+                            tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::Named { name }
+                                    if name == "Bonder's Ornament"
+                            )),
+                            "filter must contain Named prop, got {tf:?}"
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ControlsCount{{GE,Fixed(1)}}, got {other:?}"),
+        }
+    }
+
     /// CR 109.4 + CR 109.5: building-block coverage for the shared control
     /// predicate `parse_controls_permanent_object` — the comparator/count pair,
     /// the delegated object filter, the consumed-remainder shape, and the
@@ -31051,6 +31448,32 @@ mod tests {
         // Missing the "who …" lead → no predicate.
         let mut ctx = ParseContext::default();
         assert!(parse_controls_permanent_object("draws a card", &mut ctx).is_none());
+
+        // Issue #2016: "who controls a permanent named Bonder's Ornament draws
+        // a card" — the "named" suffix must terminate at the verb "draws" so
+        // the remainder carries the verb phrase.
+        let mut ctx = ParseContext::default();
+        let (comparator, count, filter, remainder) = parse_controls_permanent_object(
+            "who controls a permanent named Bonder's Ornament draws a card",
+            &mut ctx,
+        )
+        .expect("named-permanent control predicate must parse");
+        assert_eq!(comparator, Comparator::GE);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        match &filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Named { name }
+                            if name == "Bonder's Ornament"
+                    )),
+                    "filter must contain Named prop, got {tf:?}"
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+        assert_eq!(remainder.trim_start(), "draws a card");
     }
 
     #[test]

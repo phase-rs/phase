@@ -833,6 +833,12 @@ pub enum DebugAction {
         player_id: PlayerId,
         mana: Vec<ManaType>,
     },
+    /// Toggle "infinite mana" for a player (debug-only). While `enabled`, the
+    /// engine keeps the player's mana pool topped up after every action and
+    /// suppresses the end-of-step empty (CR 500.5) for that player, so any cost
+    /// is payable. Setting `enabled = false` clears the toggle; the pool then
+    /// empties normally on the next step transition. Off by default.
+    SetInfiniteMana { player_id: PlayerId, enabled: bool },
 
     // ── Game Flow ─────────────────────────────────────────────────────────
     /// Advance or rewind to a specific phase/step.
@@ -1091,6 +1097,11 @@ impl DebugAction {
             DebugAction::AddMana { player_id, mana } => {
                 format!("AddMana ({} gains {:?})", player_label(*player_id), mana)
             }
+            DebugAction::SetInfiniteMana { player_id, enabled } => format!(
+                "SetInfiniteMana ({} {})",
+                player_label(*player_id),
+                if *enabled { "on" } else { "off" }
+            ),
             DebugAction::SetPhase {
                 phase,
                 active_player,

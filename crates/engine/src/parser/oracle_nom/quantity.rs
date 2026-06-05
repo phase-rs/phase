@@ -13,7 +13,9 @@ use nom::Parser;
 
 use super::context::ParseContext;
 use super::error::OracleResult;
-use super::primitives::{parse_article, parse_counter_type_typed, parse_number};
+use super::primitives::{
+    parse_article, parse_counter_type_typed, parse_keyword_name, parse_number,
+};
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{
     parse_shared_quality, parse_shared_quality_clause, parse_type_phrase,
@@ -26,6 +28,7 @@ use crate::types::ability::{
     TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterMatch;
+use crate::types::keywords::Keyword;
 use crate::types::player::PlayerCounterKind;
 use crate::types::zones::Zone;
 
@@ -593,6 +596,11 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // count; must precede `parse_number_of_controlled_type`, whose
         // " you control" suffix does not match the battlefield-wide form.
         parse_number_of_chosen_type_on_battlefield,
+        // CR 604.3: "<type> on the battlefield with <keyword>" — global CDA
+        // count restricted to a keyword; must precede
+        // `parse_number_of_controlled_type`, whose " you control" suffix does
+        // not match the battlefield-wide form.
+        parse_number_of_type_on_battlefield_with_keyword,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -809,6 +817,34 @@ fn parse_number_of_chosen_type_on_battlefield(input: &str) -> OracleResult<'_, Q
                 type_filters: vec![head],
                 controller: None,
                 properties: vec![FilterProp::IsChosenCreatureType],
+            }),
+        },
+    ))
+}
+
+/// CR 604.3: Parse "<type> on the battlefield with <keyword>" after "the
+/// number of" → a battlefield-wide (any-controller) population count of
+/// permanents of the given type that have the named keyword.
+///
+/// Sibling of `parse_number_of_chosen_type_on_battlefield`: same global
+/// (`controller: None`) battlefield population, but the predicate is a keyword
+/// rather than the chosen creature type. Backs characteristic-defining
+/// power/toughness abilities such as Dauthi Warlord ("~'s power is equal to the
+/// number of creatures on the battlefield with shadow"). Generalized over every
+/// evergreen keyword via `parse_keyword_name` + `FilterProp::WithKeyword`, so it
+/// covers the whole class, not one card.
+fn parse_number_of_type_on_battlefield_with_keyword(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, head) = parse_type_filter_word(input)?;
+    let (rest, _) = tag(" on the battlefield with ").parse(rest)?;
+    let (rest, keyword_name) = parse_keyword_name(rest)?;
+    let keyword: Keyword = keyword_name.parse().unwrap();
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![head],
+                controller: None,
+                properties: vec![FilterProp::WithKeyword { value: keyword }],
             }),
         },
     ))
@@ -1676,6 +1712,25 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
                 scope: ObjectScope::CostPaidObject,
             },
             tag("that spell's mana value"),
+        ),
+        // CR 208.3 + CR 608.2k: "that spell's power"/"toughness" — the cast
+        // event's source object IS the spell on the stack, and a creature spell
+        // has the power/toughness printed on its card (CR 208.3), so these read
+        // directly off the trigger-condition referent (CostPaidObject, the same
+        // CR 608.2k scope as "that creature's power"/"mana value" above). Covers
+        // the class of "Whenever you cast a creature spell, if that spell's
+        // power is N or greater, …" cards (Eshki, Temur's Roar — issue #2009).
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+            tag("that spell's power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
+            tag("that spell's toughness"),
         ),
         // CR 109.2a + CR 608.2c: "that [type] card's [property]" — anaphoric
         // reference to a card selected by an earlier instruction in the same
@@ -2783,6 +2838,39 @@ mod tests {
                     assert!(
                         tf.properties.contains(&FilterProp::IsChosenCreatureType),
                         "{text:?}: must gate on the source's chosen creature type"
+                    );
+                }
+                other => panic!("{text:?}: expected ObjectCount, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_number_of_type_on_battlefield_with_keyword_global_count() {
+        // CR 604.3: Dauthi Warlord — "the number of creatures on the
+        // battlefield with shadow" is a battlefield-wide CDA count (any
+        // controller) gated on a keyword, generalized over the KEYWORDS table.
+        for (text, kw) in [
+            (
+                "the number of creatures on the battlefield with shadow",
+                Keyword::Shadow,
+            ),
+            (
+                "the number of creatures on the battlefield with flying",
+                Keyword::Flying,
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "", "{text:?} should fully consume");
+            match q {
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                } => {
+                    assert_eq!(tf.controller, None, "{text:?}: counts every controller");
+                    assert!(
+                        tf.properties
+                            .contains(&FilterProp::WithKeyword { value: kw }),
+                        "{text:?}: must gate on the named keyword"
                     );
                 }
                 other => panic!("{text:?}: expected ObjectCount, got {other:?}"),

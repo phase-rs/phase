@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
+use nom::character::complete::space1;
 use nom::combinator::{opt, peek, value};
 use nom::multi::many0;
 use nom::Parser;
@@ -616,6 +617,24 @@ pub fn parse_target_with_syntax<'a>(
                     filters: vec![
                         TargetFilter::Player,
                         typed(TypeFilter::Planeswalker, None, vec![], vec![]),
+                    ],
+                },
+                &text[lower.len() - rest.len()..],
+                syntax,
+            );
+        }
+        // CR 115.1: "target permanent or player" — the proliferate-style
+        // target pool (Skyship Plunderer, Maulfist Revolutionary).
+        // Matched before the bare "permanent" type phrase (longest-match-first)
+        // so the "or player" half is not dropped.
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("permanent or player").parse(after_target)
+        {
+            return (
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(TypeFilter::Permanent, None, vec![], vec![]),
+                        TargetFilter::Player,
                     ],
                 },
                 &text[lower.len() - rest.len()..],
@@ -1260,6 +1279,39 @@ fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> 
     }
 }
 
+/// CR 201.2: Scan `name_text` (the lowercase text after "named ") for the
+/// first word boundary where a conjugated verb begins, indicating the card
+/// name has ended and a verb phrase follows. Returns the byte offset of the
+/// space preceding the verb, or `None` if no verb boundary is found.
+///
+/// Delegates to `nom_primitives::scan_split_at_phrase` for word-boundary
+/// scanning with nom `tag()` combinators.
+fn find_verb_boundary_in_named(name_text: &str) -> Option<usize> {
+    // Conjugated 3rd-person verbs that commonly follow a card name in
+    // "each player who controls a permanent named X [verb]" patterns.
+    // Only verbs that do NOT appear in real MTG card names are included.
+    // Excluded: "gains" (Ill-Gotten Gains), "deals" (Orzhova, the Church
+    // of Deals), "gets" (Bird Gets the Worm), "has"/"is"/"are"/"enters"
+    // (too generic and appear in card names).
+    nom_primitives::scan_split_at_phrase(name_text, |i| {
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("draws ")),
+            value((), tag("loses ")),
+            value((), tag("creates ")),
+            value((), tag("destroys ")),
+            value((), tag("discards ")),
+            value((), tag("exiles ")),
+            value((), tag("mills ")),
+            value((), tag("puts ")),
+            value((), tag("reveals ")),
+            value((), tag("sacrifices ")),
+            value((), tag("searches ")),
+        ))
+        .parse(i)
+    })
+    .map(|(prefix, _)| prefix.len().saturating_sub(1))
+}
+
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
 /// "creature you control", "creature an opponent controls".
 ///
@@ -1796,6 +1848,20 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 113.1 + CR 113.3: "<type> with no abilities" — an object with none of the
+    // four ability categories. Narrow predicate combinator lives in oracle_nom/filter.rs;
+    // this arm supplies the "with " lead + offset handling, mirroring parse_counter_suffix.
+    {
+        let after_ws = lower[pos..].trim_start();
+        let ws = lower[pos..].len() - after_ws.len();
+        if let Ok((with_rest, _)) = (tag::<_, _, OracleError<'_>>("with"), space1).parse(after_ws) {
+            if let Ok((rest, prop)) = nom_filter::parse_no_abilities(with_rest) {
+                properties.push(prop);
+                pos += ws + (after_ws.len() - rest.len());
+            }
+        }
+    }
+
     if let Some((keyword_props, consumed)) = parse_without_keyword_suffix(&lower[pos..]) {
         properties.extend(keyword_props);
         pos += consumed;
@@ -2021,8 +2087,12 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let remaining_named = lower[pos..].trim_start();
     let named_offset = lower[pos..].len() - remaining_named.len();
     if let Ok((name_text, _)) = tag::<_, _, OracleError<'_>>("named ").parse(remaining_named) {
-        // Name extends to end-of-clause markers: comma, period, "you control", "that", or end.
-        let name_end = name_text.find([',', '.']).unwrap_or(name_text.len());
+        // Name extends to end-of-clause markers: comma, period, conjugated
+        // verb at a word boundary (CR 201.2), or end-of-input.
+        let punct_end = name_text.find([',', '.']).unwrap_or(name_text.len());
+        let name_end = find_verb_boundary_in_named(name_text)
+            .unwrap_or(punct_end)
+            .min(punct_end);
         let raw_name = name_text[..name_end].trim();
         if !raw_name.is_empty() {
             // Reconstruct original-case name from the same position in `text`
@@ -5872,6 +5942,33 @@ mod tests {
                 }
             ]))
         );
+    }
+
+    #[test]
+    fn no_abilities_suffix_plural() {
+        // CR 113.1 + CR 113.3: "creatures with no abilities" → Creature type +
+        // HasNoAbilities property, fully consumed (Muraganda Petroglyphs anthem
+        // subject).
+        let (f, rest) = parse_type_phrase("creatures with no abilities");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::HasNoAbilities));
+    }
+
+    #[test]
+    fn no_abilities_suffix_singular() {
+        // CR 113.1 + CR 113.3: singular "creature with no abilities" parses the
+        // same predicate.
+        let (f, rest) = parse_type_phrase("creature with no abilities");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::HasNoAbilities));
     }
 
     #[test]
@@ -10473,5 +10570,43 @@ mod tests {
                 "leg {tf:?} missing superlative Cmc/Aggregate prop"
             );
         }
+    }
+
+    /// Issue #2016: "a permanent named Bonder's Ornament draws a card" must
+    /// terminate the card name at the verb "draws" so the remainder carries
+    /// the verb phrase. Without the verb-boundary scan, the name swallows
+    /// "draws a card" and the remainder is empty.
+    #[test]
+    fn named_card_terminates_at_verb_boundary() {
+        let (filter, rest) = parse_type_phrase("a permanent named Bonder's Ornament draws a card");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Named { name } if name == "Bonder's Ornament"
+            )),
+            "expected Named prop with 'Bonder's Ornament', got {tf:?}"
+        );
+        assert_eq!(rest.trim(), "draws a card");
+    }
+
+    /// Ensure the verb-boundary scan does not fire on card names that happen
+    /// to contain verb-like substrings when followed by a comma delimiter.
+    #[test]
+    fn named_card_with_comma_delimiter_still_works() {
+        let (filter, rest) = parse_type_phrase("a creature named Falkenrath Gorger, it gains");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Named { name } if name == "Falkenrath Gorger"
+            )),
+            "expected Named prop with 'Falkenrath Gorger', got {tf:?}"
+        );
+        assert_eq!(rest.trim_start_matches([',', ' ']), "it gains");
     }
 }

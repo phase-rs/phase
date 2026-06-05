@@ -1043,6 +1043,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         crate::types::ability::CastVariantPaid::Evoke,
                         state.turn_number,
                     ));
+                    // CR 702.74a + CR 611.2 + CR 604.1: install the ETB-sac on
+                    // the resolving permanent for granted evoke (keyword lived
+                    // on the spell, not the permanent). Idempotent no-op for
+                    // printed evoke (already baked into the card face by
+                    // `synthesize_evoke`); `process_triggers` later in
+                    // `run_post_action_pipeline` reads the live
+                    // `trigger_definitions` after the zone change buffers.
+                    crate::database::synthesis::ensure_evoke_etb_sac_trigger(obj);
                 }
             }
 

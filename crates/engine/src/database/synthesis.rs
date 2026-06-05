@@ -14,11 +14,11 @@ use crate::types::ability::{
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration,
     Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
+    StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -2236,6 +2236,18 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         return;
     }
 
+    face.triggers.push(build_evoke_etb_sac_trigger());
+}
+
+/// CR 702.74a: Build the evoke ETB-sacrifice triggered ability — "When this
+/// permanent enters, if its evoke cost was paid, its controller sacrifices it."
+///
+/// Shared by `synthesize_evoke` (card-data baking of printed evoke) and the
+/// runtime `ensure_evoke_etb_sac_trigger` (granted evoke, where the keyword
+/// lived on the spell and never reached the resolving permanent's printed
+/// triggers). The trigger is gated on `CastVariantPaid { variant: Evoke }`, so
+/// it is a no-op when the permanent was not cast for its evoke cost.
+pub(crate) fn build_evoke_etb_sac_trigger() -> TriggerDefinition {
     let sac = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Sacrifice {
@@ -2244,7 +2256,7 @@ pub fn synthesize_evoke(face: &mut CardFace) {
             min_count: 0,
         },
     );
-    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+    TriggerDefinition::new(TriggerMode::ChangesZone)
         .destination(Zone::Battlefield)
         .valid_card(TargetFilter::SelfRef)
         .condition(TriggerCondition::CastVariantPaid {
@@ -2254,8 +2266,57 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         .description(
             "CR 702.74a: When this permanent enters, if its evoke cost was paid, sacrifice it."
                 .to_string(),
-        );
-    face.triggers.push(trigger);
+        )
+}
+
+/// CR 702.74a + CR 604.1: Install the evoke ETB-sacrifice trigger on a live
+/// `GameObject` if it is not already present.
+///
+/// For printed evoke the trigger is already baked into the card face by
+/// `synthesize_evoke`, so this is an idempotent no-op. For *granted* evoke
+/// (a `StaticMode::CastWithKeyword { keyword: Evoke }` static such as Ashling,
+/// the Limitless) the keyword lives on the spell while it is on the stack and
+/// never propagates to the resolving permanent's printed triggers, so the
+/// trigger must be installed onto the permanent at resolution. The structural-
+/// equality scan mirrors `synthesize_evoke`'s `already_has_trigger` matcher so
+/// the two paths never double-install.
+pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::GameObject) {
+    let is_evoke_sac = |t: &TriggerDefinition| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Evoke,
+                })
+            )
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    };
+    // CR 702.74a + CR 613.1f: the layer system rebuilds `trigger_definitions`
+    // from `base_trigger_definitions` on every evaluation (layers.rs), so a
+    // runtime install must land in the durable base or it is wiped before the
+    // ETB ChangesZone trigger is collected. Printed evoke already carries the
+    // trigger in `base_trigger_definitions` (baked into the card face by
+    // `synthesize_evoke`), making this an idempotent no-op for that path. Push to
+    // base (the durable source layers rebuild from), then refresh the live copy
+    // so the trigger is collectable this same resolution before the next layers
+    // pass re-derives `trigger_definitions`.
+    if obj.base_trigger_definitions.iter().any(is_evoke_sac) {
+        if !obj.trigger_definitions.iter_all().any(is_evoke_sac) {
+            obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
+        }
+        return;
+    }
+    let trigger = build_evoke_etb_sac_trigger();
+    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
+    obj.trigger_definitions.push(trigger);
 }
 
 /// CR 702.30a: Echo is a triggered ability. "Echo [cost]" means "At the
@@ -4536,12 +4597,53 @@ pub fn synthesize_ingest(face: &mut CardFace) {
 ///
 /// Each instance of Extort triggers separately (CR 702.101b), so one trigger
 /// is synthesized per `Keyword::Extort` instance.
+fn is_extort_mana_cost(cost: &ManaCost) -> bool {
+    matches!(
+        cost,
+        ManaCost::Cost {
+            shards,
+            generic: 0,
+        } if shards.as_slice() == [ManaCostShard::WhiteBlack]
+    )
+}
+
 fn is_extort_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::SpellCast)
         && matches!(t.valid_target, Some(TargetFilter::Controller))
-        && t.execute
-            .as_deref()
-            .is_some_and(|a| a.optional && a.cost.is_some())
+        && t.execute.as_deref().is_some_and(|a| {
+            a.optional
+                && matches!(
+                    &*a.effect,
+                    Effect::PayCost {
+                        cost: PaymentCost::AbilityCost {
+                            cost: AbilityCost::Mana { cost },
+                        },
+                        payer: TargetFilter::Controller,
+                    } if is_extort_mana_cost(cost)
+                )
+                && a.sub_ability.as_deref().is_some_and(|drain| {
+                    matches!(drain.player_scope, Some(PlayerFilter::Opponent))
+                        && drain.condition == Some(AbilityCondition::effect_performed())
+                        && matches!(
+                            &*drain.effect,
+                            Effect::LoseLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: None,
+                            }
+                        )
+                        && drain.sub_ability.as_deref().is_some_and(|gain| {
+                            matches!(
+                                &*gain.effect,
+                                Effect::GainLife {
+                                    amount: QuantityExpr::Ref {
+                                        qty: QuantityRef::PreviousEffectAmount,
+                                    },
+                                    player: TargetFilter::Controller,
+                                }
+                            )
+                        })
+                })
+        })
 }
 
 /// CR 702.191a: Intervening-if — this permanent is a creature and mana spent to
@@ -4627,12 +4729,13 @@ fn build_increment_trigger() -> TriggerDefinition {
 }
 
 fn build_extort_trigger() -> TriggerDefinition {
-    // The drain effect: each opponent loses 1 life, you gain that much.
-    // Use player_scope to iterate over opponents for the LoseLife,
-    // then sub_ability for the controller's GainLife.
-    let drain_effect = Effect::LoseLife {
-        amount: QuantityExpr::Fixed { value: 1 },
-        target: None,
+    // CR 702.101a: Optional {W/B} payment must resolve before the opponent drain.
+    // `AbilityDefinition::cost` is not carried into `ResolvedAbility`, so the
+    // payment is modeled as an optional `PayCost` parent (mirroring parsed
+    // "you may pay {cost}. If you do, …" chains) with the drain on the sub.
+    let wb_mana = ManaCost::Cost {
+        shards: vec![ManaCostShard::WhiteBlack],
+        generic: 0,
     };
     let gain_life = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -4643,20 +4746,33 @@ fn build_extort_trigger() -> TriggerDefinition {
             player: TargetFilter::Controller,
         },
     );
-    let execute = AbilityDefinition::new(AbilityKind::Spell, drain_effect)
-        .player_scope(PlayerFilter::Opponent)
-        .sub_ability(gain_life)
-        .optional()
-        .cost(AbilityCost::Mana {
-            cost: ManaCost::Cost {
-                shards: vec![ManaCostShard::WhiteBlack],
-                generic: 0,
+    let drain = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: None,
+        },
+    )
+    .player_scope(PlayerFilter::Opponent)
+    .sub_ability(gain_life)
+    .condition(AbilityCondition::effect_performed());
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Mana {
+                    cost: wb_mana.clone(),
+                },
             },
-        })
-        .description(
-            "CR 702.101a: Extort — pay {W/B}, each opponent loses 1 life, you gain that much life"
-                .to_string(),
-        );
+            payer: TargetFilter::Controller,
+        },
+    )
+    .optional()
+    .sub_ability(drain)
+    .description(
+        "CR 702.101a: Extort — pay {W/B}, each opponent loses 1 life, you gain that much life"
+            .to_string(),
+    );
     TriggerDefinition::new(TriggerMode::SpellCast)
         .valid_target(TargetFilter::Controller)
         .execute(execute)
@@ -7239,6 +7355,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.128a / CR 702.129a: Embalm / Eternalize graveyard-activated
     // token-copy abilities (self-contained building block in its own module).
     crate::database::embalm_eternalize::synthesize_embalm_eternalize(face);
+    // CR 702.84a: Unearth graveyard-activated temporary reanimation (return with
+    // haste, exile at the next end step) — self-contained building block.
+    crate::database::unearth::synthesize_unearth(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);
@@ -11650,17 +11769,43 @@ mod extort_synthesis_tests {
             panic!("execute body required");
         };
         assert!(execute.optional, "extort must be optional (may pay)");
-        assert!(execute.cost.is_some(), "extort must have a mana cost");
+        let Effect::PayCost {
+            cost:
+                PaymentCost::AbilityCost {
+                    cost: AbilityCost::Mana { cost },
+                },
+            payer,
+        } = &*execute.effect
+        else {
+            panic!("extort must pay W/B via PayCost before draining");
+        };
+        assert_eq!(
+            cost,
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::WhiteBlack],
+                generic: 0,
+            }
+        );
+        assert!(matches!(payer, TargetFilter::Controller));
+
+        let Some(drain) = execute.sub_ability.as_deref() else {
+            panic!("extort must chain drain after payment");
+        };
         assert!(
-            matches!(execute.player_scope, Some(PlayerFilter::Opponent)),
+            matches!(drain.player_scope, Some(PlayerFilter::Opponent)),
             "drain must scope to opponents"
         );
+        assert_eq!(
+            drain.condition,
+            Some(AbilityCondition::effect_performed()),
+            "drain must be gated on successful W/B payment (If you do)"
+        );
         assert!(
-            matches!(&*execute.effect, Effect::LoseLife { .. }),
-            "primary effect must be LoseLife"
+            matches!(&*drain.effect, Effect::LoseLife { .. }),
+            "drain effect must be LoseLife"
         );
 
-        let Some(gain) = execute.sub_ability.as_deref() else {
+        let Some(gain) = drain.sub_ability.as_deref() else {
             panic!("extort must chain a gain-life rider");
         };
         let Effect::GainLife { amount, player } = &*gain.effect else {
@@ -11709,6 +11854,65 @@ mod extort_synthesis_tests {
             .filter(|t| is_extort_trigger(t))
             .count();
         assert_eq!(count, 2);
+    }
+
+    /// CR 604.1: the runtime-granted path (`triggers_for`) yields the same shape
+    /// as the printed path, and `trigger_matches_keyword_kind` recognizes exactly
+    /// that shape for symmetric removal.
+    #[test]
+    fn triggers_for_extort_matches_keyword_kind() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Extort);
+        assert_eq!(triggers.len(), 1);
+        assert!(is_extort_trigger(&triggers[0]));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Extort
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &build_dethrone_trigger(),
+            &Keyword::Extort
+        ));
+    }
+
+    /// The Extort matcher feeds runtime `RemoveKeyword`, so it must not strip a
+    /// coincidental spell-cast trigger with a different payment/drain shape.
+    #[test]
+    fn extort_matcher_rejects_non_extort_pay_and_drain_trigger() {
+        let gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let drain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+        )
+        .player_scope(PlayerFilter::Opponent)
+        .sub_ability(gain)
+        .condition(AbilityCondition::effect_performed());
+        let execute = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+        )
+        .optional()
+        .sub_ability(drain);
+        let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_target(TargetFilter::Controller)
+            .execute(execute);
+
+        assert!(!is_extort_trigger(&trigger));
     }
 
     /// CR 702.101a: "you gain that much life" means the total life actually

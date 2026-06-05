@@ -328,13 +328,25 @@ impl ManaRestriction {
         qualities: impl IntoIterator<Item = &'a String>,
     ) -> bool {
         let qualities = qualities.into_iter().collect::<Vec<_>>();
-        required.split(" or ").any(|alternative| {
-            alternative.split_whitespace().all(|part| {
-                qualities
-                    .iter()
-                    .any(|quality| quality.eq_ignore_ascii_case(part))
+        // CR 106.6: A restricted-spend type phrase names the *set* of objects the
+        // mana may be spent on. Both connectives — " or " and " and " — enumerate
+        // distinct acceptable types, so each is an alternative the object need
+        // only satisfy one of. Per the Melek, Izzet Paragon example (CR 601.3e),
+        // "instant and sorcery spells" (Tablet of Discovery, issue #1975) lets a
+        // spell that is an instant *or* a sorcery qualify; a single object is
+        // never required to carry both types. Whitespace within an alternative
+        // still ANDs (a compound single quality like "Colorless Eldrazi" must
+        // match every word).
+        required
+            .split(" or ")
+            .flat_map(|clause| clause.split(" and "))
+            .any(|alternative| {
+                alternative.split_whitespace().all(|part| {
+                    qualities
+                        .iter()
+                        .any(|quality| quality.eq_ignore_ascii_case(part))
+                })
             })
-        })
     }
 
     /// Returns `true` if this restriction permits spending mana on the given spell.
@@ -1667,6 +1679,47 @@ mod tests {
             source_subtypes: &no_subtypes,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
+    }
+
+    // CR 106.6 + CR 601.2g: "Spend this mana only to cast instant and sorcery
+    // spells" (Tablet of Discovery, issue #1975) names a union of two distinct
+    // spell types. Per the Melek, Izzet Paragon example (CR 601.3e), an "instant
+    // and sorcery spells" permission lets a player cast a spell that is an
+    // instant OR a sorcery — a single spell never needs to be both. The "and"
+    // conjunction therefore distributes across the set of acceptable spells, the
+    // same way " or " does, rather than requiring one spell to carry both types.
+    #[test]
+    fn restriction_instant_and_sorcery_allows_either_type() {
+        let restriction =
+            ManaRestriction::OnlyForTypeSpellsOrAbilities("Instant and Sorcery".to_string());
+        let instant = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let sorcery = SpellMeta {
+            types: vec!["Sorcery".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        // Manamorphose is an instant — the {R}{R} restricted mana must pay for it.
+        assert!(restriction.allows_spell(&instant));
+        assert!(restriction.allows_spell(&sorcery));
+        assert!(!restriction.allows_spell(&creature));
     }
 
     // CR 105.2c + CR 106.6: The activation half uses the same compound-quality

@@ -23,10 +23,6 @@
 //! CR 712.14 / 712.14a: a DFC put onto the battlefield transformed enters back
 //! face up.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -45,14 +41,7 @@ use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// CR 702.167b: The dual-zone materials filter for "craft with creature" —
 /// a creature permanent you control OR a creature card in your graveyard.

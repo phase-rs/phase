@@ -15,10 +15,6 @@
 //! triggers fire on exactly the 2nd occurrence (not the 1st or 3rd), and that
 //! the per-turn counters reset on the turn boundary (CR 500 / CR 117.1 / CR 121.1).
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
@@ -28,14 +24,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 fn add_mana(runner: &mut GameRunner, player: PlayerId, mana: &[ManaType]) {
     let dummy = engine::types::identifiers::ObjectId(0);

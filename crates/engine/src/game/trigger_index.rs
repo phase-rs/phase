@@ -433,7 +433,8 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
     };
 
     match event {
-        GameEvent::GameStarted => {}
+        // CR 732.2: a halted-resolution notification produces no trigger keys.
+        GameEvent::GameStarted | GameEvent::ResolutionHalted { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
@@ -689,6 +690,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::TimeTravel
         | EffectKind::BecomeMonarch
         | EffectKind::Proliferate
+        | EffectKind::ProliferateTarget
         | EffectKind::EndTheTurn
         | EffectKind::EndCombatPhase
         | EffectKind::Populate

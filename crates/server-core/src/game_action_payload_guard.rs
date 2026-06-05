@@ -227,6 +227,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::SetLife { .. }
         | DebugAction::ModifyPlayerCounters { .. }
         | DebugAction::ModifyEnergy { .. }
+        | DebugAction::SetInfiniteMana { .. }
         | DebugAction::SetPhase { .. }
         | DebugAction::RunStateBasedActions
         | DebugAction::CreateTokenCopy { .. } => {}

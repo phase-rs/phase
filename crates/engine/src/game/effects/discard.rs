@@ -291,12 +291,15 @@ pub(crate) fn discard_as_cost_with_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, ReplacementCondition,
-        ReplacementDefinition, TargetFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, EffectOutcomeSignal,
+        QuantityExpr, ReplacementCondition, ReplacementDefinition, SubAbilityLink, TargetFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
@@ -1081,6 +1084,90 @@ mod tests {
         assert!(
             !state.cost_payment_failed_flag,
             "cost_payment_failed_flag should NOT be set for up_to discard with empty hand"
+        );
+    }
+
+    /// CR 608.2c: "Discard a card. If you do, draw a card." — when the discard
+    /// goes through interactive WaitingFor::DiscardChoice (hand > count),
+    /// optional_effect_performed must be set on the pending continuation so the
+    /// IfYouDo sub_ability fires after the player selects a card.
+    ///
+    /// Regression for issue #2001 (Shadow of the Goblin draw never fires).
+    #[test]
+    fn if_you_do_draw_fires_after_interactive_discard_choice() {
+        let mut state = GameState::new_two_player(42);
+
+        // Give the controller 3 cards in hand so the interactive DiscardChoice path fires.
+        let c1 = create_object(&mut state, CardId(1), PlayerId(0), "A".into(), Zone::Hand);
+        let c2 = create_object(&mut state, CardId(2), PlayerId(0), "B".into(), Zone::Hand);
+        let _c3 = create_object(&mut state, CardId(3), PlayerId(0), "C".into(), Zone::Hand);
+        // Put a card in the library so the IfYouDo draw has something to find.
+        let library_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lib".into(),
+            Zone::Library,
+        );
+        // Build "Discard a card. If you do, draw a card." as a ResolvedAbility chain.
+        let mut draw_sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        draw_sub.condition = Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+        draw_sub.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(draw_sub));
+
+        // Use resolve_ability_chain so the sub_ability is stashed into
+        // pending_continuation before the DiscardChoice pause, matching the
+        // real engine path.
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Should be waiting for a discard choice (3 cards, choose 1).
+        assert!(
+            matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
+            "expected DiscardChoice, got {:?}",
+            std::mem::discriminant(&state.waiting_for)
+        );
+
+        // Player selects c2 to discard.
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![c2] })
+            .expect("select cards should succeed");
+
+        // c2 discarded, then "If you do, draw a card" must have fired.
+        assert!(
+            !state.players[0].hand.contains(&c2),
+            "c2 should have been discarded"
+        );
+        assert!(
+            state.players[0].hand.contains(&library_card),
+            "library_card should have been drawn into hand by the IfYouDo draw"
+        );
+        // Sanity: c1 is still in hand (we only discarded c2).
+        assert!(
+            state.players[0].hand.contains(&c1),
+            "c1 should still be in hand"
         );
     }
 }

@@ -19,9 +19,6 @@
 //! The fix gates the replacement on `ZoneCardCount(Library) == 0`, so a
 //! non-empty draw no longer matches, stashes, or leaks.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -30,14 +27,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Jace, Wielder of Mysteries on P0's battlefield. `p0_library` cards are added
 /// to P0's library; P1 always gets a non-empty library so its own SBAs are inert.
