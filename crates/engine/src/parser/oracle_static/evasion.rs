@@ -66,8 +66,44 @@ pub(crate) fn classify_block_exception(filter_text: &str) -> BlockExceptionKind 
     if let Ok((_, min)) = parse_min_blockers_phrase(trimmed) {
         BlockExceptionKind::MinBlockers { min }
     } else {
-        BlockExceptionKind::Quality(parse_target(trimmed).0)
+        let normalized = strip_redundant_block_exception_by(trimmed);
+        BlockExceptionKind::Quality(parse_target(&normalized).0)
     }
+}
+
+/// CR 509.1b: The "except by <filter>" evasion grammar repeats the "by"
+/// preposition before each disjunct — "except by Vehicles or by creatures with
+/// haste" (Fast // Furious), mirroring the CR's own "and/or" exception wording.
+/// `parse_target`'s disjunction recursion expects a bare type word after the
+/// connector ("or creatures"), not a second "by", so the repeated preposition
+/// truncates the union to its first disjunct. Strip the redundant "by " that
+/// immediately follows a disjunction connector ("or by", "and by", "and/or by")
+/// so the full union parses. Combinator-scanned, not string-replaced: the "by "
+/// is only removed when it sits right after a recognized connector, never inside
+/// a filter word.
+fn strip_redundant_block_exception_by(filter_text: &str) -> Cow<'_, str> {
+    type VE<'a> = OracleError<'a>;
+
+    // Scan for "<connector> by " at any word boundary; the combinator emits the
+    // connector span so it can be re-inserted while only the redundant "by " is
+    // dropped. `before` is the prefix up to (but not including) the connector.
+    let scan = nom_primitives::scan_preceded(filter_text, |i: &str| {
+        let (after_conn, connector) = alt((
+            tag::<_, _, VE<'_>>("and/or "),
+            tag::<_, _, VE<'_>>("or "),
+            tag::<_, _, VE<'_>>("and "),
+        ))
+        .parse(i)?;
+        let (after_by, _) = tag::<_, _, VE<'_>>("by ").parse(after_conn)?;
+        Ok((after_by, connector))
+    });
+    let Some((before, connector, after)) = scan else {
+        return Cow::Borrowed(filter_text);
+    };
+    // Re-join with the connector preserved but the redundant "by " removed, then
+    // recurse to handle any further "or by" repetitions.
+    let joined = format!("{before}{connector}{after}");
+    Cow::Owned(strip_redundant_block_exception_by(&joined).into_owned())
 }
 
 /// CR 603.2d: Extract the source-restriction filter from a trigger-doubler's
