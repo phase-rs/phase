@@ -1164,6 +1164,12 @@ fn detect_dynamic_qty(
         // iteration-source QuantityRef driving `repeat_for`, not a swallowed
         // count.
         "DistinctCounterKindsAmong",
+        // CR 701.34a + CR 122.1: Skyship Plunderer / Maulfist Revolutionary —
+        // "for each kind of counter on target permanent or player, give that
+        // permanent or player another counter of that kind" is captured whole by
+        // `Effect::ProliferateTarget`. The counter-kind iteration is intrinsic to
+        // the proliferate operation, not a swallowed `QuantityExpr` count.
+        "\"type\":\"ProliferateTarget\"",
         // CR 702.122: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.
@@ -3026,5 +3032,85 @@ mod tests {
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
             "draw a card for each creature you control."
         ));
+    }
+
+    // ── Optional_MayHave regressions (#2237) ───────────────────────────────
+
+    #[test]
+    fn optional_may_have_risk_factor() {
+        let parsed = parse_named(
+            "Target opponent may have Risk Factor deal 4 damage to them. \
+             If that player doesn't, you draw three cards.",
+            "Risk Factor",
+            &["Instant"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+    }
+
+    #[test]
+    fn optional_may_have_channel_harm() {
+        let parsed = parse_named(
+            "Prevent all damage that would be dealt to you and permanents you control this turn \
+             by sources you don't control. If damage is prevented this way, you may have Channel Harm \
+             deal that much damage to target creature.",
+            "Channel Harm",
+            &["Instant"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+    }
+
+    #[test]
+    fn optional_may_have_murderous_redcap_avatar() {
+        let parsed = parse_named(
+            "Whenever a creature you control enters with a counter on it, \
+             you may have it deal damage equal to its power to any target.",
+            "Murderous Redcap Avatar",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+    }
+
+    #[test]
+    fn optional_may_have_requiem_monolith() {
+        let parsed = parse_named(
+            "{T}: Until end of turn, target creature gains \"Whenever this creature is dealt damage, \
+             you draw that many cards and lose that much life.\" That creature's controller may have \
+             this artifact deal 1 damage to it. Activate only as a sorcery.",
+            "Requiem Monolith",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+    }
+
+    #[test]
+    fn optional_may_have_siege_behemoth() {
+        let parsed = parse_named(
+            "Hexproof\nAs long as this creature is attacking, for each creature you control, \
+             you may have that creature assign its combat damage as though it weren't blocked.",
+            "Siege Behemoth",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
+    }
+
+    #[test]
+    fn optional_may_have_wall_of_stolen_identity() {
+        let parsed = parse_named(
+            "You may have this creature enter as a copy of any creature on the battlefield, \
+             except it's a Wall in addition to its other types and has defender. When you do, \
+             tap the copied creature and it doesn't untap during its controller's untap step \
+             for as long as you control this creature.",
+            "Wall of Stolen Identity",
+            &["Creature"],
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "expected ETB clone replacement, got replacements={:?} statics={:?} abilities={:?}",
+            parsed.replacements.len(),
+            parsed.statics.len(),
+            parsed.abilities.len()
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_MayHave"));
     }
 }

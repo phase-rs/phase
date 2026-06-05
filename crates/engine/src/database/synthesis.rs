@@ -2236,6 +2236,18 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         return;
     }
 
+    face.triggers.push(build_evoke_etb_sac_trigger());
+}
+
+/// CR 702.74a: Build the evoke ETB-sacrifice triggered ability — "When this
+/// permanent enters, if its evoke cost was paid, its controller sacrifices it."
+///
+/// Shared by `synthesize_evoke` (card-data baking of printed evoke) and the
+/// runtime `ensure_evoke_etb_sac_trigger` (granted evoke, where the keyword
+/// lived on the spell and never reached the resolving permanent's printed
+/// triggers). The trigger is gated on `CastVariantPaid { variant: Evoke }`, so
+/// it is a no-op when the permanent was not cast for its evoke cost.
+pub(crate) fn build_evoke_etb_sac_trigger() -> TriggerDefinition {
     let sac = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Sacrifice {
@@ -2244,7 +2256,7 @@ pub fn synthesize_evoke(face: &mut CardFace) {
             min_count: 0,
         },
     );
-    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+    TriggerDefinition::new(TriggerMode::ChangesZone)
         .destination(Zone::Battlefield)
         .valid_card(TargetFilter::SelfRef)
         .condition(TriggerCondition::CastVariantPaid {
@@ -2254,8 +2266,57 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         .description(
             "CR 702.74a: When this permanent enters, if its evoke cost was paid, sacrifice it."
                 .to_string(),
-        );
-    face.triggers.push(trigger);
+        )
+}
+
+/// CR 702.74a + CR 604.1: Install the evoke ETB-sacrifice trigger on a live
+/// `GameObject` if it is not already present.
+///
+/// For printed evoke the trigger is already baked into the card face by
+/// `synthesize_evoke`, so this is an idempotent no-op. For *granted* evoke
+/// (a `StaticMode::CastWithKeyword { keyword: Evoke }` static such as Ashling,
+/// the Limitless) the keyword lives on the spell while it is on the stack and
+/// never propagates to the resolving permanent's printed triggers, so the
+/// trigger must be installed onto the permanent at resolution. The structural-
+/// equality scan mirrors `synthesize_evoke`'s `already_has_trigger` matcher so
+/// the two paths never double-install.
+pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::GameObject) {
+    let is_evoke_sac = |t: &TriggerDefinition| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Evoke,
+                })
+            )
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    };
+    // CR 702.74a + CR 613.1f: the layer system rebuilds `trigger_definitions`
+    // from `base_trigger_definitions` on every evaluation (layers.rs), so a
+    // runtime install must land in the durable base or it is wiped before the
+    // ETB ChangesZone trigger is collected. Printed evoke already carries the
+    // trigger in `base_trigger_definitions` (baked into the card face by
+    // `synthesize_evoke`), making this an idempotent no-op for that path. Push to
+    // base (the durable source layers rebuild from), then refresh the live copy
+    // so the trigger is collectable this same resolution before the next layers
+    // pass re-derives `trigger_definitions`.
+    if obj.base_trigger_definitions.iter().any(is_evoke_sac) {
+        if !obj.trigger_definitions.iter_all().any(is_evoke_sac) {
+            obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
+        }
+        return;
+    }
+    let trigger = build_evoke_etb_sac_trigger();
+    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
+    obj.trigger_definitions.push(trigger);
 }
 
 /// CR 702.30a: Echo is a triggered ability. "Echo [cost]" means "At the

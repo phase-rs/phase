@@ -371,6 +371,17 @@ pub fn apply_debug_action(
             }
         }
 
+        DebugAction::SetInfiniteMana { player_id, enabled } => {
+            validate_player(state, player_id)?;
+            if enabled {
+                state.debug_infinite_mana.insert(player_id);
+                // Seed immediately so the pool reads full before the next probe.
+                super::mana_payment::refill_infinite_mana(state);
+            } else {
+                state.debug_infinite_mana.remove(&player_id);
+            }
+        }
+
         DebugAction::SetPhase {
             phase,
             active_player,

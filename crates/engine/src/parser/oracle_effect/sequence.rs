@@ -749,7 +749,7 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 
     let trimmed = remainder.trim_start();
     let trimmed_lower = trimmed.to_ascii_lowercase();
-    let sequence_starts = alt((
+    if alt((
         tag::<_, _, OracleError<'_>>("then, if "),
         tag("then if "),
         tag("then "),
@@ -757,8 +757,21 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         tag("otherwise"),
     ))
     .parse(trimmed_lower.as_str())
-    .is_ok();
-    sequence_starts
+    .is_ok()
+    {
+        return true;
+    }
+    // CR 608.2c: read the whole text and apply the rules of English — a
+    // granted-ability quote that ends a sentence can be followed by a fresh
+    // causative "may have …" sentence directed at the affected object's
+    // controller ("…life." That creature's controller may have this artifact
+    // deal 1 damage to it." — Requiem Monolith). Split only on that narrow
+    // causative form; arbitrary capitalized continuations ("The token is
+    // goaded", "It becomes a 2/2 …") must stay attached to the quote.
+    nom_primitives::scan_at_word_boundaries(trimmed_lower.as_str(), |i| {
+        tag::<_, _, OracleError<'_>>("may have ").parse(i)
+    })
+    .is_some()
 }
 
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
@@ -3124,6 +3137,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
         | Effect::EndTheTurn
         | Effect::EndCombatPhase
         | Effect::Populate
@@ -4247,6 +4261,34 @@ mod tests {
                 "Then if you control four or more Wizards, transform ~",
             ]
         );
+    }
+
+    #[test]
+    fn quoted_grant_splits_before_following_sentence() {
+        // Requiem Monolith: period inside the granted trigger quote, then a new
+        // optional sentence starting with an uppercase letter.
+        let chunks = clause_texts(
+            "Until end of turn, target creature gains \"Whenever this creature is dealt damage, you draw that many cards and lose that much life.\" That creature's controller may have this artifact deal 1 damage to it.",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "Until end of turn, target creature gains \"Whenever this creature is dealt damage, you draw that many cards and lose that much life.\"",
+                "That creature's controller may have this artifact deal 1 damage to it",
+            ]
+        );
+    }
+
+    #[test]
+    fn quoted_grant_keeps_nonrecognized_capitalized_continuation() {
+        // CR 608.2c: a granted quote followed by a capitalized continuation that
+        // is NOT a "may have" causative sentence ("The token is goaded …",
+        // Nettling Nuisance-style) must stay a single chunk — the prior
+        // uppercase-letter fallback over-split these.
+        let chunks = clause_texts(
+            "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\" The token is goaded.",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
 
     // --- Bare " and " splitting: positive cases (should split) ---
