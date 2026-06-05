@@ -761,13 +761,17 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     {
         return true;
     }
-    // CR 608.2d: Granted-ability quotes that end with a period are often
-    // followed by a fresh sentence starting with an uppercase letter
-    // ("…life." That creature's controller may have …" — Requiem Monolith).
-    trimmed
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_uppercase())
+    // CR 608.2c: read the whole text and apply the rules of English — a
+    // granted-ability quote that ends a sentence can be followed by a fresh
+    // causative "may have …" sentence directed at the affected object's
+    // controller ("…life." That creature's controller may have this artifact
+    // deal 1 damage to it." — Requiem Monolith). Split only on that narrow
+    // causative form; arbitrary capitalized continuations ("The token is
+    // goaded", "It becomes a 2/2 …") must stay attached to the quote.
+    nom_primitives::scan_at_word_boundaries(trimmed_lower.as_str(), |i| {
+        tag::<_, _, OracleError<'_>>("may have ").parse(i)
+    })
+    .is_some()
 }
 
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
@@ -4272,6 +4276,18 @@ mod tests {
                 "That creature's controller may have this artifact deal 1 damage to it",
             ]
         );
+    }
+
+    #[test]
+    fn quoted_grant_keeps_nonrecognized_capitalized_continuation() {
+        // CR 608.2c: a granted quote followed by a capitalized continuation that
+        // is NOT a "may have" causative sentence ("The token is goaded …",
+        // Nettling Nuisance-style) must stay a single chunk — the prior
+        // uppercase-letter fallback over-split these.
+        let chunks = clause_texts(
+            "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\" The token is goaded.",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
 
     // --- Bare " and " splitting: positive cases (should split) ---

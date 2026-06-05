@@ -1253,6 +1253,17 @@ fn find_copy_verb(norm_lower: &str) -> Option<(&str, &str, bool)> {
     Some((&norm_lower[..pos], &norm_lower[pos + len..], tapped))
 }
 
+/// CR 707.9 / CR 614.1c: whether `lower` contains a copy replacement verb
+/// ("enter as a copy of", "become a copy of", "enter tapped as a copy of").
+/// Used by the Priority 7 dispatcher to gate the copy-replacement first-pass so
+/// static / prevent lines never mis-route into the replacement parsers.
+///
+/// Intentionally takes UN-normalized lowercase: the copy verbs never contain the
+/// card name, so `~`-normalization is irrelevant to this check.
+pub(crate) fn find_copy_verb_present(lower: &str) -> bool {
+    find_copy_verb(lower).is_some()
+}
+
 /// Split the post-"enter as a copy of " remainder into (type_text, suffix, source_zone).
 /// Recognises both the battlefield form ("... on the battlefield, ...") and the
 /// graveyard forms ("... in a graveyard, ...", "... in any graveyard, ..."). The
@@ -5661,6 +5672,25 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
+
+    #[test]
+    fn find_copy_verb_present_recognizes_copy_replacement() {
+        // CR 707.9 / CR 614.1c: copy replacement verbs are recognized.
+        assert!(find_copy_verb_present(
+            "you may have ~ enter as a copy of any creature on the battlefield"
+        ));
+        assert!(find_copy_verb_present("become a copy of target creature"));
+        // Static / prevent lines are NOT copy replacements.
+        assert!(!find_copy_verb_present(
+            "prevent all combat damage that would be dealt this turn"
+        ));
+        assert!(!find_copy_verb_present(
+            "if a source you control would deal damage to a permanent or player"
+        ));
+        assert!(!find_copy_verb_present(
+            "prevent all damage that would be dealt this turn unless its controller wins a clash"
+        ));
+    }
 
     /// CR 614.12 + CR 614.1a: Phial of Galadriel — "If you would gain life
     /// while you have 5 or less life, you gain twice that much life instead."
