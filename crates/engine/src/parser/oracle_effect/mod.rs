@@ -31207,6 +31207,50 @@ mod tests {
         }
     }
 
+    /// Issue #2016 (Bonder's Ornament): "{4}, {T}: Each player who controls a
+    /// permanent named Bonder's Ornament draws a card." The "who controls a
+    /// permanent named X" relative clause must be captured into
+    /// `PlayerFilter::ControlsCount` carrying the `Named` filter, with the
+    /// predicate ("draw a card") split off — NOT dropped. Pre-fix the `Named`
+    /// suffix parser greedily consumed the predicate verb into the name
+    /// (`Named { name: "Bonder's Ornament draws a card" }`), so the controls
+    /// clause matched nobody, the clause was discarded, and the scope collapsed
+    /// to plain `All` — making *every* player draw (the reported bug: an
+    /// opponent's Ornament drew the reporter a card despite controlling none).
+    #[test]
+    fn bonders_ornament_controls_named_permanent_scope() {
+        use crate::types::ability::{Comparator, PlayerRelation, QuantityExpr};
+
+        let (scope, result) = strip_each_player_subject(
+            "each player who controls a permanent named Bonder's Ornament draws a card",
+        );
+        assert_eq!(result, "draw a card");
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                filter,
+                comparator,
+                count,
+            }) => {
+                assert_eq!(relation, PlayerRelation::All);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                match &filter {
+                    TargetFilter::Typed(tf) => assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            crate::types::ability::FilterProp::Named { name }
+                                if name == "Bonder's Ornament"
+                        )),
+                        "filter must carry the exact card name, got {filter:?}"
+                    ),
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ControlsCount{{All,GE,Fixed(1)}}, got {other:?}"),
+        }
+    }
+
     /// Migration regression (CR 109.4 + CR 109.5): the presence forms that used
     /// to be `ControlPresence::Controls` / `ControlsNone` must now land as the
     /// equivalent `{ GE, Fixed(1) }` / `{ EQ, Fixed(0) }` comparator/count pairs.
