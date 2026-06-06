@@ -5,7 +5,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
+    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, QuantityExpr, QuantityRef,
+    TargetFilter,
 };
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
@@ -508,6 +509,11 @@ pub enum TriggerCause {
     /// to `Graveyard` for an object whose snapshot included `Creature` in
     /// its core types.
     CreatureDying,
+    /// CR 603.2d + CR 120.3: Trigger was caused by a creature you control
+    /// being dealt damage (Wayta, Trainer Prodigy-class). Matches
+    /// `GameEvent::DamageDealt` whose target is a creature controlled by the
+    /// doubler's controller.
+    ControlledCreatureDealtDamage,
 }
 
 impl fmt::Display for TriggerCause {
@@ -520,6 +526,9 @@ impl fmt::Display for TriggerCause {
             }
             TriggerCause::CreatureAttacking => write!(f, "CreatureAttacking"),
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
+            TriggerCause::ControlledCreatureDealtDamage => {
+                write!(f, "ControlledCreatureDealtDamage")
+            }
         }
     }
 }
@@ -647,16 +656,19 @@ pub enum StaticMode {
         keyword: Keyword,
     },
     /// CR 118.9 + CR 601.2f: A permanent grants its controller a wholesale
-    /// alternative MANA cost for spells matching `StaticDefinition::affected`
-    /// that the controller casts — they may pay `cost` rather than the spell's
-    /// mana cost. Parallel to `CastWithKeyword`. Distinct from
-    /// `ModifyCost { mode: Reduce, .. }` (subtractive, CR 601.2f) — this REPLACES
-    /// the mana cost wholesale
-    /// (CR 118.9) and is mutually exclusive with other alternative costs
-    /// (CR 118.9a). Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
-    /// ({WUBRG}, any spell), Jodah (MV 5+).
+    /// alternative cost for spells matching `StaticDefinition::affected` that
+    /// the controller casts — they may pay `cost` rather than the spell's mana
+    /// cost. Parallel to `CastWithKeyword`. Distinct from
+    /// `ModifyCost { mode: Reduce, .. }` (subtractive, CR 601.2f) — this
+    /// REPLACES the mana cost wholesale (CR 118.9) and is mutually exclusive
+    /// with other alternative costs (CR 118.9a). Rooftop Storm ({0}, Zombie
+    /// creature spells), Fist of Suns ({WUBRG}, any spell), Jodah (MV 5+),
+    /// Primal Prayers ({E}, creature MV ≤ 3, with an alternative-cost timing
+    /// permission).
     CastWithAlternativeCost {
-        cost: ManaCost,
+        cost: AbilityCost,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timing_permission: Option<CastTimingPermission>,
     },
     /// CR 601.2f: Modifies the mana cost of spells matching `spell_filter`
     /// (or all spells when `None`) by `amount`, in the direction described by `mode`.
@@ -886,8 +898,28 @@ pub enum StaticMode {
     CantBeCopied,
     /// CR 604.3: Cards in specified zones can't enter the battlefield.
     CantEnterBattlefieldFrom,
-    /// CR 604.3: Players can't cast spells from specified zones.
-    CantCastFrom,
+    /// CR 601.3 + CR 101.2 + CR 109.5: The scoped player(s) can't cast spells from
+    /// the zones encoded in `StaticDefinition::affected` (via `FilterProp::InAnyZone`).
+    /// CR 601.3: a player can cast a spell only if no effect prohibits it; CR 101.2:
+    /// this "can't" overrides any cast-from-zone permission (escape, flashback,
+    /// foretell, commander).
+    ///
+    /// Two phrasings collapse onto this one variant:
+    /// - Grafdigger's Cage ("Players can't cast spells from graveyards or
+    ///   libraries"): `who = AllPlayers`, `affected = InAnyZone { [Graveyard, Library] }`.
+    /// - Drannith Magistrate ("Your opponents can't cast spells from anywhere
+    ///   other than their hands"): `who = Opponents`, `affected = InAnyZone {
+    ///   [Graveyard, Library, Exile, Command] }` — every cast-capable zone except
+    ///   the hand. The parser inverts "anywhere other than [hand]" into the
+    ///   explicit prohibited-zone list so the runtime check stays a single
+    ///   `InAnyZone` membership test.
+    ///
+    /// `who` rides the player axis (CR 109.5); the prohibited zones ride the
+    /// `affected` filter. Enforcement is in
+    /// `casting.rs::is_blocked_from_casting_from_zone`.
+    CantCastFrom {
+        who: ProhibitionScope,
+    },
     /// CR 101.2: Continuous casting prohibition — prevents players from casting
     /// spells under specified conditions (turn/phase-scoped).
     /// E.g., "Your opponents can't cast spells during your turn."
@@ -1363,7 +1395,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
             }
-            StaticMode::CastWithAlternativeCost { cost } => {
+            StaticMode::CastWithAlternativeCost { cost, .. } => {
                 write!(f, "CastWithAlternativeCost({cost:?})")
             }
             StaticMode::ModifyCost { mode, .. } => match mode {
@@ -1464,7 +1496,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
             StaticMode::CantEnterBattlefieldFrom => write!(f, "CantEnterBattlefieldFrom"),
-            StaticMode::CantCastFrom => write!(f, "CantCastFrom"),
+            StaticMode::CantCastFrom { who } => write!(f, "CantCastFrom({who})"),
             StaticMode::CantCastDuring { who, when } => {
                 write!(f, "CantCastDuring({who},{when})")
             }
@@ -1847,7 +1879,6 @@ impl FromStr for StaticMode {
             "CantBeCountered" => StaticMode::CantBeCountered,
             "CantBeCopied" => StaticMode::CantBeCopied,
             "CantEnterBattlefieldFrom" => StaticMode::CantEnterBattlefieldFrom,
-            "CantCastFrom" => StaticMode::CantCastFrom,
             // Tier 1
             "CantBeBlocked" => StaticMode::CantBeBlocked,
             "Protection" => StaticMode::Protection,
@@ -1918,6 +1949,16 @@ impl FromStr for StaticMode {
                 {
                     if let Ok(who) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantBeCast { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CantCastFrom(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 601.3 + CR 109.5: Round-trip of the scope identifier;
+                    // the prohibited-zone list is data-carrying (`affected`).
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantCastFrom { who });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
@@ -2406,19 +2447,25 @@ mod tests {
             StaticMode::GrantsExtraVote,
             // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
             StaticMode::CastWithAlternativeCost {
-                cost: ManaCost::zero(),
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                },
+                timing_permission: None,
             },
             StaticMode::CastWithAlternativeCost {
-                cost: ManaCost::Cost {
-                    shards: vec![
-                        super::super::mana::ManaCostShard::White,
-                        super::super::mana::ManaCostShard::Blue,
-                        super::super::mana::ManaCostShard::Black,
-                        super::super::mana::ManaCostShard::Red,
-                        super::super::mana::ManaCostShard::Green,
-                    ],
-                    generic: 0,
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![
+                            super::super::mana::ManaCostShard::White,
+                            super::super::mana::ManaCostShard::Blue,
+                            super::super::mana::ManaCostShard::Black,
+                            super::super::mana::ManaCostShard::Red,
+                            super::super::mana::ManaCostShard::Green,
+                        ],
+                        generic: 0,
+                    },
                 },
+                timing_permission: None,
             },
             StaticMode::Other("Custom".to_string()),
         ];

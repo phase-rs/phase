@@ -3,7 +3,9 @@ use crate::database::CardDatabase;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
-use crate::parser::oracle::is_commander_permission_sentence;
+use crate::parser::oracle::{
+    is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
+};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
@@ -45,6 +47,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::CantBeCast { .. }
+            // CR 601.3 + CR 109.5: CantCastFrom carries `who`; the prohibited-zone
+            // list rides `affected`. Runtime enforcement is in
+            // casting.rs::is_blocked_from_casting_from_zone().
+            | StaticMode::CantCastFrom { .. }
             | StaticMode::CantCastDuring { .. }
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
@@ -57,7 +63,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // and casting_costs.rs.
             | StaticMode::ExileCastPermission { .. }
             | StaticMode::CastWithKeyword { .. }
-            // CR 118.9: CastWithAlternativeCost carries a `ManaCost` — runtime
+            // CR 118.9: CastWithAlternativeCost carries an `AbilityCost` — runtime
             // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
             | StaticMode::CastWithAlternativeCost { .. }
             // CR 702.16: PlayerProtection carries a `ProtectionTarget` (Strings) —
@@ -1129,9 +1135,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsDrawnThisTurn { player } => {
             format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
-        QuantityRef::LandsPlayedThisTurn { player } => {
-            format!("lands played this turn ({})", fmt_player_scope(player))
-        }
+        QuantityRef::LandsPlayedThisTurn { player, from_zones } => from_zones.as_ref().map_or_else(
+            || format!("lands played this turn ({})", fmt_player_scope(player)),
+            |zones| {
+                format!(
+                    "lands played this turn ({}, from {:?})",
+                    fmt_player_scope(player),
+                    zones
+                )
+            },
+        ),
         QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => {
             format!(
                 "{} zone changes this turn ({from:?}->{to:?})",
@@ -2464,6 +2477,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Learn
         | Effect::SwitchPT { .. }
         | Effect::Myriad
+        | Effect::Encore
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::Populate
         | Effect::VentureIntoDungeon
@@ -4413,6 +4427,9 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
 
         let lower = stripped.to_lowercase();
         if is_commander_permission_sentence(&lower) {
+            continue;
+        }
+        if is_deck_construction_copy_limit_sentence(stripped) {
             continue;
         }
 
@@ -6413,6 +6430,17 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             continue;
         }
 
+        // CR 100.2a / CR 903.5b: Deck-construction copy-limit lines ("A deck can
+        // have any number of cards named X.", "...up to seven cards named Seven
+        // Dwarves.", the Megalegendary line, etc.) are consumed by the parser as
+        // typed `DeckCopyLimit` metadata (see `compute_deck_copy_limit_from_text`,
+        // read by `deck_validation`), not as a resolvable ability — they
+        // legitimately produce no `ParsedElement`. Skip them so they are not
+        // falsely reported as `SilentDrop`.
+        if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
+
         // Skip very short lines (single keywords, type lines)
         if lower.len() < 5 {
             continue;
@@ -6655,7 +6683,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantBeCast { .. } => {
                 effective_lower.contains("can't cast") && !effective_lower.contains("during")
             }
-            StaticMode::CantCastFrom => effective_lower.contains("can't cast"),
+            StaticMode::CantCastFrom { .. } => effective_lower.contains("can't cast"),
             StaticMode::RevealTopOfLibrary { .. } => {
                 effective_lower.contains("play with the top card")
                     || effective_lower.contains("play with the top")
@@ -10071,6 +10099,40 @@ mod tests {
         face.oracle_text = Some(oracle.to_string());
 
         assert!(audit_card_lines(oracle, &face).is_empty());
+    }
+
+    #[test]
+    fn deck_construction_copy_limit_line_does_not_count_as_silent_drop() {
+        // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
+        // (and the "up to N" / bare-Megalegendary variants) is consumed by the
+        // parser as typed DeckCopyLimit metadata, not a resolvable ability, so
+        // it must not be flagged as a SilentDrop. Covers the class, not one card.
+        let mut face = make_face();
+        for oracle in [
+            "A deck can have any number of cards named Relentless Rats.",
+            "A deck can have up to seven cards named Seven Dwarves.",
+            "A deck can have up to nine cards named Nazgûl.",
+            "Megalegendary",
+            "Megalegendary (Your deck can have any number of cards named Vazal, the Compleat.)",
+        ] {
+            face.oracle_text = Some(oracle.to_string());
+            assert!(
+                audit_card_lines(oracle, &face).is_empty(),
+                "deck-construction line falsely flagged as a finding: {oracle}"
+            );
+
+            let mut missing = Vec::new();
+            check_silent_drops(&Some(oracle.to_string()), &[], &mut missing);
+            assert!(
+                missing.is_empty(),
+                "deck-construction line falsely counted as SilentDrop: {oracle} -> {missing:?}"
+            );
+            assert_eq!(
+                count_effective_oracle_lines(oracle),
+                0,
+                "deck-construction line should not count as a runtime oracle line: {oracle}"
+            );
+        }
     }
 
     #[test]

@@ -109,6 +109,7 @@ import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
+import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
 import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
@@ -308,7 +309,8 @@ export function GamePage() {
         // If WE conceded, navigate to menu immediately
         if (event.player === useMultiplayerStore.getState().activePlayerId) {
           hasConcededRef.current = true;
-          if (gameId) clearGame(gameId);
+          clearPromptOverlayState();
+          if (gameId) void clearGame(gameId);
           navigate("/");
         }
         break;
@@ -835,8 +837,9 @@ function GamePageContent({
       handleConcede();
       return;
     }
+    clearPromptOverlayState();
     if (gameId) {
-      clearGame(gameId);
+      void clearGame(gameId);
     }
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);

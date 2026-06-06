@@ -235,10 +235,13 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
 
     // CR 614.1d: Zone-based restriction handlers.
     // Enforcement happens in zones.rs (CantEnterBattlefieldFrom) and casting.rs (CantCastFrom),
-    // not through the standard handler flow, but we register them as rule_mod so that
-    // `check_static_ability` queries work.
+    // not through the standard handler flow, but we register CantEnterBattlefieldFrom as
+    // rule_mod so that `check_static_ability` queries work.
     registry.insert(StaticMode::CantEnterBattlefieldFrom, handle_rule_mod);
-    registry.insert(StaticMode::CantCastFrom, handle_rule_mod);
+    // Note: CantCastFrom is a data-carrying variant (carries `who` + the prohibited-zone
+    // list on `affected`) — parameterized, so no registry entry. Runtime enforcement is in
+    // casting.rs::is_blocked_from_casting_from_zone(). Coverage support is via
+    // is_data_carrying_static().
     // Note: CantCastDuring is a data-carrying variant — runtime enforcement will be in
     // casting.rs. Coverage support is via is_data_carrying_static().
     // Note: CantActivateDuring is a data-carrying variant — runtime enforcement is in
@@ -1239,6 +1242,18 @@ pub(crate) fn static_filter_matches(
                 }
                 return true;
             }
+            // CR 119.7 + CR 109.1: an object-scoped restriction is never a
+            // player restriction. A transient `CantGainLife` grant bound to a
+            // specific object — e.g. Screaming Nemesis redirecting its damage to
+            // a CREATURE, which pins the rider's `ParentTarget` to
+            // `SpecificObject { id }` — must NOT satisfy a player-scoped query
+            // ("can this player gain life?"). Fail CLOSED for object-pin filters
+            // so the redirect-to-creature case locks no player, while the
+            // redirect-to-player case (bound `SpecificPlayer`) is handled by the
+            // transient player-scope scan. Without this arm the catch-all below
+            // fails open and locks every player whenever any creature carries a
+            // granted `CantGainLife`.
+            TargetFilter::SpecificObject { .. } | TargetFilter::SelfRef => return false,
             _ => return true,
         }
     }

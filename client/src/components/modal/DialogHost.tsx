@@ -160,11 +160,16 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // right (mirrors the stack panel — established muscle memory). On narrow
   // viewports it slides down (more reachable on phones).
   const isNarrow = useIsNarrowViewport();
+  // Only apply the peek slide transform while peeked. Framer-motion keeps a
+  // residual `transform` (even at `{ x: 0, y: 0 }`) whenever `animate` is set,
+  // which breaks `<input type="range">` hit-testing in bottom-anchored panels
+  // such as ChooseXValueUI — the slider looks fine but ignores drags until
+  // something else reflows the tree (issue #2427).
   const slideTransform = peeked
     ? isNarrow
       ? { x: 0, y: "calc(100vh - 64px)" }
       : { x: "calc(100vw - 32px)", y: 0 }
-    : { x: 0, y: 0 };
+    : undefined;
 
   return (
     <DialogPeekCtx.Provider value={ctxValue}>
@@ -183,7 +188,7 @@ export function DialogHost({ children }: { children: ReactNode }) {
             ? { pointerEvents: clickThrough || peeked ? "none" : undefined }
             : undefined
         }
-        animate={peekable ? slideTransform : undefined}
+        animate={peekable && peeked ? slideTransform : undefined}
         transition={
           shouldReduceMotion
             ? { duration: 0 }

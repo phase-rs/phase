@@ -436,6 +436,7 @@ mod tests {
         Effect::CopySpell {
             target: TargetFilter::Any,
             retarget: engine::types::ability::CopyRetargetPermission::KeepOriginalTargets,
+            copier: None,
         }
     }
 

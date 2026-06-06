@@ -450,6 +450,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
         );
         let (context, config) = make_context(0.8);
@@ -504,6 +505,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
         ));
         let (context, config) = make_context(0.8);

@@ -236,6 +236,15 @@ pub struct SpellCastRecord {
     pub cast_variant: CastingVariant,
 }
 
+/// Snapshot of a land play's cast-capable origin for per-turn history queries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandPlayRecord {
+    /// CR 305.2a + CR 601.2a: Zone the land was played from, captured at play
+    /// time so end-step conditions can answer "played a land from outside your
+    /// hand" after the land has moved or left the battlefield.
+    pub from_zone: Zone,
+}
+
 /// CR 601.2a: Default origin zone for `SpellCastRecord.from_zone`. Hand is the
 /// overwhelmingly common cast origin, so it's the safe default for snapshots
 /// that pre-date the non-Option migration.
@@ -3287,6 +3296,119 @@ pub enum RetargetScope {
 }
 
 impl WaitingFor {
+    /// Canonical stable variant name (engine-owned labeler).
+    ///
+    /// Exhaustive over every `WaitingFor` variant — no wildcard fallback, so the
+    /// compiler flags any new variant that fails to register a label. Used by the
+    /// stuck-decision diagnostic (`ai_support::stuck_decision_diagnostic`) to
+    /// surface which decision is wedged. Distinct from the test-harness labelers
+    /// in `game/scenario.rs`, which are private and non-exhaustive.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::MulliganDecision { .. } => "MulliganDecision",
+            WaitingFor::MulliganBottomCards { .. } => "MulliganBottomCards",
+            WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
+            WaitingFor::ManaPayment { .. } => "ManaPayment",
+            WaitingFor::ChooseXValue { .. } => "ChooseXValue",
+            WaitingFor::TargetSelection { .. } => "TargetSelection",
+            WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
+            WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
+            WaitingFor::UntapChoice { .. } => "UntapChoice",
+            WaitingFor::ExertChoice { .. } => "ExertChoice",
+            WaitingFor::GameOver { .. } => "GameOver",
+            WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::OrderTriggers { .. } => "OrderTriggers",
+            WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
+            WaitingFor::ExploreChoice { .. } => "ExploreChoice",
+            WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
+            WaitingFor::EquipTarget { .. } => "EquipTarget",
+            WaitingFor::CrewVehicle { .. } => "CrewVehicle",
+            WaitingFor::StationTarget { .. } => "StationTarget",
+            WaitingFor::SaddleMount { .. } => "SaddleMount",
+            WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+            WaitingFor::DigChoice { .. } => "DigChoice",
+            WaitingFor::SurveilChoice { .. } => "SurveilChoice",
+            WaitingFor::RevealChoice { .. } => "RevealChoice",
+            WaitingFor::SearchChoice { .. } => "SearchChoice",
+            WaitingFor::SearchPartitionChoice { .. } => "SearchPartitionChoice",
+            WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
+            WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
+            WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
+            WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
+            WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
+            WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
+            WaitingFor::LearnChoice { .. } => "LearnChoice",
+            WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
+            WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
+            WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
+            WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
+            WaitingFor::ModeChoice { .. } => "ModeChoice",
+            WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
+            WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::DefilerPayment { .. } => "DefilerPayment",
+            WaitingFor::CastOffer { .. } => "CastOffer",
+            WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
+            WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
+            WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
+            WaitingFor::CipherEncodeChoice { .. } => "CipherEncodeChoice",
+            WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
+            WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
+            WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
+            WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
+            WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
+            WaitingFor::PairChoice { .. } => "PairChoice",
+            WaitingFor::TributeChoice { .. } => "TributeChoice",
+            WaitingFor::MiracleReveal { .. } => "MiracleReveal",
+            WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
+            WaitingFor::UnlessPayment { .. } => "UnlessPayment",
+            WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
+            WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
+            WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
+            WaitingFor::UnlessBounceChoice { .. } => "UnlessBounceChoice",
+            WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
+            WaitingFor::ChooseDungeon { .. } => "ChooseDungeon",
+            WaitingFor::ChooseDungeonRoom { .. } => "ChooseDungeonRoom",
+            WaitingFor::SpecializeColor { .. } => "SpecializeColor",
+            WaitingFor::PayCost { .. } => "PayCost",
+            WaitingFor::ActivationCostOneOfChoice { .. } => "ActivationCostOneOfChoice",
+            WaitingFor::BlightChoice { .. } => "BlightChoice",
+            WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
+            WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
+            WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
+            WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
+            WaitingFor::RevealUntilKeptChoice { .. } => "RevealUntilKeptChoice",
+            WaitingFor::RepeatDecision { .. } => "RepeatDecision",
+            WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
+            WaitingFor::PopulateChoice { .. } => "PopulateChoice",
+            WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
+            WaitingFor::VoteChoice { .. } => "VoteChoice",
+            WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
+            WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
+            WaitingFor::CompanionReveal { .. } => "CompanionReveal",
+            WaitingFor::ChooseLegend { .. } => "ChooseLegend",
+            WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
+            WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
+            WaitingFor::ProliferateChoice { .. } => "ProliferateChoice",
+            WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
+            WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::CopyRetarget { .. } => "CopyRetarget",
+            WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
+            WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
+            WaitingFor::DistributeAmong { .. } => "DistributeAmong",
+            WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
+            WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",
+            WaitingFor::RetargetChoice { .. } => "RetargetChoice",
+            WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
+            WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
+        }
+    }
+
     /// Extract the player who must act, if any.
     ///
     /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
@@ -3918,6 +4040,14 @@ pub enum CastingVariant {
     /// matches a normal cast — no on-resolve special behavior — so this is a
     /// casting-context tag, not a resolution-affecting variant.
     Freerunning,
+    /// CR 702.133a: Cast from a graveyard via Jump-start. The card is cast for
+    /// its normal mana cost plus an additional cost of discarding a card
+    /// (CR 601.2b/601.2f–h) — so, like `Retrace`/`Aftermath`, this is an
+    /// additional cost, not an alternative cost, and is absent from
+    /// `uses_alternative_cost`. Like `Flashback`, a spell cast this way is
+    /// exiled instead of going anywhere else any time it would leave the stack
+    /// (see `exiles_when_leaving_stack_for_any_reason`).
+    JumpStart,
 }
 
 impl CastingVariant {
@@ -3958,6 +4088,9 @@ impl CastingVariant {
             | CastingVariant::Omen
             | CastingVariant::Retrace
             | CastingVariant::Aftermath
+            // CR 702.133a: Jump-start discards a card as an *additional* cost on
+            // top of the normal mana cost — not an alternative cost (CR 118.9a).
+            | CastingVariant::JumpStart
             | CastingVariant::GraveyardPermission { .. }
             | CastingVariant::ExilePermission { .. } => false,
         }
@@ -3966,7 +4099,12 @@ impl CastingVariant {
     pub fn exiles_when_leaving_stack_for_any_reason(self) -> bool {
         matches!(
             self,
-            CastingVariant::Flashback | CastingVariant::Aftermath | CastingVariant::Harmonize
+            CastingVariant::Flashback
+                | CastingVariant::Aftermath
+                | CastingVariant::Harmonize
+                // CR 702.133a: "exile this card instead of putting it anywhere
+                // else any time it would leave the stack."
+                | CastingVariant::JumpStart
         )
     }
 
@@ -4815,6 +4953,11 @@ pub struct GameState {
     /// enabling data-driven filtered counting at resolution.
     #[serde(default)]
     pub spells_cast_this_turn_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
+    /// Per-player land play origin history this turn.
+    /// Mirrors `Player::lands_played_this_turn` when origin-sensitive
+    /// conditions need to distinguish hand plays from exile/graveyard plays.
+    #[serde(default)]
+    pub lands_played_this_turn_by_player: HashMap<PlayerId, im::Vector<LandPlayRecord>>,
     #[serde(default)]
     pub players_who_searched_library_this_turn: HashSet<PlayerId>,
     /// CR 603.4: Typed player-action events performed this turn. This is the
@@ -5703,6 +5846,7 @@ impl GameState {
             spells_cast_this_game: HashMap::new(),
             spells_cast_this_game_by_player: HashMap::new(),
             spells_cast_this_turn_by_player: HashMap::new(),
+            lands_played_this_turn_by_player: HashMap::new(),
             players_who_searched_library_this_turn: HashSet::new(),
             player_actions_this_turn: Vec::new(),
             players_attacked_this_step: HashSet::new(),
@@ -6110,6 +6254,7 @@ impl PartialEq for GameState {
             && self.spells_cast_this_game == other.spells_cast_this_game
             && self.spells_cast_this_game_by_player == other.spells_cast_this_game_by_player
             && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player
+            && self.lands_played_this_turn_by_player == other.lands_played_this_turn_by_player
             && self.players_who_searched_library_this_turn
                 == other.players_who_searched_library_this_turn
             && self.player_actions_this_turn == other.player_actions_this_turn

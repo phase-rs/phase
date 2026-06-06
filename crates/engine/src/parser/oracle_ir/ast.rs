@@ -1229,6 +1229,12 @@ pub(crate) fn with_clause_duration(
         } => {
             *effect_duration = Some(duration);
         }
+        Effect::BecomeCopy {
+            duration: ref mut effect_duration,
+            ..
+        } => {
+            *effect_duration = Some(duration);
+        }
         _ => {}
     }
     clause

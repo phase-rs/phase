@@ -866,6 +866,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn jumpstart_spell_exiles_when_countered() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Jump-start Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::JumpStart,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let counter_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &counter_ability, &mut events).unwrap();
+
+        // CR 702.133a: "exile this card instead of putting it anywhere else any
+        // time it would leave the stack" — a countered jump-started spell exiles,
+        // it does not go to the graveyard.
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Exile,
+            "Jump-start spell should be exiled when countered, not put in the graveyard"
+        );
+    }
+
     /// CR 118.12 (M1 fold): Post the 2026-05-09 fold, the counter resolver
     /// has no bespoke `unless_pay` branch — the modifier flows through the
     /// generic `ResolvedAbility.unless_pay` path in `effects::mod`. This
