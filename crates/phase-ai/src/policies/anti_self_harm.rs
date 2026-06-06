@@ -26,6 +26,7 @@ use engine::game::players;
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
+use super::copy_value::{copy_target_penalties, score_legend_rule_keep};
 use super::effect_classify::{
     aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
     extract_target_filter, is_spell_beneficial, targeted_object_impact, targeted_player_impact,
@@ -53,6 +54,7 @@ impl AntiSelfHarmPolicy {
                 .sum(),
             // Penalise accepting an optional effect whose life cost would kill or nearly kill us.
             GameAction::DecideOptionalEffect { accept: true } => score_optional_effect_accept(ctx),
+            GameAction::ChooseLegend { keep } => score_legend_rule_keep(ctx.state, *keep),
             _ => 0.0,
         }
     }
@@ -481,6 +483,16 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
             };
         } else {
             score -= 6.0;
+        }
+    }
+
+    if ctx
+        .effects()
+        .iter()
+        .any(|effect| matches!(effect, Effect::CopyTokenOf { .. }))
+    {
+        if let Some(source) = ctx.source_object() {
+            score -= copy_target_penalties(ctx.state, ctx.ai_player, Some(source.id), object);
         }
     }
 

@@ -50,6 +50,12 @@ pub(crate) struct ParseContext {
     /// `parse_effect_chain_ir` snapshots this into the produced `ClauseIr` and
     /// resets it to `Chosen` for the next chunk so the marker is per-clause.
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
+    /// the most recent target phrase's target(s) at stack placement. Set when a
+    /// targeted "of their choice" suffix is stripped from a `ScopedPlayer`-controlled
+    /// filter ("destroy target X that player controls of their choice"). Snapshotted
+    /// into the produced `ClauseIr` alongside `target_selection_mode`.
+    pub target_chooser: Option<TargetFilter>,
     /// CR 303.4 + CR 702.103: Typed self-reference for the enclosing card's
     /// attachment host. Set to `Some(TargetFilter::AttachedTo)` only when the
     /// card being parsed is an Aura or has the Bestow keyword (i.e. it can be

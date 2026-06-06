@@ -1242,6 +1242,18 @@ pub(crate) fn static_filter_matches(
                 }
                 return true;
             }
+            // CR 119.7 + CR 109.1: an object-scoped restriction is never a
+            // player restriction. A transient `CantGainLife` grant bound to a
+            // specific object — e.g. Screaming Nemesis redirecting its damage to
+            // a CREATURE, which pins the rider's `ParentTarget` to
+            // `SpecificObject { id }` — must NOT satisfy a player-scoped query
+            // ("can this player gain life?"). Fail CLOSED for object-pin filters
+            // so the redirect-to-creature case locks no player, while the
+            // redirect-to-player case (bound `SpecificPlayer`) is handled by the
+            // transient player-scope scan. Without this arm the catch-all below
+            // fails open and locks every player whenever any creature carries a
+            // granted `CantGainLife`.
+            TargetFilter::SpecificObject { .. } | TargetFilter::SelfRef => return false,
             _ => return true,
         }
     }

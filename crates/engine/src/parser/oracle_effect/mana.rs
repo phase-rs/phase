@@ -154,6 +154,39 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         });
     }
 
+    // CR 106.1 + CR 106.3: disjunctive color choice scaled by a "for each"
+    // count -- "{C1} or {C2} [...] for each [clause]" (Culling Ritual: "Add
+    // {B} or {G} for each permanent destroyed this way"). Each unit is chosen
+    // independently from the color set, so this is AnyCombination, not
+    // AnyOneColor. The single-color "{C} for each X" form is handled by
+    // parse_mana_production_clause; this branch covers the >1-color set, which
+    // parse_mana_color_set rejects today because of the trailing "for each".
+    if let Ok((for_each_rest, before)) = terminated(
+        take_until::<_, _, OracleError<'_>>(" for each "),
+        tag::<_, _, OracleError<'_>>(" for each "),
+    )
+    .parse(clause)
+    {
+        if let Some(color_options) = parse_mana_color_set(before.trim()) {
+            if color_options.len() > 1 {
+                if let Some(qty) =
+                    super::super::oracle_quantity::parse_for_each_clause(for_each_rest.trim())
+                {
+                    return Some(Effect::Mana {
+                        produced: ManaProduction::AnyCombination {
+                            count: QuantityExpr::Ref { qty },
+                            color_options,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: for_each_clause_target_filter(for_each_rest.trim()),
+                    });
+                }
+            }
+        }
+    }
+
     if let Some((produced, target)) = parse_mana_production_clause(clause, contribution) {
         return Some(Effect::Mana {
             produced,
@@ -2244,6 +2277,35 @@ mod tests {
 
     /// CR 106.1: Fixed-count count-prefixed choice — `"Add 2 {G} or 2 {W}"`
     /// also routes through the combinator (the count prefix is a number).
+    /// CR 106.1 + CR 106.3: "Add {B} or {G} for each permanent destroyed this
+    /// way" (Culling Ritual). A >1-color disjunction scaled by a dynamic
+    /// "for each" count lowers to AnyCombination (each unit chosen
+    /// independently) with the count taken from the for-each clause -- not a
+    /// fixed 1-mana AnyOneColor. Building-block test for the whole
+    /// "<color set> for each <clause>" mana family.
+    #[test]
+    fn color_set_for_each_clause_scales_combination() {
+        let effect =
+            try_parse_add_mana_effect("Add {B} or {G} for each permanent destroyed this way")
+                .expect("must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana, got {effect:?}");
+        };
+        let ManaProduction::AnyCombination {
+            count,
+            color_options,
+        } = produced
+        else {
+            panic!("expected AnyCombination, got {produced:?}");
+        };
+        assert!(color_options.contains(&ManaColor::Black));
+        assert!(color_options.contains(&ManaColor::Green));
+        assert!(
+            matches!(count, QuantityExpr::Ref { .. }),
+            "count must be a dynamic for-each ref, got {count:?}"
+        );
+    }
+
     #[test]
     fn fixed_count_prefixed_color_choice() {
         let effect = try_parse_add_mana_effect("Add 2 {G} or 2 {W}")

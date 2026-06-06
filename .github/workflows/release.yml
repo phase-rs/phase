@@ -350,8 +350,22 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          # Content-addressed card-data: immutable, year-long cache.
-          npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
+          # The r2.dev public endpoint does NOT compress on the fly, so these
+          # JSONs were served raw. Pre-compress with brotli and store
+          # Content-Encoding: br — every consumer fetches via browser/Bun
+          # fetch(), which decodes br transparently. q9: ~90% reduction at a
+          # fraction of q11's CPU.
+          #
+          # Compress into a temp dir, never client/public: card-data.json /
+          # draft-pools.json are re-read after this step and baked UNCOMPRESSED
+          # into the server image (loaded from disk).
+          command -v brotli >/dev/null || { sudo apt-get update && sudo apt-get install -y brotli; }
+          BRDIR="$(mktemp -d)"
+
+          # Content-addressed card-data: immutable, year-long cache. The hash is
+          # over the uncompressed file, so the URL stays a valid content key.
+          brotli -q 9 -c "client/public/$CARD_DATA_FILENAME" > "$BRDIR/card-data.br"
+          npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "$BRDIR/card-data.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
           while IFS= read -r f; do
@@ -359,7 +373,8 @@ jobs:
               echo "::error::Expected data file client/public/$f was not generated"
               exit 1
             fi
-            npx wrangler r2 object put "phase-rs-data/$f" --file "client/public/$f" --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+            brotli -q 9 -c "client/public/$f" > "$BRDIR/$f.br"
+            npx wrangler r2 object put "phase-rs-data/$f" --file "$BRDIR/$f.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=60, must-revalidate"
           done < <(jq -r '.[]' data-files.json)
 
       - name: Verify R2 uploads landed
@@ -381,6 +396,10 @@ jobs:
           }
           check "$CARD_DATA_FILENAME"
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
+          # Prove the brotli round-trip end-to-end on one small file: --compressed
+          # requests + decodes br, jq confirms it decoded to valid JSON.
+          curl -s --compressed "$BASE/scryfall-sets.json" | jq empty \
+            || { echo "::error::brotli round-trip failed for scryfall-sets.json"; fail=1; }
           [ "$fail" = "0" ]
       - name: Remove R2-hosted data files from dist (Pages ships only the shell)
         # Single source of truth: data-files.json lists every JSON the frontend

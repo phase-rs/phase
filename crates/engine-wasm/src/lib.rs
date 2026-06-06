@@ -42,6 +42,11 @@ struct LegalActionsResult {
     /// Frontend uses this for "what can I do with this card?" lookups so it
     /// doesn't have to introspect `GameAction` variants client-side.
     legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+    /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
+    /// decision has no legal action for any authorized submitter (an engine
+    /// anomaly, not a rules outcome). `None` normally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
 }
 
 /// Serialize a Rust value to a JS object via JSON.
@@ -952,6 +957,7 @@ pub fn get_legal_actions_js() -> JsValue {
             auto_pass_recommended: auto_pass,
             spell_costs,
             legal_actions_by_object,
+            stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
         })
     }) {
         Ok(val) => val,
@@ -974,6 +980,7 @@ pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
             auto_pass_recommended: auto_pass,
             spell_costs,
             legal_actions_by_object,
+            stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
         })
     }) {
         Ok(val) => val,
@@ -993,6 +1000,11 @@ struct ViewerSnapshot {
     auto_pass_recommended: bool,
     spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
     legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+    /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
+    /// decision has no legal action for any authorized submitter (an engine
+    /// anomaly, not a rules outcome). `None` normally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
 }
 
 #[wasm_bindgen]
@@ -1009,6 +1021,7 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
             auto_pass_recommended: auto_pass,
             spell_costs,
             legal_actions_by_object,
+            stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
         })
     }) {
         Ok(val) => val,

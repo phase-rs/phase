@@ -38,7 +38,7 @@ use super::ability_utils::{
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
-use super::game_object::{PreparedState, PrototypeFormState};
+use super::game_object::{GameObject, PreparedState, PrototypeFormState};
 use super::mana_payment;
 use super::quantity::resolve_quantity;
 use super::restrictions;
@@ -262,7 +262,10 @@ fn spell_record_for_restrictions(spell_obj: &super::game_object::GameObject) -> 
         subtypes: spell_obj.card_types.subtypes.clone(),
         keywords: spell_obj.keywords.clone(),
         colors: spell_obj.color.clone(),
-        mana_value: spell_obj.mana_cost.mana_value(),
+        // CR 202.3e: While on the stack, X equals the announced value, not 0.
+        mana_value: spell_obj
+            .mana_cost
+            .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
         has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
         cast_variant: crate::types::game_state::CastingVariant::Normal,
@@ -442,6 +445,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                     || has_aftermath_keyword(state, obj_id)
                     || has_disturb_keyword(state, obj_id)
                     || retrace_has_discardable_land(state, player, obj_id)
+                    || jumpstart_has_discardable_card(state, player, obj_id)
                     || graveyard_has_enough_for_escape(state, player, obj_id))
         })
     }));
@@ -566,6 +570,41 @@ fn has_aftermath_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Aftermath)
 }
 
+/// CR 702.133: Check if an object has the Jump-start keyword.
+fn has_jumpstart_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::JumpStart)
+}
+
+/// CR 702.133a: Jump-start's graveyard-cast permission applies only "if the
+/// resulting spell is an instant or sorcery spell." The keyword is printed only
+/// on instants/sorceries, but an exotic keyword-grant could place it on another
+/// card type, so the type is checked explicitly rather than assumed implicit.
+fn jumpstart_castable_from_graveyard(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        obj.zone == Zone::Graveyard
+            && has_jumpstart_keyword(state, object_id)
+            && obj.card_types.core_types.iter().any(|ct| {
+                matches!(
+                    ct,
+                    crate::types::card_type::CoreType::Instant
+                        | crate::types::card_type::CoreType::Sorcery
+                )
+            })
+    })
+}
+
+/// CR 702.133a: Jump-start requires discarding a card (any card — `filter: None`,
+/// unlike Retrace's land filter) as an additional cost, so it is only castable
+/// with at least one card in hand and an instant/sorcery in the graveyard.
+fn jumpstart_has_discardable_card(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    jumpstart_castable_from_graveyard(state, object_id)
+        && casting_costs::can_pay_jumpstart_additional_cost(state, player, object_id)
+}
+
 /// CR 702.146: Check if an object has the Disturb keyword.
 fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Disturb)
@@ -660,10 +699,11 @@ pub fn handle_foretell(
 }
 
 // CR 702.34 (Flashback) / CR 702.81 (Retrace) / CR 702.127 (Aftermath) /
-// CR 702.138 (Escape) / CR 702.146 (Disturb) / CR 702.180 (Harmonize): graveyard-cast alternative
-// permissions. Sneak (CR 702.190a) is a HAND-cast alt-cost and is deliberately
-// NOT listed here — including it would misclassify graveyard objects with a
-// granted Sneak as castable from the graveyard, which the rules do not permit.
+// CR 702.133 (Jump-start) / CR 702.138 (Escape) / CR 702.146 (Disturb) /
+// CR 702.180 (Harmonize): graveyard-cast alternative permissions. Sneak
+// (CR 702.190a) is a HAND-cast alt-cost and is deliberately NOT listed here —
+// including it would misclassify graveyard objects with a granted Sneak as
+// castable from the graveyard, which the rules do not permit.
 fn has_effective_graveyard_cast_keyword(
     state: &GameState,
     object_id: ObjectId,
@@ -671,6 +711,7 @@ fn has_effective_graveyard_cast_keyword(
 ) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
         || has_retrace_keyword(state, object_id)
+        || jumpstart_castable_from_graveyard(state, object_id)
         || obj
             .keywords
             .iter()
@@ -888,17 +929,27 @@ fn transient_granted_spell_keywords(
 /// prompting the controller to choose among them. Offering a choice across
 /// multiple simultaneous grants needs a multi-alternative choice surface and is
 /// a known limitation tracked for follow-up, not implemented here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GrantedSpellAlternativeCost {
+    pub(super) cost: AbilityCost,
+    pub(super) timing_permission: Option<CastTimingPermission>,
+}
+
 pub(super) fn granted_spell_alternative_cost(
     state: &GameState,
     caster: PlayerId,
     object_id: ObjectId,
-) -> Option<AbilityCost> {
+) -> Option<GrantedSpellAlternativeCost> {
     let spell_obj = state.objects.get(&object_id)?;
     let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
 
     // CR 604.1: Functioning gate owned by `game_active_statics`.
     for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
-        let StaticMode::CastWithAlternativeCost { cost } = &def.mode else {
+        let StaticMode::CastWithAlternativeCost {
+            cost,
+            timing_permission,
+        } = &def.mode
+        else {
             continue;
         };
 
@@ -914,7 +965,10 @@ pub(super) fn granted_spell_alternative_cost(
             )
         });
         if matches {
-            return Some(AbilityCost::Mana { cost: cost.clone() });
+            return Some(GrantedSpellAlternativeCost {
+                cost: cost.clone(),
+                timing_permission: *timing_permission,
+            });
         }
     }
 
@@ -2365,6 +2419,9 @@ fn casting_variant_candidates(
         if has_aftermath_keyword(state, object_id) {
             candidates.push(CastingVariant::Aftermath);
         }
+        if jumpstart_castable_from_graveyard(state, object_id) {
+            candidates.push(CastingVariant::JumpStart);
+        }
         if super::keywords::effective_disturb_cost(state, object_id).is_some() {
             candidates.push(CastingVariant::Disturb);
         }
@@ -2809,6 +2866,8 @@ fn prepare_spell_cast_with_variant_override_inner(
             )
         {
             CastingVariant::Aftermath
+        } else if jumpstart_castable_from_graveyard(state, object_id) {
+            CastingVariant::JumpStart
         } else if disturb_cost.is_some() {
             CastingVariant::Disturb
         } else if let Some(source) = graveyard_permission_src {
@@ -3175,6 +3234,28 @@ fn prepare_spell_cast_with_variant_override_inner(
                     casting_variant,
                 )?;
                 mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
+                if cast_outside_sorcery_timing {
+                    cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+                }
+            } else if casting_costs::payable_spell_alternative_cost_for_timing(
+                state,
+                player,
+                object_id,
+                CastTimingPermission::AsThoughHadFlash,
+            )
+            .is_some()
+            {
+                // CR 118.9 + CR 702.8a: Some alternative-cost grants also
+                // permit the spell to be cast as though it had flash, but only
+                // when the spell is cast using that alternative cost.
+                restrictions::check_spell_timing(
+                    state,
+                    player,
+                    obj,
+                    ability_def.as_ref(),
+                    true,
+                    casting_variant,
+                )?;
                 if cast_outside_sorcery_timing {
                     cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
                 }
@@ -6005,6 +6086,29 @@ pub fn handle_cast_spell(
     )
 }
 
+fn normal_cast_choice_cost_and_affordability(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    obj: &GameObject,
+) -> (ManaCost, bool) {
+    // CR 601.2b + CR 118.9a: `Unlimited` `CastFromHandFree` (Omniscience)
+    // replaces the printed mana cost with nothing on the normal path. Every
+    // hand alternative-cost prompt must treat that path as affordable and
+    // display `NoCost`; otherwise an affordable alternative cost can hide the
+    // free normal cast.
+    if unlimited_hand_cast_free_applies(state, player, obj, CastingVariant::Normal) {
+        return (ManaCost::NoCost, true);
+    }
+
+    // CR 601.2f + CR 118.9d: normal-path affordability and displayed cost
+    // reflect active cost modifiers before comparing against alternative costs.
+    let normal_cost = apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+        .unwrap_or_else(|| obj.mana_cost.clone());
+    let normal_affordable = can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+    (normal_cost, normal_affordable)
+}
+
 pub fn handle_cast_spell_with_payment_mode(
     state: &mut GameState,
     player: PlayerId,
@@ -6134,17 +6238,11 @@ pub fn handle_cast_spell_with_payment_mode(
                 crate::types::keywords::Keyword::Warp(cost) => Some(cost.clone()),
                 _ => None,
             }) {
-                // CR 601.2f + CR 118.9d: affordability and the displayed costs
-                // must reflect active cost modifiers — applied to BOTH the printed
-                // cost and the warp alternative cost (CR 118.9d).
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let warp_cost_eff =
                     apply_cost_modifiers_to_base(state, player, object_id, warp_cost.clone())
                         .unwrap_or_else(|| warp_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let warp_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &warp_cost_eff);
                 if normal_affordable && warp_affordable {
@@ -6208,15 +6306,12 @@ pub fn handle_cast_spell_with_payment_mode(
                 // CR 601.2f + CR 118.9d: affordability and the displayed costs
                 // must reflect active cost modifiers — applied to BOTH the printed
                 // cost and the evoke mana sub-cost (CR 118.9d).
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let evoke_mana_eff = evoke_mana_part.as_ref().map(|m| {
                     apply_cost_modifiers_to_base(state, player, object_id, m.clone())
                         .unwrap_or_else(|| m.clone())
                 });
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let evoke_mana_affordable = match &evoke_mana_eff {
                     Some(m) => can_pay_cost_after_auto_tap(state, player, object_id, m),
                     // CR 118.3: a zero mana cost is always payable.
@@ -6274,14 +6369,11 @@ pub fn handle_cast_spell_with_payment_mode(
                 // CR 601.2f + CR 118.9d: affordability and the displayed costs
                 // must reflect active cost modifiers — applied to BOTH the printed
                 // cost and the overload alternative cost (CR 118.9d).
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let overload_cost_eff =
                     apply_cost_modifiers_to_base(state, player, object_id, overload_cost.clone())
                         .unwrap_or_else(|| overload_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let overload_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &overload_cost_eff);
                 if normal_affordable && overload_affordable {
@@ -6333,14 +6425,11 @@ pub fn handle_cast_spell_with_payment_mode(
                 // CR 601.2f: affordability and the displayed costs must reflect
                 // active cost modifiers — applied to BOTH the printed cost and the
                 // MTMTE alternative cost.
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let mtmte_cost_eff =
                     apply_cost_modifiers_to_base(state, player, object_id, mtmte_cost.clone())
                         .unwrap_or_else(|| mtmte_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let mtmte_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &mtmte_cost_eff);
                 if normal_affordable && mtmte_affordable {
@@ -6390,14 +6479,11 @@ pub fn handle_cast_spell_with_payment_mode(
                 // CR 601.2f + CR 118.9d: affordability and the displayed costs
                 // must reflect active cost modifiers — applied to BOTH the printed
                 // cost and the cleave alternative cost (CR 118.9d).
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let cleave_cost_eff =
                     apply_cost_modifiers_to_base(state, player, object_id, cleave_cost.clone())
                         .unwrap_or_else(|| cleave_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let cleave_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &cleave_cost_eff);
                 if normal_affordable && cleave_affordable {
@@ -6458,14 +6544,11 @@ pub fn handle_cast_spell_with_payment_mode(
                 // CR 601.2f + CR 118.9d: affordability and the displayed costs
                 // must reflect active cost modifiers — applied to BOTH the printed
                 // cost and the bestow alternative cost (CR 118.9d).
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let bestow_cost_eff =
                     apply_cost_modifiers_to_base(state, player, object_id, bestow_cost.clone())
                         .unwrap_or_else(|| bestow_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let bestow_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &bestow_cost_eff);
                 if has_legal_creature_target && normal_affordable && bestow_affordable {
@@ -6528,14 +6611,11 @@ pub fn handle_cast_spell_with_payment_mode(
                 // CR 601.2f + CR 118.9d: affordability and displayed costs reflect
                 // active cost modifiers — applied to BOTH the printed cost and the
                 // mutate alternative cost.
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let mutate_cost_eff =
                     apply_cost_modifiers_to_base(state, player, object_id, mutate_cost.clone())
                         .unwrap_or_else(|| mutate_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let mutate_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &mutate_cost_eff);
                 if has_legal_mutate_target && normal_affordable && mutate_affordable {
@@ -6598,14 +6678,11 @@ pub fn handle_cast_spell_with_payment_mode(
                 // CR 601.2f + CR 118.9d: affordability and the displayed costs
                 // must reflect active cost modifiers — applied to BOTH the printed
                 // cost and the awaken alternative cost (CR 118.9d).
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let awaken_cost_eff =
                     apply_cost_modifiers_to_base(state, player, object_id, awaken_cost.clone())
                         .unwrap_or_else(|| awaken_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let awaken_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &awaken_cost_eff);
                 if has_legal_land && normal_affordable && awaken_affordable {
@@ -6648,14 +6725,11 @@ pub fn handle_cast_spell_with_payment_mode(
                 crate::types::keywords::Keyword::Impending { cost, .. } => Some(cost.clone()),
                 _ => None,
             }) {
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let impending_cost_eff =
                     apply_cost_modifiers_to_base(state, player, object_id, impending_cost.clone())
                         .unwrap_or_else(|| impending_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let impending_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &impending_cost_eff);
                 if normal_affordable && impending_affordable {
@@ -6694,9 +6768,8 @@ pub fn handle_cast_spell_with_payment_mode(
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Hand {
             if let Some(prototype_form) = prototype_form_from_object(obj) {
-                let normal_cost =
-                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
-                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
                 let prototype_cost_eff = apply_cost_modifiers_to_base(
                     state,
                     player,
@@ -6704,8 +6777,6 @@ pub fn handle_cast_spell_with_payment_mode(
                     prototype_form.mana_cost.clone(),
                 )
                 .unwrap_or_else(|| prototype_form.mana_cost.clone());
-                let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let prototype_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &prototype_cost_eff);
                 if normal_affordable && prototype_affordable {
@@ -7798,6 +7869,13 @@ fn can_cast_prepared_now(
         return false;
     }
 
+    // CR 702.133a: Jump-start requires a discardable card (any card) in hand.
+    if prepared.casting_variant == CastingVariant::JumpStart
+        && !casting_costs::can_pay_jumpstart_additional_cost(state, player, prepared.object_id)
+    {
+        return false;
+    }
+
     // CR 702.34a + CR 118.3 + CR 119.8: Flashback's non-mana cost (e.g. "pay N
     // life") is an additional cost. Pre-check affordability so a CantLoseLife
     // lock or insufficient life filters the flashback from legal actions.
@@ -8191,6 +8269,26 @@ pub fn can_pay_cost_after_auto_tap(
 // payment. Castability must account for them, or spells with feasibly payable
 // costs are never offered (the original #562 bug).
 pub(super) fn can_feasibly_pay_mana_cost(
+    state: &GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    // CR 601.2f + CR 107.1b: Affordability must check a concrete X value, not
+    // the symbolic `{X}` shard left in the cost (issue #2011: Kozilek's Command
+    // `{X}{C}{C}` with only Eldrazi Temple was treated as uncastable). X only
+    // adds generic mana, so X=0 is the cheapest concrete affordability probe.
+    if let Some(sid) = source_id {
+        if super::casting_costs::cost_has_x(cost) {
+            let mut concrete = cost.clone();
+            concrete.concretize_x(0);
+            return can_feasibly_pay_mana_cost_without_x(state, player, Some(sid), &concrete);
+        }
+    }
+    can_feasibly_pay_mana_cost_without_x(state, player, source_id, cost)
+}
+
+fn can_feasibly_pay_mana_cost_without_x(
     state: &GameState,
     player: PlayerId,
     source_id: Option<ObjectId>,
@@ -9471,6 +9569,8 @@ fn find_eligible_hand_cost_targets(
     source: ObjectId,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
+    let effective_filter = super::cost_payability::exile_cost_effective_filter(filter);
+    let filter_ref = effective_filter.as_ref();
     let ctx = super::filter::FilterContext::from_source(state, source);
     state
         .players
@@ -9482,7 +9582,7 @@ fn find_eligible_hand_cost_targets(
                 .copied()
                 .filter(|&id| {
                     id != source
-                        && filter.is_none_or(|f| {
+                        && filter_ref.is_none_or(|f| {
                             super::filter::matches_target_filter(state, id, f, &ctx)
                         })
                 })
@@ -9512,8 +9612,12 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     zone: ExileCostSourceZone,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
+    let effective_filter = super::cost_payability::exile_cost_effective_filter(filter);
+    let filter_ref = effective_filter.as_ref();
     match zone {
-        ExileCostSourceZone::Hand => find_eligible_hand_cost_targets(state, player, source, filter),
+        ExileCostSourceZone::Hand => {
+            find_eligible_hand_cost_targets(state, player, source, filter_ref)
+        }
         ExileCostSourceZone::Graveyard => {
             let ctx = super::filter::FilterContext::from_source(state, source);
             state
@@ -9525,7 +9629,7 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
                         .copied()
                         .filter(|&id| {
                             id != source
-                                && filter.is_none_or(|f| {
+                                && filter_ref.is_none_or(|f| {
                                     super::filter::matches_target_filter(state, id, f, &ctx)
                                 })
                         })
@@ -11316,7 +11420,7 @@ mod tests {
         BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
         CostCategory, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
-        ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
+        ManaSpendPermission, ManaSpendRestriction, ModalChoice, ModalSelectionCondition,
         ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtValue,
         QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
         RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
@@ -15073,6 +15177,7 @@ mod tests {
                         controller: Some(ControllerRef::You),
                     },
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    copier: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -18614,6 +18719,96 @@ mod tests {
         );
     }
 
+    fn add_primal_prayers_grant(state: &mut GameState, controller: PlayerId) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(24028),
+            controller,
+            "Primal Prayers".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            timing_permission: Some(CastTimingPermission::AsThoughHadFlash),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }]),
+        ))
+        .active_zones(vec![Zone::Battlefield]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+        source
+    }
+
+    /// CR 118.9 + CR 702.8a: Primal Prayers' flash rider is conditional on
+    /// casting the spell for the {E} alternative cost. Normal-cost creature
+    /// casts do not gain instant-speed timing.
+    #[test]
+    fn primal_prayers_flash_rider_does_not_authorize_normal_cost_cast() {
+        let mut state = setup_game_at_main_phase();
+        state.phase = Phase::End;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        add_primal_prayers_grant(&mut state, PlayerId(0));
+
+        let spell_id = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        let card_id = state.objects.get(&spell_id).unwrap().card_id;
+        state.objects.get_mut(&spell_id).unwrap().mana_cost = ManaCost::generic(1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let err = handle_cast_spell(&mut state, PlayerId(0), spell_id, card_id, &mut Vec::new())
+            .expect_err("normal-cost creature cast must not inherit Primal Prayers flash");
+
+        assert!(
+            matches!(err, EngineError::ActionNotAllowed(_)),
+            "expected timing rejection, got {err:?}"
+        );
+        assert_eq!(state.stack.len(), 0);
+    }
+
+    /// CR 118.9 + CR 107.14 + CR 702.8a: When Primal Prayers is the timing
+    /// permission used to cast outside sorcery timing, the {E} alternative cost
+    /// is the only legal cost path and is paid immediately.
+    #[test]
+    fn primal_prayers_outside_timing_requires_energy_alternative_cost() {
+        let mut state = setup_game_at_main_phase();
+        state.phase = Phase::End;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.players[0].energy = 1;
+        add_primal_prayers_grant(&mut state, PlayerId(0));
+
+        let spell_id = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        let card_id = state.objects.get(&spell_id).unwrap().card_id;
+        state.objects.get_mut(&spell_id).unwrap().mana_cost = ManaCost::generic(1);
+
+        let waiting =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, card_id, &mut Vec::new())
+                .expect("payable Primal Prayers alternative cost should authorize the cast");
+
+        assert!(
+            matches!(waiting, WaitingFor::Priority { .. }),
+            "the timing-required alternative cost should be paid directly, got {waiting:?}"
+        );
+        assert_eq!(state.players[0].energy, 0);
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            state.objects.get(&spell_id).unwrap().cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number))
+        );
+    }
+
     #[test]
     fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
         let mut state = setup_game_at_main_phase();
@@ -19191,6 +19386,222 @@ mod tests {
             !matches!(cost, ManaCost::NoCost),
             "Omniscience must not apply to command-zone commanders, got {cost:?}"
         );
+    }
+
+    /// Issue #2432: Omniscience must offer a free normal cast for spells whose
+    /// printed mana cost is unaffordable but whose alternative cost is payable.
+    mod omniscience_alt_cost_2432 {
+        use super::*;
+        use crate::types::game_state::AlternativeCastKeyword;
+        use crate::types::keywords::{EvokeCost, Keyword};
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        fn install_omniscience(state: &mut GameState) {
+            let id = create_object(
+                state,
+                CardId(2_432_001),
+                PlayerId(0),
+                "Omniscience".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().static_definitions.push(
+                parse_static_line(
+                    "You may cast spells from your hand without paying their mana costs.",
+                )
+                .expect("Omniscience static should parse"),
+            );
+        }
+
+        /// Quantum Riddler class: printed {3}{U}{U}, Warp {1}{U}.
+        fn create_quantum_riddler(state: &mut GameState) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(2_432_002),
+                PlayerId(0),
+                "Quantum Riddler".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 3,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.keywords.push(Keyword::Warp(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            }));
+            obj_id
+        }
+
+        /// Mulldrifter class: printed {4}{U}, Evoke {2}{U}.
+        fn create_mulldrifter(state: &mut GameState) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(2_432_003),
+                PlayerId(0),
+                "Mulldrifter".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.keywords
+                .push(Keyword::Evoke(EvokeCost::Mana(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 2,
+                })));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Mulldrifter".to_string(),
+                    description: None,
+                },
+            ));
+            obj_id
+        }
+
+        #[test]
+        fn omniscience_offers_free_normal_when_warp_affordable_but_printed_is_not() {
+            let mut state = setup_game_at_main_phase();
+            install_omniscience(&mut state);
+            let riddler = create_quantum_riddler(&mut state);
+            // Enough for Warp {1}{U}, not for {3}{U}{U}.
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+            add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(
+                &mut state,
+                PlayerId(0),
+                riddler,
+                CardId(2_432_002),
+                &mut events,
+            )
+            .unwrap();
+
+            match wf {
+                WaitingFor::AlternativeCastChoice {
+                    keyword: AlternativeCastKeyword::Warp,
+                    normal_cost,
+                    alternative_cost,
+                    ..
+                } => {
+                    assert_eq!(
+                        normal_cost,
+                        ManaCost::NoCost,
+                        "Omniscience must surface NoCost as the normal option"
+                    );
+                    assert_eq!(
+                        alternative_cost,
+                        Some(ManaCost::Cost {
+                            shards: vec![ManaCostShard::Blue],
+                            generic: 1,
+                        })
+                    );
+                }
+                other => {
+                    panic!("expected Warp choice with free normal under Omniscience, got {other:?}")
+                }
+            }
+        }
+
+        #[test]
+        fn omniscience_offers_free_normal_when_evoke_affordable_but_printed_is_not() {
+            let mut state = setup_game_at_main_phase();
+            install_omniscience(&mut state);
+            let mulldrifter = create_mulldrifter(&mut state);
+            // Enough for Evoke {2}{U}, not for printed {4}{U}.
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+            add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(
+                &mut state,
+                PlayerId(0),
+                mulldrifter,
+                CardId(2_432_003),
+                &mut events,
+            )
+            .unwrap();
+
+            match wf {
+                WaitingFor::AlternativeCastChoice {
+                    keyword: AlternativeCastKeyword::Evoke,
+                    normal_cost,
+                    alternative_cost,
+                    ..
+                } => {
+                    assert_eq!(
+                        normal_cost,
+                        ManaCost::NoCost,
+                        "Omniscience must surface NoCost as the normal option"
+                    );
+                    assert_eq!(
+                        alternative_cost,
+                        Some(ManaCost::Cost {
+                            shards: vec![ManaCostShard::Blue],
+                            generic: 2,
+                        })
+                    );
+                }
+                other => {
+                    panic!(
+                        "expected Evoke choice with free normal under Omniscience, got {other:?}"
+                    )
+                }
+            }
+        }
+
+        #[test]
+        fn omniscience_warp_spell_normal_choice_proceeds_without_mana_payment() {
+            let mut state = setup_game_at_main_phase();
+            install_omniscience(&mut state);
+            let riddler = create_quantum_riddler(&mut state);
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+            add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(
+                &mut state,
+                PlayerId(0),
+                riddler,
+                CardId(2_432_002),
+                &mut events,
+            )
+            .unwrap();
+            assert!(matches!(
+                wf,
+                WaitingFor::AlternativeCastChoice {
+                    keyword: AlternativeCastKeyword::Warp,
+                    ..
+                }
+            ));
+
+            let wf = handle_warp_cost_choice(
+                &mut state,
+                PlayerId(0),
+                riddler,
+                CardId(2_432_002),
+                crate::types::actions::AlternativeCastDecision::Normal,
+                &mut events,
+            )
+            .unwrap();
+
+            assert!(
+                !matches!(wf, WaitingFor::AlternativeCastChoice { .. }),
+                "normal choice under Omniscience must not re-prompt; got {wf:?}"
+            );
+            assert!(
+                !matches!(wf, WaitingFor::ManaPayment { .. }),
+                "Omniscience normal cast must skip mana payment; got {wf:?}"
+            );
+        }
     }
 
     // Witherbloom, the Balancer (cost {5}{B}{G}) has printed `Keyword::Affinity(Creature)`.
@@ -27106,6 +27517,207 @@ mod tests {
         );
     }
 
+    fn add_jumpstart_sorcery_to_graveyard(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let obj_id = create_object(
+            state,
+            card_id,
+            player,
+            "Radical Idea".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.base_keywords.push(Keyword::JumpStart);
+        obj.keywords = obj.base_keywords.clone();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Unimplemented {
+                name: "jump-start test spell".to_string(),
+                description: None,
+            },
+        );
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        Arc::make_mut(&mut obj.base_abilities).push(ability);
+        obj_id
+    }
+
+    // CR 702.133a: jump-start discards *any* card (unlike Retrace's land), so a
+    // hand holding only a nonland card makes the graveyard cast available.
+    #[test]
+    fn jumpstart_graveyard_spell_surfaces_when_any_card_discard_and_mana_are_payable() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_jumpstart_sorcery_to_graveyard(&mut state, PlayerId(0));
+        add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        assert!(
+            spell_objects_available_to_cast(&state, PlayerId(0)).contains(&spell),
+            "jump-start card with any discardable card should be in the graveyard castable set"
+        );
+        assert!(can_cast_object_now(&state, PlayerId(0), spell));
+    }
+
+    // CR 702.133a: with an empty hand there is no card to discard, so jump-start
+    // is not a legal cast.
+    #[test]
+    fn jumpstart_without_any_discardable_card_is_not_a_legal_cast_action() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_jumpstart_sorcery_to_graveyard(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&spell),
+            "jump-start card with an empty hand should not be castable"
+        );
+        assert!(!can_cast_object_now(&state, PlayerId(0), spell));
+    }
+
+    // CR 702.133a: jump-start grants a graveyard-cast permission only if the
+    // resulting spell is an instant or sorcery spell.
+    #[test]
+    fn jumpstart_on_non_instant_sorcery_does_not_enable_normal_graveyard_cast() {
+        let mut state = setup_game_at_main_phase();
+        let card_id = CardId(state.next_object_id);
+        let creature = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Experimental Jump-start Creature".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.base_keywords.push(Keyword::JumpStart);
+        obj.keywords = obj.base_keywords.clone();
+        add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&creature),
+            "Jump-start must not surface non-instant/sorcery graveyard cards"
+        );
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), creature),
+            "the shared graveyard-cast gate must not fall through to a normal cast"
+        );
+    }
+
+    // CR 702.133a: the discarded card may be a nonland — Retrace would reject it.
+    #[test]
+    fn jumpstart_cast_discards_any_card_then_pushes_spell_with_jumpstart_variant() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_jumpstart_sorcery_to_graveyard(&mut state, PlayerId(0));
+        let nonland = add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
+            .expect("jump-start cast should request a discard");
+        let (cards, pending_cast) = match waiting {
+            WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Discard,
+                choices: cards,
+                count: 1,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                (cards, pending_cast)
+            }
+            other => panic!("expected PayCost Discard, got {other:?}"),
+        };
+        assert!(
+            cards.contains(&nonland),
+            "jump-start must allow discarding a nonland card"
+        );
+
+        let mut events = Vec::new();
+        let resumed = super::casting_costs::handle_discard_for_cost(
+            &mut state,
+            PlayerId(0),
+            *pending_cast,
+            1,
+            &cards,
+            &[nonland],
+            &mut events,
+        )
+        .expect("discarding a nonland should finish jump-start cost payment");
+
+        assert!(matches!(resumed, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects.get(&nonland).unwrap().zone, Zone::Graveyard);
+        assert_eq!(state.objects.get(&spell).unwrap().zone, Zone::Stack);
+        assert!(matches!(
+            state.stack[0].kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::JumpStart,
+                ..
+            }
+        ));
+    }
+
+    // CR 702.133a: "exile this card … any time it would leave the stack" — unlike
+    // Retrace, a jump-started spell is exiled on resolution, not put in the graveyard.
+    #[test]
+    fn jumpstart_spell_resolves_to_exile_not_graveyard() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_jumpstart_sorcery_to_graveyard(&mut state, PlayerId(0));
+        let nonland = add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
+            .expect("jump-start cast should start");
+        let (cards, pending_cast) = match waiting {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                choices: cards,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
+                ..
+            } => (cards, pending_cast),
+            other => panic!("expected PayCost Discard, got {other:?}"),
+        };
+        super::casting_costs::handle_discard_for_cost(
+            &mut state,
+            PlayerId(0),
+            *pending_cast,
+            1,
+            &cards,
+            &[nonland],
+            &mut Vec::new(),
+        )
+        .expect("discarding a card should put the jump-start spell on the stack");
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects.get(&spell).unwrap().zone,
+            Zone::Exile,
+            "CR 702.133a: a jump-started spell is exiled when it leaves the stack"
+        );
+        assert!(state.exile.contains(&spell));
+    }
+
     fn add_echo_of_eons_to_graveyard(state: &mut GameState) -> ObjectId {
         let echo_id = create_object(
             state,
@@ -28906,6 +29518,59 @@ mod tests {
         assert!(
             !is_blocked_by_cant_be_activated(&state, PlayerId(0), other, &other_ability),
             "SelfRef must NOT block other permanents' activations"
+        );
+    }
+
+    #[test]
+    fn cant_be_activated_aura_blocks_enchanted_creature_not_others() {
+        // CR 602.5: Viper's Kiss — an Aura whose text grants "its activated
+        // abilities can't be activated" must block the ENCHANTED creature's
+        // abilities, not the Aura's own. `CantBeActivated` is not re-homed onto
+        // the host, and the runtime matches `source_filter` from the Aura source,
+        // so the parser must emit `source_filter = EnchantedBy` (the host filter).
+        // This is the end-to-end proof that the #2479 split is not a runtime no-op.
+        let mut state = setup_game_at_main_phase();
+
+        // Enchanted creature with a {T}: Draw activated ability, under P0.
+        let creature = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let creature_ability = state.objects[&creature].abilities[0].clone();
+
+        // Parse Viper's Kiss's compound line and take the CantBeActivated companion.
+        let cba = crate::parser::oracle_static::parse_static_line_multi(
+            "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+        )
+        .into_iter()
+        .find(|d| matches!(d.mode, StaticMode::CantBeActivated { .. }))
+        .expect("Viper's Kiss yields a CantBeActivated companion static");
+
+        // Place it on an Aura attached to the creature.
+        let aura = create_object(
+            &mut state,
+            CardId(0x71BE),
+            PlayerId(0),
+            "Viper's Kiss".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.entered_battlefield_turn = Some(0);
+            obj.attached_to = Some(creature.into());
+            obj.static_definitions.push(cba);
+        }
+
+        assert!(
+            is_blocked_by_cant_be_activated(&state, PlayerId(0), creature, &creature_ability),
+            "Viper's Kiss must block the ENCHANTED creature's activated ability"
+        );
+
+        // A different, unenchanted creature is unaffected.
+        let other = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let other_ability = state.objects[&other].abilities[0].clone();
+        assert!(
+            !is_blocked_by_cant_be_activated(&state, PlayerId(0), other, &other_ability),
+            "Viper's Kiss must NOT block a creature it doesn't enchant"
         );
     }
 
@@ -35816,5 +36481,114 @@ mod tests {
                 "stealing Teferi must not hand the grant to the thief"
             );
         }
+    }
+
+    /// Issue #2011: `{X}{C}{C}` Kozilek's Command must be castable when Eldrazi
+    /// Temple is the only colorless source (restricted `{C}{C}` covers `{C}{C}` at X=0).
+    #[test]
+    fn issue_2011_kozilek_command_castable_with_only_eldrazi_temple() {
+        let mut state = setup_game_at_main_phase();
+        let temple = create_object(
+            &mut state,
+            CardId(9200),
+            PlayerId(0),
+            "Eldrazi Temple".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&temple).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).extend([
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                            "Colorless Eldrazi".to_string(),
+                        )],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            ]);
+        }
+
+        let command = create_object(
+            &mut state,
+            CardId(9201),
+            PlayerId(0),
+            "Kozilek's Command".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&command).unwrap();
+            obj.card_types.core_types.push(CoreType::Kindred);
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.card_types.subtypes.push("Eldrazi".to_string());
+            obj.color.clear();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::X,
+                    ManaCostShard::Colorless,
+                    ManaCostShard::Colorless,
+                ],
+                generic: 0,
+            };
+            obj.modal = Some(ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 4,
+                ..ModalChoice::default()
+            });
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        let cost = state.objects[&command].mana_cost.clone();
+        let max_x = super::casting_costs::max_x_value_excluding(
+            &state,
+            PlayerId(0),
+            &cost,
+            Some(command),
+            &HashSet::new(),
+        );
+        assert_eq!(max_x, 0, "only Temple should afford X=0 for {{C}}{{C}}");
+
+        let mut concrete = cost.clone();
+        concrete.concretize_x(0);
+        assert!(
+            can_pay_cost_after_auto_tap(&state, PlayerId(0), command, &concrete),
+            "auto-tap must cover {{C}}{{C}} with Eldrazi Temple restricted mana"
+        );
+        assert!(
+            can_feasibly_pay_mana_cost_without_x(&state, PlayerId(0), Some(command), &concrete),
+            "X=0 concrete cost must be feasible via Temple restricted mana"
+        );
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), command),
+            "can_cast_object_now must be true (issue #2011)"
+        );
     }
 }

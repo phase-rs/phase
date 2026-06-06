@@ -5,7 +5,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
+    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, QuantityExpr, QuantityRef,
+    TargetFilter,
 };
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
@@ -508,6 +509,11 @@ pub enum TriggerCause {
     /// to `Graveyard` for an object whose snapshot included `Creature` in
     /// its core types.
     CreatureDying,
+    /// CR 603.2d + CR 120.3: Trigger was caused by a creature you control
+    /// being dealt damage (Wayta, Trainer Prodigy-class). Matches
+    /// `GameEvent::DamageDealt` whose target is a creature controlled by the
+    /// doubler's controller.
+    ControlledCreatureDealtDamage,
 }
 
 impl fmt::Display for TriggerCause {
@@ -520,6 +526,9 @@ impl fmt::Display for TriggerCause {
             }
             TriggerCause::CreatureAttacking => write!(f, "CreatureAttacking"),
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
+            TriggerCause::ControlledCreatureDealtDamage => {
+                write!(f, "ControlledCreatureDealtDamage")
+            }
         }
     }
 }
@@ -647,16 +656,19 @@ pub enum StaticMode {
         keyword: Keyword,
     },
     /// CR 118.9 + CR 601.2f: A permanent grants its controller a wholesale
-    /// alternative MANA cost for spells matching `StaticDefinition::affected`
-    /// that the controller casts — they may pay `cost` rather than the spell's
-    /// mana cost. Parallel to `CastWithKeyword`. Distinct from
-    /// `ModifyCost { mode: Reduce, .. }` (subtractive, CR 601.2f) — this REPLACES
-    /// the mana cost wholesale
-    /// (CR 118.9) and is mutually exclusive with other alternative costs
-    /// (CR 118.9a). Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
-    /// ({WUBRG}, any spell), Jodah (MV 5+).
+    /// alternative cost for spells matching `StaticDefinition::affected` that
+    /// the controller casts — they may pay `cost` rather than the spell's mana
+    /// cost. Parallel to `CastWithKeyword`. Distinct from
+    /// `ModifyCost { mode: Reduce, .. }` (subtractive, CR 601.2f) — this
+    /// REPLACES the mana cost wholesale (CR 118.9) and is mutually exclusive
+    /// with other alternative costs (CR 118.9a). Rooftop Storm ({0}, Zombie
+    /// creature spells), Fist of Suns ({WUBRG}, any spell), Jodah (MV 5+),
+    /// Primal Prayers ({E}, creature MV ≤ 3, with an alternative-cost timing
+    /// permission).
     CastWithAlternativeCost {
-        cost: ManaCost,
+        cost: AbilityCost,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timing_permission: Option<CastTimingPermission>,
     },
     /// CR 601.2f: Modifies the mana cost of spells matching `spell_filter`
     /// (or all spells when `None`) by `amount`, in the direction described by `mode`.
@@ -1383,7 +1395,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
             }
-            StaticMode::CastWithAlternativeCost { cost } => {
+            StaticMode::CastWithAlternativeCost { cost, .. } => {
                 write!(f, "CastWithAlternativeCost({cost:?})")
             }
             StaticMode::ModifyCost { mode, .. } => match mode {
@@ -2435,19 +2447,25 @@ mod tests {
             StaticMode::GrantsExtraVote,
             // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
             StaticMode::CastWithAlternativeCost {
-                cost: ManaCost::zero(),
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                },
+                timing_permission: None,
             },
             StaticMode::CastWithAlternativeCost {
-                cost: ManaCost::Cost {
-                    shards: vec![
-                        super::super::mana::ManaCostShard::White,
-                        super::super::mana::ManaCostShard::Blue,
-                        super::super::mana::ManaCostShard::Black,
-                        super::super::mana::ManaCostShard::Red,
-                        super::super::mana::ManaCostShard::Green,
-                    ],
-                    generic: 0,
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![
+                            super::super::mana::ManaCostShard::White,
+                            super::super::mana::ManaCostShard::Blue,
+                            super::super::mana::ManaCostShard::Black,
+                            super::super::mana::ManaCostShard::Red,
+                            super::super::mana::ManaCostShard::Green,
+                        ],
+                        generic: 0,
+                    },
                 },
+                timing_permission: None,
             },
             StaticMode::Other("Custom".to_string()),
         ];

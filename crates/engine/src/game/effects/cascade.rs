@@ -27,13 +27,12 @@ pub fn resolve(
         return Err(EffectError::InvalidParam("Expected Cascade".to_string()));
     }
 
-    // CR 202.3b + CR 702.85a: Read source MV from the stack spell object.
-    // `mana_cost.mana_value()` contributes 0 for {X} shards (CR 107.3b), so
-    // add `cost_x_paid` to reflect the chosen value of X on the stack.
+    // CR 202.3b + CR 202.3e + CR 702.85a: Read source MV from the stack spell object.
+    // `mana_value_with_x` includes cost_x_paid to reflect the chosen value of X.
     let source_mv = state
         .objects
         .get(&ability.source_id)
-        .map(|obj| obj.mana_cost.mana_value() + obj.cost_x_paid.unwrap_or(0))
+        .map(|obj| obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
         .unwrap_or(0);
 
     // CR 603.3a: Re-read the controller from the source spell at resolution

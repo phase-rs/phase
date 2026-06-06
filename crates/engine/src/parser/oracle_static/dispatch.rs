@@ -1898,6 +1898,8 @@ pub(crate) fn parse_static_line_inner(
     // CR 603.2d: Trigger doubling — "triggers an additional time".
     //
     // Cause classification by phrasing:
+    // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
+    //   Prodigy (ControlledCreatureDealtDamage).
     // - "attacking causes" — Isshin, Two Heavens as One (CreatureAttacking).
     // - "entering" / "enters the battlefield" / "enters" — Panharmonicon-class
     //   (EntersBattlefield). Panharmonicon itself names "artifact or creature
@@ -1908,7 +1910,11 @@ pub(crate) fn parse_static_line_inner(
     //   unrestricted `Any` cause; the doubler's `affected` filter narrows
     //   which source's triggers qualify.
     if nom_primitives::scan_contains(tp.lower, "triggers an additional time") {
-        let cause = if nom_primitives::scan_contains(tp.lower, "attacking causes") {
+        let cause = if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
+            || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
+        {
+            TriggerCause::ControlledCreatureDealtDamage
+        } else if nom_primitives::scan_contains(tp.lower, "attacking causes") {
             TriggerCause::CreatureAttacking
         } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
             TriggerCause::CreatureDying

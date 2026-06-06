@@ -7,7 +7,7 @@ use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode, CostResume, GameState,
-    PayCostKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    LandPlayRecord, PayCostKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -988,6 +988,7 @@ mod auto_pass_decision_tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             Vec::new(),
             copy_id,
@@ -4590,7 +4591,13 @@ pub(super) fn begin_pending_trigger_target_selection(
     }
 
     let ability = trigger.ability.clone();
-    let player = trigger.controller;
+    // CR 601.2c + CR 603.3d + CR 109.5: a targeted "of their choice" trigger routes
+    // target selection to the scoped (upkeep) player, not the source's controller.
+    let player = ability
+        .target_chooser
+        .as_ref()
+        .and_then(|f| crate::game::targeting::resolve_effect_player_ref(state, &ability, f))
+        .unwrap_or(trigger.controller);
     let source_id = trigger.source_id;
     let target_constraints = trigger.target_constraints.clone();
     let description = trigger.description.clone();
@@ -4716,6 +4723,20 @@ fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: 
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.played_from_zone = Some(zone);
     }
+}
+
+fn record_land_played_from_zone(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    zone: Zone,
+) {
+    mark_land_played_from_zone(state, object_id, zone);
+    state
+        .lands_played_this_turn_by_player
+        .entry(player)
+        .or_default()
+        .push_back(LandPlayRecord { from_zone: zone });
 }
 
 fn handle_play_land(
@@ -4986,7 +5007,7 @@ fn handle_play_land(
                     )
                 {
                     state.lands_played_this_turn += 1;
-                    mark_land_played_from_zone(state, object_id, origin_zone);
+                    record_land_played_from_zone(state, player, object_id, origin_zone);
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     record_exile_play_permission(state, exile_permission_source);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
@@ -5014,7 +5035,7 @@ fn handle_play_land(
             // Increment counters now — the land play is committed, only the ETB
             // effect is pending.
             state.lands_played_this_turn += 1;
-            mark_land_played_from_zone(state, object_id, origin_zone);
+            record_land_played_from_zone(state, player, object_id, origin_zone);
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
             record_exile_play_permission(state, exile_permission_source);
@@ -5038,7 +5059,7 @@ fn handle_play_land(
 
     // Increment land counter
     state.lands_played_this_turn += 1;
-    mark_land_played_from_zone(state, object_id, origin_zone);
+    record_land_played_from_zone(state, player, object_id, origin_zone);
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
     record_exile_play_permission(state, exile_permission_source);

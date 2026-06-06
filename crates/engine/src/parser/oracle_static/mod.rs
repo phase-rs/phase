@@ -100,9 +100,9 @@ mod support {
         parse_compound_subject_rule_static, parse_property_descriptor,
         parse_rule_static_separator_nom, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
-        try_split_and_can_block_additional, try_split_and_cant_attack,
-        try_split_and_cant_be_blocked, try_split_and_cant_block, try_split_and_doesnt_untap,
-        try_split_and_must_attack_block,
+        try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
+        try_split_and_cant_attack, try_split_and_cant_be_attached, try_split_and_cant_be_blocked,
+        try_split_and_cant_block, try_split_and_doesnt_untap, try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{
@@ -124,7 +124,9 @@ mod support {
     pub(super) use super::{lower_static_ir, parse_static_line};
 }
 
-pub(crate) use cost_mod::parse_spells_alternative_cost;
+pub(crate) use cost_mod::{
+    parse_cast_spells_alternative_cost_multi, parse_spells_alternative_cost,
+};
 pub(crate) use evasion::classify_block_exception;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,

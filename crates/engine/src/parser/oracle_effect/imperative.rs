@@ -3199,6 +3199,7 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             // Step 4 continuation absorption upgrades this to MayChooseNewTargets
             // when "you may choose new targets for the copy" follows (CR 707.10c).
             retarget: CopyRetargetPermission::KeepOriginalTargets,
+            copier: None,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { attachment, target } => {

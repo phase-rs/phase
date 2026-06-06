@@ -1601,6 +1601,97 @@ mod tests {
         );
     }
 
+    /// CR 119.7 + CR 608.2c: Screaming Nemesis's rider end-to-end. A
+    /// `GenericEffect { affected: ParentTarget, CantGainLife }` whose parent
+    /// (the redirect) targeted a PLAYER must lock exactly that player against
+    /// life gain; the same effect whose parent targeted a CREATURE must lock
+    /// NO player (CR 119.7 governs players only). This proves the player-gating
+    /// is intrinsic to the `ParentTarget`->TargetRef binding, not a parser
+    /// guess.
+    #[test]
+    fn parent_target_cant_gain_life_locks_player_target_only() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::statics::StaticMode;
+
+        let make_def = || {
+            StaticDefinition::new(StaticMode::CantGainLife)
+                .affected(TargetFilter::ParentTarget)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantGainLife,
+                }])
+        };
+        let make_effect = || Effect::GenericEffect {
+            static_abilities: vec![make_def()],
+            duration: Some(Duration::Permanent),
+            target: None,
+        };
+
+        // Case 1: parent target is a player -> that player is locked.
+        {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Screaming Nemesis".to_string(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                make_effect(),
+                vec![TargetRef::Player(PlayerId(1))],
+                source,
+                PlayerId(0),
+            )
+            .duration(Duration::Permanent);
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(
+                crate::game::static_abilities::player_has_cant_gain_life(&state, PlayerId(1)),
+                "player redirect target must be locked against life gain"
+            );
+            assert!(
+                !crate::game::static_abilities::player_has_cant_gain_life(&state, PlayerId(0)),
+                "the source's controller must NOT be locked"
+            );
+        }
+
+        // Case 2: parent target is a creature -> NO player is locked (CR 119.7).
+        {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Screaming Nemesis".to_string(),
+                Zone::Battlefield,
+            );
+            let creature = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+            let ability = ResolvedAbility::new(
+                make_effect(),
+                vec![TargetRef::Object(creature)],
+                source,
+                PlayerId(0),
+            )
+            .duration(Duration::Permanent);
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            assert!(
+                !crate::game::static_abilities::player_has_cant_gain_life(&state, PlayerId(0)),
+                "creature redirect target must not lock its controller (CR 119.7)"
+            );
+            assert!(
+                !crate::game::static_abilities::player_has_cant_gain_life(&state, PlayerId(1)),
+                "creature redirect target must not lock its controller (CR 119.7)"
+            );
+        }
+    }
+
     #[test]
     fn generic_effect_binds_tracked_set_sentinel_to_latest_chain_set() {
         let mut state = GameState::new_two_player(42);
