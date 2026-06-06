@@ -146,7 +146,7 @@ fn legal_new_targets_for_stack_ability(
 /// (placeholder) spell effect. Returns that filter when `source_id` is an Aura,
 /// so retargeting an Aura spell (CR 115.7) enumerates the permanents it could
 /// legally enchant. Mirrors the Aura branch of `casting::spell_has_legal_targets`.
-fn aura_enchant_filter(state: &GameState, source_id: ObjectId) -> Option<TargetFilter> {
+pub(crate) fn aura_enchant_filter(state: &GameState, source_id: ObjectId) -> Option<TargetFilter> {
     let obj = state.objects.get(&source_id)?;
     if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
         return None;

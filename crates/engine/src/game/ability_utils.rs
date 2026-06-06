@@ -2342,6 +2342,49 @@ fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::abili
     }
 }
 
+/// CR 702.5a + CR 303.4: When `spec` is the host slot of an `Effect::Attach`
+/// whose `attachment` resolves to an object, return the host filter that object's
+/// Enchant keyword imposes, plus the attachment id/controller. `None` = no
+/// restriction (not an Attach, attachment unresolved, or aura_enchant_filter
+/// returned None: not an Aura / Aura with no Enchant keyword). No restriction ⇒
+/// ANY battlefield permanent is legal (CR 702.5a; mirrors the no-Enchant
+/// else-branch in sba::is_valid_attachment_target).
+fn attach_host_enchant_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &TargetSlotSpec,
+    selected_slots: &[Option<TargetRef>],
+) -> Option<(TargetFilter, ObjectId, PlayerId)> {
+    // Walk the effect + sub_ability chain (mirrors collect_target_slot_specs) to
+    // find the Attach whose host `target` filter is the one we're enumerating.
+    let mut current = Some(ability);
+    let mut attachment_filter: Option<&TargetFilter> = None;
+    while let Some(node) = current {
+        if let Effect::Attach { attachment, target } = &node.effect {
+            if target == &spec.filter {
+                attachment_filter = Some(attachment);
+                break;
+            }
+        }
+        current = node.sub_ability.as_deref();
+    }
+    let attachment_filter = attachment_filter?;
+
+    // Resolve the attachment (the moved Aura) to a concrete object id.
+    let attachment_id = match attachment_filter {
+        TargetFilter::SelfRef => ability.source_id,
+        TargetFilter::ParentTarget => selected_slots.iter().find_map(|sel| match sel {
+            Some(TargetRef::Object(id)) => Some(*id),
+            _ => None,
+        })?,
+        _ => return None,
+    };
+
+    let filter = crate::game::effects::change_targets::aura_enchant_filter(state, attachment_id)?;
+    let controller = state.objects.get(&attachment_id)?.controller;
+    Some((filter, attachment_id, controller))
+}
+
 fn is_per_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
     if ability.target_choice_timing != TargetChoiceTiming::Stack {
         return false;
@@ -2653,6 +2696,29 @@ fn legal_targets_for_selected_slot(
             targeting::find_legal_targets(state, &spec.filter, controller, ability.source_id)
         }
     };
+
+    // CR 702.5a + CR 303.4j: An Aura being attached may only go to a host it can
+    // legally enchant. Restrict offered hosts to those matching the moved aura's own
+    // Enchant filter; no Enchant keyword => no restriction (any host).
+    if let Some((enchant_filter, aura_id, aura_controller)) =
+        attach_host_enchant_filter(state, ability, spec, selected_slots)
+    {
+        let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+            aura_id,
+            aura_controller,
+        );
+        legal.retain(|t| match t {
+            TargetRef::Object(id) => {
+                crate::game::filter::matches_target_filter(state, *id, &enchant_filter, &ctx)
+            }
+            TargetRef::Player(pid) => crate::game::filter::player_matches_target_filter_in_state(
+                state,
+                &enchant_filter,
+                *pid,
+                Some(aura_controller),
+            ),
+        });
+    }
 
     // CR 601.2c + CR 115.3: within one instance of "target", the same object
     // can't be chosen twice. Remove objects already chosen in prior slots of

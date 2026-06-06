@@ -1275,7 +1275,7 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
 ///
 /// CR 301.5: Equipment carries no `Keyword::Enchant`, so legality reduces to
 /// the printed "on the battlefield" requirement.
-fn is_valid_attachment_target(
+pub(crate) fn is_valid_attachment_target(
     state: &GameState,
     attacher_id: crate::types::identifiers::ObjectId,
     target_id: crate::types::identifiers::ObjectId,
