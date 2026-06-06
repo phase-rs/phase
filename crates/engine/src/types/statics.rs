@@ -563,12 +563,12 @@ pub enum CostModifyMode {
     Minimum,
 }
 
-/// CR 702.122c + CR 702.171 + CR 702.184: How a creature's effective power is
-/// computed when tapped to crew, saddle, or station a permanent.
+/// CR 702.122c: How a creature's contributed power is modified when it crews a
+/// Vehicle, saddles a Mount, or stations a permanent. See [`StaticMode::CrewContribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CrewContributionKind {
-    /// "as though its power were N greater" — contribute `power + N`.
-    PowerDelta(i32),
+    /// "as though its power were N greater" — contribute `power + delta`.
+    PowerDelta { delta: i32 },
     /// "using its toughness rather than its power" — contribute `toughness`.
     ToughnessInsteadOfPower,
 }
@@ -602,6 +602,13 @@ impl FromStr for CrewContributionKind {
         }
         Err(format!("unknown CrewContributionKind: {s}"))
     }
+/// The keyword action being performed. `StaticMode::CrewContribution` stores the
+/// exact named actions it modifies. CR 702.122 / 702.171 / 702.184.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrewAction {
+    Crew,
+    Saddle,
+    Station,
 }
 
 /// All static ability modes from Forge's static ability registry.
@@ -1143,12 +1150,14 @@ pub enum StaticMode {
     CantBlockAlone,
     /// CR 702.122c: This creature can't crew Vehicles.
     CantCrew,
-    /// CR 702.122c + CR 702.171 + CR 702.184: Modifies the effective power this
-    /// creature contributes when tapped to crew, saddle, or station. Scope rides
-    /// on `StaticDefinition::affected` (`SelfRef` for "~ crews Vehicles …";
-    /// controlled-creature filter for Stoic Star-Captain class).
+    /// CR 702.122c / CR 702.171a / CR 702.184a: This creature contributes to a
+    /// crew/saddle/station cost as though its power were modified (Reckoner
+    /// Bankbuster: "as though its power were 2 greater") or using its toughness
+    /// instead of its power (Giant Ox). `actions` records which keyword actions
+    /// the modifier applies to, since a card may name only some of them.
     CrewContribution {
         kind: CrewContributionKind,
+        actions: Vec<CrewAction>,
     },
     MayLookAtTopOfLibrary,
 
@@ -1332,6 +1341,10 @@ impl Hash for StaticMode {
             }
             StaticMode::ActivateAsInstant { cost_category } => {
                 cost_category.hash(state);
+            }
+            StaticMode::CrewContribution { kind, actions } => {
+                kind.hash(state);
+                actions.hash(state);
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
@@ -1620,6 +1633,10 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
             StaticMode::CantCrew => write!(f, "CantCrew"),
+            // Debug format, one-way (mirrors CantBeBlockedBy). No from_str reconstruction.
+            StaticMode::CrewContribution { kind, actions } => {
+                write!(f, "CrewContribution({kind:?},{actions:?})")
+            }
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),

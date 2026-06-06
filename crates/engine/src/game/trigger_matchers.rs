@@ -24,6 +24,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::ChangesZone | TriggerMode::Evolve => match_changes_zone,
         TriggerMode::Evolved => match_evolved,
         TriggerMode::ChangesZoneAll => match_changes_zone_all,
+        // CR 702.55c: Haunt payoff — fires from exile when the haunted creature
+        // dies; resolved through the `ExileLinkKind::Haunt` link.
+        TriggerMode::HauntedCreatureDies => crate::game::haunt::match_haunted_creature_dies,
         TriggerMode::DamageDone
         | TriggerMode::DamageDoneOnce
         | TriggerMode::DamageAll
@@ -211,6 +214,11 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Core matchers with real logic
     r.insert(TriggerMode::ChangesZone, match_changes_zone);
     r.insert(TriggerMode::ChangesZoneAll, match_changes_zone_all);
+    // CR 702.55c: Haunt payoff — fires from exile when the haunted creature dies.
+    r.insert(
+        TriggerMode::HauntedCreatureDies,
+        crate::game::haunt::match_haunted_creature_dies,
+    );
     r.insert(TriggerMode::DamageDone, match_damage_done);
     r.insert(TriggerMode::DamageDoneOnce, match_damage_done);
     r.insert(TriggerMode::DamageAll, match_damage_done);

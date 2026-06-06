@@ -251,11 +251,16 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         // `UntilSourceLeaves` links are intentionally preserved here because
         // `check_exile_returns` runs later in the priority loop and consumes
         // them to return the exiled cards (CR 610.3a).
+        // CR 702.55b + CR 702.55c: `Haunt` links are likewise preserved — the haunted
+        // creature leaving the battlefield (its death) is exactly when the
+        // card's haunt-payoff trigger reads the link to fire from exile. The
+        // link is pruned later, when the haunting card itself leaves exile.
         state.exile_links.retain(|link| {
             link.source_id != object_id
                 || matches!(
                     link.kind,
                     crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+                        | crate::types::game_state::ExileLinkKind::Haunt
                 )
         });
     }

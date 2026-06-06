@@ -6730,6 +6730,26 @@ fn try_parse_event(
 fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let mut def = make_base();
 
+    // CR 702.55c: Haunt payoff — "When the creature {this card|it} haunts dies".
+    // The standalone form appears on instant/sorcery haunt cards (Cry of
+    // Contrition, Seize the Soul); the creature-form disjunct ("~ enters or the
+    // creature it haunts dies") is split off at synthesis. The trigger functions
+    // in the exile zone, where the haunting card lives (CR 702.55b).
+    if (
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        tag("the creature "),
+        alt((tag("this card "), tag("it "))),
+        tag("haunts dies"),
+    )
+        .parse(lower)
+        .is_ok()
+    {
+        def.mode = TriggerMode::HauntedCreatureDies;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        def.trigger_zones = vec![Zone::Exile];
+        return Some((TriggerMode::HauntedCreatureDies, def));
+    }
+
     if matches!(lower, "whenever chaos ensues" | "when chaos ensues") {
         def.mode = TriggerMode::ChaosEnsues;
         return Some((TriggerMode::ChaosEnsues, def));

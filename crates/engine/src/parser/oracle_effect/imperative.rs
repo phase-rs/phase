@@ -326,6 +326,33 @@ fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
         .map(|qty| QuantityExpr::Ref { qty })
 }
 
+/// CR 119.3 + CR 102.1: "gain 1 life for each player" (a/an/1) → the count of
+/// every player in the game (`PlayerFilter::All`). Narrow to the one-life-per
+/// form, the only shape that occurs (Benediction of Moons); other multipliers
+/// fall through to the generic quantity paths. `text` is the remainder after
+/// the "gain" verb, lowercased.
+fn parse_gain_life_per_player(after_gain_lower: &str) -> Option<QuantityExpr> {
+    // `(1|a|an) life for each player(s)` — `players` first so the longer tag
+    // wins; the optional trailing period is consumed so `all_consuming` accepts
+    // both the sentence-final and mid-clause forms.
+    all_consuming((
+        alt((
+            tag::<_, _, OracleError<'_>>("1 life for each "),
+            tag("a life for each "),
+            tag("an life for each "),
+        )),
+        alt((tag("players"), tag("player"))),
+        opt(tag(".")),
+    ))
+    .parse(after_gain_lower.trim())
+    .ok()
+    .map(|_| QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount {
+            filter: crate::types::ability::PlayerFilter::All,
+        },
+    })
+}
+
 pub(super) fn parse_numeric_imperative_ast(
     text: &str,
     lower: &str,
@@ -367,6 +394,13 @@ pub(super) fn parse_numeric_imperative_ast(
 
     if let Some(after_gain) = parse_life_verb_remainder(text, lower, "gain", "gains") {
         let after_lower = after_gain.to_ascii_lowercase();
+        // CR 119.3 + CR 102.1: "gain N life for each player" — the life gained is
+        // the number of players (the per-each amount is 1). Benediction of Moons.
+        // Probed before the bare-quantity fallback, which would otherwise parse
+        // "1" and silently drop the "for each player" multiplier.
+        if let Some(amount) = parse_gain_life_per_player(&after_lower) {
+            return Some(NumericImperativeAst::GainLife { amount });
+        }
         // CR 119.3: Handle "life equal to {quantity}" — dynamic amount from game state.
         // CR 119.3: target-relative quantity refs ("target creature's
         // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,

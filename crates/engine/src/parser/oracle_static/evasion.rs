@@ -1657,6 +1657,75 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
     None
 }
 
+/// CR 702.122c / 702.171a / 702.184a: nom parser for the crew/saddle/station
+/// power-contribution modifier predicate. Composes the named action-list prefix
+/// (which records the affected keyword actions) with the modifier tail.
+fn parse_crew_contribution_predicate_nom(
+    input: &str,
+) -> OracleResult<'_, (CrewContributionKind, Vec<CrewAction>)> {
+    let (input, actions) = alt((
+        value(
+            vec![CrewAction::Saddle, CrewAction::Crew],
+            tag::<_, _, OracleError<'_>>("saddles mounts and crews vehicles"),
+        ),
+        value(
+            vec![CrewAction::Crew, CrewAction::Station],
+            tag("crews vehicles and stations permanents"),
+        ),
+        value(vec![CrewAction::Crew], tag("crews vehicles")),
+    ))
+    .parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, kind) = alt((
+        map(
+            (
+                tag::<_, _, OracleError<'_>>("as though its power were "),
+                nom_primitives::parse_number,
+                tag(" greater"),
+            ),
+            |(_, n, _)| CrewContributionKind::PowerDelta { delta: n as i32 },
+        ),
+        value(
+            CrewContributionKind::ToughnessInsteadOfPower,
+            tag("using its toughness rather than its power"),
+        ),
+    ))
+    .parse(input)?;
+    Ok((input, (kind, actions)))
+}
+
+/// CR 702.122c / 702.171a / 702.184a: "<subject> crews Vehicles [/ saddles
+/// Mounts / stations permanents] as though its power were N greater" or "…
+/// using its toughness rather than its power" — a continuous static that
+/// modifies the creature's contributed power when paying a crew/saddle/station
+/// cost (Reckoner Bankbuster, the "Roads" cycle, Giant Ox, Stoic Star-Captain).
+pub(crate) fn parse_crew_contribution_static(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let (subject_lower, (kind, actions), rest) =
+        nom_primitives::scan_preceded(&lower, parse_crew_contribution_predicate_nom)?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let subject = text[..subject_lower.len()].trim();
+    let affected = parse_rule_static_subject_filter(subject)?;
+    let mode = StaticMode::CrewContribution { kind, actions };
+    // CR 613.1: a self-referential modifier lives directly on the creature's own
+    // `static_definitions` (read by `active_static_definitions`). A modifier
+    // granted to a group ("Each creature you control crews … as though its power
+    // were 2 greater", Stoic Star-Captain) must be propagated onto each affected
+    // creature via `AddStaticMode` so the same lookup observes it — mirroring how
+    // a granted `CantCrew` propagates.
+    let def = if matches!(affected, TargetFilter::SelfRef) {
+        StaticDefinition::new(mode).affected(affected)
+    } else {
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddStaticMode { mode }])
+    };
+    Some(def.description(text.to_string()))
+}
+
 /// Nom 8.0 parser for the combat-tax body.
 ///
 /// Grammar (case-insensitive):

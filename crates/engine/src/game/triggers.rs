@@ -1816,10 +1816,24 @@ fn collect_pending_triggers(
                         .iter()
                         .any(|s| s == "Assassin");
                 let is_commander = source_obj.is_commander;
+                // CR 702.76a + CR 608.2i: snapshot the controller and the source's
+                // creature types AT DAMAGE TIME (LKI) before any later mutation.
+                let controller = source_obj.controller;
+                let source_subtypes = source_obj.card_types.subtypes.clone();
                 if is_assassin_creature || is_commander {
                     state
                         .assassin_or_commander_dealt_combat_damage_this_turn
-                        .insert(source_obj.controller);
+                        .insert(controller);
+                }
+                // CR 702.76a: record this source's creature types under its
+                // controller so Prowl can later check "had any of this spell's
+                // creature types". A source with no subtypes contributes nothing.
+                if !source_subtypes.is_empty() {
+                    state.creature_types_dealt_combat_damage_this_turn.extend(
+                        source_subtypes
+                            .into_iter()
+                            .map(|creature_type| (controller, creature_type)),
+                    );
                 }
             }
         }
@@ -18647,6 +18661,76 @@ mod dedup_regression_tests {
             "Assassin combat damage must seed the Freerunning eligibility ledger \
              with the source's controller (P0); ledger = {:?}",
             state.assassin_or_commander_dealt_combat_damage_this_turn,
+        );
+    }
+
+    /// CR 702.76a + CR 608.2i: A creature with a creature type dealing combat
+    /// damage to a player seeds the Prowl creature-type ledger under its
+    /// controller, snapshot at damage time. (Unlike the Freerunning ledger, this
+    /// is recorded for any controlled source's types, not gated on Assassin.)
+    #[test]
+    fn typed_creature_combat_damage_seeds_prowl_creature_type_ledger() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let rogue = make_creature(&mut state, PlayerId(0), "Rogue Test", 1, 1);
+        {
+            // Subtype must live on both rows to survive the layer flush (see the
+            // assassin test above).
+            let obj = state.objects.get_mut(&rogue).unwrap();
+            obj.card_types.subtypes.push("Rogue".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let event = GameEvent::DamageDealt {
+            source_id: rogue,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        };
+        process_triggers(&mut state, &[event]);
+
+        assert!(
+            state
+                .creature_types_dealt_combat_damage_this_turn
+                .contains(&(PlayerId(0), "Rogue".to_string())),
+            "Rogue combat damage must seed the Prowl creature-type ledger under P0; ledger = {:?}",
+            state.creature_types_dealt_combat_damage_this_turn,
+        );
+    }
+
+    /// CR 702.76a: Non-combat damage must NOT seed the Prowl ledger — the
+    /// predicate is "was dealt COMBAT damage this turn".
+    #[test]
+    fn noncombat_damage_does_not_seed_prowl_ledger() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let rogue = make_creature(&mut state, PlayerId(0), "Rogue Test", 1, 1);
+        {
+            let obj = state.objects.get_mut(&rogue).unwrap();
+            obj.card_types.subtypes.push("Rogue".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let event = GameEvent::DamageDealt {
+            source_id: rogue,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        };
+        process_triggers(&mut state, &[event]);
+
+        assert!(
+            state
+                .creature_types_dealt_combat_damage_this_turn
+                .is_empty(),
+            "non-combat damage must not seed the Prowl ledger; ledger = {:?}",
+            state.creature_types_dealt_combat_damage_this_turn,
         );
     }
 

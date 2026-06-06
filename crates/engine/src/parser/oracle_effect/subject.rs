@@ -2643,6 +2643,11 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             | StaticMode::CantAttack
             | StaticMode::CantAttackOrBlock
             | StaticMode::CantCrew
+            // CR 702.122c: a granted crew/saddle/station power modifier (e.g. Stoic
+            // Star-Captain's "Each creature you control crews … as though its power
+            // were 2 greater") must propagate onto the affected creatures so the
+            // crew/saddle power summation observes it via active_static_definitions.
+            | StaticMode::CrewContribution { .. }
             | StaticMode::CantBeBlocked
             | StaticMode::CantBeBlockedBy { .. }
             | StaticMode::CantBeBlockedExceptBy { .. }

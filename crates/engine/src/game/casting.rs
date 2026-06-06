@@ -2541,6 +2541,29 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Freerunning);
     }
 
+    // CR 702.76a: Prowl — a hand alternative cost legal when a source the caster
+    // controlled dealt combat damage to a player this turn and, at that time, had
+    // any of this spell's creature types. The per-turn creature-type ledger is
+    // snapshot at damage time (`creature_types_dealt_combat_damage_this_turn`).
+    if obj.zone == Zone::Hand
+        && effective_spell_keywords(state, player, object_id)
+            .iter()
+            .any(|k| matches!(k, Keyword::Prowl(_)))
+        && state
+            .creature_types_dealt_combat_damage_this_turn
+            .iter()
+            .any(|(controller, creature_type)| {
+                *controller == player
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|spell_type| spell_type == creature_type)
+            })
+    {
+        candidates.push(CastingVariant::Prowl);
+    }
+
     // CR 702.74a + CR 118.9: Evoke is a static alternative cost usable from any
     // zone the card can be cast from; surface it as a hand candidate so the gate
     // offers it when the printed cost is unaffordable. effective_spell_keywords
@@ -3241,6 +3264,19 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.76a: When the caller opted into Prowl, substitute the prowl mana cost
+    // from the `Keyword::Prowl(cost)` payload (printed or granted). Mirrors the
+    // Freerunning/Overload cost-selection pattern.
+    let prowl_cost = if casting_variant == CastingVariant::Prowl {
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Prowl(cost) => Some(cost.clone()),
+                _ => None,
+            })
+    } else {
+        None
+    };
     // CR 702.34a: When the flashback cost is purely non-mana (e.g. Battle Screech's
     // "tap three white creatures"), the spell pays no mana through the normal flow.
     // For compound flashback costs ("{1}{U}, Pay 3 life") we still want the mana
@@ -3340,6 +3376,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(effective_dash_cost_for_path)
             .or(effective_blitz_cost_for_path)
             .or(freerunning_cost)
+            .or(prowl_cost)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
     let has_granted_flash =
@@ -3509,10 +3546,10 @@ fn prepare_spell_cast_with_variant_override_inner(
 }
 
 /// CR 601.2f: Apply every NON-FLOOR cost modifier to `mana_cost` in CR-correct
-/// order: self-spell statics → battlefield statics → affinity → one-shot pending
-/// reductions. Floors (Trinisphere class) are deliberately excluded so callers
-/// can run them LAST against a concrete cost. Every pass reads `&GameState` only
-/// and is idempotent against a fresh base cost.
+/// order: self-spell statics → battlefield statics → affinity → undaunted →
+/// one-shot pending reductions. Floors (Trinisphere class) are deliberately
+/// excluded so callers can run them LAST against a concrete cost. Every pass
+/// reads `&GameState` only and is idempotent against a fresh base cost.
 fn apply_non_floor_cost_modifiers(
     state: &GameState,
     player: PlayerId,
@@ -3525,13 +3562,15 @@ fn apply_non_floor_cost_modifiers(
     apply_battlefield_cost_modifiers(state, player, object_id, mana_cost);
     // CR 702.41a: Affinity — reduce cost by {1} per matching permanent controlled.
     apply_affinity_reduction(state, player, object_id, mana_cost);
+    // CR 702.125a: Undaunted — reduce cost by {1} per living opponent you have.
+    apply_undaunted_reduction(state, player, object_id, mana_cost);
     // CR 601.2f: One-shot pending cost reductions ("the next spell costs {N} less").
     apply_pending_spell_cost_reductions(state, player, object_id, mana_cost);
 }
 
 /// CR 601.2f: Apply every cost modifier to `mana_cost` in CR-correct order:
-/// self-spell statics → battlefield statics → affinity → one-shot pending
-/// reductions → cost floor (Trinisphere, applied last). Every pass reads
+/// self-spell statics → battlefield statics → affinity → undaunted → one-shot
+/// pending reductions → cost floor (Trinisphere, applied last). Every pass reads
 /// `&GameState` only and is idempotent against a fresh base cost, so this
 /// helper can be re-run after an additional cost (Bargain) is declared.
 pub(super) fn apply_all_cost_modifiers(
@@ -4397,6 +4436,37 @@ fn apply_affinity_reduction(
                 .count() as u32;
             apply_cost_mod_to_mana(mana_cost, &ManaCost::generic(1), count, false);
         }
+    }
+}
+
+/// CR 702.125a: Apply Undaunted cost reduction from the spell's own keyword.
+///
+/// "This spell costs {1} less to cast for each opponent you have." CR 702.125b:
+/// players who have left the game are not counted — `players::opponents` already
+/// returns only living opponents, so its length is exactly the CR count. Reduces
+/// the spell's generic mana cost by that count (floor at 0; colored pips are
+/// never reduced — `apply_cost_mod_to_mana` handles both).
+fn apply_undaunted_reduction(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    mana_cost: &mut ManaCost,
+) {
+    if !state.objects.contains_key(&spell_id) {
+        return;
+    }
+    let instances = effective_spell_keywords(state, caster, spell_id)
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Undaunted))
+        .count() as u32;
+    if instances > 0 {
+        let opponents = super::players::opponents(state, caster).len() as u32;
+        apply_cost_mod_to_mana(
+            mana_cost,
+            &ManaCost::generic(1),
+            opponents * instances,
+            false,
+        );
     }
 }
 
@@ -12784,6 +12854,131 @@ mod tests {
         );
     }
 
+    // ----- CR 702.76a: Prowl alternative-cost casts -------------------------
+
+    fn prowl_test_cost() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        }
+    }
+
+    /// A Tribal sorcery in P0's hand with creature type "Rogue", prowl {1}{U},
+    /// and a printed cost of {3}{U}{U}.
+    fn add_prowl_spell(state: &mut GameState) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(2076),
+            PlayerId(0),
+            "Prowl Test Spell".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.card_types.subtypes.push("Rogue".to_string());
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 3,
+        };
+        obj.keywords.push(Keyword::Prowl(prowl_test_cost()));
+        object_id
+    }
+
+    /// CR 702.76a: With no matching combat damage this turn, Prowl is not offered.
+    #[test]
+    fn prowl_unavailable_without_matching_combat_damage() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_prowl_spell(&mut state);
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            !candidates.contains(&CastingVariant::Prowl),
+            "Prowl must not be a candidate without a matching ledger entry; got {candidates:?}",
+        );
+    }
+
+    /// CR 702.76a: When a Rogue source the caster controlled dealt combat damage
+    /// this turn, Prowl is surfaced and the prowl cost replaces the printed cost.
+    #[test]
+    fn prowl_available_after_matching_creature_type_combat_damage() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_prowl_spell(&mut state);
+        state
+            .creature_types_dealt_combat_damage_this_turn
+            .insert((PlayerId(0), "Rogue".to_string()));
+
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            candidates.contains(&CastingVariant::Prowl),
+            "Prowl must be a candidate when a matching creature type dealt combat damage; \
+             got {candidates:?}",
+        );
+
+        let prepared = prepare_spell_cast_with_variant_override(
+            &state,
+            PlayerId(0),
+            object_id,
+            Some(CastingVariant::Prowl),
+        )
+        .expect("prowl override must prepare a spell cast");
+        assert_eq!(prepared.casting_variant, CastingVariant::Prowl);
+        assert_eq!(
+            prepared.mana_cost,
+            prowl_test_cost(),
+            "prepared mana cost must be the prowl alt cost, not the printed cost",
+        );
+        assert_ne!(
+            prepared.mana_cost, state.objects[&object_id].mana_cost,
+            "printed mana cost must NOT be paid when Prowl override is selected",
+        );
+    }
+
+    /// CR 702.76a: The recorded creature type must overlap one of the spell's
+    /// creature types — an unrelated type does not unlock Prowl.
+    #[test]
+    fn prowl_requires_creature_type_overlap() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_prowl_spell(&mut state); // spell is a Rogue
+        state
+            .creature_types_dealt_combat_damage_this_turn
+            .insert((PlayerId(0), "Goblin".to_string()));
+
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            !candidates.contains(&CastingVariant::Prowl),
+            "Prowl must require a creature-type overlap; Goblin damage must not unlock a \
+             Rogue spell; got {candidates:?}",
+        );
+    }
+
+    /// CR 702.76a + CR 514: The Prowl creature-type ledger is turn-scoped.
+    #[test]
+    fn prowl_ledger_resets_at_turn_cleanup() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_prowl_spell(&mut state);
+        state
+            .creature_types_dealt_combat_damage_this_turn
+            .insert((PlayerId(0), "Rogue".to_string()));
+        assert!(
+            casting_variant_candidates(&state, PlayerId(0), object_id)
+                .contains(&CastingVariant::Prowl),
+            "Prowl must be a candidate before cleanup",
+        );
+
+        crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+
+        assert!(
+            state
+                .creature_types_dealt_combat_damage_this_turn
+                .is_empty(),
+            "ledger must be cleared by start_next_turn",
+        );
+        assert!(
+            !casting_variant_candidates(&state, PlayerId(0), object_id)
+                .contains(&CastingVariant::Prowl),
+            "Prowl must NOT be a candidate after turn cleanup",
+        );
+    }
+
     /// CR 702.173a + CR 604.1 + CR 611.2c: Freerunning **granted** by a
     /// `CastWithKeyword` static (Ezio Auditore da Firenze: "Assassin
     /// spells you cast have freerunning {B}{B}.") must be visible to
@@ -17468,6 +17663,163 @@ mod tests {
             ),
             other => panic!("expected ManaCost::Cost, got {other:?}"),
         }
+    }
+
+    fn create_black_sorcery_with_keywords(
+        state: &mut GameState,
+        card_id: u64,
+        name: &str,
+        generic: u32,
+        keywords: Vec<Keyword>,
+    ) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic,
+        };
+        obj.keywords.extend(keywords);
+        obj_id
+    }
+
+    /// CR 702.125a: Undaunted reduces the spell's generic cost by {1} per living
+    /// opponent. In a two-player game P0 has one opponent → {6}{B} becomes {5}{B}.
+    #[test]
+    fn undaunted_reduces_generic_by_living_opponent_count() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_black_sorcery_with_keywords(
+            &mut state,
+            2125,
+            "Undaunted Spell",
+            6,
+            vec![Keyword::Undaunted],
+        );
+
+        let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_non_floor_cost_modifiers(
+            &state,
+            PlayerId(0),
+            obj_id,
+            &mut mana_cost,
+        );
+        assert_eq!(
+            mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 5,
+            },
+            "one opponent reduces generic from 6 to 5; the colored pip is untouched",
+        );
+    }
+
+    /// CR 702.125a: Without the keyword there is no reduction.
+    #[test]
+    fn undaunted_no_op_without_keyword() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id =
+            create_black_sorcery_with_keywords(&mut state, 2126, "Plain Spell", 6, Vec::new());
+
+        let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_non_floor_cost_modifiers(
+            &state,
+            PlayerId(0),
+            obj_id,
+            &mut mana_cost,
+        );
+        assert_eq!(
+            mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 6,
+            },
+            "no Undaunted keyword → no reduction",
+        );
+    }
+
+    /// CR 702.125a + CR 702.125c: In a four-player game, each Undaunted
+    /// instance reduces by {1} for each of P0's three opponents. Two instances
+    /// therefore reduce {8}{B} by {6}, leaving {2}{B}.
+    #[test]
+    fn undaunted_multiple_instances_scale_by_living_opponents() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let obj_id = create_black_sorcery_with_keywords(
+            &mut state,
+            2128,
+            "Double Undaunted Spell",
+            8,
+            vec![Keyword::Undaunted, Keyword::Undaunted],
+        );
+
+        let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_non_floor_cost_modifiers(
+            &state,
+            PlayerId(0),
+            obj_id,
+            &mut mana_cost,
+        );
+        assert_eq!(
+            mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 2,
+            },
+            "two Undaunted instances across three opponents reduce generic from 8 to 2",
+        );
+    }
+
+    /// CR 702.125b: Players who have left the game are not counted. With the only
+    /// opponent eliminated, the discount is zero.
+    #[test]
+    fn undaunted_does_not_count_eliminated_opponents() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_black_sorcery_with_keywords(
+            &mut state,
+            2127,
+            "Undaunted Spell",
+            6,
+            vec![Keyword::Undaunted],
+        );
+        // CR 702.125b: the lone opponent has left the game. `players::is_alive`
+        // reads the per-player `is_eliminated` flag, so set that (not the
+        // `eliminated_players` audit list).
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(1))
+            .unwrap()
+            .is_eliminated = true;
+
+        let mut mana_cost = state.objects.get(&obj_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_non_floor_cost_modifiers(
+            &state,
+            PlayerId(0),
+            obj_id,
+            &mut mana_cost,
+        );
+        assert_eq!(
+            mana_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 6,
+            },
+            "an eliminated opponent must not be counted (CR 702.125b)",
+        );
     }
 
     /// CR 903.8 + CR 601.2f: A commander cast from the command zone still uses

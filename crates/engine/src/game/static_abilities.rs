@@ -9,7 +9,9 @@ use crate::types::ability::{ContinuousModification, Duration, TargetFilter, Type
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
+use crate::types::statics::{
+    CostPaymentProhibition, CrewAction, CrewContributionKind, ProhibitionScope, StaticMode,
+};
 
 /// Handler function type for static ability modes.
 /// Receives the `StaticMode` variant the handler was registered under.
@@ -1159,55 +1161,37 @@ pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
     })
 }
 
-/// CR 702.122c + CR 702.171 + CR 702.184: Effective power a creature contributes
-/// when tapped to crew, saddle, or station a permanent.
-pub fn object_crew_contribution_power(state: &GameState, creature_id: ObjectId) -> i32 {
-    let Some(creature) = state.objects.get(&creature_id) else {
+/// CR 702.122c / 702.171a / 702.184a: The power a creature contributes toward a
+/// crew / saddle / station cost, after applying any active `CrewContribution`
+/// static whose action list contains `action`. "Using its toughness rather than
+/// its power" substitutes the creature's toughness for its base power; "as
+/// though its power were N greater" adds N. Multiple deltas accumulate. The
+/// result is clamped to 0, matching the plain `power.unwrap_or(0).max(0)` it
+/// replaces.
+pub fn object_crew_power_contribution(
+    state: &GameState,
+    object_id: ObjectId,
+    action: CrewAction,
+) -> i32 {
+    let Some(obj) = state.objects.get(&object_id) else {
         return 0;
     };
-    let base_power = creature.power.unwrap_or(0).max(0);
-    let base_toughness = creature.toughness.unwrap_or(0).max(0);
-
-    let context = StaticCheckContext {
-        target_id: Some(creature_id),
-        ..Default::default()
-    };
-
-    let mut power_delta: i32 = 0;
-    let mut use_toughness = false;
-
-    for (source_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
-        let StaticMode::CrewContribution { kind } = &def.mode else {
-            continue;
-        };
-        if let Some(ref affected) = def.affected {
-            if !static_filter_matches(state, &context, affected, source_obj.id) {
+    let mut base = obj.power.unwrap_or(0);
+    let mut delta = 0;
+    for def in super::functioning_abilities::active_static_definitions(state, obj) {
+        if let StaticMode::CrewContribution { kind, actions } = &def.mode {
+            if !actions.contains(&action) {
                 continue;
             }
-        }
-        if !static_condition_matches_context(
-            state,
-            source_obj.id,
-            source_obj.controller,
-            def,
-            &context,
-        ) {
-            continue;
-        }
-        match kind {
-            crate::types::statics::CrewContributionKind::PowerDelta(n) => power_delta += *n,
-            crate::types::statics::CrewContributionKind::ToughnessInsteadOfPower => {
-                use_toughness = true;
+            match kind {
+                CrewContributionKind::ToughnessInsteadOfPower => {
+                    base = obj.toughness.unwrap_or(0);
+                }
+                CrewContributionKind::PowerDelta { delta: d } => delta += *d,
             }
         }
     }
-
-    let base = if use_toughness {
-        base_toughness
-    } else {
-        base_power
-    };
-    (base + power_delta).max(0)
+    (base + delta).max(0)
 }
 
 /// Check if a static ability named `name` applies to a specific object

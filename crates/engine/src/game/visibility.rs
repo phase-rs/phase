@@ -158,19 +158,38 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     }
 
     // CR 406.3: A card exiled face down can't be examined by any player
-    // except when an instruction allows it. Foretell is the only modeled
-    // face-down-exile look permission today; other face-down exile classes
-    // (Necropotence / Asmodeus by default, Bomat-style look permissions until
-    // their static is modeled) fail closed and redact the card for every
-    // viewer.
+    // except when an instruction allows it. Two modeled look-permission classes:
+    // Foretell (the owner may look, CR 702.143e) and Hideaway (CR 702.75a — the
+    // controller of the permanent that exiled the card may look, keyed on the
+    // dedicated `ExileLinkKind::HideawayLookable` link). Every other face-down
+    // exile class — including plain `TrackedBySource` exiles that grant no
+    // look-permission (Bomat Courier's "(You can't look at it.)", Necropotence,
+    // Asmodeus) — fails closed and redacts the card for every viewer.
     let hidden_facedown_exile_ids: Vec<ObjectId> = filtered
         .exile
         .iter()
         .copied()
         .filter(|obj_id| {
             state.objects.get(obj_id).is_some_and(|obj| {
-                let viewer_can_examine = obj.foretold && can_view_private_for_player(obj.owner);
-                obj.face_down && !viewer_can_examine
+                if !obj.face_down {
+                    return false;
+                }
+                // CR 702.143e: foretold card — its owner may look.
+                let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
+                // CR 702.75a + CR 607.2a: the controller of the permanent that
+                // exiled this card under Hideaway may look at it. Keyed on the
+                // dedicated `HideawayLookable` link kind so plain
+                // `TrackedBySource` face-down exiles that grant no look-permission
+                // (Bomat Courier, Necropotence, Asmodeus) stay redacted.
+                let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
+                    link.exiled_id == *obj_id
+                        && link.kind == crate::types::game_state::ExileLinkKind::HideawayLookable
+                        && state
+                            .objects
+                            .get(&link.source_id)
+                            .is_some_and(|src| can_view_private_for_player(src.controller))
+                });
+                !(foretell_ok || hideaway_lookable_by_viewer)
             })
         })
         .collect();

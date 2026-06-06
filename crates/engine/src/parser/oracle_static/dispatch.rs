@@ -1172,6 +1172,12 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 702.122c / 702.171a / 702.184a: crew/saddle/station power-contribution
+    // modifier (Reckoner Bankbuster, Giant Ox, Stoic Star-Captain).
+    if let Some(def) = parse_crew_contribution_static(&text) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_source_power_block_restriction(&text) {
         return Some(def);
     }

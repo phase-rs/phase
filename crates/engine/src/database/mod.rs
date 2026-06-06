@@ -4,6 +4,8 @@ pub mod embalm_eternalize;
 pub mod encore;
 #[cfg(feature = "forge")]
 pub mod forge;
+pub mod haunt;
+pub mod hideaway;
 pub mod legality;
 pub mod mtgjson;
 pub mod oracle_loader;
@@ -15,6 +17,8 @@ pub mod unearth;
 mod embalm_eternalize_tests;
 #[cfg(test)]
 mod encore_tests;
+#[cfg(test)]
+mod hideaway_tests;
 #[cfg(test)]
 mod unearth_tests;
 
