@@ -576,7 +576,7 @@ pub enum CrewContributionKind {
 impl fmt::Display for CrewContributionKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CrewContributionKind::PowerDelta(n) => write!(f, "PowerDelta({n})"),
+            CrewContributionKind::PowerDelta { delta } => write!(f, "PowerDelta({delta})"),
             CrewContributionKind::ToughnessInsteadOfPower => {
                 write!(f, "ToughnessInsteadOfPower")
             }
@@ -597,11 +597,13 @@ impl FromStr for CrewContributionKind {
         {
             return inner
                 .parse::<i32>()
-                .map(CrewContributionKind::PowerDelta)
+                .map(|delta| CrewContributionKind::PowerDelta { delta })
                 .map_err(|e| e.to_string());
         }
         Err(format!("unknown CrewContributionKind: {s}"))
     }
+}
+
 /// The keyword action being performed. `StaticMode::CrewContribution` stores the
 /// exact named actions it modifies. CR 702.122 / 702.171 / 702.184.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
