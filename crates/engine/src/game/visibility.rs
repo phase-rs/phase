@@ -183,28 +183,34 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // permanents controlled by another player." Face-down objects on the
     // battlefield (manifest / morph / disguise / cloak) and any future modeled
     // face-down stack spells keep their real identity in `back_face`. That
-    // hidden identity is look-permission of the *controller* alone — strip
+    // hidden identity is look-permission of the *controller* alone. Strip
     // `back_face` for every viewer who is not the controller so the underlying
     // card never leaks to opponents over the wire. The controller (turn-control
-    // aware, matching the rest of this filter) retains it so their client can
-    // show them the face. DFC back faces (`face_down == false`) are public
-    // information and are intentionally left untouched.
-    let leaked_facedown_object_ids: Vec<ObjectId> = filtered
+    // aware, matching the rest of this filter) retains it and gets only display
+    // identity projected onto the filtered object; CR 708.2 face-down rules
+    // characteristics stay intact. DFC back faces (`face_down == false`) are
+    // public information and are intentionally left untouched.
+    let facedown_object_ids: Vec<ObjectId> = filtered
         .battlefield
         .iter()
         .copied()
         .chain(filtered.stack.iter().map(|entry| entry.id))
         .filter(|obj_id| {
-            state.objects.get(obj_id).is_some_and(|obj| {
-                obj.face_down
-                    && obj.back_face.is_some()
-                    && !can_view_private_for_player(obj.controller)
-            })
+            state
+                .objects
+                .get(obj_id)
+                .is_some_and(|obj| obj.face_down && obj.back_face.is_some())
         })
         .collect();
-    for obj_id in leaked_facedown_object_ids {
-        if let Some(obj) = filtered.objects.get_mut(&obj_id) {
-            obj.back_face = None;
+    for obj_id in facedown_object_ids {
+        if let Some(source) = state.objects.get(&obj_id) {
+            if let Some(obj) = filtered.objects.get_mut(&obj_id) {
+                if can_view_private_for_player(source.controller) {
+                    reveal_face_down_identity_to_controller(obj);
+                } else {
+                    redact_face_down_identity_from_observer(obj);
+                }
+            }
         }
     }
 
@@ -582,6 +588,23 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.source_related_token_ids.clear();
         obj.foretold = false;
     }
+}
+
+fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::GameObject) {
+    if let Some(back_face) = &obj.back_face {
+        obj.name = back_face.name.clone();
+        obj.base_name = back_face.name.clone();
+        obj.printed_ref = back_face.printed_ref.clone();
+        obj.base_printed_ref = back_face.printed_ref.clone();
+    }
+}
+
+fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::GameObject) {
+    obj.name = "Hidden Card".to_string();
+    obj.base_name = "Hidden Card".to_string();
+    obj.printed_ref = None;
+    obj.base_printed_ref = None;
+    obj.back_face = None;
 }
 
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its
@@ -1676,6 +1699,9 @@ mod tests {
         let controller_view = filter_state_for_viewer(&state, controller);
         let controller_obj = controller_view.objects.get(&secret).unwrap();
         assert!(controller_obj.face_down);
+        assert_eq!(controller_obj.name, "Secret Manifest");
+        assert_eq!(controller_obj.power, Some(2));
+        assert_eq!(controller_obj.toughness, Some(2));
         let controller_back = controller_obj
             .back_face
             .as_ref()
@@ -1688,6 +1714,7 @@ mod tests {
         let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
         let opponent_obj = opponent_view.objects.get(&secret).unwrap();
         assert!(opponent_obj.face_down);
+        assert_eq!(opponent_obj.name, "Hidden Card");
         assert!(
             opponent_obj.back_face.is_none(),
             "opponent must not see the manifested card's hidden identity"
