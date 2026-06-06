@@ -2777,8 +2777,10 @@ fn parse_total_mana_value_target_constraint(text: &str) -> Option<TargetSelectio
 pub(super) fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
-    if let Some((_, spec)) = strip_bounded_targets_placeholder(after_each_of) {
-        return Some(spec);
+    if let Some((remainder, spec)) = strip_bounded_targets_placeholder(after_each_of) {
+        if remainder.is_empty() {
+            return Some(spec);
+        }
     }
     let (_, multi_target) = strip_optional_target_prefix(after_each_of);
     multi_target
@@ -2884,6 +2886,11 @@ const MULTI_TARGET_VERBS: &[&str] = &[
     "exile", "tap", "untap", "goad", "return", "destroy", "choose",
 ];
 
+pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
+    ("one or two targets", 1, 2),
+    ("one, two, or three targets", 1, 3),
+];
+
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
 /// number of targets, unlike "up to X target creatures".
@@ -2925,13 +2932,13 @@ fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> 
 /// Returns the unconsumed remainder and a bounded `MultiTargetSpec` with min ≥ 1.
 fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpec)> {
     let lower = text.to_ascii_lowercase();
-    for (phrase, min, max) in [
-        ("one or two targets", 1usize, 2usize),
-        ("one, two, or three targets", 1, 3),
-    ] {
+    for &(phrase, min, max) in BOUNDED_TARGET_PHRASES {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
             let consumed = lower.len() - rest.len();
-            return Some((text[consumed..].trim_start(), MultiTargetSpec::fixed(min, max)));
+            return Some((
+                text[consumed..].trim_start(),
+                MultiTargetSpec::fixed(min, max),
+            ));
         }
     }
     None
