@@ -25,6 +25,25 @@ pub(crate) enum DiscardOutcome {
     NeedsReplacementChoice(PlayerId),
 }
 
+/// CR 701.9a: To discard a card, move it from its owner's hand to their graveyard.
+/// CR 702.187b: Mayhem's cast permission is gated by the graveyard card having
+/// been discarded this turn, so stamp that marker at the same completion point
+/// that records the discard event.
+pub(crate) fn complete_discard_to_graveyard(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player_id: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    zones::move_to_zone(state, object_id, Zone::Graveyard, events);
+    crate::game::restrictions::record_discard(state, player_id);
+    crate::game::restrictions::record_card_discarded(state, object_id);
+    events.push(GameEvent::Discarded {
+        player_id,
+        object_id,
+    });
+}
+
 /// CR 701.9a: To discard a card, move it from owner's hand to their graveyard.
 /// If targets specify specific cards, discard those; otherwise discard from end of hand.
 pub fn resolve(
@@ -104,14 +123,7 @@ pub fn resolve(
                             object_id: oid,
                             ..
                         } => {
-                            zones::move_to_zone(state, oid, Zone::Graveyard, events);
-                            crate::game::restrictions::record_discard(state, pid);
-                            // CR 702.187b: Mark the graveyard card for Mayhem's gate.
-                            crate::game::restrictions::record_card_discarded(state, oid);
-                            events.push(GameEvent::Discarded {
-                                player_id: pid,
-                                object_id: oid,
-                            });
+                            complete_discard_to_graveyard(state, oid, pid, events);
                         }
                         zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                             // Replacement redirected (e.g., Madness → exile instead of graveyard).
@@ -263,14 +275,7 @@ pub(crate) fn discard_as_cost_with_source(
                 object_id: oid,
                 ..
             } => {
-                zones::move_to_zone(state, oid, Zone::Graveyard, events);
-                crate::game::restrictions::record_discard(state, pid);
-                // CR 702.187b: Mark the graveyard card for Mayhem's gate.
-                crate::game::restrictions::record_card_discarded(state, oid);
-                events.push(GameEvent::Discarded {
-                    player_id: pid,
-                    object_id: oid,
-                });
+                complete_discard_to_graveyard(state, oid, pid, events);
             }
             zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                 // CR 614.1c: Replacement redirected destination (e.g., Madness → exile).
@@ -444,6 +449,7 @@ mod tests {
         assert!(matches!(outcome, DiscardOutcome::Complete));
         assert!(state.exile.contains(&card));
         assert!(!state.players[0].graveyard.contains(&card));
+        assert_eq!(state.objects[&card].discarded_turn, None);
         assert!(events.iter().any(
             |event| matches!(event, GameEvent::Discarded { object_id, .. } if *object_id == card)
         ));
@@ -581,6 +587,7 @@ mod tests {
         assert!(state
             .players_who_discarded_card_this_turn
             .contains(&PlayerId(0)));
+        assert_eq!(state.objects[&card].discarded_turn, Some(state.turn_number));
         assert_eq!(
             state
                 .cards_discarded_this_turn_by_player

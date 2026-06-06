@@ -20,7 +20,6 @@ use super::engine::{
 use super::engine_priority;
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
-use super::restrictions;
 use super::zones;
 
 pub(super) fn handle_optional_effect_choice(
@@ -922,14 +921,7 @@ pub(super) fn handle_ward_discard_choice(
         ));
     }
 
-    zones::move_to_zone(state, chosen[0], Zone::Graveyard, events);
-    restrictions::record_discard(state, player);
-    // CR 702.187b: Mark the graveyard card for Mayhem's gate.
-    restrictions::record_card_discarded(state, chosen[0]);
-    events.push(GameEvent::Discarded {
-        player_id: player,
-        object_id: chosen[0],
-    });
+    effects::discard::complete_discard_to_graveyard(state, chosen[0], player, events);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,
