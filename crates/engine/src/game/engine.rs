@@ -20028,7 +20028,8 @@ mod crew_tests {
             .static_definitions
             .push(
                 StaticDefinition::new(StaticMode::CrewContribution {
-                    kind: CrewContributionKind::PowerDelta(2),
+                    kind: CrewContributionKind::PowerDelta { delta: 2 },
+                    actions: vec![CrewAction::Crew],
                 })
                 .affected(TargetFilter::SelfRef),
             );
@@ -20073,6 +20074,7 @@ mod crew_tests {
             .push(
                 StaticDefinition::new(StaticMode::CrewContribution {
                     kind: CrewContributionKind::ToughnessInsteadOfPower,
+                    actions: vec![CrewAction::Crew],
                 })
                 .affected(TargetFilter::SelfRef),
             );

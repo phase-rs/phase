@@ -3533,6 +3533,7 @@ fn crew_vehicle_candidates(
         player,
         eligible_creatures,
         crew_power as i32,
+        crate::types::statics::CrewAction::Crew,
         |creature_ids| GameAction::CrewVehicle {
             vehicle_id,
             creature_ids,
@@ -3555,6 +3556,7 @@ fn saddle_mount_candidates(
         player,
         eligible_creatures,
         saddle_power as i32,
+        crate::types::statics::CrewAction::Saddle,
         |creature_ids| GameAction::SaddleMount {
             mount_id,
             creature_ids,
@@ -3571,6 +3573,7 @@ fn minimal_power_subset_candidates<F>(
     player: PlayerId,
     eligible_creatures: &[crate::types::identifiers::ObjectId],
     threshold: i32,
+    action: crate::types::statics::CrewAction,
     wrap: F,
 ) -> Vec<CandidateAction>
 where
@@ -3581,11 +3584,15 @@ where
     let mut creatures_with_power: Vec<(crate::types::identifiers::ObjectId, i32)> =
         eligible_creatures
             .iter()
-            .map(|&id| {
-                (
-                    id,
-                    crate::game::static_abilities::object_crew_contribution_power(state, id),
-                )
+            .filter_map(|&id| {
+                state.objects.get(&id).map(|_| {
+                    (
+                        id,
+                        crate::game::static_abilities::object_crew_power_contribution(
+                            state, id, action,
+                        ),
+                    )
+                })
             })
             .collect();
     // Ascending-power sort with id tie-break makes enumeration deterministic

@@ -1404,7 +1404,6 @@ impl Hash for StaticMode {
             // CR 107.4f: Parameterized by ManaColor — hash the color so distinct
             // grants (Black vs Red) don't collide.
             StaticMode::PayLifeAsColoredMana { color } => color.hash(state),
-            StaticMode::CrewContribution { kind } => kind.hash(state),
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
@@ -1450,7 +1449,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantCauseSacrificeOrExile { cause } => {
                 write!(f, "CantCauseSacrificeOrExile({cause})")
             }
-            StaticMode::CrewContribution { kind } => write!(f, "CrewContribution({kind})"),
+            StaticMode::CrewContribution { kind, .. } => write!(f, "CrewContribution({kind})"),
             StaticMode::SuppressTriggers { events, .. } => {
                 let parts: Vec<String> = events.iter().map(|e| e.to_string()).collect();
                 write!(f, "SuppressTriggers({})", parts.join("+"))
@@ -1635,10 +1634,6 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
             StaticMode::CantCrew => write!(f, "CantCrew"),
-            // Debug format, one-way (mirrors CantBeBlockedBy). No from_str reconstruction.
-            StaticMode::CrewContribution { kind, actions } => {
-                write!(f, "CrewContribution({kind:?},{actions:?})")
-            }
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),
@@ -2069,7 +2064,10 @@ impl FromStr for StaticMode {
                     .and_then(|s| s.strip_suffix(')'))
                 {
                     if let Ok(kind) = CrewContributionKind::from_str(inner) {
-                        return Ok(StaticMode::CrewContribution { kind });
+                        return Ok(StaticMode::CrewContribution {
+                            kind,
+                            actions: vec![CrewAction::Crew],
+                        });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if other.starts_with("SuppressTriggers(") {

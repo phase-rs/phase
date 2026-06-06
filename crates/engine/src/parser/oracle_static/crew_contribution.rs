@@ -14,8 +14,8 @@ fn parse_crew_contribution_modifier(input: &str) -> OracleResult<'_, CrewContrib
                 nom_primitives::parse_number,
                 tag(" greater"),
             ),
-            |(_, delta, _)| {
-                CrewContributionKind::PowerDelta(i32::try_from(delta).unwrap_or(i32::MAX))
+            |(_, delta, _)| CrewContributionKind::PowerDelta {
+                delta: i32::try_from(delta).unwrap_or(i32::MAX),
             },
         ),
         value(
@@ -28,23 +28,33 @@ fn parse_crew_contribution_modifier(input: &str) -> OracleResult<'_, CrewContrib
 
 /// CR 702.122 / CR 702.171 / CR 702.184: Keyword-action targets this creature
 /// may crew, saddle, or station — composed as one axis, not enumerated per card.
-fn parse_crew_contribution_actions(input: &str) -> OracleResult<'_, ()> {
-    alt((
-        value((), tag("crews vehicles")),
-        value((), tag("saddles mounts and crews vehicles")),
-        value((), tag("crews vehicles and stations permanents")),
-        value((), tag("crews vehicles and station permanents")),
+fn parse_crew_contribution_actions(input: &str) -> OracleResult<'_, Vec<CrewAction>> {
+    let (input, actions) = alt((
+        value(vec![CrewAction::Crew], tag("crews vehicles")),
+        value(
+            vec![CrewAction::Saddle, CrewAction::Crew],
+            tag("saddles mounts and crews vehicles"),
+        ),
+        value(
+            vec![CrewAction::Crew, CrewAction::Station],
+            tag("crews vehicles and stations permanents"),
+        ),
+        value(
+            vec![CrewAction::Crew, CrewAction::Station],
+            tag("crews vehicles and station permanents"),
+        ),
     ))
     .parse(input)?;
-    Ok((input, ()))
+    Ok((input, actions))
 }
 
 fn finish_crew_contribution(
     text: &str,
     kind: CrewContributionKind,
+    actions: Vec<CrewAction>,
     affected: TargetFilter,
 ) -> StaticDefinition {
-    StaticDefinition::new(StaticMode::CrewContribution { kind })
+    StaticDefinition::new(StaticMode::CrewContribution { kind, actions })
         .affected(affected)
         .description(text.to_string())
 }
@@ -54,26 +64,28 @@ fn finish_crew_contribution(
 pub(crate) fn parse_crew_contribution(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     if let Some(rest) = nom_tag_tp(tp, "each creature you control ") {
         let rest_lower = rest.lower;
-        let ((kind, affected), _) = nom_on_lower(rest.original, rest_lower, |i| {
-            let (i, _) = parse_crew_contribution_actions(i)?;
+        let ((kind, actions, affected), _) = nom_on_lower(rest.original, rest_lower, |i| {
+            let (i, actions) = parse_crew_contribution_actions(i)?;
+            let (i, _) = space1.parse(i)?;
             let (i, kind) = parse_crew_contribution_modifier(i)?;
             let (i, _) = opt(tag(".")).parse(i)?;
             let (i, _) = eof(i)?;
             let affected =
                 TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
-            Ok((i, (kind, affected)))
+            Ok((i, (kind, actions, affected)))
         })?;
-        return Some(finish_crew_contribution(text, kind, affected));
+        return Some(finish_crew_contribution(text, kind, actions, affected));
     }
 
-    let ((kind, affected), _) = nom_on_lower(tp.original, tp.lower, |i| {
+    let ((kind, actions, affected), _) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, _) = alt((tag("~ "), tag("this creature "))).parse(i)?;
-        let (i, _) = parse_crew_contribution_actions(i)?;
+        let (i, actions) = parse_crew_contribution_actions(i)?;
+        let (i, _) = space1.parse(i)?;
         let (i, kind) = parse_crew_contribution_modifier(i)?;
         let (i, _) = opt(tag(".")).parse(i)?;
         let (i, _) = eof(i)?;
-        Ok((i, (kind, TargetFilter::SelfRef)))
+        Ok((i, (kind, actions, TargetFilter::SelfRef)))
     })?;
 
-    Some(finish_crew_contribution(text, kind, affected))
+    Some(finish_crew_contribution(text, kind, actions, affected))
 }

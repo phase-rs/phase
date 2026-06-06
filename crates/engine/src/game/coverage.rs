@@ -6749,8 +6749,8 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantCrew => {
                 effective_lower.contains("can't crew") || effective_lower.contains("cannot crew")
             }
-            StaticMode::CrewContribution { kind } => match kind {
-                crate::types::statics::CrewContributionKind::PowerDelta(n) => {
+            StaticMode::CrewContribution { kind, .. } => match kind {
+                crate::types::statics::CrewContributionKind::PowerDelta { delta: n } => {
                     effective_lower.contains("as though its power were")
                         && effective_lower.contains(&format!("{n} greater"))
                 }
