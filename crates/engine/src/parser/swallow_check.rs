@@ -1061,6 +1061,7 @@ fn def_has_activation_restriction(def: &AbilityDefinition) -> bool {
     !def.activation_restrictions.is_empty() || def.sorcery_speed
 }
 
+// CR 702.122 + CR 602.5b: Crew with a once-per-turn activation limit.
 fn keyword_has_activation_limit(keyword: &Keyword) -> bool {
     matches!(
         keyword,
