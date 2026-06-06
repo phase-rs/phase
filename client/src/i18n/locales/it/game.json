@@ -1166,6 +1166,10 @@
     "adventureTag": "(Avventura)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1176,6 +1180,11 @@
     "warpAltLabel": "Lancia con Warp",
     "warpAltSuffix": "(esiliata al passo finale)",
     "warpSubtitle": "Lancia {{name}} normalmente o usa il suo costo di Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Lancia normalmente",
+    "dashAltLabel": "Lancia con Dash",
+    "dashAltSuffix": "(ottiene rapidità, torna in mano al passo finale)",
+    "dashSubtitle": "Lancia {{name}} normalmente o usa il suo costo di Dash.",
     "evokeEyebrow": "Evocare",
     "evokeNormalLabel": "Lancia normalmente",
     "evokeAltLabel": "Lancia con Evocare",

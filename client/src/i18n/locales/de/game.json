@@ -1166,6 +1166,10 @@
     "adventureTag": "(Abenteuer)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1176,6 +1180,11 @@
     "warpAltLabel": "Mit Warp wirken",
     "warpAltSuffix": "(wird im Endschritt ins Exil geschickt)",
     "warpSubtitle": "Wirke {{name}} normal oder nutze seine Warp-Kosten.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Normal wirken",
+    "dashAltLabel": "Mit Dash wirken",
+    "dashAltSuffix": "(erhält Eile, kehrt im Endschritt auf die Hand zurück)",
+    "dashSubtitle": "Wirke {{name}} normal oder nutze seine Dash-Kosten.",
     "evokeEyebrow": "Herbeirufen",
     "evokeNormalLabel": "Normal wirken",
     "evokeAltLabel": "Mit Herbeirufen wirken",

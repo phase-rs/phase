@@ -1171,6 +1171,10 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1181,6 +1185,11 @@
     "warpAltLabel": "Cast with Warp",
     "warpAltSuffix": "(exiles at end step)",
     "warpSubtitle": "Cast {{name}} normally or use its Warp cost.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Cast Normally",
+    "dashAltLabel": "Cast with Dash",
+    "dashAltSuffix": "(gains haste, returns to hand at end step)",
+    "dashSubtitle": "Cast {{name}} normally or use its Dash cost.",
     "evokeEyebrow": "Evoke",
     "evokeNormalLabel": "Cast Normally",
     "evokeAltLabel": "Cast with Evoke",

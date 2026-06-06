@@ -1143,6 +1143,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     );
                 }
             }
+
+            // CR 702.109a: a dash-cast permanent gains haste and is returned to
+            // its owner's hand at the beginning of the next end step.
+            if casting_variant == CastingVariant::Dash {
+                crate::game::dash::install_dash_riders(state, entry.id, entry.controller);
+            }
+            // CR 702.152a: a blitz-cast permanent gains haste and a dies-draw
+            // trigger, and is sacrificed at the beginning of the next end step.
+            if casting_variant == CastingVariant::Blitz {
+                crate::game::blitz::install_blitz_riders(state, entry.id, entry.controller);
+            }
         }
     }
     // Activated abilities: source stays where it is, no zone movement

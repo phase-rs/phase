@@ -2,6 +2,12 @@ pub mod ability_utils;
 pub mod arithmetic;
 pub mod attractions;
 pub mod bending;
+pub mod blitz;
+// Tests for `blitz` live in a sibling file (declared here, not in `blitz.rs`,
+// so `blitz.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "blitz_tests.rs"]
+mod blitz_tests;
 pub mod bracket_estimate;
 pub mod casting;
 pub(crate) mod casting_costs;
@@ -18,6 +24,10 @@ pub mod commander;
 pub mod companion;
 pub mod cost_payability;
 pub mod coverage;
+pub mod dash;
+#[cfg(test)]
+#[path = "dash_tests.rs"]
+mod dash_tests;
 pub mod day_night;
 pub mod deck_loading;
 pub mod deck_validation;

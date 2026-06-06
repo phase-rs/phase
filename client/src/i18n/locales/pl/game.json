@@ -1166,6 +1166,10 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1176,6 +1180,11 @@
     "warpAltLabel": "Rzuć z Warp",
     "warpAltSuffix": "(wygnanie w kroku końcowym)",
     "warpSubtitle": "Rzuć {{name}} normalnie lub użyj jego kosztu Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Rzuć normalnie",
+    "dashAltLabel": "Rzuć z Dash",
+    "dashAltSuffix": "(zyskuje pośpiech, wraca do ręki w kroku końcowym)",
+    "dashSubtitle": "Rzuć {{name}} normalnie lub użyj jego kosztu Dash.",
     "evokeEyebrow": "Evoke",
     "evokeNormalLabel": "Rzuć normalnie",
     "evokeAltLabel": "Rzuć z Evoke",

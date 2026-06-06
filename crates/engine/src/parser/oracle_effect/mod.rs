@@ -17161,9 +17161,9 @@ mod tests {
         ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode,
         Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming,
-        TypeFilter, TypedFilter, ZoneRef,
+        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation, PtStat,
+        PtValue, PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
+        TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -31532,6 +31532,48 @@ mod tests {
                 assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
             }
             other => panic!("expected ControlsCount{{GE,Fixed(1)}}, got {other:?}"),
+        }
+    }
+
+    /// Issue #2016 (Bonder's Ornament): "{4}, {T}: Each player who controls a
+    /// permanent named Bonder's Ornament draws a card." The "who controls a
+    /// permanent named X" relative clause must be captured into
+    /// `PlayerFilter::ControlsCount` carrying the `Named` filter, with the
+    /// predicate ("draw a card") split off — NOT dropped. Pre-fix the `Named`
+    /// suffix parser greedily consumed the predicate verb into the name
+    /// (`Named { name: "Bonder's Ornament draws a card" }`), so the controls
+    /// clause matched nobody, the clause was discarded, and the scope collapsed
+    /// to plain `All` — making *every* player draw (the reported bug: an
+    /// opponent's Ornament drew the reporter a card despite controlling none).
+    #[test]
+    fn bonders_ornament_controls_named_permanent_scope() {
+        let (scope, result) = strip_each_player_subject(
+            "each player who controls a permanent named Bonder's Ornament draws a card",
+        );
+        assert_eq!(result, "draw a card");
+        match scope {
+            Some(PlayerFilter::ControlsCount {
+                relation,
+                filter,
+                comparator,
+                count,
+            }) => {
+                assert_eq!(relation, PlayerRelation::All);
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                match &filter {
+                    TargetFilter::Typed(tf) => assert!(
+                        tf.properties.iter().any(|p| matches!(
+                            p,
+                            crate::types::ability::FilterProp::Named { name }
+                                if name == "Bonder's Ornament"
+                        )),
+                        "filter must carry the exact card name, got {filter:?}"
+                    ),
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ControlsCount{{All,GE,Fixed(1)}}, got {other:?}"),
         }
     }
 

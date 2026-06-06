@@ -1166,6 +1166,10 @@
     "adventureTag": "(Aventura)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1176,6 +1180,11 @@
     "warpAltLabel": "Conjurar com Warp",
     "warpAltSuffix": "(exilada na etapa final)",
     "warpSubtitle": "Conjure {{name}} normalmente ou use seu custo de Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Conjurar Normalmente",
+    "dashAltLabel": "Conjurar com Dash",
+    "dashAltSuffix": "(ganha ímpeto, volta para a mão na etapa final)",
+    "dashSubtitle": "Conjure {{name}} normalmente ou use seu custo de Dash.",
     "evokeEyebrow": "Evocar",
     "evokeNormalLabel": "Conjurar Normalmente",
     "evokeAltLabel": "Conjurar com Evocar",

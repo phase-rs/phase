@@ -1279,37 +1279,93 @@ fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> 
     }
 }
 
-/// CR 201.2: Scan `name_text` (the lowercase text after "named ") for the
-/// first word boundary where a conjugated verb begins, indicating the card
-/// name has ended and a verb phrase follows. Returns the byte offset of the
-/// space preceding the verb, or `None` if no verb boundary is found.
+/// CR 201.2: Match a clause boundary that ends a card name in a board-filter
+/// "X named <CardName> …" phrase, scanned at word boundaries (most arms begin
+/// with a space; the comma arm begins with ","). A bare comma or " and " is NOT
+/// a terminator on its own — card names embed both ("Bruna, the Fading Light";
+/// "Gisa and Geralf") — so the name is never split on internal punctuation. The
+/// name ends only at a *clause-joining* connective: the controller suffix
+/// ("… you control"), a relative pronoun ("… that has flying"), the predicate
+/// verb that opens the enclosing relative clause ("… draws a card", "… loses 3
+/// life"), or a comma that introduces a *referential* clause about the named
+/// object ("…, it gains", "…, they draw"). The comma arm is pronoun-guarded:
+/// a legendary epithet after a comma is a noun phrase ("…, the Fading Light"),
+/// never a bare referential pronoun, so comma-bearing names stay whole while
+/// "Falkenrath Gorger, it gains" still terminates at "Falkenrath Gorger". This
+/// mirrors `oracle_effect::search::parse_name_terminator` (the search-zone
+/// analogue) but covers the board-filter predicate verbs rather than search
+/// follow-up actions.
 ///
-/// Delegates to `nom_primitives::scan_split_at_phrase` for word-boundary
-/// scanning with nom `tag()` combinators.
-fn find_verb_boundary_in_named(name_text: &str) -> Option<usize> {
-    // Conjugated 3rd-person verbs that commonly follow a card name in
-    // "each player who controls a permanent named X [verb]" patterns.
-    // Only verbs that do NOT appear in real MTG card names are included.
-    // Excluded: "gains" (Ill-Gotten Gains), "deals" (Orzhova, the Church
-    // of Deals), "gets" (Bird Gets the Worm), "has"/"is"/"are"/"enters"
-    // (too generic and appear in card names).
-    nom_primitives::scan_split_at_phrase(name_text, |i| {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("draws ")),
-            value((), tag("loses ")),
-            value((), tag("creates ")),
-            value((), tag("destroys ")),
-            value((), tag("discards ")),
-            value((), tag("exiles ")),
-            value((), tag("mills ")),
-            value((), tag("puts ")),
-            value((), tag("reveals ")),
-            value((), tag("sacrifices ")),
-            value((), tag("searches ")),
-        ))
-        .parse(i)
-    })
-    .map(|(prefix, _)| prefix.len().saturating_sub(1))
+/// The verb arms are third-person singular/plural present forms because the
+/// enclosing subject is a singular "permanent/creature named X" or the
+/// per-player iteration of "each player who controls a permanent named X"
+/// (issue #2016, Bonder's Ornament). They are kept as a single composable
+/// `alt()` over the predicate lead so the boundary covers the class, not one
+/// card.
+fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        // Controller-scope suffixes (CR 109.4). Longest-match-first.
+        value((), tag(" you don't control")),
+        value((), tag(" you control")),
+        value((), tag(" you own")),
+        value((), tag(" an opponent controls")),
+        value((), tag(" your opponents control")),
+        // Relative-pronoun clause leads (CR 201.2 descriptive clauses).
+        value((), tag(" that ")),
+        value((), tag(" with ")),
+        value((), tag(" without ")),
+        // Copular / state predicates opening a relative clause.
+        value((), tag(" is ")),
+        value((), tag(" are ")),
+        value((), tag(" has ")),
+        value((), tag(" have ")),
+        // Per-player / per-permanent action predicates (issue #2016 class:
+        // "… draws a card", "… loses N life", "… sacrifices a permanent").
+        // Excludes conjugated verbs that occur verbatim inside real card
+        // names — matching them would truncate the name: "gains" (Ill-Gotten
+        // Gains), "gets" (Bird Gets the Worm), "deals" (Orzhova, the Church of
+        // Deals). Plural/modal board-filter predicates ("get", "can't") are
+        // split upstream by the static parser before this terminator sees them.
+        value(
+            (),
+            (
+                tag(" "),
+                alt((
+                    tag("draws "),
+                    tag("loses "),
+                    tag("sacrifices "),
+                    tag("discards "),
+                    tag("creates "),
+                    tag("mills "),
+                    tag("destroys "),
+                    tag("exiles "),
+                    tag("puts "),
+                    tag("reveals "),
+                    tag("searches "),
+                )),
+            ),
+        ),
+        // CR 201.2: A comma that opens a referential clause about the named
+        // object ("Falkenrath Gorger, it gains"). Pronoun-guarded so a
+        // name-internal comma followed by an epithet noun phrase ("Bruna, the
+        // Fading Light") is preserved — legendary epithets never begin with a
+        // bare referential pronoun.
+        value(
+            (),
+            (
+                tag(", "),
+                alt((
+                    tag("it "),
+                    tag("they "),
+                    tag("he "),
+                    tag("she "),
+                    tag("you "),
+                    tag("its "),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
@@ -2095,12 +2151,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let remaining_named = lower[pos..].trim_start();
     let named_offset = lower[pos..].len() - remaining_named.len();
     if let Ok((name_text, _)) = tag::<_, _, OracleError<'_>>("named ").parse(remaining_named) {
-        // Name extends to end-of-clause markers: comma, period, conjugated
-        // verb at a word boundary (CR 201.2), or end-of-input.
-        let punct_end = name_text.find([',', '.']).unwrap_or(name_text.len());
-        let name_end = find_verb_boundary_in_named(name_text)
-            .unwrap_or(punct_end)
-            .min(punct_end);
+        // CR 201.2: The card name runs to the earliest *clause* boundary, NOT to
+        // the first comma/period. Card names legitimately contain commas and the
+        // word "and" ("Bruna, the Fading Light"; "Gisa and Geralf"), so splitting
+        // on bare punctuation truncates them, while scanning to end-of-string
+        // over-consumes the trailing relative-clause predicate. Issue #2016:
+        // "each player who controls a permanent named Bonder's Ornament draws a
+        // card" produced `Named { name: "Bonder's Ornament draws a card" }` — the
+        // predicate verb was swallowed into the name, so the controls-predicate
+        // matched nobody and the whole "who controls …" scope was dropped, making
+        // *every* player draw. Scan word boundaries (spaces, and commas for the
+        // pronoun-guarded comma-clause arm) and stop at the first clause-joining
+        // terminator (see `parse_named_filter_terminator`), which preserves
+        // comma/and-bearing names while ending the name at the controller
+        // suffix, relative pronoun, predicate verb, or referential comma clause.
+        let name_end = name_text
+            .char_indices()
+            .filter(|&(_, c)| c == ' ' || c == ',')
+            .find(|&(idx, _)| parse_named_filter_terminator(&name_text[idx..]).is_ok())
+            .map_or_else(
+                || name_text.find(['.', ':', ';']).unwrap_or(name_text.len()),
+                |(idx, _)| idx,
+            );
         let raw_name = name_text[..name_end].trim();
         if !raw_name.is_empty() {
             // Reconstruct original-case name from the same position in `text`
@@ -5014,6 +5086,50 @@ mod tests {
             TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
             _ => None,
         }
+    }
+
+    /// CR 201.2 (issue #2016): the "named <CardName>" suffix must terminate the
+    /// card name at the enclosing clause boundary instead of swallowing the
+    /// trailing predicate or controller suffix. Tests the boundary class, not a
+    /// single card: predicate verb, controller suffix, and relative pronoun all
+    /// terminate the name, while a comma-bearing legendary name is preserved.
+    #[test]
+    fn named_filter_terminates_at_clause_boundary() {
+        fn named_of(text: &str) -> (String, String) {
+            let mut ctx = ParseContext::default();
+            let (filter, rest) = parse_type_phrase_with_ctx(text, &mut ctx);
+            let name = typed_leg(&filter)
+                .and_then(|tf| {
+                    tf.properties.iter().find_map(|p| match p {
+                        FilterProp::Named { name } => Some(name.clone()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| panic!("expected a Named property in {filter:?}"));
+            (name, rest.to_string())
+        }
+
+        // Predicate verb terminates the name (Bonder's Ornament class).
+        let (name, rest) = named_of("a permanent named Bonder's Ornament draws a card");
+        assert_eq!(name, "Bonder's Ornament");
+        assert_eq!(rest, " draws a card");
+
+        // Controller suffix terminates the name.
+        let (name, _) = named_of("a creature named Storm Crow you control");
+        assert_eq!(name, "Storm Crow");
+
+        // Relative pronoun terminates the name.
+        let (name, _) = named_of("a creature named Storm Crow that has flying");
+        assert_eq!(name, "Storm Crow");
+
+        // A comma-bearing legendary name is preserved (no split on internal
+        // punctuation) when no clause boundary follows.
+        let (name, _) = named_of("a creature named Bruna, the Fading Light");
+        assert_eq!(name, "Bruna, the Fading Light");
+
+        // Period still ends the name.
+        let (name, _) = named_of("a creature named Storm Crow.");
+        assert_eq!(name, "Storm Crow");
     }
 
     fn is_stack_spell_leg(filter: &TargetFilter) -> bool {

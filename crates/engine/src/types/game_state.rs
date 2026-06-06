@@ -1727,6 +1727,12 @@ pub enum AlternativeCastKeyword {
     /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
     /// was cast for its evoke cost (CR 702.74b).
     Evoke,
+    /// CR 702.109a: Cast for the dash cost — the resolving permanent gains haste
+    /// and is returned to its owner's hand at the next end step.
+    Dash,
+    /// CR 702.152a: Cast for the blitz cost — the resolving permanent gains
+    /// haste and a dies-draw trigger, and is sacrificed at the next end step.
+    Blitz,
     /// CR 702.96a: Spell's text changes "target" to "each" (CR 702.96b-c).
     Overload,
     /// CR 702.103a: Spell becomes an Aura with enchant creature (CR 702.103b).
@@ -3933,6 +3939,14 @@ pub enum CastingVariant {
     /// the permanent enters tagged with `CastVariantPaid::Evoke`, which fires
     /// the synthesized intervening-if ETB sacrifice trigger.
     Evoke,
+    /// CR 702.109a: Cast from hand via Dash's alternative cost. On resolution,
+    /// `dash::install_dash_riders` grants the permanent haste and schedules a
+    /// next-end-step return to its owner's hand.
+    Dash,
+    /// CR 702.152a: Cast from hand via Blitz's alternative cost. On resolution,
+    /// `blitz::install_blitz_riders` grants the permanent haste and a dies-draw
+    /// trigger and schedules a next-end-step sacrifice.
+    Blitz,
     /// CR 702.62a: Cast from exile via Suspend's "play it without paying its
     /// mana cost" trigger after the last time counter was removed. On resolution
     /// of the resulting permanent, the stack handler tags
@@ -4068,6 +4082,8 @@ impl CastingVariant {
             | CastingVariant::Miracle
             | CastingVariant::Madness
             | CastingVariant::Evoke
+            | CastingVariant::Dash
+            | CastingVariant::Blitz
             | CastingVariant::Suspend
             | CastingVariant::Plot
             | CastingVariant::Foretell

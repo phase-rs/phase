@@ -1166,6 +1166,10 @@
     "adventureTag": "(Aventura)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
     "mutateEyebrow": "Mutate",
     "mutateNormalLabel": "Cast Normally",
     "mutateAltLabel": "Mutate",
@@ -1176,6 +1180,11 @@
     "warpAltLabel": "Lanzar con Distorsión",
     "warpAltSuffix": "(se exilia en el paso final)",
     "warpSubtitle": "Lanza {{name}} normalmente o usa su coste de Distorsión.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Lanzar normalmente",
+    "dashAltLabel": "Lanzar con Dash",
+    "dashAltSuffix": "(gana prisa, vuelve a la mano en el paso final)",
+    "dashSubtitle": "Lanza {{name}} normalmente o usa su coste de Dash.",
     "evokeEyebrow": "Evocar",
     "evokeNormalLabel": "Lanzar normalmente",
     "evokeAltLabel": "Lanzar con Evocar",
