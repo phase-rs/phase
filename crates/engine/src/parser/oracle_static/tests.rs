@@ -1671,6 +1671,31 @@ fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
 }
 
 #[test]
+fn green_goblin_graveyard_cast_cost_reduction_diagnostic() {
+    // Green Goblin: "Spells you cast from your graveyard cost {2} less to cast."
+    // Diagnostic: confirm this parses to a cost-reduction static (not dropped).
+    let def = parse_static_line("Spells you cast from your graveyard cost {2} less to cast.");
+    assert!(
+        def.is_some(),
+        "graveyard-cast cost reduction did not parse to a static",
+    );
+    let def = def.unwrap();
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::Cost { generic: 2, .. },
+                ..
+            }
+        ),
+        "expected ModifyCost Reduce by {{2}}, got mode={:?} affected={:?}",
+        def.mode,
+        def.affected,
+    );
+}
+
+#[test]
 fn chandras_incinerator_self_cost_reduction_uses_noncombat_damage_to_opponents() {
     let def = parse_static_line(
         "This spell costs {X} less to cast, where X is the total amount of noncombat damage dealt to your opponents this turn.",
