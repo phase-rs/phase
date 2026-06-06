@@ -446,7 +446,11 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                     || has_disturb_keyword(state, obj_id)
                     || retrace_has_discardable_land(state, player, obj_id)
                     || jumpstart_has_discardable_card(state, player, obj_id)
-                    || graveyard_has_enough_for_escape(state, player, obj_id))
+                    || graveyard_has_enough_for_escape(state, player, obj_id)
+                    // CR 702.187b: Mayhem is eligible only while the card was
+                    // discarded this turn.
+                    || (was_discarded_this_turn(state, obj_id)
+                        && super::keywords::effective_mayhem_cost(state, obj_id).is_some()))
         })
     }));
 

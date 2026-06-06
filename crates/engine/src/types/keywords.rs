@@ -2741,6 +2741,14 @@ mod tests {
             assert_eq!(shards.len(), 2); // BB
         }
 
+        // CR 702.187b: Mayhem carries a plain mana cost.
+        let mayhem = Keyword::from_str("Mayhem:1R").unwrap();
+        assert!(matches!(mayhem, Keyword::Mayhem(ManaCost::Cost { .. })));
+        if let Keyword::Mayhem(ManaCost::Cost { generic, shards }) = &mayhem {
+            assert_eq!(*generic, 1);
+            assert_eq!(shards.len(), 1); // R
+        }
+
         let ward = Keyword::from_str("Ward:2").unwrap();
         assert!(matches!(
             ward,
