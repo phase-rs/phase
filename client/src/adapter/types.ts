@@ -418,6 +418,7 @@ export type CastingVariant =
   | { type: "Escape" }
   | { type: "Retrace" }
   | { type: "Harmonize" }
+  | { type: "Mayhem" }
   | { type: "Flashback" }
   | { type: "Aftermath" }
   | {
