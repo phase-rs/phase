@@ -551,6 +551,8 @@ pub enum Keyword {
     /// `CastingVariant::Miracle` with the miracle mana cost.
     Miracle(ManaCost),
     Dash(ManaCost),
+    /// CR 702.119a-c: Emerge is an alternative cost paid by sacrificing a
+    /// creature and reducing the emerge cost by that creature's mana value.
     Emerge(ManaCost),
     /// CR 702.138: Escape — cast from graveyard for an alternative cost,
     /// exiling N other cards from your graveyard as an additional cost.

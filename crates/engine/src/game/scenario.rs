@@ -1465,6 +1465,9 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Evoke => {
                     "AlternativeCastChoice(Evoke)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Emerge => {
+                    "AlternativeCastChoice(Emerge)"
+                }
                 crate::types::game_state::AlternativeCastKeyword::Dash => {
                     "AlternativeCastChoice(Dash)"
                 }

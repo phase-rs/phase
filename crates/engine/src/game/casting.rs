@@ -2525,6 +2525,17 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Evoke);
     }
 
+    // CR 702.119a-c + CR 118.9: Emerge is a hand-zone alternative cost that
+    // requires sacrificing a creature and reducing the emerge cost by that
+    // creature's mana value.
+    if obj.zone == Zone::Hand
+        && effective_spell_keywords(state, player, object_id)
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Emerge(_)))
+    {
+        candidates.push(CastingVariant::Emerge);
+    }
+
     // CR 702.109a: Dash is an opt-in alternative cost from hand; surface it as a
     // candidate so the gate offers it (and so it is reachable when the printed
     // cost is unaffordable).
@@ -3001,6 +3012,21 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         (None, None)
     };
+    // CR 702.119a: When the caller explicitly opted into Emerge (via
+    // `variant_override = Some(CastingVariant::Emerge)`), substitute the emerge
+    // mana cost from the spell's effective `Keyword::Emerge(cost)`. The required
+    // sacrifice and mana-value reduction are paid later as a cost component
+    // (CR 702.119c, CR 601.2h).
+    let emerge_cost = if casting_variant == CastingVariant::Emerge {
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Emerge(cost) => Some(cost.clone()),
+                _ => None,
+            })
+    } else {
+        None
+    };
     // CR 702.103a: When the caller explicitly opted into Bestow (via
     // `variant_override = Some(CastingVariant::Bestow)`), substitute the bestow
     // mana cost taken from the hand object's `Keyword::Bestow(cost)` payload.
@@ -3247,6 +3273,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         miracle_cost
             .or(madness_cost)
             .or(evoke_cost)
+            .or(emerge_cost)
             .or(overload_cost)
             .or(mtmte_cost)
             .or(bestow_cost)
@@ -5430,6 +5457,56 @@ pub fn handle_evoke_cost_choice_with_payment_mode(
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
 }
 
+/// CR 702.119a-c: Handle Emerge cost choice and proceed with casting. On
+/// `AlternativeCastDecision::Alternative`, the cast is prepared with
+/// `CastingVariant::Emerge`, which substitutes the emerge mana cost and then
+/// requires sacrificing a creature as the first cost component.
+pub fn handle_emerge_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    handle_emerge_cost_choice_with_payment_mode(
+        state,
+        player,
+        object_id,
+        card_id,
+        decision,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+pub fn handle_emerge_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    use crate::types::actions::AlternativeCastDecision;
+    let alt_path = match decision {
+        AlternativeCastDecision::Alternative => true,
+        AlternativeCastDecision::Normal => false,
+    };
+    if alt_path {
+        let mut prepared = prepare_spell_cast_with_variant_override(
+            state,
+            player,
+            object_id,
+            Some(CastingVariant::Emerge),
+        )?;
+        prepared.payment_mode = payment_mode;
+        return continue_with_prepared(state, player, prepared, events);
+    }
+    continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+}
+
 /// CR 702.109a: Resolve the player's Dash cost choice. Mirrors
 /// `handle_evoke_cost_choice_with_payment_mode` — `Alternative` opts into
 /// `CastingVariant::Dash` (which substitutes the dash mana cost and installs the
@@ -6477,6 +6554,53 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
+    // CR 702.119a-c: Emerge — when a hand card has Keyword::Emerge and both
+    // costs are affordable, present a choice. Emerge affordability includes a
+    // legal creature sacrifice and the reduced emerge cost after that
+    // sacrificed creature's mana value is subtracted.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(emerge_cost) = effective_spell_keywords(state, player, object_id)
+                .into_iter()
+                .find_map(|k| match k {
+                    crate::types::keywords::Keyword::Emerge(cost) => Some(cost),
+                    _ => None,
+                })
+            {
+                let (normal_cost, normal_affordable) =
+                    normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
+                let emerge_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, emerge_cost.clone())
+                        .unwrap_or_else(|| emerge_cost.clone());
+                let emerge_affordable =
+                    casting_costs::can_pay_emerge_cost(state, player, object_id, &emerge_cost_eff);
+                if normal_affordable && emerge_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Emerge,
+                        normal_cost,
+                        alternative_cost: Some(emerge_cost_eff),
+                        alternative_additional_cost: Some(casting_costs::emerge_sacrifice_cost()),
+                    });
+                }
+                if !normal_affordable && emerge_affordable {
+                    return handle_emerge_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
+            }
+        }
+    }
+
     // CR 702.109a + CR 118.9: Dash — opt-in pure-mana alternative cost. When a
     // hand card has Keyword::Dash and both the printed and dash costs are
     // affordable, present the choice; auto-route when only dash is payable.
@@ -7406,6 +7530,33 @@ fn continue_with_prepared(
         }
     }
 
+    // CR 702.119a-c + CR 601.2b/h: Emerge requires choosing which creature to
+    // sacrifice as the player chooses to pay the emerge cost, then sacrificing
+    // it as that cost is paid. Route this before any target selection so the
+    // required sacrifice is declared on the CR 601.2b axis.
+    if prepared.casting_variant == CastingVariant::Emerge {
+        return casting_costs::begin_required_cost_before_targets(
+            state,
+            player,
+            prepared.object_id,
+            prepared.card_id,
+            resolved,
+            prepared.mana_cost,
+            Some(prepared.base_mana_cost.clone()),
+            casting_costs::emerge_sacrifice_cost(),
+            SpellCostSource::Emerge,
+            prepared.casting_variant,
+            prepared.cast_timing_permission,
+            prepared
+                .ability_def
+                .as_ref()
+                .and_then(|a| a.distribute.clone()),
+            prepared.origin_zone,
+            prepared.payment_mode,
+            events,
+        );
+    }
+
     // CR 601.2b/c/f: When target cardinality depends on an announced X, defer
     // target selection until that X is chosen from the spell's required
     // additional cost or mana cost.
@@ -7764,6 +7915,25 @@ fn continue_with_no_ability(
         prepared.object_id,
         player,
     );
+    if prepared.casting_variant == CastingVariant::Emerge {
+        return casting_costs::begin_required_cost_before_targets(
+            state,
+            player,
+            prepared.object_id,
+            prepared.card_id,
+            placeholder,
+            prepared.mana_cost,
+            Some(prepared.base_mana_cost.clone()),
+            casting_costs::emerge_sacrifice_cost(),
+            SpellCostSource::Emerge,
+            prepared.casting_variant,
+            prepared.cast_timing_permission,
+            None,
+            prepared.origin_zone,
+            prepared.payment_mode,
+            events,
+        );
+    }
     check_additional_cost_or_pay(
         state,
         player,
@@ -8094,6 +8264,18 @@ fn can_cast_prepared_now(
         && !casting_costs::can_pay_jumpstart_additional_cost(state, player, prepared.object_id)
     {
         return false;
+    }
+
+    // CR 702.119a-c: Emerge affordability is the reduced emerge cost after
+    // sacrificing a legal creature, not the unreduced `prepared.mana_cost`.
+    if prepared.casting_variant == CastingVariant::Emerge {
+        return (prepared.modal.is_some() || spell_has_legal_targets(state, obj, player))
+            && casting_costs::can_pay_emerge_cost(
+                state,
+                player,
+                prepared.object_id,
+                &prepared.mana_cost,
+            );
     }
 
     // CR 702.34a + CR 118.3 + CR 119.8: Flashback's non-mana cost (e.g. "pay N
@@ -32637,6 +32819,62 @@ mod tests {
             obj_id
         }
 
+        /// CR 702.119a-c: An Emerge creature in hand with the given printed and
+        /// emerge costs.
+        fn create_emerge_spell(
+            state: &mut GameState,
+            player: PlayerId,
+            card_id: u64,
+            printed: ManaCost,
+            emerge: ManaCost,
+        ) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(card_id),
+                player,
+                "Emerge Creature".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = printed.clone();
+            obj.base_mana_cost = printed;
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+            obj.base_power = Some(5);
+            obj.base_toughness = Some(5);
+            obj.base_characteristics_initialized = true;
+            obj.keywords.push(Keyword::Emerge(emerge));
+            obj_id
+        }
+
+        fn create_sacrifice_creature(
+            state: &mut GameState,
+            player: PlayerId,
+            card_id: u64,
+            mana_cost: ManaCost,
+        ) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(card_id),
+                player,
+                "Sacrifice Creature".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = mana_cost.clone();
+            obj.base_mana_cost = mana_cost;
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.base_characteristics_initialized = true;
+            obj_id
+        }
+
         /// An Evoke creature in hand with a non-mana evoke cost (MH2 Solitude /
         /// Endurance / Grief / Subtlety / Fury class). The evoke cost is an
         /// `AbilityCost` (typically `Exile { count: 1, zone: Hand, filter: <color
@@ -33231,6 +33469,235 @@ mod tests {
                 !can_cast_object_now(&state, PlayerId(0), obj),
                 "neither printed nor evoke affordable ⇒ object must not be castable"
             );
+        }
+
+        #[test]
+        fn emerge_only_affordable_after_sacrifice_reduction_casts_and_sacrifices_creature() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Blue, 2);
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+            let emerge = create_emerge_spell(
+                &mut state,
+                PlayerId(0),
+                800,
+                ManaCost::generic(8),
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 5,
+                },
+            );
+            let sacrifice = create_sacrifice_creature(
+                &mut state,
+                PlayerId(0),
+                801,
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 2,
+                },
+            );
+
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), emerge),
+                "Emerge must be castable when sacrificing a mana-value-4 creature reduces {{5}}{{U}}{{U}} to payable {{1}}{{U}}{{U}}"
+            );
+
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(&mut state, PlayerId(0), emerge, CardId(800), &mut events)
+                .expect("Emerge-only cast should enter sacrifice payment");
+
+            match &wf {
+                WaitingFor::PayCost {
+                    kind: PayCostKind::Sacrifice,
+                    choices,
+                    resume:
+                        CostResume::SpellCost {
+                            source: SpellCostSource::Emerge,
+                            ..
+                        },
+                    ..
+                } => {
+                    assert!(
+                        choices.contains(&sacrifice),
+                        "Emerge sacrifice prompt must include controlled creature"
+                    );
+                }
+                other => panic!("expected Emerge PayCost(Sacrifice), got {other:?}"),
+            }
+
+            state.waiting_for = wf;
+            apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: vec![sacrifice],
+                },
+            )
+            .expect("sacrificing the creature should complete the Emerge cast");
+
+            assert_eq!(state.objects[&sacrifice].zone, Zone::Graveyard);
+            assert_eq!(state.objects[&emerge].zone, Zone::Stack);
+            assert_eq!(
+                state.players[0].mana_pool.total(),
+                0,
+                "Emerge should charge the reduced {{1}}{{U}}{{U}} cost, consuming exactly three mana"
+            );
+        }
+
+        #[test]
+        fn emerge_mana_value_reduction_preserves_colored_pips() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+            let emerge = create_emerge_spell(
+                &mut state,
+                PlayerId(0),
+                805,
+                ManaCost::generic(8),
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 5,
+                },
+            );
+            create_sacrifice_creature(
+                &mut state,
+                PlayerId(0),
+                806,
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 2,
+                },
+            );
+
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), emerge),
+                "Emerge reduces only generic mana by mana value: {{5}}{{U}}{{U}} minus mana value 4 is {{1}}{{U}}{{U}}, not {{3}}"
+            );
+        }
+
+        #[test]
+        fn emerge_reduction_applies_cost_floor_before_payment() {
+            let mut state = setup_game_at_main_phase();
+            add_trinisphere(&mut state, PlayerId(0));
+            add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+            let emerge = create_emerge_spell(
+                &mut state,
+                PlayerId(0),
+                807,
+                ManaCost::generic(8),
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 5,
+                },
+            );
+            let sacrifice =
+                create_sacrifice_creature(&mut state, PlayerId(0), 808, ManaCost::generic(5));
+
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), emerge),
+                "Emerge under Trinisphere must be affordable only when the post-reduction {{2}}{{U}} floor is payable"
+            );
+
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(&mut state, PlayerId(0), emerge, CardId(807), &mut events)
+                .expect("Emerge should enter sacrifice payment");
+            state.waiting_for = wf;
+            apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: vec![sacrifice],
+                },
+            )
+            .expect("sacrificing the creature should complete the Emerge cast");
+
+            assert_eq!(state.objects[&emerge].zone, Zone::Stack);
+            assert_eq!(
+                state.players[0].mana_pool.total(),
+                0,
+                "Trinisphere must floor the post-Emerge-reduction cost to {{2}}{{U}}, not leave it at {{U}}"
+            );
+        }
+
+        #[test]
+        fn emerge_affordability_includes_post_reduction_cost_floor() {
+            let mut state = setup_game_at_main_phase();
+            add_trinisphere(&mut state, PlayerId(0));
+            add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+
+            let emerge = create_emerge_spell(
+                &mut state,
+                PlayerId(0),
+                809,
+                ManaCost::generic(8),
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 5,
+                },
+            );
+            create_sacrifice_creature(&mut state, PlayerId(0), 810, ManaCost::generic(5));
+
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), emerge),
+                "Emerge affordability must include the Trinisphere floor after mana-value reduction, so {{U}} alone cannot pay the final {{2}}{{U}} cost"
+            );
+        }
+
+        #[test]
+        fn emerge_not_castable_without_sacrificeable_creature() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+
+            let emerge = create_emerge_spell(
+                &mut state,
+                PlayerId(0),
+                802,
+                ManaCost::generic(8),
+                ManaCost::generic(5),
+            );
+
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), emerge),
+                "Emerge must not make the card castable without a creature to sacrifice"
+            );
+        }
+
+        #[test]
+        fn emerge_prompts_when_printed_and_emerge_costs_are_both_affordable() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+            let emerge = create_emerge_spell(
+                &mut state,
+                PlayerId(0),
+                803,
+                ManaCost::generic(3),
+                ManaCost::generic(5),
+            );
+            create_sacrifice_creature(&mut state, PlayerId(0), 804, ManaCost::generic(4));
+
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(&mut state, PlayerId(0), emerge, CardId(803), &mut events)
+                .expect("both-costs-affordable Emerge cast should prompt");
+
+            match wf {
+                WaitingFor::AlternativeCastChoice {
+                    keyword: AlternativeCastKeyword::Emerge,
+                    alternative_cost,
+                    alternative_additional_cost,
+                    ..
+                } => {
+                    assert_eq!(alternative_cost, Some(ManaCost::generic(5)));
+                    assert!(
+                        matches!(
+                            alternative_additional_cost,
+                            Some(AbilityCost::Sacrifice { count: 1, .. })
+                        ),
+                        "Emerge prompt must surface the required sacrifice cost"
+                    );
+                }
+                other => panic!("expected AlternativeCastChoice(Emerge), got {other:?}"),
+            }
         }
     }
 

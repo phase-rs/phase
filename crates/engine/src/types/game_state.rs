@@ -1727,6 +1727,9 @@ pub enum AlternativeCastKeyword {
     /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
     /// was cast for its evoke cost (CR 702.74b).
     Evoke,
+    /// CR 702.119a-c: Emerge alternative cost requires sacrificing a creature
+    /// while casting and reduces the emerge cost by that creature's mana value.
+    Emerge,
     /// CR 702.109a: Cast for the dash cost — the resolving permanent gains haste
     /// and is returned to its owner's hand at the next end step.
     Dash,
@@ -1833,6 +1836,7 @@ pub enum SpellCostSource {
     #[default]
     Other,
     Offering,
+    Emerge,
 }
 
 /// The specific kind of cast offer being presented to the player.
@@ -3939,6 +3943,12 @@ pub enum CastingVariant {
     /// the permanent enters tagged with `CastVariantPaid::Evoke`, which fires
     /// the synthesized intervening-if ETB sacrifice trigger.
     Evoke,
+    /// CR 702.119a-c: Cast from hand via Emerge's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Emerge(cost)` at cast preparation;
+    /// casting requires sacrificing a creature, then reduces that emerge cost by
+    /// the sacrificed creature's mana value. Resolution routing matches a normal
+    /// cast; Emerge has no resolution rider.
+    Emerge,
     /// CR 702.109a: Cast from hand via Dash's alternative cost. On resolution,
     /// `dash::install_dash_riders` grants the permanent haste and schedules a
     /// next-end-step return to its owner's hand.
@@ -4082,6 +4092,7 @@ impl CastingVariant {
             | CastingVariant::Miracle
             | CastingVariant::Madness
             | CastingVariant::Evoke
+            | CastingVariant::Emerge
             | CastingVariant::Dash
             | CastingVariant::Blitz
             | CastingVariant::Suspend

@@ -1824,6 +1824,17 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                AlternativeCastKeyword::Emerge => {
+                    casting::handle_emerge_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
                 AlternativeCastKeyword::Dash => {
                     casting::handle_dash_cost_choice_with_payment_mode(
                         state,

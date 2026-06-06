@@ -692,6 +692,19 @@ fn finish_pending_cost_or_cast(
     }
 
     let base_cost = pending.base_cost.clone();
+    // CR 601.2f: Cost floors are the last effects applied to the final locked
+    // spell cost. Additional-cost payments can reduce `pending.cost` after the
+    // prepare/targeting floor passes, so re-run the floor idempotently here.
+    if !cost_has_x(&pending.cost) {
+        super::casting::apply_cost_floor(state, player, pending.object_id, &mut pending.cost);
+        super::casting::apply_cost_floor_with_selected_targets(
+            state,
+            player,
+            pending.object_id,
+            &pending.ability,
+            &mut pending.cost,
+        );
+    }
     let waiting_for = pay_and_push(
         state,
         player,
@@ -1068,13 +1081,21 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
-    // CR 702.48b: If this sacrifice is paying an Offering additional cost,
-    // CR 702.48c: use the chosen permanent's ObjectId BEFORE it leaves the
-    // battlefield so `apply_offering_cost_reduction` can read its mana cost
-    // when recomputing the spell's total cost.
-    let is_offering_sacrifice = paid_cost.is_some_and(|payment| {
-        payment.source == SpellCostSource::Offering
+    // CR 702.48b-c / CR 702.119a-c: If this sacrifice is paying an Offering or
+    // Emerge additional cost, use the chosen permanent's ObjectId BEFORE it
+    // leaves the battlefield so the mana-value reduction can read its mana cost.
+    let reduction_source = paid_cost.and_then(|payment| {
+        if payment.source == SpellCostSource::Offering
             && is_offering_sacrifice_cost(state, player, pending.object_id, payment.cost)
+        {
+            Some(SpellCostSource::Offering)
+        } else if payment.source == SpellCostSource::Emerge
+            && is_emerge_sacrifice_cost(payment.cost)
+        {
+            Some(SpellCostSource::Emerge)
+        } else {
+            None
+        }
     });
 
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the sacrificed object's public
@@ -1091,12 +1112,19 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
-    // CR 702.48c: When paying the Offering additional cost, reduce the spell's
-    // total mana cost by the sacrificed permanent's mana cost BEFORE the
-    // permanent leaves the battlefield so its mana cost is still readable.
-    if is_offering_sacrifice {
+    // CR 702.48c / CR 702.119a: Offering and Emerge use different reduction
+    // rules, but both must read the sacrificed permanent before it leaves.
+    if let Some(reduction_source) = reduction_source {
         if let Some(&first) = chosen.first() {
-            apply_offering_cost_reduction(state, first, &mut pending.cost);
+            match reduction_source {
+                SpellCostSource::Offering => {
+                    apply_offering_cost_reduction(state, first, &mut pending.cost);
+                }
+                SpellCostSource::Emerge => {
+                    apply_emerge_cost_reduction(state, first, &mut pending.cost);
+                }
+                SpellCostSource::Other => {}
+            }
         }
     }
 
@@ -3196,6 +3224,55 @@ fn is_offering_sacrifice_cost(
     )
 }
 
+fn emerge_sacrifice_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::creature())
+}
+
+fn is_emerge_sacrifice_cost(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Sacrifice { target, count: 1 } if *target == emerge_sacrifice_filter()
+    )
+}
+
+/// CR 702.119a-c: Build the required sacrifice component of Emerge's
+/// alternative cost. The sacrificed creature's mana value is applied as a cost
+/// reduction by `handle_sacrifice_for_cost` while the creature is still on the
+/// battlefield.
+pub(super) fn emerge_sacrifice_cost() -> AbilityCost {
+    AbilityCost::Sacrifice {
+        target: emerge_sacrifice_filter(),
+        count: 1,
+    }
+}
+
+/// CR 702.119a-c: Emerge can be paid only if a legal creature can be
+/// sacrificed and the resulting reduced emerge mana cost can be paid.
+pub(super) fn can_pay_emerge_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    emerge_cost: &ManaCost,
+) -> bool {
+    super::casting::find_eligible_sacrifice_targets(
+        state,
+        player,
+        object_id,
+        &emerge_sacrifice_filter(),
+    )
+    .into_iter()
+    .any(|creature| {
+        let mut reduced = emerge_cost.clone();
+        apply_emerge_cost_reduction(state, creature, &mut reduced);
+        // CR 601.2f + CR 702.119a: Affordability probes must include the
+        // final Trinisphere-class floor after Emerge's sacrifice reduction.
+        if !cost_has_x(&reduced) {
+            super::casting::apply_cost_floor(state, player, object_id, &mut reduced);
+        }
+        super::casting::can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+    })
+}
+
 fn additional_cost_x_max(
     state: &GameState,
     player: PlayerId,
@@ -3400,6 +3477,25 @@ pub(super) fn apply_offering_cost_reduction(
 
     // CR 702.48c: Generic in sacrificed cost reduces generic in spell cost.
     *spell_generic = spell_generic.saturating_sub(sac_generic);
+}
+
+/// CR 702.119a: Reduce the Emerge cost by generic mana equal to the sacrificed
+/// creature's mana value. Colored pips in the Emerge cost are never reduced.
+pub(super) fn apply_emerge_cost_reduction(
+    state: &GameState,
+    sacrifice_id: ObjectId,
+    spell_cost: &mut ManaCost,
+) {
+    let Some(sacrificed_obj) = state.objects.get(&sacrifice_id) else {
+        return;
+    };
+    let reduction = sacrificed_obj.mana_cost.mana_value();
+
+    let ManaCost::Cost { generic, .. } = spell_cost else {
+        return;
+    };
+
+    *generic = generic.saturating_sub(reduction);
 }
 
 fn apply_sacrificed_this_way_cost_reduction(
