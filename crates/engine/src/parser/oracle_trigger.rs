@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{one_of, space1};
-use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, rest, value};
 use nom::multi::{many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -46,7 +46,7 @@ use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
-use crate::types::mana::ManaColor;
+use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
 use crate::types::zones::Zone;
@@ -5699,6 +5699,64 @@ fn parse_attachment_self_host(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 603.2 + CR 106.1: Parse a single mana letter from inside `{…}`.
+fn parse_taps_for_mana_color_code(i: &str) -> OracleResult<'_, ManaType> {
+    alt((
+        value(ManaType::Colorless, alt((tag("C"), tag("c")))),
+        value(ManaType::White, alt((tag("W"), tag("w")))),
+        value(ManaType::Blue, alt((tag("U"), tag("u")))),
+        value(ManaType::Black, alt((tag("B"), tag("b")))),
+        value(ManaType::Red, alt((tag("R"), tag("r")))),
+        value(ManaType::Green, alt((tag("G"), tag("g")))),
+    ))
+    .parse(i)
+}
+
+/// CR 603.2 + CR 106.1: Parse one braced mana symbol, expanding hybrids
+/// (`{W/U}` → two types).
+fn parse_taps_for_mana_braced_symbol(i: &str) -> OracleResult<'_, Vec<ManaType>> {
+    let (rest, types) = delimited(
+        tag("{"),
+        separated_list1(tag("/"), parse_taps_for_mana_color_code),
+        tag("}"),
+    )
+    .parse(i)?;
+    Ok((rest, types))
+}
+
+/// CR 603.2 + CR 106.1: Parse the trailing "for mana" / "for {C}" /
+/// "for {G} or {U}" clause of a TapsForMana trigger subject.
+fn parse_taps_for_mana_for_clause_body(i: &str) -> OracleResult<'_, Option<Vec<ManaType>>> {
+    alt((
+        value(None, tag("mana")),
+        map(
+            separated_list1(
+                preceded(space1, tag("or ")),
+                parse_taps_for_mana_braced_symbol,
+            ),
+            |chunks| {
+                let mut produced = Vec::new();
+                for types in chunks {
+                    produced.extend(types);
+                }
+                Some(produced)
+            },
+        ),
+    ))
+    .parse(i)
+}
+
+/// CR 603.2 + CR 106.1: Split a TapsForMana subject line into the permanent
+/// filter text and an optional produced-mana constraint from the trailing
+/// "for mana" / "for {C}" / "for {G}" clause.
+fn split_taps_for_mana_for_clause(text: &str) -> Option<(String, Option<Vec<ManaType>>)> {
+    let (_, (subject, for_clause)) = nom_primitives::split_once_on(text, " for ").ok()?;
+    let (_, produced) = all_consuming(parse_taps_for_mana_for_clause_body)
+        .parse(for_clause.trim())
+        .ok()?;
+    Some((subject.to_string(), produced))
+}
+
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
 fn try_parse_event(
     subject: &TargetFilter,
@@ -8624,10 +8682,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
-        let Some(subject_text) = rest.strip_suffix(" for mana") else {
+        let Some((subject_text, produced_filter)) = split_taps_for_mana_for_clause(rest) else {
             continue;
         };
-        let (filter, remainder) = parse_trigger_subject(subject_text, &mut ParseContext::default());
+        let (filter, remainder) =
+            parse_trigger_subject(&subject_text, &mut ParseContext::default());
         if !remainder.trim().is_empty() {
             continue;
         }
@@ -8641,6 +8700,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // which scopes to ControllerRef::Opponent.
         def.valid_card = Some(add_controller(filter, ControllerRef::You));
         def.valid_target = Some(TargetFilter::Controller);
+        def.taps_for_mana_produced = produced_filter;
         return Some((TriggerMode::TapsForMana, def));
     }
 
@@ -8649,23 +8709,27 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     //   - "a player taps …"  → no controller constraint on the source
     //   - "an opponent taps …" → source must be opponent-controlled (Vorinclex class)
     // Nested nom dispatch: outer trigger verb → actor → subject-up-to-"for mana".
-    fn parse_taps_for_mana_line(i: &str) -> OracleResult<'_, (Option<ControllerRef>, &str)> {
-        preceded(
+    fn parse_taps_for_mana_line(
+        i: &str,
+    ) -> OracleResult<'_, (Option<ControllerRef>, String, Option<Vec<ManaType>>)> {
+        let (rest, actor_controller) = preceded(
             alt((tag("whenever "), tag("when "))),
-            pair(
-                alt((
-                    value(Some(ControllerRef::Opponent), tag("an opponent taps ")),
-                    value(None, tag("a player taps ")),
-                )),
-                terminated(take_until(" for mana"), tag(" for mana")),
-            ),
+            alt((
+                value(Some(ControllerRef::Opponent), tag("an opponent taps ")),
+                value(None, tag("a player taps ")),
+            )),
         )
-        .parse(i)
+        .parse(i)?;
+        let (subject_text, produced_filter) =
+            split_taps_for_mana_for_clause(rest).ok_or_else(|| oracle_err(rest))?;
+        Ok(("", (actor_controller, subject_text, produced_filter)))
     }
-    if let Ok((rem, (actor_controller, subject_text))) = parse_taps_for_mana_line(lower) {
+    if let Ok((rem, (actor_controller, subject_text, produced_filter))) =
+        parse_taps_for_mana_line(lower)
+    {
         if rem.trim().is_empty() {
             let (mut filter, sub_rem) =
-                parse_trigger_subject(subject_text, &mut ParseContext::default());
+                parse_trigger_subject(&subject_text, &mut ParseContext::default());
             if sub_rem.trim().is_empty() {
                 if let Some(c) = actor_controller {
                     // Constrain subject to opponent-controlled permanents via the
@@ -8676,6 +8740,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 let mut def = make_base();
                 def.mode = TriggerMode::TapsForMana;
                 def.valid_card = Some(filter);
+                def.taps_for_mana_produced = produced_filter;
                 return Some((TriggerMode::TapsForMana, def));
             }
         }
@@ -15198,6 +15263,52 @@ mod tests {
             panic!("expected WheneverEvent, got {condition:?}");
         };
         assert_eq!(trigger.mode, TriggerMode::YouAttack);
+
+        // CR 603.7c + CR 513.1: the sacrifice cleanup must nest under the token
+        // creator inside the WheneverEvent delayed trigger, not as a sibling
+        // activated sub registered at ability activation time (issue #2433).
+        let Effect::CreateDelayedTrigger { effect: inner, .. } = delayed_effect else {
+            unreachable!();
+        };
+        assert!(
+            matches!(&*inner.effect, Effect::Token { .. }),
+            "WheneverEvent inner effect must be Token, got {:?}",
+            inner.effect
+        );
+        let sacrifice_delayed = inner
+            .sub_ability
+            .as_deref()
+            .expect("token creator must chain to end-step sacrifice delayed trigger");
+        let Effect::CreateDelayedTrigger {
+            condition: cleanup_condition,
+            effect: cleanup_effect,
+            ..
+        } = sacrifice_delayed.effect.as_ref()
+        else {
+            panic!(
+                "expected nested CreateDelayedTrigger sacrifice, got {:?}",
+                sacrifice_delayed.effect
+            );
+        };
+        assert_eq!(
+            *cleanup_condition,
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+        );
+        assert!(
+            matches!(
+                &*cleanup_effect.effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::LastCreated,
+                    ..
+                }
+            ),
+            "sacrifice them must rewrite to LastCreated, got {:?}",
+            cleanup_effect.effect
+        );
+        assert!(
+            parsed.abilities[0].sub_ability.is_none(),
+            "sacrifice cleanup must not remain a sibling sub of the outer delayed trigger"
+        );
     }
 
     #[test]
@@ -16781,6 +16892,32 @@ mod tests {
             ))
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.taps_for_mana_produced, None);
+    }
+
+    #[test]
+    fn trigger_you_tap_a_land_for_colorless_mana() {
+        let def = parse_trigger_line(
+            "Whenever you tap a land for {C}, add an additional {C}.",
+            "Ultima, Origin of Oblivion",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Land).controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.taps_for_mana_produced, Some(vec![ManaType::Colorless]));
+        let execute = def.execute.as_deref().expect("trigger should execute");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::Mana {
+                produced: crate::types::ability::ManaProduction::Colorless { count },
+                ..
+            } if matches!(count, QuantityExpr::Fixed { value: 1 })
+        ));
     }
 
     #[test]

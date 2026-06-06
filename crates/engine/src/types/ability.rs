@@ -6193,6 +6193,13 @@ pub enum Effect {
     /// opponent other than the defending player for the source creature, then
     /// exiles those tokens at end of combat.
     Myriad,
+    /// CR 702.141a: Encore — for each opponent, create a token that's a copy of
+    /// the (exiled) source card that must attack that opponent this turn if
+    /// able. The tokens gain haste and are sacrificed at the beginning of the
+    /// next end step. Resolver: `game/effects/encore.rs`. No player-selectable
+    /// target (opponents and per-opponent attack binding are chosen by the
+    /// effect, like `Myriad`).
+    Encore,
     /// CR 509.1g + CR 506.3e + CR 707.2: For each attacking creature matched by
     /// `source_filter`, create a token that's a copy of it and put that token
     /// onto the battlefield blocking the attacker it copies. Mirror Match is the
@@ -8225,6 +8232,9 @@ impl Effect {
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
             | Effect::Myriad
+            // CR 702.141a: opponents and per-opponent attack binding are chosen
+            // by the effect, not declared as targets.
+            | Effect::Encore
             // CR 508.1: copies are chosen by the effect, not declared as targets.
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::ChangeSpeed { .. }
@@ -8403,6 +8413,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
+        Effect::Encore => "Encore",
         Effect::CopyTokenBlockingAttacker { .. } => "CopyTokenBlockingAttacker",
         Effect::BecomeCopy { .. } => "BecomeCopy",
         Effect::ChooseCard { .. } => "ChooseCard",
@@ -8593,6 +8604,7 @@ pub enum EffectKind {
     CastCopyOfCard,
     CopyTokenOf,
     Myriad,
+    Encore,
     BecomeCopy,
     ChooseCard,
     PutCounter,
@@ -8780,6 +8792,7 @@ impl From<&Effect> for EffectKind {
             Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
+            Effect::Encore => EffectKind::Encore,
             // CR 707.2: classified as a copy-token effect — the block placement
             // is bookkeeping layered on top of the same token-copy creation.
             Effect::CopyTokenBlockingAttacker { .. } => EffectKind::CopyTokenOf,
@@ -11016,6 +11029,13 @@ pub struct TriggerDefinition {
     /// When `Some(Won)`, fires only on wins; `Some(Lost)` only on losses; `None` fires on any flip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coin_flip_result: Option<CoinFlipResult>,
+    /// CR 603.2 + CR 106.1: Produced-mana filter for `TriggerMode::TapsForMana`
+    /// triggers whose event text specifies "for {C}" / "for {G}" rather than
+    /// the generic "for mana". When `Some`, the `TappedForMana` event must
+    /// include at least one produced unit matching the set; `None` accepts any
+    /// mana type (the "for mana" form). Ignored by other trigger modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taps_for_mana_produced: Option<Vec<ManaType>>,
 }
 
 impl TriggerDefinition {
@@ -11050,6 +11070,7 @@ impl TriggerDefinition {
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
+            taps_for_mana_produced: None,
         }
     }
 
@@ -13325,6 +13346,7 @@ mod tests {
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
+            taps_for_mana_produced: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();

@@ -794,6 +794,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
+    nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
@@ -1257,6 +1258,71 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         }
         _ => {}
     }
+}
+
+/// CR 603.7c: Sentence splitting can leave a WheneverEvent delayed trigger's
+/// token-creating inner effect and its end-step cleanup delayed trigger as
+/// sibling `sub_ability` links on the activated ability. Rewire the cleanup
+/// under the token creator so it registers when the WheneverEvent fires, not
+/// at activation time (Dalkovan Encampment, Encore sacrifice riders).
+fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut AbilityDefinition) {
+    let cleanup_sub = match def.sub_ability.take() {
+        Some(sub) => sub,
+        None => return,
+    };
+
+    let inner = match &mut *def.effect {
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent { .. },
+            effect: inner,
+            ..
+        } => inner,
+        _ => {
+            def.sub_ability = Some(cleanup_sub);
+            return;
+        }
+    };
+
+    let is_token_cleanup = matches!(
+        &*cleanup_sub.effect,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { .. },
+            effect: cleanup_effect,
+            ..
+        } if matches!(
+            &*cleanup_effect.effect,
+            Effect::Sacrifice { .. } | Effect::ChangeZone { .. } | Effect::Destroy { .. }
+        )
+    );
+    if !is_token_cleanup || !is_token_creating_effect(&inner.effect) {
+        def.sub_ability = Some(cleanup_sub);
+        return;
+    }
+
+    let mut cleanup_sub = cleanup_sub;
+    let remaining_sibling_chain = cleanup_sub
+        .sub_ability
+        .as_ref()
+        .is_some_and(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+        .then(|| cleanup_sub.sub_ability.take())
+        .flatten();
+    if let Effect::CreateDelayedTrigger {
+        effect: cleanup_effect,
+        ..
+    } = &mut *cleanup_sub.effect
+    {
+        rewrite_parent_target_to_last_created(&mut cleanup_effect.effect);
+    }
+
+    let mut cursor = inner.as_mut();
+    while cursor.sub_ability.is_some() {
+        cursor = cursor
+            .sub_ability
+            .as_mut()
+            .expect("sub_ability checked above");
+    }
+    cursor.sub_ability = Some(cleanup_sub);
+    def.sub_ability = remaining_sibling_chain;
 }
 
 /// CR 705: Post-process parsed ability defs to consolidate coin flip conditional
@@ -5000,12 +5066,17 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_where_x_quantity_expression, strip_return_destination_ext_with_remainder,
-        strip_trailing_where_x,
+        nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_where_x_quantity_expression,
+        strip_return_destination_ext_with_remainder, strip_trailing_where_x,
     };
     use crate::parser::oracle_util::TextPair;
-    use crate::types::ability::{QuantityExpr, QuantityRef};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, PtValue, QuantityExpr,
+        QuantityRef, TargetFilter, TriggerDefinition,
+    };
     use crate::types::counter::CounterType;
+    use crate::types::phase::Phase;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     /// CR 614.1c + issue #1498: "return it to the battlefield tapped and with
@@ -5068,6 +5139,105 @@ mod tests {
                 "{expression}"
             );
         }
+    }
+
+    #[test]
+    fn token_cleanup_nesting_splits_only_cleanup_node_from_sibling_chain() {
+        let token_creator = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Warrior".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string(), "Warrior".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: true,
+                count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: true,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        );
+        let mut cleanup = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Sacrifice {
+                        target: TargetFilter::ParentTarget,
+                        count: QuantityExpr::Fixed { value: 2 },
+                        min_count: 0,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+        );
+        let mut following_sibling = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        following_sibling.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+        cleanup.sub_ability = Some(Box::new(following_sibling));
+        let mut outer = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::YouAttack)),
+                },
+                effect: Box::new(token_creator),
+                uses_tracked_set: false,
+            },
+        );
+        outer.sub_ability = Some(Box::new(cleanup));
+
+        nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut outer);
+
+        let Effect::CreateDelayedTrigger { effect: inner, .. } = outer.effect.as_ref() else {
+            panic!("expected outer delayed trigger");
+        };
+        let nested_cleanup = inner
+            .sub_ability
+            .as_deref()
+            .expect("cleanup node must move under token creator");
+        let Effect::CreateDelayedTrigger {
+            effect: cleanup_effect,
+            ..
+        } = nested_cleanup.effect.as_ref()
+        else {
+            panic!("expected nested cleanup delayed trigger");
+        };
+        assert!(
+            nested_cleanup.sub_ability.is_none(),
+            "only the cleanup node should move under the token creator"
+        );
+        assert!(
+            matches!(
+                cleanup_effect.effect.as_ref(),
+                Effect::Sacrifice {
+                    target: TargetFilter::LastCreated,
+                    ..
+                }
+            ),
+            "nested cleanup target must be rewritten to LastCreated"
+        );
+        assert!(
+            matches!(
+                outer
+                    .sub_ability
+                    .as_deref()
+                    .map(|ability| ability.effect.as_ref()),
+                Some(Effect::Draw { .. })
+            ),
+            "sibling effects after the cleanup must remain on the outer ability"
+        );
     }
 }
 

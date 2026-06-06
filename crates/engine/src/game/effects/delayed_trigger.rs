@@ -43,8 +43,17 @@ pub fn resolve(
         *player = ability.controller;
     }
 
-    // Build the delayed trigger's resolved ability from the definition
-    let mut delayed_effect = *effect_def.effect.clone();
+    // CR 603.7c: Build the delayed trigger's resolved ability from the full
+    // definition, preserving sub_ability chains. A bare `effect_def.effect`
+    // clone dropped continuation clauses — e.g. Dalkovan Encampment's
+    // "create … Warrior tokens … sacrifice them at the beginning of the next
+    // end step" inner chain (Token → CreateDelayedTrigger{Sacrifice}) never
+    // reached runtime when registered inside a WheneverEvent delayed trigger.
+    let mut delayed_ability = crate::game::ability_utils::build_resolved_from_def(
+        &effect_def,
+        ability.source_id,
+        ability.controller,
+    );
 
     // CR 603.7: Bind the most recent tracked set to the effect's target filter,
     // resolving sentinel TrackedSetId(0) or TargetFilter::Any, and upgrading
@@ -52,7 +61,7 @@ pub fn resolve(
     if uses_tracked_set {
         if let Some(real_id) = crate::game::targeting::latest_tracked_set_id(state) {
             bind_tracked_set_to_condition(&mut condition, real_id);
-            bind_tracked_set_to_effect(&mut delayed_effect, real_id);
+            bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
         }
     }
 
@@ -63,9 +72,9 @@ pub fn resolve(
     // time `last_created_token_ids` will have been overwritten by other
     // token-creating effects (CR 603.7c: a delayed trigger refers to a
     // particular object even if later events change it).
-    let snapshot_targets = if super::effect_refs_parent_target(&delayed_effect) {
+    let snapshot_targets = if super::effect_refs_parent_target(&delayed_ability.effect) {
         parent_target_snapshot(state, ability)
-    } else if effect_references_last_created(&delayed_effect)
+    } else if effect_references_last_created(&delayed_ability.effect)
         && !state.last_created_token_ids.is_empty()
     {
         state
@@ -79,15 +88,10 @@ pub fn resolve(
 
     // CR 603.7 + CR 608.2h: Snapshot parent-resolution-dependent
     // quantity refs to Fixed before the delayed trigger gets stashed.
-    // After this call, `delayed_effect` holds no parent context refs.
-    snapshot_parent_dependent_quantities(&mut delayed_effect, state, ability);
+    // After this call, the delayed ability chain holds no parent context refs.
+    snapshot_parent_dependent_quantities_in_ability_chain(&mut delayed_ability, state, ability);
 
-    let mut delayed_ability = ResolvedAbility::new(
-        delayed_effect,
-        snapshot_targets,
-        ability.source_id,
-        ability.controller,
-    );
+    delayed_ability.targets = snapshot_targets;
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
     delayed_ability.scoped_player = ability.scoped_player;
@@ -288,6 +292,20 @@ fn snapshot_parent_dependent_quantities(
     }
 }
 
+fn snapshot_parent_dependent_quantities_in_ability_chain(
+    ability: &mut ResolvedAbility,
+    state: &GameState,
+    parent: &ResolvedAbility,
+) {
+    snapshot_parent_dependent_quantities(&mut ability.effect, state, parent);
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        snapshot_parent_dependent_quantities_in_ability_chain(sub_ability, state, parent);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        snapshot_parent_dependent_quantities_in_ability_chain(else_ability, state, parent);
+    }
+}
+
 fn snapshot_pt_value(value: &mut PtValue, state: &GameState, ability: &ResolvedAbility) {
     if let PtValue::Quantity(expr) = value {
         snapshot_quantity_expr(expr, state, ability);
@@ -439,6 +457,16 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
     }
 }
 
+fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: TrackedSetId) {
+    bind_tracked_set_to_effect(&mut ability.effect, real_id);
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        bind_tracked_set_to_ability_chain(sub_ability, real_id);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        bind_tracked_set_to_ability_chain(else_ability, real_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,7 +475,7 @@ mod tests {
         AbilityDefinition, AbilityKind, BounceSelection, DamageKindFilter, DelayedTriggerCondition,
         Effect, ManaProduction, ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition,
     };
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
@@ -631,8 +659,6 @@ mod tests {
 
     #[test]
     fn uses_tracked_set_binds_to_change_zone_all() {
-        use crate::types::identifiers::TrackedSetId;
-
         let mut state = GameState::new_two_player(42);
         // Register a tracked set
         state
@@ -682,9 +708,71 @@ mod tests {
     }
 
     #[test]
-    fn uses_tracked_set_resolves_sentinel() {
-        use crate::types::identifiers::TrackedSetId;
+    fn uses_tracked_set_binds_sub_ability_effects() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(10)]);
+        state.next_tracked_set_id = 2;
 
+        let mut effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        )));
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let sub = state.delayed_triggers[0]
+            .ability
+            .sub_ability
+            .as_deref()
+            .expect("sub-ability chain must be preserved");
+        match &sub.effect {
+            Effect::ChangeZoneAll { origin, target, .. } => {
+                assert_eq!(*origin, Some(Zone::Exile));
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(1)
+                    }
+                );
+            }
+            other => panic!("Expected sub ChangeZoneAll, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn uses_tracked_set_resolves_sentinel() {
         let mut state = GameState::new_two_player(42);
         state
             .tracked_object_sets
@@ -748,8 +836,6 @@ mod tests {
 
     #[test]
     fn uses_tracked_set_binds_zone_change_condition_filter() {
-        use crate::types::identifiers::TrackedSetId;
-
         let mut state = GameState::new_two_player(42);
         state
             .tracked_object_sets
@@ -937,6 +1023,63 @@ mod tests {
             }
             other => panic!("expected Mana{{Colorless}}, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sub_ability_parent_dependent_quantity_baked_to_fixed() {
+        let mut state = GameState::new_two_player(42);
+        let spell_id = ObjectId(42);
+        inject_spell_with_mana_value(&mut state, spell_id, 6);
+
+        let mut delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        delayed_inner.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            mana_colorless_effect(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            }),
+        )));
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let sub = state.delayed_triggers[0]
+            .ability
+            .sub_ability
+            .as_deref()
+            .expect("sub-ability chain must be preserved");
+        let Effect::Mana {
+            produced: ManaProduction::Colorless { count },
+            ..
+        } = &sub.effect
+        else {
+            panic!("Expected sub Mana effect, got {:?}", sub.effect);
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Fixed { value: 6 },
+            "parent-dependent sub-chain quantities must be snapshotted before the delayed trigger fires"
+        );
     }
 
     /// CR 603.7 + CR 202.3: A delayed trigger whose inner effect references

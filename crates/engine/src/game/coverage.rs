@@ -2477,6 +2477,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Learn
         | Effect::SwitchPT { .. }
         | Effect::Myriad
+        | Effect::Encore
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::Populate
         | Effect::VentureIntoDungeon

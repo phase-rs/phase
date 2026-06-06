@@ -7529,6 +7529,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.84a: Unearth graveyard-activated temporary reanimation (return with
     // haste, exile at the next end step) — self-contained building block.
     crate::database::unearth::synthesize_unearth(face);
+    // CR 702.141a: Encore graveyard-activated per-opponent token-copy generator
+    // (haste, must-attack that opponent, sacrifice at the next end step) —
+    // self-contained building block.
+    crate::database::encore::synthesize_encore(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);

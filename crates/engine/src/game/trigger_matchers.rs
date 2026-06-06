@@ -2436,11 +2436,21 @@ pub(super) fn match_taps_for_mana(
     if let GameEvent::TappedForMana {
         player_id,
         source_id: mana_source,
+        produced,
         ..
     } = event
     {
         if !taps_for_mana_card_matches(trigger, state, *mana_source, source_id) {
             return false;
+        }
+
+        if let Some(required) = &trigger.taps_for_mana_produced {
+            if !produced
+                .iter()
+                .any(|mana_type| required.contains(mana_type))
+            {
+                return false;
+            }
         }
 
         valid_player_matches(trigger, state, *player_id, source_id)
@@ -6894,6 +6904,35 @@ mod tests {
         };
         let trigger = make_trigger(TriggerMode::TapsForMana);
         assert!(!match_taps_for_mana(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn taps_for_mana_respects_produced_color_filter() {
+        let state = setup();
+        let source = ObjectId(5);
+        let colorless_event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: source,
+            produced: vec![crate::types::mana::ManaType::Colorless],
+            tap_state: ManaTapState::FromTap,
+        };
+        let green_event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: source,
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: ManaTapState::FromTap,
+        };
+
+        let mut trigger = make_trigger(TriggerMode::TapsForMana);
+        trigger.taps_for_mana_produced = Some(vec![crate::types::mana::ManaType::Colorless]);
+
+        assert!(match_taps_for_mana(
+            &colorless_event,
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_taps_for_mana(&green_event, &trigger, source, &state));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod bracket_lists;
 pub mod card_db;
 pub mod embalm_eternalize;
+pub mod encore;
 #[cfg(feature = "forge")]
 pub mod forge;
 pub mod legality;
@@ -12,6 +13,8 @@ pub mod unearth;
 
 #[cfg(test)]
 mod embalm_eternalize_tests;
+#[cfg(test)]
+mod encore_tests;
 #[cfg(test)]
 mod unearth_tests;
 

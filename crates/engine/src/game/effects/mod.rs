@@ -69,6 +69,7 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod encore;
 pub mod end_combat_phase;
 pub(super) mod end_phase;
 pub mod end_the_turn;
@@ -1845,6 +1846,7 @@ pub fn resolve_effect(
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::Myriad => myriad::resolve(state, ability, events),
+        Effect::Encore => encore::resolve(state, ability, events),
         Effect::CopyTokenBlockingAttacker { .. } => {
             copy_token_blocking::resolve(state, ability, events)
         }
