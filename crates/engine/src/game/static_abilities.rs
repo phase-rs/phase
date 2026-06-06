@@ -1159,6 +1159,57 @@ pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
     })
 }
 
+/// CR 702.122c + CR 702.171 + CR 702.184: Effective power a creature contributes
+/// when tapped to crew, saddle, or station a permanent.
+pub fn object_crew_contribution_power(state: &GameState, creature_id: ObjectId) -> i32 {
+    let Some(creature) = state.objects.get(&creature_id) else {
+        return 0;
+    };
+    let base_power = creature.power.unwrap_or(0).max(0);
+    let base_toughness = creature.toughness.unwrap_or(0).max(0);
+
+    let context = StaticCheckContext {
+        target_id: Some(creature_id),
+        ..Default::default()
+    };
+
+    let mut power_delta: i32 = 0;
+    let mut use_toughness = false;
+
+    for (source_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+        let StaticMode::CrewContribution { kind } = &def.mode else {
+            continue;
+        };
+        if let Some(ref affected) = def.affected {
+            if !static_filter_matches(state, &context, affected, source_obj.id) {
+                continue;
+            }
+        }
+        if !static_condition_matches_context(
+            state,
+            source_obj.id,
+            source_obj.controller,
+            def,
+            &context,
+        ) {
+            continue;
+        }
+        match kind {
+            crate::types::statics::CrewContributionKind::PowerDelta(n) => power_delta += *n,
+            crate::types::statics::CrewContributionKind::ToughnessInsteadOfPower => {
+                use_toughness = true;
+            }
+        }
+    }
+
+    let base = if use_toughness {
+        base_toughness
+    } else {
+        base_power
+    };
+    (base + power_delta).max(0)
+}
+
 /// Check if a static ability named `name` applies to a specific object
 /// (target-scoped query). Used for object-targeted prohibitions like
 /// `CantBeSacrificed`, `CantBeEnchanted`, `CantTransform`, etc.

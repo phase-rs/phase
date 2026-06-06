@@ -5473,8 +5473,7 @@ fn handle_crew_activation(
     // Validate total power of all eligible creatures can meet the threshold
     let total_power: i32 = eligible_creatures
         .iter()
-        .filter_map(|id| state.objects.get(id))
-        .map(|o| o.power.unwrap_or(0).max(0))
+        .map(|id| super::static_abilities::object_crew_contribution_power(state, *id))
         .sum();
 
     if total_power < crew_power as i32 {
@@ -5578,7 +5577,7 @@ fn handle_crew_announcement(
                 "Creature can't crew Vehicles".to_string(),
             ));
         }
-        total_power += obj.power.unwrap_or(0).max(0);
+        total_power += super::static_abilities::object_crew_contribution_power(state, cid);
     }
 
     // CR 702.122a: Total power must meet threshold
@@ -5751,7 +5750,8 @@ fn handle_station_announcement(
     // creature leaving the battlefield before resolution. CR 702.184c lets
     // static abilities modify the characteristic read; this implementation
     // reads `power`, which is the default per the rule.
-    let snapshot_power = creature.power.unwrap_or(0).max(0);
+    let snapshot_power =
+        super::static_abilities::object_crew_contribution_power(state, creature_id);
 
     // CR 701.26a: Tap the creature as cost payment.
     if let Some(obj) = state.objects.get_mut(&creature_id) {
@@ -5846,8 +5846,7 @@ fn handle_saddle_activation(
 
     let total_power: i32 = eligible_creatures
         .iter()
-        .filter_map(|id| state.objects.get(id))
-        .map(|o| o.power.unwrap_or(0).max(0))
+        .map(|id| super::static_abilities::object_crew_contribution_power(state, *id))
         .sum();
 
     if total_power < saddle_power as i32 {
@@ -5914,7 +5913,7 @@ fn handle_saddle_announcement(
                 "Creature is no longer eligible for saddling".to_string(),
             ));
         }
-        total_power += obj.power.unwrap_or(0).max(0);
+        total_power += super::static_abilities::object_crew_contribution_power(state, cid);
     }
 
     if total_power < saddle_power as i32 {
@@ -19748,7 +19747,7 @@ mod crew_tests {
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
-    use crate::types::StaticDefinition;
+    use crate::types::{StaticDefinition, TargetFilter};
 
     fn setup_game_at_main_phase() -> GameState {
         let mut state = new_game(42);
@@ -19983,6 +19982,91 @@ mod crew_tests {
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::InvalidAction(_)));
+    }
+
+    #[test]
+    fn test_crew_contribution_power_delta_satisfies_threshold() {
+        // CR 702.122c: 1/4 with "+2 for crewing" contributes 3 — enough for Crew 3.
+        use crate::types::statics::CrewContributionKind;
+
+        let (mut state, vehicle_id, creature_a, _) = setup_crew_scenario();
+        state.objects.get_mut(&creature_a).unwrap().power = Some(1);
+        state.objects.get_mut(&creature_a).unwrap().base_power = Some(1);
+        state
+            .objects
+            .get_mut(&creature_a)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CrewContribution {
+                    kind: CrewContributionKind::PowerDelta(2),
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_a],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.objects.get(&creature_a).unwrap().tapped);
+    }
+
+    #[test]
+    fn test_crew_contribution_toughness_substitution() {
+        // CR 702.122c: Giant Ox — 0/4 contributes 4 for Crew 3.
+        use crate::types::statics::CrewContributionKind;
+
+        let (mut state, vehicle_id, creature_a, _) = setup_crew_scenario();
+        state.objects.get_mut(&creature_a).unwrap().power = Some(0);
+        state.objects.get_mut(&creature_a).unwrap().base_power = Some(0);
+        state.objects.get_mut(&creature_a).unwrap().toughness = Some(4);
+        state.objects.get_mut(&creature_a).unwrap().base_toughness = Some(4);
+        state
+            .objects
+            .get_mut(&creature_a)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CrewContribution {
+                    kind: CrewContributionKind::ToughnessInsteadOfPower,
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_a],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
     }
 
     #[test]

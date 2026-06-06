@@ -4,8 +4,8 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use super::{
-    anthem::*, cda::*, cost_mod::*, evasion::*, keyword_grant::*, loyalty::*, mana_transform::*,
-    restriction::*, type_change::*,
+    anthem::*, cda::*, cost_mod::*, crew_contribution::*, evasion::*, keyword_grant::*, loyalty::*,
+    mana_transform::*, restriction::*, type_change::*,
 };
 
 /// Whether the inverted `"As long as <cond>, <effect>"` detector may fire.
@@ -1291,6 +1291,13 @@ pub(crate) fn parse_static_line_inner(
     // where `cause` identifies whose triggered abilities are muzzled and `affected`
     // identifies the protected objects.
     if let Some(def) = parse_cant_cause_sacrifice_or_exile(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "~ crews Vehicles as though its power were N greater" ---
+    // CR 702.122c + CR 702.171 + CR 702.184: Effective power when tapping to
+    // crew, saddle, or station. Self-scoped (~) and controlled-creature grants.
+    if let Some(def) = parse_crew_contribution(&tp, &text) {
         return Some(def);
     }
 

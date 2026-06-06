@@ -99,6 +99,8 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantSearchLibrary { .. }
             // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
             | StaticMode::CantCauseSacrificeOrExile { .. }
+            // CR 702.122c + CR 702.171 + CR 702.184: CrewContribution carries `kind`.
+            | StaticMode::CrewContribution { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
             | StaticMode::SuppressTriggers { .. }
             // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
@@ -6745,6 +6747,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantCrew => {
                 effective_lower.contains("can't crew") || effective_lower.contains("cannot crew")
             }
+            StaticMode::CrewContribution { kind } => match kind {
+                crate::types::statics::CrewContributionKind::PowerDelta(n) => {
+                    effective_lower.contains("as though its power were")
+                        && effective_lower.contains(&format!("{n} greater"))
+                }
+                crate::types::statics::CrewContributionKind::ToughnessInsteadOfPower => {
+                    effective_lower.contains("using its toughness rather than its power")
+                }
+            },
             StaticMode::CastWithFlash => {
                 effective_lower.contains("as though it had flash")
                     || effective_lower.contains("as though they had flash")

@@ -3581,11 +3581,11 @@ where
     let mut creatures_with_power: Vec<(crate::types::identifiers::ObjectId, i32)> =
         eligible_creatures
             .iter()
-            .filter_map(|&id| {
-                state
-                    .objects
-                    .get(&id)
-                    .map(|o| (id, o.power.unwrap_or(0).max(0)))
+            .map(|&id| {
+                (
+                    id,
+                    crate::game::static_abilities::object_crew_contribution_power(state, id),
+                )
             })
             .collect();
     // Ascending-power sort with id tie-break makes enumeration deterministic

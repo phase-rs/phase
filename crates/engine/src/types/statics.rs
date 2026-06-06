@@ -563,6 +563,47 @@ pub enum CostModifyMode {
     Minimum,
 }
 
+/// CR 702.122c + CR 702.171 + CR 702.184: How a creature's effective power is
+/// computed when tapped to crew, saddle, or station a permanent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrewContributionKind {
+    /// "as though its power were N greater" — contribute `power + N`.
+    PowerDelta(i32),
+    /// "using its toughness rather than its power" — contribute `toughness`.
+    ToughnessInsteadOfPower,
+}
+
+impl fmt::Display for CrewContributionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CrewContributionKind::PowerDelta(n) => write!(f, "PowerDelta({n})"),
+            CrewContributionKind::ToughnessInsteadOfPower => {
+                write!(f, "ToughnessInsteadOfPower")
+            }
+        }
+    }
+}
+
+impl FromStr for CrewContributionKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "ToughnessInsteadOfPower" {
+            return Ok(CrewContributionKind::ToughnessInsteadOfPower);
+        }
+        if let Some(inner) = s
+            .strip_prefix("PowerDelta(")
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            return inner
+                .parse::<i32>()
+                .map(CrewContributionKind::PowerDelta)
+                .map_err(|e| e.to_string());
+        }
+        Err(format!("unknown CrewContributionKind: {s}"))
+    }
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1102,6 +1143,13 @@ pub enum StaticMode {
     CantBlockAlone,
     /// CR 702.122c: This creature can't crew Vehicles.
     CantCrew,
+    /// CR 702.122c + CR 702.171 + CR 702.184: Modifies the effective power this
+    /// creature contributes when tapped to crew, saddle, or station. Scope rides
+    /// on `StaticDefinition::affected` (`SelfRef` for "~ crews Vehicles …";
+    /// controlled-creature filter for Stoic Star-Captain class).
+    CrewContribution {
+        kind: CrewContributionKind,
+    },
     MayLookAtTopOfLibrary,
 
     // -- Tier 3: Parser-produced statics --
@@ -1356,9 +1404,10 @@ impl Hash for StaticMode {
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
+            | StaticMode::CrewContribution { kind } => kind.hash(state),
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
-            | StaticMode::EntersWithAdditionalCounters { .. }
+            StaticMode::EntersWithAdditionalCounters { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
@@ -1386,6 +1435,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantCauseSacrificeOrExile { cause } => {
                 write!(f, "CantCauseSacrificeOrExile({cause})")
             }
+            StaticMode::CrewContribution { kind } => write!(f, "CrewContribution({kind})"),
             StaticMode::SuppressTriggers { events, .. } => {
                 let parts: Vec<String> = events.iter().map(|e| e.to_string()).collect();
                 write!(f, "SuppressTriggers({})", parts.join("+"))
@@ -1993,6 +2043,14 @@ impl FromStr for StaticMode {
                     // CR 603.2 + CR 609.3: Round-trip of the scope identifier.
                     if let Ok(cause) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantCauseSacrificeOrExile { cause });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CrewContribution(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(kind) = CrewContributionKind::from_str(inner) {
+                        return Ok(StaticMode::CrewContribution { kind });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if other.starts_with("SuppressTriggers(") {
