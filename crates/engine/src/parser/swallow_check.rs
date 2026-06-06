@@ -410,6 +410,22 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // Veil's "you may activate one of its loyalty abilities once this turn"
         // is the permission itself; the player still decides each activation.
         | Effect::GrantExtraLoyaltyActivations { .. } => true,
+        // CR 117.3a + CR 601.3b + CR 702.8a: a `GenericEffect` that grants a
+        // casting permission carries the "you may cast … as though …" opt-in
+        // inside the granted static, exactly like `GrantCastingPermission` /
+        // `CastFromZone` above. Teferi, Time Raveler's [+1] ("you may cast
+        // sorcery spells as though they had flash") lowers to a `GenericEffect`
+        // whose static grants `StaticMode::CastWithKeyword { Flash }` (directly,
+        // or via `GrantStaticAbility`), so the "may" is the permission itself —
+        // no def-level `optional` flag is needed.
+        //
+        // NARROW BY DESIGN: only casting-permission modes count here. A
+        // `GenericEffect` granting an unrelated static (CantGainLife, +1/+1,
+        // etc.) does NOT carry a "you may" and must remain subject to the
+        // Optional_YouMay detector.
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().any(static_grants_cast_permission),
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
         Effect::CreateEmblem { statics, triggers } => {
@@ -418,6 +434,28 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         }
         _ => false,
     }
+}
+
+/// CR 117.3a + CR 601.3b + CR 702.8a: True when a `StaticDefinition` IS (or,
+/// via `GrantStaticAbility`, grants) a casting-permission static of the
+/// "cast as though it had <keyword>" family (`StaticMode::CastWithKeyword`).
+/// Such permissions inherently encode the "you may cast" opt-in, so a
+/// `GenericEffect` carrying one accounts for the "you may " marker without a
+/// def-level `optional` flag (Teferi, Time Raveler's flash grant).
+///
+/// Deliberately narrow: only `CastWithKeyword` permission modes match. This
+/// must NOT exempt grants of unrelated modes (CantGainLife, AddPower, etc.),
+/// or it would suppress legitimate Optional_YouMay detection elsewhere.
+fn static_grants_cast_permission(s: &StaticDefinition) -> bool {
+    if matches!(s.mode, StaticMode::CastWithKeyword { .. }) {
+        return true;
+    }
+    s.modifications.iter().any(|m| match m {
+        ContinuousModification::GrantStaticAbility { definition } => {
+            matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+        }
+        _ => false,
+    })
 }
 
 /// Recursive walk: does any def in the tree carry an `AddTargetReplacement`
@@ -2450,6 +2488,105 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_teferi_flash_grant_generic_effect() {
+        // CR 117.3a + CR 702.8a: Teferi, Time Raveler's [+1] ("you may cast
+        // sorcery spells as though they had flash") lowers to a `GenericEffect`
+        // granting `StaticMode::CastWithKeyword { Flash }`. The granted casting
+        // permission IS the "you may cast" opt-in, so the "you may " marker must
+        // NOT be reported as a swallowed clause.
+        let parsed = parse_named(
+            "Each opponent can cast spells only any time they could cast a sorcery.\n\
+             [+1]: Until your next turn, you may cast sorcery spells as though they had flash.\n\
+             [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+            "Teferi, Time Raveler",
+            &["Planeswalker"],
+        );
+
+        // Pin the structural shape the exemption keys on: the [+1] must lower to
+        // a GenericEffect granting CastWithKeyword (directly or via
+        // GrantStaticAbility). Guards against a silent regression where the
+        // grant stops parsing — then the negative assertion below would pass
+        // vacuously.
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(def_tree_grants_cast_with_keyword),
+            "expected Teferi [+1] to lower to a GenericEffect granting \
+             CastWithKeyword, parsed abilities: {:#?}",
+            parsed.abilities
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_still_flags_unrepresented_optional_verb() {
+        // Guard the exemption did NOT over-broaden: a genuine "you may <verb>"
+        // optional effect with no AST representation must still be flagged.
+        // `Effect::Unimplemented` suppression is avoided by pairing the bogus
+        // clause with a fully-parsed primary effect.
+        let parsed = parse_named(
+            "Each opponent can cast spells only any time they could cast a sorcery.\n\
+             [+1]: You may wibble the frobnicator until your next turn.\n\
+             [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+            "Not Teferi",
+            &["Planeswalker"],
+        );
+
+        // Only meaningful if the bogus +1 did NOT itself become Unimplemented
+        // (which would suppress all swallow detectors). If parsing classified it
+        // as Unimplemented, the test is inconclusive — skip rather than assert a
+        // false positive.
+        let plus_one_unimplemented = parsed.abilities.iter().any(def_tree_has_unimplemented);
+        if !plus_one_unimplemented {
+            assert!(
+                has_swallowed_detector(&parsed, "Optional_YouMay"),
+                "an unrepresented 'you may <verb>' must still be flagged; \
+                 the CastWithKeyword exemption must not over-broaden. \
+                 warnings: {:#?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// Walk a def tree for a `GenericEffect` granting `CastWithKeyword` (directly
+    /// or via `GrantStaticAbility`) — the flash-grant shape Teferi's [+1] lowers
+    /// to and the swallow-check exemption keys on.
+    fn def_tree_grants_cast_with_keyword(def: &AbilityDefinition) -> bool {
+        let here = if let Effect::GenericEffect {
+            ref static_abilities,
+            ..
+        } = &*def.effect
+        {
+            static_abilities.iter().any(|s| {
+                matches!(s.mode, StaticMode::CastWithKeyword { .. })
+                    || s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            crate::types::ability::ContinuousModification::GrantStaticAbility {
+                                definition,
+                            } if matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+                        )
+                    })
+            })
+        } else {
+            false
+        };
+        here || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(def_tree_grants_cast_with_keyword)
+            || def
+                .else_ability
+                .as_deref()
+                .is_some_and(def_tree_grants_cast_with_keyword)
+            || def
+                .mode_abilities
+                .iter()
+                .any(def_tree_grants_cast_with_keyword)
     }
 
     #[test]

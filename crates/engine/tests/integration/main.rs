@@ -155,6 +155,7 @@ mod steadfast_armasaur_lki_toughness;
 mod support;
 mod swans_prevention_followup;
 mod talon_gates_from_hand_activation;
+mod teferi_time_raveler_sorcery_speed_lock;
 mod tempt_with_discovery;
 mod terra_herald_optional_prompt;
 mod terra_magical_adept_milled_enchantment;
