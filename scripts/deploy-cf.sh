@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# r2.dev does not compress on the fly; we pre-compress every uploaded JSON with
+# brotli and store Content-Encoding: br (consumers fetch via browser/Bun fetch,
+# which decodes transparently). Fail early if brotli is missing.
+command -v brotli >/dev/null || { echo "ERROR: brotli required (brew install brotli)"; exit 1; }
+
 PROJECT_NAME="${1:-phase-rs}"
 R2_BUCKET="phase-rs-data"
 R2_PUBLIC="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
@@ -25,6 +30,11 @@ jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' \
 
 # --- R2 uploads (run in background, parallel to WASM build) ---
 upload_to_r2() {
+  # Compress into a temp dir, never client/public: a stray .br there would be
+  # copied into dist by the later `pnpm build` and shipped to Pages.
+  local BRDIR
+  BRDIR="$(mktemp -d)"
+  trap 'rm -rf "$BRDIR"' RETURN
   # Upload JSON data files in parallel, skipping unchanged
   local json_pids=()
   for entry in \
@@ -39,17 +49,21 @@ upload_to_r2() {
     key="${entry%%:*}"
     file="${entry#*:}"
     (
-      local_hash=$(md5 -q "client/$file")
-      cached_hash=$(grep "^$key:" "$DEPLOY_CACHE" 2>/dev/null | cut -d: -f2 || true)
-      if [ "$local_hash" = "$cached_hash" ]; then
+      # The -br9 tag suffix versions the cache on encoding: a pre-existing entry
+      # recorded as a bare md5 (uncompressed upload) won't match, so the file is
+      # re-uploaded compressed exactly once, then stays cached.
+      local_tag="$(md5 -q "client/$file")-br9"
+      cached_tag=$(grep "^$key:" "$DEPLOY_CACHE" 2>/dev/null | cut -d: -f2 || true)
+      if [ "$local_tag" = "$cached_tag" ]; then
         echo "  = $key (unchanged)"
       else
-        echo "  ^ $key (uploading)"
+        echo "  ^ $key (compress + upload)"
+        brotli -q 9 -c "client/$file" > "$BRDIR/$key.br"
         (cd client && pnpm wrangler r2 object put "$R2_BUCKET/$key" \
-          --file "$file" --content-type application/json --remote)
+          --file "$BRDIR/$key.br" --content-type application/json --content-encoding br --remote)
         # Update cache atomically
         grep -v "^$key:" "$DEPLOY_CACHE" > "$DEPLOY_CACHE.tmp" 2>/dev/null || true
-        echo "$key:$local_hash" >> "$DEPLOY_CACHE.tmp"
+        echo "$key:$local_tag" >> "$DEPLOY_CACHE.tmp"
         mv "$DEPLOY_CACHE.tmp" "$DEPLOY_CACHE"
       fi
     ) &

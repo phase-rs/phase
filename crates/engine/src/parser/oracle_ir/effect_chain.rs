@@ -12,7 +12,7 @@ use super::ast::{ClauseBoundary, ContinuationAst, ParsedEffectClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef,
     DelayedTriggerCondition, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
-    RoundingMode, TargetSelectionMode, UnlessPayModifier,
+    RoundingMode, TargetFilter, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -77,6 +77,13 @@ pub(crate) enum SpecialClause {
     /// additional `StaticDefinition` cloned from the antecedent grant template,
     /// with both the granted keyword and the gating condition's keyword swapped.
     SameIsTrueFor(Vec<Keyword>),
+    /// CR 608.2c: "Repeat this process for <keyword list>." — Kathril, Aspect
+    /// Warper. Replicates the antecedent conditional keyword-counter clause
+    /// (`PutCounter { counter_type: Keyword(..) }` gated by a graveyard-keyword
+    /// condition) once per listed keyword, swapping both the placed counter's
+    /// keyword and the gating condition's keyword. The counters-class analogue
+    /// of `SameIsTrueFor` (which handles static keyword grants).
+    RepeatProcessForKeywords(Vec<Keyword>),
 }
 
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.
@@ -135,13 +142,19 @@ pub(crate) struct ClauseIr {
     /// `Random` when the parser stripped a leading "random " modifier.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub(crate) target_selection_mode: TargetSelectionMode,
+    /// CR 601.2c + CR 603.3d: Target chooser captured from `ParseContext` after
+    /// this chunk was parsed. Stamped onto the produced `AbilityDefinition` during
+    /// lowering. `None` (default) = controller chooses; `Some(ScopedPlayer)` for a
+    /// targeted "of their choice" controlled by the phase-trigger active player.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) target_chooser: Option<TargetFilter>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parser::oracle_ir::ast::parsed_clause;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::Effect;
 
     #[test]
     fn effect_chain_ir_empty_construction() {
@@ -181,6 +194,7 @@ mod tests {
             special: None,
             source_text: "draw a card".to_string(),
             target_selection_mode: TargetSelectionMode::Chosen,
+            target_chooser: None,
         };
         assert_eq!(clause.source_text, "draw a card");
         assert!(!clause.is_optional);
@@ -215,6 +229,7 @@ mod tests {
                 special: None,
                 source_text: "draw two cards".to_string(),
                 target_selection_mode: TargetSelectionMode::Chosen,
+                target_chooser: None,
             }],
             kind: AbilityKind::Spell,
             chain_rounding: None,

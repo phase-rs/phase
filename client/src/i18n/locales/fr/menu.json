@@ -67,7 +67,31 @@
     "load": {
       "title": "Charger un état de partie"
     },
-    "exit": "Quitter"
+    "exit": "Quitter",
+    "dashboard": {
+      "welcome": "Bon retour",
+      "enter": "Entrer",
+      "continue": "Reprenez où vous en étiez",
+      "resumeDraft": "Reprendre le draft",
+      "draftPod": "Pod de draft",
+      "activeDeck": "Deck actif",
+      "noActiveDeck": "Choisissez un deck pour commencer",
+      "fromFeeds": "Depuis vos flux",
+      "feedsEmpty": "Abonnez-vous à un flux pour voir de nouveaux decks",
+      "cards": "{{count}} cartes",
+      "mode": {
+        "ai": "contre l'IA",
+        "online": "En ligne",
+        "local": "Local",
+        "p2p-host": "P2P",
+        "p2p-join": "P2P"
+      },
+      "tagline": "Un moteur de règles et client de jeu Magic: The Gathering open source",
+      "turn": "Tour {{n}}",
+      "yourTurn": "À toi de jouer",
+      "opponentTurn": "Tour de l'adversaire",
+      "yourLife": "Toi {{life}}"
+    }
   },
   "loadState": {
     "title": "Charger un état de partie",
@@ -242,5 +266,16 @@
   },
   "loadGameState": {
     "readFailed": "Échec de la lecture du fichier"
+  },
+  "nav": {
+    "label": "Navigation principale",
+    "home": "Accueil",
+    "play": "Jouer",
+    "online": "En ligne",
+    "draft": "Draft",
+    "decks": "Decks",
+    "alpha": "Alpha",
+    "profile": "Profil",
+    "settings": "Réglages"
   }
 }

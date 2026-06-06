@@ -2,7 +2,7 @@ use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -15,7 +15,8 @@ use crate::types::zones::Zone;
 ///
 /// The second MV check (resulting-spell MV) is enforced at cast time in
 /// `casting_costs::finalize_cast_with_phyrexian_choices` via the
-/// `CastPermissionConstraint::CascadeResultingMvBelow` predicate, because X
+/// `CastPermissionConstraint::ManaValue` predicate carried on the hit's
+/// cast-during-resolution `ExileWithAltCost` permission (CR 608.2g), because X
 /// and other variable costs are only resolved at that point.
 pub fn resolve(
     state: &mut GameState,
@@ -26,13 +27,12 @@ pub fn resolve(
         return Err(EffectError::InvalidParam("Expected Cascade".to_string()));
     }
 
-    // CR 202.3b + CR 702.85a: Read source MV from the stack spell object.
-    // `mana_cost.mana_value()` contributes 0 for {X} shards (CR 107.3b), so
-    // add `cost_x_paid` to reflect the chosen value of X on the stack.
+    // CR 202.3b + CR 202.3e + CR 702.85a: Read source MV from the stack spell object.
+    // `mana_value_with_x` includes cost_x_paid to reflect the chosen value of X.
     let source_mv = state
         .objects
         .get(&ability.source_id)
-        .map(|obj| obj.mana_cost.mana_value() + obj.cost_x_paid.unwrap_or(0))
+        .map(|obj| obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
         .unwrap_or(0);
 
     // CR 603.3a: Re-read the controller from the source spell at resolution
@@ -114,11 +114,13 @@ pub fn resolve(
             // here because a rejection at cast time (X makes resulting MV
             // ineligible) must still bottom-shuffle them together with the
             // hit, and that path runs from `casting_costs`.
-            state.waiting_for = WaitingFor::CascadeChoice {
+            state.waiting_for = WaitingFor::CastOffer {
                 player: controller,
-                hit_card: hit,
-                exiled_misses,
-                source_mv,
+                kind: CastOfferKind::Cascade {
+                    hit_card: hit,
+                    exiled_misses,
+                    source_mv,
+                },
             };
         }
         None => {
@@ -222,10 +224,13 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::CascadeChoice {
-                hit_card,
-                exiled_misses,
-                source_mv,
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::Cascade {
+                        hit_card,
+                        exiled_misses,
+                        source_mv,
+                    },
                 ..
             } => {
                 assert_eq!(*hit_card, hit);
@@ -250,9 +255,13 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::CascadeChoice {
-                hit_card,
-                exiled_misses,
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::Cascade {
+                        hit_card,
+                        exiled_misses,
+                        ..
+                    },
                 ..
             } => {
                 assert_eq!(*hit_card, hit);
@@ -279,7 +288,13 @@ mod tests {
         // No CascadeChoice produced — waiting_for remains whatever the initial
         // state was (resolver leaves it alone when library is exhausted).
         assert!(
-            !matches!(state.waiting_for, WaitingFor::CascadeChoice { .. }),
+            !matches!(
+                state.waiting_for,
+                WaitingFor::CastOffer {
+                    kind: CastOfferKind::Cascade { .. },
+                    ..
+                }
+            ),
             "No CascadeChoice should be offered when nothing hits"
         );
 
@@ -314,7 +329,10 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::CascadeChoice { source_mv, .. } => assert_eq!(*source_mv, 5),
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { source_mv, .. },
+                ..
+            } => assert_eq!(*source_mv, 5),
             other => panic!("Expected CascadeChoice, got {:?}", other),
         }
     }
@@ -331,7 +349,13 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(
-            !matches!(state.waiting_for, WaitingFor::CascadeChoice { .. }),
+            !matches!(
+                state.waiting_for,
+                WaitingFor::CastOffer {
+                    kind: CastOfferKind::Cascade { .. },
+                    ..
+                }
+            ),
             "No CascadeChoice should be offered with an empty library"
         );
         let missed = events.iter().find_map(|e| match e {
@@ -365,7 +389,13 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(
-            !matches!(state.waiting_for, WaitingFor::CascadeChoice { .. }),
+            !matches!(
+                state.waiting_for,
+                WaitingFor::CastOffer {
+                    kind: CastOfferKind::Cascade { .. },
+                    ..
+                }
+            ),
             "No CascadeChoice should be offered when no nonland is hit"
         );
         let missed = events.iter().find_map(|e| match e {

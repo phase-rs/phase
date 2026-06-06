@@ -12,11 +12,16 @@ expression: "&ir"
           "type": "GenericEffect",
           "static_abilities": [
             {
-              "mode": "CantBeTargeted",
+              "mode": "Continuous",
               "affected": {
                 "type": "ParentTarget"
               },
-              "modifications": [],
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Hexproof"
+                }
+              ],
               "condition": null,
               "affected_zone": null,
               "effect_zone": null,

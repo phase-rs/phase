@@ -86,13 +86,13 @@ fn whitemane_lion_self_bounce_does_not_infinite_loop() {
             main_deck: deck_whitemane_lion_stack(),
             sideboard: Vec::new(),
             commander: Vec::new(),
-            bracket_tier: Default::default(),
+            ..Default::default()
         },
         opponent: PlayerDeckList {
             main_deck: deck_whitemane_lion_stack(),
             sideboard: Vec::new(),
             commander: Vec::new(),
-            bracket_tier: Default::default(),
+            ..Default::default()
         },
         ai_decks: Vec::new(),
         ai_difficulties: Vec::new(),

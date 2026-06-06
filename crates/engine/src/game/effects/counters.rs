@@ -48,6 +48,8 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         }
         // CR 702.62a + CR 702.63a: Time counters live only in the counter map
         // (read by the suspend upkeep / vanishing triggers) — no derived field.
+        // CR 702.32a: Fade counters likewise live only in the counter map (read
+        // by the Fading upkeep removal / sacrifice triggers) — no derived field.
         // CR 702.24a: Age counters likewise live only in the counter map (read
         // by the cumulative-upkeep trigger to scale the cost) — no derived field.
         CounterType::Plus1Plus1
@@ -56,7 +58,9 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         | CounterType::Stun
         | CounterType::Lore
         | CounterType::Time
+        | CounterType::Fade
         | CounterType::Age
+        | CounterType::Shield
         | CounterType::Keyword(_)
         | CounterType::Generic(_) => {}
     }
@@ -65,14 +69,21 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
 /// Mark layers dirty if this counter type projects into a derived characteristic
 /// computed by the layer system. P/T counters feed layer 7c (CR 613.4c);
 /// Loyalty/Defense are cached fields mirrored from the counter map; keyword
-/// counters grant abilities at layer 6 (CR 613.1f + CR 122.1b). Setting
+/// counters grant abilities at layer 6 (CR 613.1f + CR 122.1b); generic
+/// counters can gate static/trigger conditions (e.g. Spacecraft Station
+/// thresholds) whose effects are realized by layer recomputation. Setting
 /// `layers_dirty` for these is defensive — the layer reset/re-derive path is
 /// idempotent when counters already match.
 pub(crate) fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
+    // CR 613.1: Recompute the continuous-effect layer system whenever a
+    // counter change can alter condition-gated effects.
     counter_type.power_toughness_delta().is_some()
         || matches!(
             counter_type,
-            CounterType::Loyalty | CounterType::Defense | CounterType::Keyword(_)
+            CounterType::Loyalty
+                | CounterType::Defense
+                | CounterType::Keyword(_)
+                | CounterType::Generic(_)
         )
 }
 
@@ -150,8 +161,13 @@ pub(crate) fn apply_counter_addition(
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
 
+    // CR 122.1: Drop stale zero-count keys left over from prior removals before
+    // recording the object snapshot so counter history never exposes absent
+    // markers as present entries.
+    crate::types::counter::prune_zero_counters(&mut obj.counters);
+
     if counter_type_affects_layers(&counter_type) {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     state.counter_added_this_turn.push(CounterAddedRecord {
@@ -205,8 +221,12 @@ pub(crate) fn apply_counter_removal(
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
 
+    // CR 122.1: Zero-count entries are absent — prune so proliferate and other
+    // "has a counter" checks cannot resurrect removed counter types.
+    crate::types::counter::prune_zero_counters(&mut obj.counters);
+
     if counter_type_affects_layers(&counter_type) {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     // CR 122.1: Only emit when counters were actually removed,
@@ -582,7 +602,7 @@ pub fn resolve_add_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (counter_type, counter_num, target_filter) = match &ability.effect {
+    let (counter_type, count, counter_num_shared, target_filter) = match &ability.effect {
         Effect::PutCounterAll {
             counter_type,
             count,
@@ -591,19 +611,21 @@ pub fn resolve_add_all(
             let resolved =
                 crate::game::quantity::resolve_quantity_with_targets(state, count, ability).max(0)
                     as u32;
-            (counter_type.clone(), resolved, target.clone())
+            (
+                counter_type.clone(),
+                count.clone(),
+                resolved,
+                target.clone(),
+            )
         }
         _ => return Ok(()),
     };
     // CR 608.2c: Bind the `TrackedSetId(0)` sentinel emitted by the parser for
     // "put a counter on each [card] this way" continuations to the active
-    // chain tracked set — the set the immediately preceding effect in this
-    // chain published. Empty sets are *not* skipped here (unlike
-    // `targeting::resolve_tracked_set_sentinel`): a chained counter effect
-    // refers to the preceding effect's set even when it ended up empty. When
-    // no chain set exists, combat-damage trigger context may provide the
-    // filtered "those creatures" source set; otherwise fall back to the legacy
-    // latest tracked set behavior.
+    // chain tracked set. Empty sets are *not* skipped here: a chained counter
+    // effect refers to the preceding effect's set even when it affected no
+    // objects. Preserve that counter-specific fallback while supporting the
+    // filtered "each of those <type>" intersection.
     let target_filter = match crate::game::effects::resolved_object_filter(ability, &target_filter)
     {
         TargetFilter::TrackedSet {
@@ -622,6 +644,29 @@ pub fn resolve_add_all(
             .unwrap_or(TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0),
             }),
+        TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter,
+        } => {
+            if let Some(id) = state.chain_tracked_set_id {
+                TargetFilter::TrackedSetFiltered { id, filter }
+            } else if let Some(source_filter) =
+                crate::game::targeting::current_combat_damage_source_filter(state)
+            {
+                TargetFilter::And {
+                    filters: vec![source_filter, *filter],
+                }
+            } else if let Some((&id, _)) =
+                state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+            {
+                TargetFilter::TrackedSetFiltered { id, filter }
+            } else {
+                TargetFilter::TrackedSetFiltered {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                    filter,
+                }
+            }
+        }
         filter => filter,
     };
 
@@ -646,7 +691,26 @@ pub fn resolve_add_all(
                 .collect()
         };
 
+    // CR 122.1 + CR 608.2c: A per-recipient count ("each other creature you
+    // control equal to THAT CREATURE's toughness" — Canopy Gargantuan) is
+    // re-evaluated against each object; a uniform count (the source's power —
+    // Ouroboroid) is resolved once and shared. Detected via the recipient-
+    // binding scope the parser stamps on per-recipient counts.
+    let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
+
     for obj_id in matching_ids {
+        let counter_num = if count_uses_recipient {
+            crate::game::quantity::resolve_quantity_with_recipient(
+                state,
+                &count,
+                ability.controller,
+                ability.source_id,
+                obj_id,
+            )
+            .max(0) as u32
+        } else {
+            counter_num_shared
+        };
         add_counter_with_replacement(
             state,
             ability.controller,
@@ -1335,6 +1399,115 @@ mod tests {
             .push(CoreType::Creature);
     }
 
+    /// Issue #1675 — Canopy Gargantuan: "put a number of +1/+1 counters on each
+    /// other creature you control equal to THAT CREATURE's toughness." Each
+    /// other creature must receive counters equal to ITS OWN toughness (the
+    /// count is re-evaluated per recipient), the source is excluded ("Another"),
+    /// and an opponent's creature receives none ("you control").
+    #[test]
+    fn put_counter_all_per_recipient_toughness() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+
+        let mut state = GameState::new_two_player(42);
+
+        // Canopy Gargantuan (the source).
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Canopy Gargantuan".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, source);
+        {
+            let o = state.objects.get_mut(&source).unwrap();
+            o.toughness = Some(7);
+            o.base_toughness = Some(7);
+        }
+
+        // Three OTHER creatures you control with distinct toughness.
+        let others: Vec<(ObjectId, i32)> = [(2u64, 3i32), (3, 5), (4, 1)]
+            .into_iter()
+            .map(|(cid, tough)| {
+                let id = create_object(
+                    &mut state,
+                    CardId(cid),
+                    PlayerId(0),
+                    format!("Creature {cid}"),
+                    Zone::Battlefield,
+                );
+                mark_creature(&mut state, id);
+                let o = state.objects.get_mut(&id).unwrap();
+                o.toughness = Some(tough);
+                o.base_toughness = Some(tough);
+                (id, tough)
+            })
+            .collect();
+
+        // An opponent's creature — must NOT receive counters ("you control").
+        let opp = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, opp);
+        {
+            let o = state.objects.get_mut(&opp).unwrap();
+            o.toughness = Some(4);
+            o.base_toughness = Some(4);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another]),
+                ),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_add_all(&mut state, &ability, &mut events).unwrap();
+
+        // Each OTHER creature you control gains counters equal to ITS OWN toughness.
+        for (id, tough) in &others {
+            assert_eq!(
+                state.objects[id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                *tough as u32,
+                "creature with toughness {tough} must receive {tough} +1/+1 counters"
+            );
+        }
+        // Source ("Another") and the opponent's creature ("you control") get none.
+        assert!(
+            !state.objects[&source]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "source must be excluded by Another"
+        );
+        assert!(
+            !state.objects[&opp]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "opponent's creature must be excluded by 'you control'"
+        );
+    }
+
     #[test]
     fn add_counter_increments() {
         let mut state = GameState::new_two_player(42);
@@ -1380,7 +1553,7 @@ mod tests {
         };
         let mut events = Vec::new();
 
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
         apply_counter_addition(
             &mut state,
             PlayerId(0),
@@ -1389,11 +1562,11 @@ mod tests {
             1,
             &mut events,
         );
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
 
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
         apply_counter_removal(&mut state, obj_id, counter_type, 1, &mut events);
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
     }
 
     #[test]
@@ -1428,7 +1601,52 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.objects[&obj_id].counters[&CounterType::Plus1Plus1], 0);
+        assert!(
+            !state.objects[&obj_id]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "zero-count +1/+1 entry should be pruned after removal"
+        );
+    }
+
+    #[test]
+    fn apply_counter_removal_prunes_zero_entry() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 1);
+        let mut events = Vec::new();
+
+        apply_counter_removal(
+            &mut state,
+            obj_id,
+            CounterType::Generic("charge".to_string()),
+            1,
+            &mut events,
+        );
+
+        assert!(
+            state.objects[&obj_id].counters.is_empty(),
+            "last charge counter removed should leave an empty map"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::CounterRemoved {
+                counter_type: CounterType::Generic(_),
+                count: 1,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1634,7 +1852,10 @@ mod tests {
             1,
             "SelfRef counter must land on the source object"
         );
-        assert!(state.layers_dirty, "layers must be dirtied for P/T counter");
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "layers must be dirtied for P/T counter"
+        );
     }
 
     #[test]
@@ -1847,6 +2068,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: lki_counters,
             },
         );
@@ -2444,7 +2666,10 @@ mod tests {
         remove_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 5, &mut events);
 
         let obj = &state.objects[&pw_id];
-        assert_eq!(obj.counters.get(&CounterType::Loyalty).copied(), Some(0));
+        assert!(
+            !obj.counters.contains_key(&CounterType::Loyalty),
+            "zero-count loyalty entry should be pruned after removal"
+        );
         assert_eq!(obj.loyalty, Some(0));
     }
 

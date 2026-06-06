@@ -831,6 +831,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
@@ -845,6 +846,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -866,6 +868,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -882,6 +885,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
             vec![],
             source_id,
@@ -904,6 +908,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1162,6 +1167,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
@@ -1176,6 +1182,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             enchantment_id,
@@ -1197,6 +1204,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -1213,6 +1221,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
             vec![],
             enchantment_id,
@@ -1269,6 +1278,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1830,11 +1840,13 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         from: Zone::Graveyard,
         to: Zone::Battlefield,
         cause: None,
+        attach_to: None,
         enter_tapped: EtbTapState::Tapped,
         enter_with_counters: Vec::new(),
         controller_override: Some(P0),
         enter_transformed: false,
         applied: std::collections::HashSet::new(),
+        face_down_profile: None,
     };
 
     let mut events = Vec::new();
@@ -1903,11 +1915,13 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         from: Zone::Hand,
         to: Zone::Battlefield,
         cause: None,
+        attach_to: None,
         enter_tapped: EtbTapState::Unspecified,
         enter_with_counters: Vec::new(),
         controller_override: None,
         enter_transformed: false,
         applied: std::collections::HashSet::new(),
+        face_down_profile: None,
     };
 
     let mut events = Vec::new();
@@ -1973,6 +1987,7 @@ fn build_earthbend_ability(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     );
 
@@ -2064,6 +2079,7 @@ fn cast_synthetic_earthbend(
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(state, entry, &mut vec![]);
@@ -2231,7 +2247,9 @@ fn earthbended_land_returns_tapped_after_exile() {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::SpecificObject { id: land_id },
+            enters_under: None,
             enter_tapped: false,
+            face_down_profile: None,
         },
         vec![TargetRef::Object(land_id)],
         exile_source,
@@ -2251,6 +2269,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(runner.state_mut(), entry, &mut vec![]);
@@ -2281,22 +2300,11 @@ fn earthbended_land_returns_tapped_after_exile() {
 /// This is the closest analog to what the user reported in #313.
 #[test]
 fn earthbending_lesson_returned_tapped_after_dies_e2e() {
-    use std::path::Path;
-    use std::sync::OnceLock;
-
-    use engine::database::card_db::CardDatabase;
     use engine::game::engine::apply_as_current;
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::card_type::Supertype;
 
-    fn load_db() -> Option<&'static CardDatabase> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-        if !path.exists() {
-            return None;
-        }
-        static DB: OnceLock<CardDatabase> = OnceLock::new();
-        Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-    }
+    use crate::support::shared_card_db as load_db;
 
     let Some(db) = load_db() else {
         return;

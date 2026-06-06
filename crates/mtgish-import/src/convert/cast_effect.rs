@@ -29,7 +29,7 @@ use engine::types::ability::{
     AdditionalCost, CastingRestriction, QuantityExpr, QuantityRef, SpellCastingOption,
     SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
 };
-use engine::types::statics::StaticMode;
+use engine::types::statics::{CostModifyMode, StaticMode};
 use engine::types::{ManaCost, Zone};
 
 use crate::convert::condition as condition_conv;
@@ -144,14 +144,14 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
         }),
         // CR 117.7 + CR 601.2f: Self-spell cost reduction. Mirrors the native
         // parser's `try_parse_cost_modification` self-spell branch
-        // (oracle_static.rs:6720). Emits `StaticMode::ReduceCost` with
+        // (oracle_static.rs:6720). Emits `StaticMode::ModifyCost` (Reduce) with
         // `affected = SelfRef` and `active_zones = [Hand, Stack]` so the
         // casting-time scanner finds the static on the spell being cast.
         E::ReduceCastingCost(reduction) => {
             push_self_reduce_cost_static(stub, reduction, None, None)
         }
         // CR 117.7 + CR 601.2f: Self-spell cost reduction with a dynamic
-        // "for each X" multiplier. The engine `StaticMode::ReduceCost.dynamic_count`
+        // "for each X" multiplier. The engine `StaticMode::ModifyCost.dynamic_count`
         // is `Option<QuantityRef>` — `QuantityExpr::Ref { qty }` unwraps cleanly;
         // `Fixed`/`Offset`/`Multiply`/`DivideRounded` cannot be expressed as a bare
         // `QuantityRef` and strict-fail.
@@ -180,7 +180,7 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
         }
         // CR 601.2f + CR 117.7: Self-cost reduction gated on a Condition.
         // Mirrors the native parser's trailing if-clause attachment in
-        // `oracle_static.rs:6850-6917`: build a `StaticMode::ReduceCost` and
+        // `oracle_static.rs:6850-6917`: build a `StaticMode::ModifyCost` (Reduce) and
         // hang the translated `StaticCondition` off
         // `StaticDefinition.condition` (engine field declared at
         // `types/ability.rs:6245`, builder at :6295). The bridge
@@ -344,7 +344,7 @@ fn require_pure_mana(cost: &Cost, idiom: &'static str) -> ConvResult<ManaCost> {
     }
 }
 
-/// CR 117.7 + CR 601.2f: Build a self-spell `StaticMode::ReduceCost`
+/// CR 117.7 + CR 601.2f: Build a self-spell `StaticMode::ModifyCost` (Reduce)
 /// matching the native parser's emit shape (oracle_static.rs:6720+):
 /// `affected = SelfRef`, `active_zones = [Hand, Stack]` so the
 /// casting-time scanner picks it up on the spell being cast. The amount
@@ -398,7 +398,8 @@ fn push_self_reduce_cost_static_with_amount_and_filter(
     dynamic_count: Option<QuantityRef>,
     condition: Option<StaticCondition>,
 ) -> ConvResult<()> {
-    let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+    let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
         amount,
         spell_filter,
         dynamic_count,
@@ -470,7 +471,8 @@ mod tests {
         assert_eq!(static_def.affected, Some(TargetFilter::SelfRef));
         assert_eq!(static_def.active_zones, vec![Zone::Hand, Zone::Stack]);
 
-        let StaticMode::ReduceCost {
+        let StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount,
             spell_filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
             dynamic_count: None,

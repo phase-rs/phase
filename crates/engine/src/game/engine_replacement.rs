@@ -99,7 +99,7 @@ pub(super) fn handle_replacement_choice(
                         }
                     }
                     if to == Zone::Battlefield || from == Zone::Battlefield {
-                        state.layers_dirty = true;
+                        crate::game::layers::mark_layers_full(state);
                     }
                     enters_battlefield = to == Zone::Battlefield;
                     zone_change_object_id = Some(object_id);
@@ -315,6 +315,17 @@ pub(super) fn handle_replacement_choice(
                     );
                     state.pending_step_end_mana_handlers.clear();
                 }
+                // CR 705.1 + CR 614.1a: Coin-flip replacements (Krark's Thumb)
+                // are always Mandatory and applied inline by
+                // `flip_coin::flip_through_replacement`; they never reach the
+                // optional replacement-choice resume path. Unreachable in
+                // practice — present only for match exhaustiveness.
+                ProposedEvent::CoinFlip { .. } => {
+                    debug_assert!(
+                        false,
+                        "CoinFlip replacement reached the optional-choice resume path"
+                    );
+                }
             }
 
             let mut waiting_for = WaitingFor::Priority {
@@ -366,6 +377,15 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_copy_token_resolution.is_some()
+            {
+                effects::token_copy::drain_pending_copy_token_resolution(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_continuation.is_some()
                     || state.pending_change_zone_iteration.is_some())
             {
@@ -399,6 +419,14 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 601.2h + CR 602.2b + CR 616.1: Resume cast/activation cost payment paused for a
+            // replacement choice during discard or sacrifice cost payment.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+            {
+                waiting_for = super::casting_costs::resume_interrupted_cost_payment(state, events)?;
+            }
+
             Ok(waiting_for)
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => Ok(
@@ -413,6 +441,13 @@ pub(super) fn handle_replacement_choice(
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     effects::drain_pending_continuation(state, events);
                 }
+                return Ok(state.waiting_for.clone());
+            }
+            if state.pending_copy_token_resolution.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
@@ -487,7 +522,7 @@ pub(super) fn handle_copy_target_choice(
         }
     }
     apply_etb_counters(state, source_id, &enter_modifiers.counters, events);
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
     // captured into `state.deferred_entry_events` when `CopyTargetChoice` was
     // set up, *before* `BecomeCopy` had a chance to push the copied object's
@@ -1182,6 +1217,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 ))
                 .description("Rest in Peace".to_string()),
@@ -1296,11 +1332,13 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Exile,
             cause: None,
+            attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let mut events = Vec::new();
         crate::game::sacrifice::apply_sacrifice_after_replacement(&mut state, event, &mut events);
@@ -1357,6 +1395,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: std::collections::HashSet::new(),
@@ -1797,11 +1836,13 @@ mod tests {
             from: Zone::Stack,
             to: Zone::Battlefield,
             cause: None,
+            attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -1974,11 +2015,13 @@ mod tests {
             from: Zone::Stack,
             to: Zone::Battlefield,
             cause: None,
+            attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {
@@ -2117,7 +2160,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             ),
             AbilityDefinition::new(

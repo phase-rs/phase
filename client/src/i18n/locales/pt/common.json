@@ -49,6 +49,8 @@
     "volume": "Volume"
   },
   "hostControl": {
+    "collapse": "Recolher",
+    "expand": "Expandir painel do anfitrião",
     "seatHost": "Anfitrião",
     "seatPlayer": "Jogador",
     "seatOpen": "Livre",
@@ -198,6 +200,18 @@
   },
   "turnBanner": {
     "turn": "Turno {{number}}"
+  },
+  "diceRoll": {
+    "rollingForFirst": "Rolagem para ver quem começa",
+    "tieReroll": "Empate — rolar de novo!",
+    "versus": "VS",
+    "skip": "Toque para pular",
+    "continue": "Toque para continuar",
+    "you": "Você",
+    "youPlayFirst": "Você joga primeiro",
+    "playerPlaysFirst": "{{name}} joga primeiro",
+    "heads": "Cara",
+    "tails": "Coroa"
   },
   "chrome": {
     "back": "Voltar",

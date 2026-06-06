@@ -33,6 +33,12 @@ interface PermanentCardProps {
   objectId: number;
   attachmentsLiftedByAncestor?: boolean;
   onPrimaryClickOverride?: () => void;
+  /** When this card is the visible representative of a collapsed identical-permanent
+   *  group (see GroupedPermanent collapsed mode), the full list of object ids it
+   *  stands in for. Rendered as `data-grouped-ids` so DOM-driven animations
+   *  (card slam, position lookup) can resolve a non-rendered swarm member to this
+   *  visible card instead of silently no-op'ing. */
+  coveredIds?: number[];
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
@@ -101,7 +107,7 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
   return Number.isFinite(objectId) ? objectId : null;
 }
 
-export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride }: PermanentCardProps) {
+export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride, coveredIds }: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
@@ -157,7 +163,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
   const {
     selectedObjectId, selectObject, hoverObject, inspectObject,
-    hoveredObjectId,
     debugHighlightedObjectId,
     combatMode, selectedAttackers, toggleAttacker,
     blockerAssignments, combatClickHandler, selectedCardIds, toggleSelectedCard,
@@ -166,7 +171,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     selectObject: s.selectObject,
     hoverObject: s.hoverObject,
     inspectObject: s.inspectObject,
-    hoveredObjectId: s.hoveredObjectId,
     debugHighlightedObjectId: s.debugHighlightedObjectId,
     combatMode: s.combatMode,
     selectedAttackers: s.selectedAttackers,
@@ -176,6 +180,18 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     selectedCardIds: s.selectedCardIds,
     toggleSelectedCard: s.toggleSelectedCard,
   })));
+  // Hover is read as derived booleans, NOT the raw hoveredObjectId, so hovering
+  // any permanent re-renders only the card whose hovered/lifted state actually
+  // flips — not every PermanentCard on the board. O(1) per hover, not O(N).
+  const isHovered = useUiStore((s) => s.hoveredObjectId === objectId);
+  // Lifting a host's attachments only applies to cards that HAVE attachments;
+  // for the common (unattached) card this selector is a constant `false`, so it
+  // never re-renders on hover. Attached cards re-render only when their lifted
+  // state changes. Mirrors the `obj.attachments.length > 0` gate below.
+  const hasAttachments = (obj?.attachments.length ?? 0) > 0;
+  const isInHoveredAttachmentTree = useUiStore((s) =>
+    hasAttachments ? attachmentTreeContains(gameObjects, objectId, s.hoveredObjectId) : false,
+  );
   // Debug-panel preview highlight: lights up only when the user is hovering
   // an ObjectSelect option (or otherwise dispatching `setDebugHighlightedObjectId`).
   // Deliberately distinct from the standard hover-lift so the debug signal
@@ -187,7 +203,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const canTapForMana = manaTappableObjectIds.has(objectId);
   const isActivatable = hasActivatableAbility || canTapForMana;
   const tapCreatureCostChoice = useGameStore((s) =>
-    (s.waitingFor?.type === "TapCreaturesForManaAbility" || s.waitingFor?.type === "TapCreaturesForSpellCost") && s.waitingFor.data.player === playerId
+    s.waitingFor?.type === "PayCost"
+    && s.waitingFor.data.kind.type === "TapCreatures"
+    && s.waitingFor.data.player === playerId
       ? s.waitingFor.data
       : null,
   );
@@ -260,10 +278,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const isSelected = selectedObjectId === objectId;
   const attachmentsLifted =
     obj.attachments.length > 0
-    && (
-      attachmentsLiftedByAncestor
-      || attachmentTreeContains(gameObjects, objectId, hoveredObjectId)
-    );
+    && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
 
   // Combat state — check both UI selection and committed combat state
   const isSelectingAttacker =
@@ -365,8 +380,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     // to activate Equip and reattach it. Stop the bubble so the attachment's
     // own intent (target / activate / select) wins cleanly.
     if (obj.attached_to !== null) e.stopPropagation();
-    // TapCreaturesForManaAbility is mid-cost resolution — check before combat mode
-    // so clicks land even when DeclareAttackers combat mode is active.
+    // A PayCost TapCreatures prompt is mid-cost resolution — check before combat
+    // mode so clicks land even when DeclareAttackers combat mode is active.
     if (isSelectableForManaCost && tapCreatureCostChoice) {
       if (
         isSelectedForManaCost
@@ -458,11 +473,12 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     <motion.div
       ref={cardRef}
       data-object-id={objectId}
+      data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
-        zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : hoveredObjectId === objectId ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
+        zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : isHovered ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:

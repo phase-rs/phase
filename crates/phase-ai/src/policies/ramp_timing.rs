@@ -298,6 +298,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -313,6 +314,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         ability

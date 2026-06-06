@@ -2,11 +2,14 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, DisplaySource};
 
 use super::counter::CounterType;
 
-use super::ability::{Duration, StaticDefinition, TargetRef};
+use super::ability::{
+    ContinuousModification, CopiableValues, Duration, FaceDownProfile, StaticDefinition, TargetRef,
+};
+use super::card::PrintedCardRef;
 use super::card_type::{CoreType, Supertype};
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
@@ -126,6 +129,29 @@ pub struct TokenSpec {
     pub attach_to: Option<AttachTarget>,
 }
 
+/// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same
+/// `CreateToken` proposed event that ordinary token creation uses for
+/// replacement effects. `TokenSpec` remains the replacement-visible probe
+/// characteristics; this payload carries the full copiable values needed once
+/// the event is accepted, including display metadata that is not copiable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyTokenSpec {
+    pub values: Box<CopiableValues>,
+    pub display_source: DisplaySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_keywords: Vec<Keyword>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_modifications: Vec<ContinuousModification>,
+    pub tapped: bool,
+    pub enters_attacking: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sacrifice_at: Option<Duration>,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProposedEvent {
     ZoneChange {
@@ -133,6 +159,14 @@ pub enum ProposedEvent {
         from: Zone,
         to: Zone,
         cause: Option<ObjectId>,
+        /// CR 303.4f: When an Aura enters the battlefield by a non-spell
+        /// effect and the effect does not specify what it enchants, the
+        /// controller chooses a legal object or player as it enters. The
+        /// ChangeZone pipeline resolves that choice before delivery and carries
+        /// the chosen host here so the battlefield entry and attachment are one
+        /// event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attach_to: Option<AttachTarget>,
         /// Explicit ETB tap-state override carried through the replacement pipeline.
         /// `Unspecified` preserves any non-replacement tapped seed from the originating effect.
         #[serde(default)]
@@ -149,6 +183,14 @@ pub enum ProposedEvent {
         /// Set by "return ... transformed" effects.
         #[serde(default)]
         enter_transformed: bool,
+        /// CR 708.2a + CR 708.3: When `Some`, the object is turned face down
+        /// (before entering, CR 708.3) with these characteristics as it enters
+        /// the battlefield. Carried through the replacement pipeline so the
+        /// face-down state is established before ETB triggers would fire.
+        /// Boxed so this rarely-set field doesn't inflate the size of every
+        /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<Box<FaceDownProfile>>,
         applied: HashSet<ReplacementId>,
     },
     Damage {
@@ -177,6 +219,15 @@ pub enum ProposedEvent {
         player_id: PlayerId,
         count: u32,
         destination: Zone,
+        applied: HashSet<ReplacementId>,
+    },
+    /// CR 705.1 + CR 614.1a: A player is about to flip a single coin. Carried
+    /// through the replacement pipeline so per-flip "instead flip two and ignore
+    /// one" effects (Krark's Thumb) double the count before the RNG runs. Per the
+    /// card's 2019-01-25 ruling, each individual flip is replaced separately.
+    CoinFlip {
+        player_id: PlayerId,
+        count: u32,
         applied: HashSet<ReplacementId>,
     },
     LifeGain {
@@ -231,6 +282,12 @@ pub enum ProposedEvent {
         /// Resolved token characteristics, keyed by replacement pipeline
         /// matchers on the apply path to reproduce the token faithfully.
         spec: Box<TokenSpec>,
+        /// CR 707.2: When present, the event creates tokens that are copies of
+        /// a permanent. Replacement matching still reads `spec`; the apply path
+        /// reads this payload so replacement-choice resume does not degrade to a
+        /// generic token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<Box<CopyTokenSpec>>,
         /// Explicit ETB tap-state override carried through the replacement pipeline.
         /// `Unspecified` preserves the token spec's authored `tapped` bit.
         #[serde(default)]
@@ -339,10 +396,12 @@ impl ProposedEvent {
             from,
             to,
             cause,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            face_down_profile: None,
             applied: HashSet::new(),
         }
     }
@@ -412,6 +471,7 @@ impl ProposedEvent {
             | ProposedEvent::Draw { applied, .. }
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
+            | ProposedEvent::CoinFlip { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
@@ -437,6 +497,7 @@ impl ProposedEvent {
             | ProposedEvent::Draw { applied, .. }
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
+            | ProposedEvent::CoinFlip { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
@@ -465,8 +526,23 @@ impl ProposedEvent {
 
     pub fn affected_player(&self, state: &crate::types::game_state::GameState) -> PlayerId {
         match self {
-            ProposedEvent::ZoneChange { object_id, .. }
-            | ProposedEvent::Tap { object_id, .. }
+            // CR 614.12 + CR 109.4: A permanent entering under another player's
+            // control (Tergrid's "onto the battlefield under your control",
+            // reanimation "under your control", etc.) carries a
+            // `controller_override`. The object itself is still in its origin
+            // zone — typically a graveyard, where CR 109.4 gives it no controller
+            // so `o.controller` defaults to the owner. "As-it-enters" replacement
+            // effects (Mirrormade's "enter as a copy", CR 707.9) must be offered
+            // to the controller the permanent WOULD have on the battlefield, so
+            // honor the override before falling back to the object's controller.
+            ProposedEvent::ZoneChange {
+                object_id,
+                controller_override,
+                ..
+            } => controller_override
+                .or_else(|| state.objects.get(object_id).map(|o| o.controller))
+                .unwrap_or(PlayerId(0)),
+            ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::AddCounter { object_id, .. }
@@ -502,6 +578,7 @@ impl ProposedEvent {
             ProposedEvent::Draw { player_id, .. }
             | ProposedEvent::Scry { player_id, .. }
             | ProposedEvent::Mill { player_id, .. }
+            | ProposedEvent::CoinFlip { player_id, .. }
             | ProposedEvent::LifeGain { player_id, .. }
             | ProposedEvent::LifeLoss { player_id, .. }
             | ProposedEvent::Discard { player_id, .. }
@@ -544,6 +621,7 @@ impl ProposedEvent {
             ProposedEvent::Draw { .. }
             | ProposedEvent::Scry { .. }
             | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
             | ProposedEvent::LifeGain { .. }
             | ProposedEvent::LifeLoss { .. }
             | ProposedEvent::CreateToken { .. }
@@ -559,8 +637,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proposed_event_has_19_variants() {
-        // Verify all 19 variants compile
+    fn proposed_event_has_21_variants() {
+        // Verify all 21 variants compile
         let events: Vec<ProposedEvent> = vec![
             ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
             ProposedEvent::Damage {
@@ -584,6 +662,11 @@ mod tests {
                 player_id: PlayerId(0),
                 count: 1,
                 destination: Zone::Graveyard,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::CoinFlip {
+                player_id: PlayerId(0),
+                count: 1,
                 applied: HashSet::new(),
             },
             ProposedEvent::LifeGain {
@@ -642,6 +725,7 @@ mod tests {
                     controller: PlayerId(0),
                     attach_to: None,
                 }),
+                copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: 1,
                 applied: HashSet::new(),
@@ -680,7 +764,7 @@ mod tests {
                 applied: HashSet::new(),
             },
         ];
-        assert_eq!(events.len(), 20);
+        assert_eq!(events.len(), 21);
     }
 
     #[test]

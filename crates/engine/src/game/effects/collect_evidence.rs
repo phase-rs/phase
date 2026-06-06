@@ -174,6 +174,7 @@ pub(crate) fn handle_choice(
         CollectEvidenceResume::Casting { pending_cast } => {
             let mut pending = pending_cast.as_ref().clone();
             pending.ability.context.additional_cost_paid = true;
+            let base_cost = pending.base_cost.clone();
             super::super::casting_costs::pay_and_push(
                 state,
                 player,
@@ -181,6 +182,7 @@ pub(crate) fn handle_choice(
                 pending.card_id,
                 pending.ability,
                 &pending.cost,
+                base_cost,
                 pending.casting_variant,
                 pending.cast_timing_permission,
                 pending.distribute,
@@ -276,6 +278,7 @@ mod tests {
                     target_player: None,
                     selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                     split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
                 },
                 vec![],
                 source_id,
@@ -414,6 +417,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),

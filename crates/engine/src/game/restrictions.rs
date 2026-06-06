@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingRestriction,
-    ControllerRef, FilterProp, ParsedCondition, QuantityExpr, SpellCastingOptionKind, TargetFilter,
-    TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingPermission,
+    CastingRestriction, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
+    SpellCastingOptionKind, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -34,6 +34,26 @@ pub fn check_spell_timing(
         casting_variant,
         CastingVariant::Miracle | CastingVariant::Madness
     ) {
+        return Ok(());
+    }
+
+    // CR 608.2g + CR 702.85a / CR 701.57a + CR 702.62a/d: A spell cast DURING
+    // the resolution of its source ability — a Cascade/Discover hit, or
+    // Suspend's last-time-counter free cast — follows the 601.2a-i cast steps
+    // but bypasses normal timing: sorcery-speed, empty-stack, and active-player
+    // gates do not apply (Treasure Cruise is a sorcery cast at upkeep with the
+    // trigger still on the stack). Such a cast is driven by
+    // `initiate_cast_during_resolution`, which marks the card with an
+    // `ExileWithAltCost` permission carrying `resolution_cleanup`.
+    if obj.casting_permissions.iter().any(|p| {
+        matches!(
+            p,
+            CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(_),
+                ..
+            }
+        )
+    }) {
         return Ok(());
     }
 
@@ -176,7 +196,8 @@ pub fn record_spell_cast_from_zone(
         subtypes: obj.card_types.subtypes.clone(),
         keywords: obj.keywords.clone(),
         colors: obj.color.clone(),
-        mana_value: obj.mana_cost.mana_value(),
+        // CR 202.3e: While on the stack, X equals the announced value, not 0.
+        mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
         // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
         // trigger-filter evaluation (e.g. "your first spell with {X} in its
         // mana cost each turn") does not need to re-examine the spell object.
@@ -233,6 +254,15 @@ pub fn record_attackers_declared(
         .attacking_creatures_this_turn
         .entry(state.active_player)
         .or_insert(0) += attacker_count as u32;
+
+    // CR 508.6 + CR 508.5: record the defending players attacked this declaration.
+    // `players_attacked_this_step` already holds this declaration's defenders.
+    let active = state.active_player;
+    state
+        .attacked_defenders_this_turn
+        .entry(active)
+        .or_default()
+        .extend(state.players_attacked_this_step.iter().copied());
 }
 
 pub fn record_discard(state: &mut crate::types::game_state::GameState, player: PlayerId) {
@@ -533,6 +563,10 @@ fn effective_activation_limit(
         AbilityTag::Evolve => "evolve",
         AbilityTag::Exhaust => "exhaust",
         AbilityTag::Outlast => "outlast",
+        // CR 702.29: Cycling has no per-turn activation limit. Unreachable here —
+        // this fn is only called for abilities carrying an `OnlyOnceEachTurn`
+        // restriction, which the synthesized cycling ability never has.
+        AbilityTag::Cycling => "cycling",
     };
     // Scan battlefield for ModifyActivationLimit statics that affect this keyword
     let mut limit: u32 = 1;
@@ -653,7 +687,7 @@ fn activation_restriction_applies(
             state.active_player == player && state.phase == Phase::Upkeep
         }
         // CR 508.1c / CR 509.1b: Combat-phase restrictions on activation timing.
-        ActivationRestriction::DuringCombat => is_combat_phase(state.phase),
+        ActivationRestriction::DuringCombat => state.phase.is_combat(),
         ActivationRestriction::BeforeAttackersDeclared => is_before_attackers_declared(state),
         ActivationRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
         // CR 602.5b: Per-turn activation limit tracked via ability activation counter.
@@ -746,7 +780,7 @@ fn casting_restriction_applies(
     match restriction {
         // CR 307.1: A player may cast a sorcery during a main phase of their turn when the stack is empty.
         CastingRestriction::AsSorcery => is_sorcery_speed_window(state, player),
-        CastingRestriction::DuringCombat => is_combat_phase(state.phase),
+        CastingRestriction::DuringCombat => state.phase.is_combat(),
         CastingRestriction::DuringOpponentsTurn => state.active_player != player,
         CastingRestriction::DuringYourTurn => state.active_player == player,
         CastingRestriction::DuringYourUpkeep => {
@@ -840,6 +874,16 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
+        // CR 301.5 + CR 602.5b: Attachment activation gates only apply when
+        // the source is attached to an object of the required type. Player
+        // hosts have no core types, so `as_object()` correctly rejects them.
+        ParsedCondition::SourceAttachedTo { required_type } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.attached_to)
+            .and_then(|t| t.as_object())
+            .and_then(|attached_to| state.objects.get(&attached_to))
+            .is_some_and(|obj| obj.card_types.core_types.contains(required_type)),
         // CR 301.5 + CR 303.4: This condition is meaningful only when the host is
         // an object (Equipment/Aura attached to a permanent). A player host
         // (CR 303.4 + CR 702.5d, Curse cycle) has no `tapped` or core_type, so
@@ -1263,9 +1307,20 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
     // entry, and re-running it here would over-strictly reject casts where the
     // game state changed mid-cast (an unusual but possible edge case the rules
     // do not require us to police a second time).
-    obj.casting_options
+    let flash_options: Vec<_> = obj
+        .casting_options
         .iter()
         .filter(|o| o.kind == SpellCastingOptionKind::AsThoughHadFlash)
+        .collect();
+    // CR 118.9 + CR 702.8a: Instant-speed permission from a battlefield
+    // `CastWithAlternativeCost` grant (Primal Prayers class) is not encoded as
+    // a spell `casting_options` entry — only alternative-cost spell options
+    // carry target-dependent flash riders (Timely Ward class).
+    if flash_options.is_empty() {
+        return true;
+    }
+    flash_options
+        .iter()
         .any(|option| match option.condition.as_ref() {
             None => true,
             Some(ParsedCondition::SpellTargetsFilter { filter }) => evaluate_target_filter(filter),
@@ -1320,9 +1375,7 @@ pub(crate) fn target_dependent_flash_permission_feasible(
     // granted types/keywords are visible — mirror `spell_has_legal_targets`
     // (casting.rs). `find_legal_targets` does not evaluate layers itself.
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
     let Some(obj) = simulated.objects.get(&object_id) else {
         return true;
     };
@@ -1397,19 +1450,6 @@ fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> 
     // without turn-control, where the seat and submitter are the same player.
     super::turn_control::priority_seat(state) == state.active_player
         && matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
-}
-
-/// CR 506.1: The combat phase has five steps: beginning of combat, declare attackers,
-/// declare blockers, combat damage, and end of combat.
-fn is_combat_phase(phase: Phase) -> bool {
-    matches!(
-        phase,
-        Phase::BeginCombat
-            | Phase::DeclareAttackers
-            | Phase::DeclareBlockers
-            | Phase::CombatDamage
-            | Phase::EndCombat
-    )
 }
 
 fn is_before_combat_damage(phase: Phase) -> bool {
@@ -1640,6 +1680,39 @@ fn is_source_blocked(state: &crate::types::game_state::GameState, source_id: Obj
         .is_some_and(|blockers| !blockers.is_empty())
 }
 
+/// CR 508.1d + CR 508.1h: Whether a declared `AttackTarget` falls within a
+/// combat restriction's defended scope relative to the static's controller.
+pub(crate) fn attack_target_matches_defended_scope(
+    state: &crate::types::game_state::GameState,
+    attack_target: Option<&crate::game::combat::AttackTarget>,
+    filter: &crate::types::triggers::AttackTargetFilter,
+    source_controller: PlayerId,
+) -> bool {
+    use crate::game::combat::AttackTarget;
+    use crate::types::triggers::AttackTargetFilter;
+    let Some(target) = attack_target else {
+        return false;
+    };
+    let permanent_controller =
+        |id: ObjectId| -> Option<PlayerId> { state.objects.get(&id).map(|obj| obj.controller) };
+    match (filter, target) {
+        (AttackTargetFilter::Player, AttackTarget::Player(p)) => *p == source_controller,
+        (AttackTargetFilter::Planeswalker, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+        }
+        (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Player(p)) => {
+            *p == source_controller
+        }
+        (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+        }
+        (AttackTargetFilter::Battle, AttackTarget::Battle(b_id)) => {
+            permanent_controller(*b_id) == Some(source_controller)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1704,6 +1777,58 @@ mod tests {
         assert!(!evaluate_condition(&state, player, source_id, &condition));
         state.players[usize::from(player.0)].lands_played_this_turn = 1;
         assert!(evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    #[test]
+    fn source_attached_to_condition_checks_host_type() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Reconfigurer".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_id = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Host Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let land_id = create_object(
+            &mut state,
+            CardId(3),
+            player,
+            "Host Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let condition = ParsedCondition::SourceAttachedTo {
+            required_type: CoreType::Creature,
+        };
+
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        state.objects.get_mut(&source_id).unwrap().attached_to = Some(creature_id.into());
+        assert!(evaluate_condition(&state, player, source_id, &condition));
+
+        state.objects.get_mut(&source_id).unwrap().attached_to = Some(land_id.into());
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
     }
 
     #[test]

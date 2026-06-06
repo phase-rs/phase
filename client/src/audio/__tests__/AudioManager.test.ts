@@ -37,15 +37,17 @@ const mockClose = vi.fn();
 
 vi.stubGlobal(
   "AudioContext",
-  vi.fn().mockImplementation(() => ({
-    createGain: mockCreateGain,
-    createBufferSource: mockCreateBufferSource,
-    createMediaElementSource: mockCreateMediaElementSource,
-    decodeAudioData: mockDecodeAudioData,
-    close: mockClose,
-    destination: {},
-    currentTime: 0,
-  })),
+  vi.fn().mockImplementation(function () {
+    return {
+      createGain: mockCreateGain,
+      createBufferSource: mockCreateBufferSource,
+      createMediaElementSource: mockCreateMediaElementSource,
+      decodeAudioData: mockDecodeAudioData,
+      close: mockClose,
+      destination: {},
+      currentTime: 0,
+    };
+  }),
 );
 
 // Mock audioCache to avoid IndexedDB
@@ -74,13 +76,15 @@ const mockAudioPause = vi.fn();
 
 vi.stubGlobal(
   "Audio",
-  vi.fn().mockImplementation(() => ({
-    play: mockAudioPlay,
-    pause: mockAudioPause,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    crossOrigin: null,
-  })),
+  vi.fn().mockImplementation(function () {
+    return {
+      play: mockAudioPlay,
+      pause: mockAudioPause,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      crossOrigin: null,
+    };
+  }),
 );
 
 // Import after mocks are set up

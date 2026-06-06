@@ -22,10 +22,6 @@
 //! milled card* — a creature/artifact/land permanent on the battlefield is
 //! never offered.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
@@ -35,14 +31,7 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 fn add_mana(runner: &mut engine::game::scenario::GameRunner, mana: &[ManaType]) {
     let dummy = ObjectId(0);
@@ -99,41 +88,19 @@ fn dredgers_insight_offers_only_milled_cards_not_battlefield() {
 
     add_mana(&mut runner, &[ManaType::Colorless, ManaType::Green]);
 
-    let card_id = runner.state().objects[&insight_id].card_id;
-    let mut result = runner
-        .act(GameAction::CastSpell {
-            object_id: insight_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Dredger's Insight cast should be accepted");
-
     // Resolve the spell (enchantment enters) and its ETB trigger. The Mill 4
-    // resolves, then the put-from-among-milled `ChangeZone` sub-ability runs
-    // and prompts an `EffectZoneChoice` for the optional selection.
-    let mut guard = 0;
-    while !matches!(result.waiting_for, WaitingFor::EffectZoneChoice { .. }) {
-        guard += 1;
-        assert!(
-            guard < 64,
-            "expected an EffectZoneChoice prompt for the put-from-milled clause; \
-             last waiting_for = {:?}",
-            result.waiting_for
-        );
-        // Drive the stack forward (priority passes, trigger placement, etc.).
-        result = match runner.act(GameAction::PassPriority) {
-            Ok(r) => r,
-            Err(_) => break,
-        };
-    }
+    // resolves, then the put-from-among-milled `ChangeZone` sub-ability runs;
+    // the cast driver stops at the resulting `EffectZoneChoice` (an optional
+    // selection it does not auto-answer), leaving the live runner parked there.
+    let outcome = runner.cast(insight_id).resolve();
 
     let WaitingFor::EffectZoneChoice {
         cards, destination, ..
-    } = &result.waiting_for
+    } = outcome.final_waiting_for()
     else {
         panic!(
             "expected EffectZoneChoice for the put-from-milled clause, got {:?}",
-            result.waiting_for
+            outcome.final_waiting_for()
         );
     };
 

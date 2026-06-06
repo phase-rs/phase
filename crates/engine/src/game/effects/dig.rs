@@ -85,12 +85,21 @@ pub fn resolve(
         .collect::<Vec<_>>();
     let keep_count = keep_num.min(cards.len());
 
-    // CR 701.20a: Pure-peek pattern (keep_count = 0): "look at the top card" with no
+    // CR 701.20e: Pure-peek pattern (keep_count = 0): "look at the top card" with no
     // player selection — the sub_ability condition decides whether to take it. Set
     // last_revealed_ids so RevealedHasCardType can evaluate, then return without
     // creating a DigChoice interaction.
     if keep_count == 0 && !is_reveal {
         state.last_revealed_ids = cards.clone();
+        // CR 701.20e: "look at" privately reveals the cards to the looking
+        // player. The looker is the ability controller (e.g. Delver of Secrets'
+        // "look at the top card of your library"). Record the looker-scoped peek
+        // window so `filter_state_for_viewer` keeps these cards visible to the
+        // looker — and only the looker — through any subsequent "you may reveal
+        // that card" optional decision, instead of leaving the looking player to
+        // choose blind.
+        state.private_look_ids = cards.clone();
+        state.private_look_player = Some(ability.controller);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -155,7 +164,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityKind, FilterProp, GainLifePlayer, QuantityExpr, TypedFilter,
+        AbilityCondition, AbilityKind, FilterProp, QuantityExpr, TypedFilter,
     };
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -268,6 +277,69 @@ mod tests {
         assert_eq!(state.objects[&top_card].zone, Zone::Library);
         assert_eq!(state.players[1].library.front(), Some(&top_card));
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        // CR 701.20e: the looker is the ability controller, not the library
+        // owner — the peeked opponent card is visible to the controller only.
+        assert_eq!(state.private_look_ids, vec![top_card]);
+        assert_eq!(state.private_look_player, Some(PlayerId(0)));
+    }
+
+    /// CR 701.20e (issue #2021, Delver of Secrets): a bare "look at the top card
+    /// of your library" peek must privately reveal the card to the looking
+    /// player, so they can SEE it before deciding a subsequent "you may reveal
+    /// that card" optional. The peek records a looker-scoped window
+    /// (`private_look_ids` / `private_look_player`) that `filter_state_for_viewer`
+    /// surfaces to the looker and hides from opponents.
+    #[test]
+    fn look_at_top_card_makes_peek_visible_to_looker_only() {
+        use crate::game::visibility::filter_state_for_viewer;
+
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Delver Top Card".to_string(),
+            Zone::Library,
+        );
+        let top_card = state.players[0].library[0];
+
+        // "look at the top card of your library" — Dig keep_count 0, no reveal.
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: None,
+                keep_count: Some(0),
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.private_look_ids, vec![top_card]);
+        assert_eq!(state.private_look_player, Some(PlayerId(0)));
+        // CR 701.20e: a private "look at" must NOT publicly reveal the card.
+        assert!(!state.revealed_cards.contains(&top_card));
+
+        // The looking player (PlayerId(0)) can see the peeked card's identity.
+        let looker_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            looker_view.objects[&top_card].name, "Delver Top Card",
+            "the looking player must see the card they looked at"
+        );
+
+        // The opponent (PlayerId(1)) must NOT see it — the library card is hidden.
+        let opp_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert_ne!(
+            opp_view.objects[&top_card].name, "Delver Top Card",
+            "the private look must not leak the card to opponents"
+        );
     }
 
     #[test]
@@ -518,6 +590,134 @@ mod tests {
         );
     }
 
+    /// CR 401.2 + CR 608.2c: a `DigChoice` selection must be drawn from the cards
+    /// actually looked at. Regression guard for the freeform-selection hole — the
+    /// old handler skipped this check whenever `selectable_cards` was empty (a
+    /// filtered dig that matched nothing), so an `apply`-level `SelectCards` with
+    /// a foreign object id was accepted and moved into the chooser's hand.
+    #[test]
+    fn dig_choice_rejects_card_not_looked_at() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+        let cards_on_top = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        // A card the dig never looked at.
+        let foreign = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Foreign".to_string(),
+            Zone::Library,
+        );
+        let original_library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+
+        // Filtered dig that matched nothing -> empty selectable set (the hole).
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            selectable_cards: Vec::new(),
+            cards: cards_on_top,
+            keep_count: 1,
+            up_to: true,
+            kept_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Graveyard),
+            source_id: Some(ObjectId(100)),
+        };
+
+        let mut events = Vec::new();
+        let result = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![foreign],
+            },
+            &mut events,
+        );
+
+        assert!(
+            result.is_err(),
+            "a card that was not looked at must be rejected (CR 401.2)"
+        );
+        assert!(
+            !state.players[0].hand.contains(&foreign),
+            "rejected selection must not move the foreign card to hand"
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            original_library,
+            "rejected selection must not mutate the library"
+        );
+    }
+
+    /// CR 401.2 + CR 608.2c: when a dig's filter matches nothing, the only legal
+    /// keep-selection is empty — a looked-at card that doesn't match the filter
+    /// must still be rejected. Regression guard for the same empty-`selectable`
+    /// hole: the old handler accepted it and moved it to hand.
+    #[test]
+    fn dig_choice_rejects_card_excluded_by_empty_filter() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+        let cards_on_top = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        let original_library = cards_on_top.clone();
+
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            selectable_cards: Vec::new(),
+            cards: cards_on_top.clone(),
+            keep_count: 1,
+            up_to: true,
+            kept_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Graveyard),
+            source_id: Some(ObjectId(100)),
+        };
+
+        let mut events = Vec::new();
+        let result = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![cards_on_top[0]],
+            },
+            &mut events,
+        );
+
+        assert!(
+            result.is_err(),
+            "a looked-at card that doesn't match the filter must be rejected when the filter matched nothing"
+        );
+        assert!(
+            !state.players[0].hand.contains(&cards_on_top[0]),
+            "rejected selection must not move the card to hand"
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            original_library,
+            "rejected selection must not mutate the library"
+        );
+    }
+
     #[test]
     fn dig_choice_forwards_kept_cards_to_conditional_continuation() {
         use crate::game::engine_resolution_choices::{
@@ -563,7 +763,7 @@ mod tests {
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -633,7 +833,7 @@ mod tests {
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -698,7 +898,7 @@ mod tests {
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),

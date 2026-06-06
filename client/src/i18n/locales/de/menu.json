@@ -67,7 +67,31 @@
     "load": {
       "title": "Spielzustand laden"
     },
-    "exit": "Beenden"
+    "exit": "Beenden",
+    "dashboard": {
+      "welcome": "Willkommen zurück",
+      "enter": "Öffnen",
+      "continue": "Mach weiter, wo du aufgehört hast",
+      "resumeDraft": "Draft fortsetzen",
+      "draftPod": "Draft-Pod",
+      "activeDeck": "Aktives Deck",
+      "noActiveDeck": "Wähle ein Deck zum Loslegen",
+      "fromFeeds": "Aus deinen Feeds",
+      "feedsEmpty": "Abonniere einen Feed für frische Decks",
+      "cards": "{{count}} Karten",
+      "mode": {
+        "ai": "gegen KI",
+        "online": "Online",
+        "local": "Lokal",
+        "p2p-host": "P2P",
+        "p2p-join": "P2P"
+      },
+      "tagline": "Eine quelloffene Magic: The Gathering Regel-Engine und Spielclient",
+      "turn": "Zug {{n}}",
+      "yourTurn": "Du bist dran",
+      "opponentTurn": "Gegner ist dran",
+      "yourLife": "Du {{life}}"
+    }
   },
   "loadState": {
     "title": "Spielzustand laden",
@@ -242,5 +266,16 @@
   },
   "loadGameState": {
     "readFailed": "Datei konnte nicht gelesen werden"
+  },
+  "nav": {
+    "label": "Hauptnavigation",
+    "home": "Start",
+    "play": "Spielen",
+    "online": "Online",
+    "draft": "Draft",
+    "decks": "Decks",
+    "alpha": "Alpha",
+    "profile": "Profil",
+    "settings": "Einstellungen"
   }
 }

@@ -26,6 +26,7 @@ fn scenario_prefers_opponent_target_over_self() {
             legal_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
             optional: false,
         }],
+        mode_labels: Vec::new(),
         target_constraints: Vec::new(),
         selection: TargetSelectionProgress {
             current_slot: 0,
@@ -57,6 +58,7 @@ fn scenario_skips_optional_target_with_no_legal_choices() {
             legal_targets: Vec::new(),
             optional: true,
         }],
+        mode_labels: Vec::new(),
         target_constraints: Vec::new(),
         selection: Default::default(),
         source_id: None,
@@ -134,7 +136,7 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
     let mut rng = SmallRng::seed_from_u64(14);
     let action = choose_action(runner.state(), P0, &config, &mut rng);
 
-    let Some(engine::types::actions::GameAction::DeclareAttackers { attacks }) = action else {
+    let Some(engine::types::actions::GameAction::DeclareAttackers { attacks, .. }) = action else {
         panic!("expected declare attackers action");
     };
     assert_eq!(attacks.len(), 2);

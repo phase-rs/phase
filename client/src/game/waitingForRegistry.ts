@@ -44,37 +44,38 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "DefilerPayment",
     "ModeChoice",
     "AbilityModeChoice",
-    "AdventureCastChoice",
     "ModalFaceChoice",
     "AlternativeCastChoice",
+    // CR 702.140c + CR 730.2a: mutate top/bottom merge choice (MutateMergeChoiceModal).
+    "MutateMergeChoice",
+    // CR 702.99a: cipher encode-on-resolve choice (CipherEncodeChoiceModal).
+    "CipherEncodeChoice",
     "CastingVariantChoice",
     "ChoosePermanentTypeSlot",
-    "DiscardForCost",
-    "SacrificeForCost",
-    "ReturnToHandForCost",
-    "RemoveCounterForCost",
+    // CR 118.3 + CR 601.2b + CR 605.3b: unified cost-payment selection
+    // (replaces the 11 old per-cost variants; dispatches on `kind`).
+    "PayCost",
     "BlightChoice",
-    "BeholdForCost",
-    "TapCreaturesForSpellCost",
-    "ExileForCost",
     "HarmonizeTapChoice",
     "CollectEvidenceChoice",
     // Multi-step target / offer choices rendered by CardChoiceModal.
     "MultiTargetSelection", // verified rendered: CardChoiceModal.tsx:216 case → :218 → MultiTargetSelectionModal (:1448)
-    "ParadigmCastOffer", // verified rendered: CardChoiceModal.tsx:219 case → :221 → ParadigmCastOfferModal (:1515)
-    // Note: `PopulateChoice` is intentionally NOT registered — it has no
-    // renderer anywhere in client/src/, so the safety-net modal must fire for it.
-    // Mana abilities
-    "TapCreaturesForManaAbility",
-    "DiscardForManaAbility",
-    "ExileForManaAbility",
-    "SacrificeForManaAbility",
+    // CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
+    // unified special-cast offer (Adventure / Miracle / Madness / Cascade /
+    // Discover / Paradigm); dispatches on `data.kind.type`.
+    "CastOffer",
+    // CR 701.36a: choose a creature token to copy (board click via TargetingOverlay).
+    "PopulateChoice",
+    // Mana abilities (cost-selection prompts now route through PayCost above).
     "PayManaAbilityMana",
     "ChooseManaColor",
     // Combat
     "DeclareAttackers",
     "DeclareBlockers",
     "AssignCombatDamage",
+    // CR 702.22k: active player divides a banded blocker's combat damage
+    // (BlockerDamageAssignmentModal, rendered via CardChoiceModal).
+    "AssignBlockerDamage",
     "CombatTaxPayment",
     // Triggers / resolution-time choices
     "OrderTriggers",
@@ -82,11 +83,16 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "CopyTargetChoice",
     "CopyRetarget",
     "ExploreChoice",
+    // CR 303.4 + CR 115.1: return-as-Aura / non-spell Aura entry host pick.
+    // Resolved on the board (object hosts) or via player HUD glow (Curse /
+    // enchant-player Auras) — see TargetingOverlay + PlayerHud/OpponentHud.
+    "ReturnAsAuraTarget",
     "EquipTarget",
     "CrewVehicle",
     "StationTarget",
     "SaddleMount",
     "ScryChoice",
+    "CoinFlipKeepChoice",
     "DigChoice",
     "SurveilChoice",
     "RevealChoice",
@@ -101,6 +107,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "DrawnThisTurnTopdeckChoice",
     "LearnChoice",
     "ManifestDreadChoice",
+    "ClashChooseOpponent",
     "ClashCardPlacement",
     "TopOrBottomChoice",
     "ProliferateChoice",
@@ -113,8 +120,6 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "DamageSourceChoice",
     "DiscardToHandSize",
     "MiracleReveal",
-    "MiracleCastOffer",
-    "MadnessCastOffer",
     "TributeChoice",
     "PairChoice",
     "OpponentMayChoice",
@@ -124,16 +129,15 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "WardDiscardChoice",
     "WardSacrificeChoice",
     "UnlessBounceChoice",
-    "DiscoverChoice",
     "RevealUntilKeptChoice",
     "RepeatDecision",
-    "CascadeChoice",
     "VoteChoice",
     "SeparatePilesPartition",
     "SeparatePilesChoice",
     "ChooseRingBearer",
     "ChooseDungeon",
     "ChooseDungeonRoom",
+    "SpecializeColor",
     "ChooseLegend",
     "CommanderZoneChoice",
     "BattleProtectorChoice",

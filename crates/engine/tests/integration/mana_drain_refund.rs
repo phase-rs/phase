@@ -8,10 +8,6 @@
 //! refund colorless mana equal to the countered spell's mana value at the
 //! controller's next PreCombatMain.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::effects::{counter, delayed_trigger, resolve_ability_chain};
 use engine::game::zones::create_object;
 use engine::types::ability::{
@@ -25,14 +21,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::PlayerId;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Build the inner Mana effect used by Mana Drain's delayed trigger.
 fn mana_colorless_effect(count: QuantityExpr) -> Effect {

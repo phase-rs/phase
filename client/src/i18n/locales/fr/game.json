@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Résolution {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Carte face cachée",
     "loading": "Chargement de {{name}}",
     "unimplemented": "Non implémenté : {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Engagé"
   },
   "preview": {
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",
@@ -25,9 +29,32 @@
     "fromSource": "(depuis {{source}})",
     "basePT": "(base {{power}}/{{toughness}})",
     "damage": "Blessures : {{amount}}",
+    "activateCost": "Activer — {{cost}}",
     "ptDeltaFrom": "{{delta}} depuis {{source}}",
     "colors": "Couleurs : {{colors}}",
-    "colorless": "Incolore"
+    "colorless": "Incolore",
+    "chosen": {
+      "title": "Choisi",
+      "entry": "{{kind}} : {{value}}",
+      "playerValue": "Joueur {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Inconnu",
+      "kind": {
+        "color": "Couleur",
+        "creatureType": "Type de créature",
+        "basicLandType": "Type de terrain de base",
+        "cardType": "Type de carte",
+        "oddOrEven": "Pair ou impair",
+        "cardName": "Nom de carte",
+        "number": "Nombre",
+        "player": "Joueur",
+        "twoColors": "Deux couleurs",
+        "tributeOutcome": "Tribut",
+        "keyword": "Mot-clé",
+        "label": "Libellé",
+        "fallback": "Choix"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Effacer les attaquants",
@@ -211,6 +238,9 @@
     "radAriaLabel_one": "{{count}} marqueur rad",
     "radAriaLabel_other": "{{count}} marqueurs rad",
     "radTooltip": "Marqueurs rad : {{count}}",
+    "experienceAriaLabel_one": "{{count}} marqueur d'expérience",
+    "experienceAriaLabel_other": "{{count}} marqueurs d'expérience",
+    "experienceTooltip": "Marqueurs d'expérience : {{count}}",
     "speedAriaLabel": "Vitesse {{value}}",
     "speedTooltip": "Vitesse : {{value}}",
     "companion": "Compagnon"
@@ -278,6 +308,7 @@
     "convokeHint": "Engagez des créatures pour aider à payer.",
     "improviseHint": "Engagez des artefacts pour aider à payer.",
     "convokeOrImproviseHint": "Engagez des créatures ou des artefacts pour aider à payer.",
+    "convokeStaged": "Engagés :",
     "lifeAmount": "2 points de vie",
     "lifeCostSummary": "({{count}} points de vie)",
     "paymentPending": "Le paiement est toujours en attente. Engagez des permanents ou annulez cette action.",
@@ -324,6 +355,8 @@
     "expandHud": "Développer le HUD d'adversaire. Affiche la main et le détail du champ de bataille de chaque adversaire."
   },
   "combat": {
+    "band": "Bande",
+    "banded": "Bande ✓",
     "attackAll": "Attaquer tous",
     "skip": "Ignorer",
     "confirmAttackers": "Confirmer les attaquants ({{count}})",
@@ -379,12 +412,14 @@
     "chooseNewTargetForCopy": "Choisissez une nouvelle cible pour la copie",
     "chooseTargetForCopy": "Choisissez la cible de la copie",
     "chooseCreatureToExplore": "Choisissez quelle créature explore ensuite",
+    "chooseCreatureTokenToPopulate": "Choisissez un jeton de créature à peupler",
     "chooseReturnAsAuraTarget": "Choisissez un permanent à enchanter",
     "tapUntappedCreatures_one": "Engagez {{count}} créature dégagée",
     "tapUntappedCreatures_other": "Engagez {{count}} créatures dégagées",
     "chooseTargetOf": "Choisissez la cible {{current}} sur {{total}}",
     "chooseTarget": "Choisissez une cible",
     "noLegalTargets": "Aucune cible légale disponible",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "jusqu'à un(e) {{target}}",
     "one": "un(e) {{target}}",
     "nounPlayer": "joueur",
@@ -449,7 +484,26 @@
     "companionRevealed": "{{player}} a révélé son compagnon : {{cardName}}",
     "companionMovedToHand": "{{player}} a mis le compagnon {{cardName}} dans sa main",
     "powerToughnessChanged": "L'objet {{objectId}} est maintenant {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Événement : {{type}}"
+    "genericEvent": "Événement : {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Outils du moteur",
@@ -861,6 +915,7 @@
       "titleSacrifice": "Sacrifier",
       "titleTopdeck": "Mettre sur la bibliothèque",
       "titleBattlefield": "Mettre sur le champ de bataille",
+      "titleHand": "Renvoyer",
       "subtitleSacrificeExact_one": "Choisissez {{count}} permanent à sacrifier",
       "subtitleSacrificeExact_other": "Choisissez {{count}} permanents à sacrifier",
       "subtitleSacrificeUpTo_one": "Choisissez jusqu'à {{count}} permanent à sacrifier",
@@ -879,12 +934,19 @@
       "subtitleBattlefieldUpTo_other": "Choisissez jusqu'à {{count}} cartes à mettre sur le champ de bataille",
       "subtitleBattlefieldRange_one": "Choisissez {{min}}-{{count}} carte à mettre sur le champ de bataille",
       "subtitleBattlefieldRange_other": "Choisissez {{min}}-{{count}} cartes à mettre sur le champ de bataille",
+      "subtitleHandExact_one": "Choisissez {{count}} permanent à renvoyer dans la main de son propriétaire",
+      "subtitleHandExact_other": "Choisissez {{count}} permanents à renvoyer dans la main de leur propriétaire",
+      "subtitleHandUpTo_one": "Choisissez jusqu'à {{count}} permanent à renvoyer dans la main de son propriétaire",
+      "subtitleHandUpTo_other": "Choisissez jusqu'à {{count}} permanents à renvoyer dans la main de leur propriétaire",
+      "subtitleHandRange_one": "Choisissez {{min}}-{{count}} permanent à renvoyer dans la main de son propriétaire",
+      "subtitleHandRange_other": "Choisissez {{min}}-{{count}} permanents à renvoyer dans la main de leur propriétaire",
       "labelSkip": "Ignorer",
       "labelDecline": "Refuser",
       "labelPutOnTop": "Mettre au-dessus ({{order}})",
       "labelConfirm": "Confirmer ({{selected}}/{{count}})",
       "labelTop": "Dessus ({{selected}}/{{count}})",
       "labelPut": "Placer ({{selected}}/{{count}})",
+      "labelReturn": "Renvoyer ({{selected}}/{{count}})",
       "orderTop": "Dessus"
     },
     "drawnThisTurn": {
@@ -980,6 +1042,12 @@
       "subtitle_one": "Exilez {{count}} carte depuis {{source}}",
       "subtitle_other": "Exilez {{count}} cartes depuis {{source}}"
     },
+    "craft": {
+      "title": "Façonner",
+      "subtitle_one": "Exilez {{count}} matériau pour façonner",
+      "subtitle_other": "Exilez {{count}} matériaux pour façonner",
+      "subtitleRange": "Exilez de {{min}} à {{count}} matériaux pour façonner"
+    },
     "behold": {
       "title": "Contempler",
       "subtitleExile": "Exilez un permanent ou une carte correspondant",
@@ -1062,6 +1130,16 @@
       "subtitle": "Sélectionnez quelle combinaison de mana produire"
     }
   },
+  "specializeColor": {
+    "title": "Choisir la spécialisation",
+    "subtitle": "Choisissez une couleur correspondant à la carte défaussée",
+    "confirm": "Spécialiser",
+    "white": "Blanc",
+    "blue": "Bleu",
+    "black": "Noir",
+    "red": "Rouge",
+    "green": "Vert"
+  },
   "dialogShell": {
     "eyebrow": "Choix de partie",
     "restoreDialog": "Restaurer la boîte de dialogue",
@@ -1087,6 +1165,10 @@
     "adventureTag": "(Aventure)"
   },
   "alternativeCost": {
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Choisir le coût de lancement",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Lancer normalement",
@@ -1105,6 +1187,18 @@
     "bestowNormalLabel": "Lancer comme créature",
     "bestowAltLabel": "Lancer avec Don",
     "bestowSubtitle": "Lancez {{name}} normalement comme créature, ou payez son coût de Don pour le lancer comme aura.",
+    "awakenEyebrow": "Éveil",
+    "awakenNormalLabel": "Lancer normalement",
+    "awakenAltLabel": "Lancer avec Éveil",
+    "awakenSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Éveil pour mettre aussi des marqueurs +1/+1 sur un terrain que vous contrôlez et en faire une créature 0/0 Élémental avec la célérité.",
+    "cleaveEyebrow": "Tranchage",
+    "cleaveNormalLabel": "Lancer normalement",
+    "cleaveAltLabel": "Lancer avec Tranchage",
+    "cleaveSubtitle": "Lancez {{name}} normalement, ou payez son coût de Tranchage pour retirer les mots entre crochets.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Exiler une carte",
     "additionalSacrifice": "+ Sacrifier un permanent",
     "additionalPayLife": "+ Payer des points de vie",
@@ -1116,6 +1210,10 @@
     "title": "Choisir un protecteur",
     "battleFallback": "Bataille",
     "subtitle": "{{name}} a besoin d'un nouveau protecteur. Choisissez quel adversaire la défendra."
+  },
+  "clashOpponent": {
+    "title": "Choisir l'adversaire pour la confrontation",
+    "subtitle": "Choisissez quel adversaire fera la confrontation avec vous."
   },
   "cardDataMissing": {
     "title": "Données de cartes manquantes",
@@ -1163,8 +1261,8 @@
   },
   "categoryChoice": {
     "title": "Choisir les permanents à garder",
-    "subtitleOpponent": "Choisissez un permanent de chaque type parmi les permanents non-terrain que {{name}} contrôle ; le reste est sacrifié.",
-    "subtitleSelf": "Choisissez un permanent de chaque type parmi les permanents non-terrain que vous contrôlez ; le reste est sacrifié.",
+    "subtitleOpponent": "Choisissez un permanent pour chaque catégorie pour {{name}}.",
+    "subtitleSelf": "Choisissez un permanent pour chaque catégorie.",
     "noneToKeep": "Aucun {{category}} — rien à garder",
     "objectFallback": "Objet {{id}}"
   },
@@ -1268,7 +1366,9 @@
     "searchSubtitle": "Tapez pour rechercher dans toutes les cartes",
     "searchPlaceholder": "Rechercher par nom...",
     "noCardsFound": "Aucune carte trouvée",
-    "buttonSubtitle": "Sélectionnez une option"
+    "buttonSubtitle": "Sélectionnez une option",
+    "filterPlaceholder": "Filtrer les options...",
+    "noOptionsMatch": "Aucune option ne correspond"
   },
   "nonFatalPanic": {
     "heading": "Avertissement du moteur (non fatal)",
@@ -1277,6 +1377,14 @@
     "dontShowAgain": "Ne plus afficher pendant cette session",
     "reportTitle": "Panique non fatale du moteur : {{summary}}",
     "reportWhatHappened": "**Ce qui s'est passé**\n_décrivez brièvement ce que vous faisiez_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
+  "stuckDecision": {
+    "heading": "Game appears stuck",
+    "dismiss": "Dismiss",
+    "body": "phase.rs is waiting on a decision that has no available action, so the game can’t continue. This is a bug. Please <report>report it</report> so we can investigate.",
+    "dontShowAgain": "Don’t show again this session",
+    "reportTitle": "Stuck decision: {{kind}}",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
   },
   "optionalEffect": {
     "sourceFallback": "Effet",
@@ -1290,6 +1398,24 @@
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
     "bottom": "Bottom of library"
+  },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
+  "cipher": {
+    "cardFallback": "this card",
+    "creatureFallback": "a creature",
+    "title": "Cipher: {{name}}",
+    "subtitle": "Exile this card encoded on a creature you control, or decline.",
+    "encodeDesc": "Encode here. Whenever this creature deals combat damage to a player, you may cast a copy of the encoded card without paying its mana cost.",
+    "decline": "Don't encode",
+    "declineDesc": "Put this card into its owner's graveyard."
   },
   "permanentTypeSlot": {
     "eyebrow": "Type de permanent",
@@ -1405,5 +1531,21 @@
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
+  },
+  "coinFlip": {
+    "keep": {
+      "title": "Krark's Thumb",
+      "subtitle": "Flip two coins and ignore one — choose which result to keep.",
+      "heads": "Heads",
+      "tails": "Tails"
+    },
+    "buttons": {
+      "keep": "Keep this"
+    }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

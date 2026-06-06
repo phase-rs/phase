@@ -47,6 +47,7 @@ pub enum GameFormat {
     PauperCommander,
     DuelCommander,
     TinyLeaders,
+    Oathbreaker,
     Brawl,
     HistoricBrawl,
     FreeForAll,
@@ -68,6 +69,27 @@ pub enum SideboardPolicy {
     Forbidden,
     Limited(u32),
     Unlimited,
+}
+
+/// Per-card override to the default constructed copy limit.
+///
+/// CR 100.2a sets the default constructed limit to four of any card with a
+/// particular English name (basic lands excepted). A handful of cards print an
+/// explicit deck-construction override in their rules text:
+///
+/// - `Unlimited`: "A deck can have any number of cards named ~." (Relentless
+///   Rats, Shadowborn Apostle, etc.) — no upper bound on copies.
+/// - `UpTo(n)`: "A deck can have up to <n> cards named ~." (Seven Dwarves → 7,
+///   Nazgûl → 9) and the Commander/companion singleton override "Your deck can
+///   have only one copy of this card" (Vazal, the Compleat → `UpTo(1)`).
+///
+/// CR 903.5b's Commander singleton rule exempts basic lands; an `UpTo(n>1)`
+/// override likewise raises the cap above the format default for that card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DeckCopyLimit {
+    Unlimited,
+    UpTo(u32),
 }
 
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
@@ -118,6 +140,7 @@ impl GameFormat {
             GameFormat::Brawl => Some(LegalityFormat::StandardBrawl),
             GameFormat::HistoricBrawl => Some(LegalityFormat::Brawl),
             GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Limited => None,
@@ -143,6 +166,7 @@ impl GameFormat {
             GameFormat::Commander
             | GameFormat::PauperCommander
             | GameFormat::DuelCommander
+            | GameFormat::Oathbreaker
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
             GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
@@ -165,6 +189,7 @@ impl GameFormat {
             GameFormat::Commander
                 | GameFormat::PauperCommander
                 | GameFormat::DuelCommander
+                | GameFormat::Oathbreaker
                 | GameFormat::Brawl
                 | GameFormat::HistoricBrawl,
         )
@@ -205,6 +230,7 @@ impl GameFormat {
             GameFormat::PauperCommander => "Pauper Commander",
             GameFormat::DuelCommander => "Duel Commander",
             GameFormat::TinyLeaders => "Tiny Leaders: Reborn",
+            GameFormat::Oathbreaker => "Oathbreaker",
             GameFormat::Brawl => "Brawl",
             GameFormat::HistoricBrawl => "Historic Brawl",
             GameFormat::FreeForAll => "Free-for-All",
@@ -322,6 +348,14 @@ impl GameFormat {
                 description: "50-card Tiny singleton",
                 group: FormatGroup::Commander,
                 default_config: FormatConfig::tiny_leaders(),
+            },
+            FormatMetadata {
+                format: GameFormat::Oathbreaker,
+                label: "Oathbreaker",
+                short_label: "OBK",
+                description: "60-card singleton, Planeswalker + signature spell",
+                group: FormatGroup::Commander,
+                default_config: FormatConfig::oathbreaker(),
             },
             FormatMetadata {
                 format: GameFormat::Brawl,
@@ -483,6 +517,27 @@ impl FormatConfig {
         }
     }
 
+    /// Oathbreaker RC: 60-card singleton, one legendary Planeswalker as the
+    /// Oathbreaker commander plus one signature spell (instant/sorcery within
+    /// color identity), both in the command zone. 20 life, 2–4 players,
+    /// no commander-damage threshold.
+    pub fn oathbreaker() -> Self {
+        FormatConfig {
+            format: GameFormat::Oathbreaker,
+            starting_life: 20,
+            min_players: 2,
+            max_players: 4,
+            deck_size: 60,
+            singleton: true,
+            command_zone: true,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+            uses_commander: false,
+            allow_debug_actions: false,
+        }
+    }
+
     /// Historic: non-rotating constructed using the Arena Historic card pool.
     pub fn historic() -> Self {
         FormatConfig {
@@ -609,6 +664,7 @@ impl FormatConfig {
             GameFormat::PauperCommander => Self::pauper_commander(),
             GameFormat::DuelCommander => Self::duel_commander(),
             GameFormat::TinyLeaders => Self::tiny_leaders(),
+            GameFormat::Oathbreaker => Self::oathbreaker(),
             GameFormat::Brawl => Self::brawl(),
             GameFormat::HistoricBrawl => Self::historic_brawl(),
             GameFormat::FreeForAll => Self::free_for_all(),
@@ -754,6 +810,46 @@ mod tests {
     }
 
     #[test]
+    fn deck_copy_limit_serializes_as_tagged_union() {
+        // Unit variant emits {"type": "..."} with no "data" field; the frontend
+        // must switch on `.type`, never destructure `.data` unconditionally.
+        let unlimited = serde_json::to_string(&DeckCopyLimit::Unlimited).unwrap();
+        assert_eq!(unlimited, r#"{"type":"Unlimited"}"#);
+
+        // Tuple variant carries the cap in `data`.
+        let up_to = serde_json::to_string(&DeckCopyLimit::UpTo(7)).unwrap();
+        assert_eq!(up_to, r#"{"type":"UpTo","data":7}"#);
+
+        // Round-trips both directions.
+        let parsed: DeckCopyLimit = serde_json::from_str(r#"{"type":"Unlimited"}"#).unwrap();
+        assert_eq!(parsed, DeckCopyLimit::Unlimited);
+        let parsed: DeckCopyLimit = serde_json::from_str(r#"{"type":"UpTo","data":9}"#).unwrap();
+        assert_eq!(parsed, DeckCopyLimit::UpTo(9));
+    }
+
+    #[test]
+    fn format_config_oathbreaker() {
+        let config = FormatConfig::oathbreaker();
+        assert_eq!(config.format, GameFormat::Oathbreaker);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 4);
+        assert_eq!(config.deck_size, 60);
+        assert!(config.singleton);
+        assert!(config.command_zone);
+        assert_eq!(config.commander_damage_threshold, None);
+        assert!(!config.uses_commander);
+        assert!(!config.team_based);
+        assert_eq!(
+            GameFormat::Oathbreaker.sideboard_policy(),
+            SideboardPolicy::Forbidden
+        );
+        assert!(GameFormat::Oathbreaker.grants_free_first_mulligan());
+        assert!(!GameFormat::Oathbreaker.uses_commander());
+        assert_eq!(GameFormat::Oathbreaker.legality_format(), None);
+    }
+
+    #[test]
     fn format_config_serde_roundtrip() {
         let configs = vec![
             FormatConfig::standard(),
@@ -763,6 +859,7 @@ mod tests {
             FormatConfig::historic(),
             FormatConfig::pauper(),
             FormatConfig::tiny_leaders(),
+            FormatConfig::oathbreaker(),
             FormatConfig::brawl(),
             FormatConfig::historic_brawl(),
             FormatConfig::free_for_all(),

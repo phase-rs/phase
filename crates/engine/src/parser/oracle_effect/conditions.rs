@@ -13,7 +13,7 @@ use super::super::oracle_nom::condition::inject_controller_you;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
-use super::super::oracle_target::parse_type_phrase;
+use super::super::oracle_target::{parse_type_phrase, parse_zone_word};
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -156,6 +156,52 @@ pub(crate) fn strip_leading_general_conditional(
     (None, text.to_string())
 }
 
+/// CR 608.2c + CR 608.2d: Strip a leading `"If <condition>, "` head ONLY when the
+/// typed-condition strip already returned `None` AND the body that would follow
+/// the head begins with `"you may "`. The unrepresentable condition is dropped
+/// to preserve the optional choice on the body — issue #2277.
+///
+/// Without this fallback the `If <X>, ` head stays on the text, so the downstream
+/// `strip_optional_effect_prefix` (which requires `"you may "` at position 0)
+/// never fires and the optional flag is lost (e.g. Amareth's "If it shares a card
+/// type with that permanent, you may reveal that card and put it into your hand",
+/// Tithe's "If target opponent controls more lands than you, you may search …").
+/// Dropping the condition is acceptable because the upstream `Condition_If`
+/// swallow detector still flags these patterns as condition-unsupported — we are
+/// fixing the OPTIONAL representation here, NOT the condition. The condition
+/// stays correctly unrepresented; the may-choice is now preserved.
+///
+/// TRADE-OFF (read before extending): this is a deliberate rules-fidelity
+/// regression at the AST layer. The produced sub-ability carries `optional:
+/// true` with `condition: null`, so if such a card were ever executed it would
+/// offer the may-choice *ungated* — strictly more permissive than the printed
+/// `If <gate>` text. This is sound ONLY because `Condition_If` keeps the card
+/// `supported == false`, which holds it out of the engine's production-execution
+/// set. When a typed recognizer is later added for one of these conditions, the
+/// typed strip will match first, this fallback will stop firing for that shape,
+/// and the card transitions to a fully gated+optional AST in a single step.
+///
+/// Mandatory-body guard: this function is a no-op when the body does NOT start
+/// with `"you may "`. That prevents turning, e.g.,
+/// `"If you control a creature, draw a card"` into an unconditional draw.
+///
+/// Callers must invoke this ONLY after the typed strip returned `None` — the
+/// function performs no typed-condition recognition itself.
+pub(crate) fn strip_unrecognized_conditional_head_when_body_optional(text: &str) -> String {
+    let Some((_condition_fragment, body)) = split_leading_conditional(text) else {
+        return text.to_string();
+    };
+    let body_lower = body.to_lowercase();
+    if nom_on_lower(&body, &body_lower, |i| {
+        value((), tag::<_, _, OracleError<'_>>("you may ")).parse(i)
+    })
+    .is_none()
+    {
+        return text.to_string();
+    }
+    body
+}
+
 /// CR 702.33b + CR 702.33c + CR 702.33f: Recognize quantified or per-variant
 /// kicker gating in a leading `"if [subject] was kicked …, [body]"` clause.
 /// Returns the typed `AbilityCondition` and the residual body when matched.
@@ -235,6 +281,19 @@ fn parse_kicker_condition_mana_cost(cost_text: &str) -> Option<ManaCost> {
         .map(|(_, cost)| cost)
 }
 
+fn strip_alternative_mana_cost_conditional<'a>(text: &'a str, lower: &str) -> Option<&'a str> {
+    // CR 118.9 + CR 608.2c: "If the {COST} cost was paid, [body]" — alternative
+    // cost rider on spells like Baleful Mastery.
+    let ((), after_prefix) =
+        nom_on_lower(text, lower, |input| value((), tag("if the ")).parse(input))?;
+    let (after_cost, _) = nom_primitives::parse_mana_cost(after_prefix).ok()?;
+    let after_cost_lower = after_cost.to_lowercase();
+    nom_on_lower(after_cost, &after_cost_lower, |input| {
+        value((), tag(" cost was paid, ")).parse(input)
+    })
+    .map(|((), rest)| rest)
+}
+
 pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
@@ -267,6 +326,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         }
     }
 
+    let mut alternative_mana_cost_conditional = false;
+
     let body = if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
         value(
             (),
@@ -278,6 +339,9 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         )
         .parse(input)
     }) {
+        Some(rest.to_string())
+    } else if let Some(rest) = strip_alternative_mana_cost_conditional(text, &lower) {
+        alternative_mana_cost_conditional = true;
         Some(rest.to_string())
     } else if tag::<_, _, OracleError<'_>>("if ")
         .parse(lower.as_str())
@@ -359,6 +423,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                 let stripped = strip_leading_instead(&body);
                 if stripped.len() < body.len() {
                     (stripped, AbilityCondition::AdditionalCostPaidInstead)
+                } else if alternative_mana_cost_conditional {
+                    (body, AbilityCondition::AlternativeManaCostPaid)
                 } else {
                     (body, AbilityCondition::additional_cost_paid_any())
                 }
@@ -1786,14 +1852,21 @@ pub(super) fn try_parse_dig_instead_alternative(
     let body_rest_lower = body_rest.to_lowercase();
     let alt_continuation = parse_dig_from_among(&body_rest_lower, body_rest)?;
     let ContinuationAst::DigFromAmong {
-        count: alt_keep_count,
-        up_to: alt_up_to,
+        quantity: alt_quantity,
         filter: alt_filter,
         destination: alt_destination,
         rest_destination: alt_rest,
+        ..
     } = alt_continuation
     else {
         return None;
+    };
+    // CR 701.20e: Map the typed `PutCount` onto the Dig's keep_count/up_to.
+    // `All` has no fixed cap (route every kept card → `keep_count = None`).
+    let (alt_keep_count, alt_up_to) = match alt_quantity {
+        crate::parser::oracle_ir::ast::PutCount::All => (None, false),
+        crate::parser::oracle_ir::ast::PutCount::Up(n) => (Some(n), true),
+        crate::parser::oracle_ir::ast::PutCount::Exactly(n) => (Some(n), false),
     };
 
     let condition = parse_additional_cost_instead_condition_fragment(cond_text)
@@ -1810,7 +1883,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         player: prev_player.clone(),
         count: prev_count.clone(),
         destination: alt_destination,
-        keep_count: Some(alt_keep_count),
+        keep_count: alt_keep_count,
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
@@ -2117,6 +2190,10 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(counter_threshold_to_condition(qty, *minimum, *maximum))
         }
         StaticCondition::DevotionGE { .. }
+        // CR 702.176a + CR 611.3a: Persistent alternative-cost markers are
+        // source-bound static predicates with no effect-resolution
+        // `AbilityCondition` equivalent.
+        | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::ChosenColorIs { .. }
         // CR 614.12c + CR 607.2d: Anchor-word linked statics are evaluated
         // by `layers::evaluate_condition_with_context`; no effect-resolution
@@ -2218,7 +2295,29 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    if let Some(condition) = parse_entered_or_cast_from_zone_ability_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_zone_change_object_matches_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    // CR 608.2c: trailing "this way" outcome gate — "[effect] if at least one
+    // <filter> was <verb> this way". CR 608.2c explicitly defines that later
+    // text on a card may reference an earlier instruction in the same effect
+    // ("if that spell is countered this way") — here "this way" names the set
+    // of objects affected by the immediately-preceding instruction. The suffix
+    // lands here after
+    // `strip_suffix_conditional` peels the effect, so the residual condition
+    // text is the bare existential "<quantifier> <filter> (was|is) <verb> this
+    // way". Delegate to the shared `parse_zone_changed_this_way_clause`
+    // combinator — the same authority the leading-form
+    // `strip_if_you_do_conditional` uses — so prefix ("if a creature card is
+    // exiled this way, …") and suffix ("… if at least one creature card was
+    // exiled this way") forms produce the identical
+    // `AbilityCondition::ZoneChangedThisWay { filter }` representation.
+    if let Some(condition) = parse_outcome_this_way_condition(lower.as_str()) {
         return Some(condition);
     }
 
@@ -2452,17 +2551,65 @@ pub(super) fn try_nom_condition_as_ability_condition(
         }
     }
 
-    let (negated, rest_after_prefix) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("it's not a ").parse(lower.as_str())
+    // CR 508.1 + CR 509.1 + CR 400.7: "it was/wasn't attacking/blocking" — past-tense
+    // combat-status check on the trigger subject via LKI. Used by dies-triggers
+    // that condition on the creature's combat state before it left the battlefield
+    // (e.g., Garna, Bloodfist of Keld: "draw a card if it was attacking").
+    {
+        let mut parse_status = (
+            alt((
+                value(
+                    true,
+                    alt((
+                        tag::<_, _, OracleError<'_>>("it wasn't "),
+                        tag("it was not "),
+                    )),
+                ),
+                value(false, tag("it was ")),
+            )),
+            alt((
+                value(FilterProp::Attacking, tag("attacking")),
+                value(FilterProp::Blocking, tag("blocking")),
+            )),
+        );
+        if let Ok((rest, (negated, prop))) = parse_status.parse(lower.as_str()) {
+            if rest.trim().is_empty() {
+                let cond = AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![prop],
+                        ..Default::default()
+                    }),
+                    use_lki: true,
+                };
+                return Some(maybe_negate(cond, negated));
+            }
+        }
+    }
+
+    // CR 608.2c + CR 205.3a: Article choice must not affect anaphoric subtype gates.
+    let (negated, rest_after_prefix) = if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it's not a "),
+        tag("it's not an "),
+    ))
+    .parse(lower.as_str())
     {
         (true, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it's a ").parse(lower.as_str()) {
-        (false, Some(rest))
     } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("that card is a ").parse(lower.as_str())
+        alt((tag::<_, _, OracleError<'_>>("it's a "), tag("it's an "))).parse(lower.as_str())
     {
         (false, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it isn't a ").parse(lower.as_str())
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that card is a "),
+        tag("that card is an "),
+    ))
+    .parse(lower.as_str())
+    {
+        (false, Some(rest))
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it isn't a "),
+        tag("it isn't an "),
+    ))
+    .parse(lower.as_str())
     {
         (true, Some(rest))
     } else {
@@ -2575,7 +2722,25 @@ pub(super) fn try_nom_condition_as_ability_condition(
     static_condition_to_ability_condition(&condition, ctx)
 }
 
-fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCondition> {
+/// CR 109.4 + CR 109.5 + CR 608.2c: Consume the anaphoric control predicate
+/// "you control[led] [it | that <type>]" / "you (don't|did not) control[led] …"
+/// and return the typed `TargetFilter` for the controlled-by-you subject plus
+/// `(use_lki, negated)` flags.
+///
+/// Composes three orthogonal axes — none enumerated as full-string `tag()`s:
+///   - polarity: positive ("you control[led]") vs. negative ("you don't /
+///     do not / didn't / did not control[led]"). Negative → `negated = true`;
+///     "didn't" / "did not" also imply past-tense LKI.
+///   - tense: present ("control") → current state (`use_lki = false`,
+///     CR 109.4 evaluated now); past ("controlled") → LKI snapshot
+///     (`use_lki = true`, CR 400.7) — matters when an earlier chain link has
+///     already moved the subject before the check runs.
+///   - subject: pronoun "it" (controller-only typed filter) vs. "that <type>".
+///
+/// The subject identity is preserved by the consumer wrapping the filter in
+/// `AbilityCondition::TargetMatchesFilter`, which evaluates `ability.targets[0]`
+/// (the trigger subject / parent target).
+fn parse_anaphoric_control_predicate(input: &str) -> OracleResult<'_, (TargetFilter, bool, bool)> {
     type E<'a> = OracleError<'a>;
 
     let controller_only =
@@ -2600,33 +2765,89 @@ fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCo
     let battle =
         TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle).controller(ControllerRef::You));
 
-    let (_, filter) = all_consuming(preceded(
-        tag::<_, _, E>("you controlled "),
-        alt((
-            value(controller_only, tag::<_, _, E>("it")),
-            preceded(
-                tag::<_, _, E>("that "),
-                alt((
-                    value(nonland_permanent, tag::<_, _, E>("nonland permanent")),
-                    value(permanent, tag("permanent")),
-                    value(artifact, tag("artifact")),
-                    value(creature, tag("creature")),
-                    value(enchantment, tag("enchantment")),
-                    value(land, tag("land")),
-                    value(planeswalker, tag("planeswalker")),
-                    value(battle, tag("battle")),
-                    value(card, tag("card")),
-                )),
-            ),
-        )),
+    // Axis 1 — polarity. "you " then optional negator, then the control verb.
+    let (rest, _) = tag::<_, _, E>("you ").parse(input)?;
+    let (rest, negator_lki) = opt(alt((
+        value(false, tag::<_, _, E>("don't ")),
+        value(false, tag("do not ")),
+        value(true, tag("didn't ")),
+        value(true, tag("did not ")),
+    )))
+    .parse(rest)?;
+    let negated = negator_lki.is_some();
+    // Axis 2 — tense. "controlled" → past (LKI); "control" → present.
+    let (rest, verb_lki) = alt((
+        value(true, tag::<_, _, E>("controlled ")),
+        value(false, tag("control ")),
     ))
-    .parse(lower)
-    .ok()?;
+    .parse(rest)?;
+    let use_lki = negator_lki.unwrap_or(verb_lki) || verb_lki;
+    // Axis 3 — subject.
+    let (rest, filter) = alt((
+        value(controller_only, tag::<_, _, E>("it")),
+        preceded(
+            tag::<_, _, E>("that "),
+            alt((
+                value(nonland_permanent, tag::<_, _, E>("nonland permanent")),
+                value(permanent, tag("permanent")),
+                value(artifact, tag("artifact")),
+                value(creature, tag("creature")),
+                value(enchantment, tag("enchantment")),
+                value(land, tag("land")),
+                value(planeswalker, tag("planeswalker")),
+                value(battle, tag("battle")),
+                value(card, tag("card")),
+            )),
+        ),
+    ))
+    .parse(rest)?;
 
-    Some(AbilityCondition::TargetMatchesFilter {
-        filter,
-        use_lki: true,
+    Ok((rest, (filter, use_lki, negated)))
+}
+
+fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCondition> {
+    let (_, (filter, use_lki, negated)) = all_consuming(parse_anaphoric_control_predicate)
+        .parse(lower)
+        .ok()?;
+    Some(maybe_negate(
+        AbilityCondition::TargetMatchesFilter { filter, use_lki },
+        negated,
+    ))
+}
+
+/// CR 109.4 + CR 608.2c: Recognize a leading **inverse** anaphoric-control
+/// "otherwise" connector — `"if you don't control [it | that <type>], <body>"`
+/// (and the `do not` / `didn't` / `did not` spellings). Returns the residual
+/// body when matched.
+///
+/// This is the else-branch sibling of the positive control suffix consumed by
+/// `parse_anaphoric_control_predicate`: a card that reads "draw a card if you
+/// control that creature. If you don't control it, its controller loses 1 life."
+/// (Auntie Ool, Cursewretch class) expresses a true CR 608.2c if/else over the
+/// SAME subject. The negated second sentence is the `else_ability` of the
+/// positively-gated first sentence — not an independent sibling instruction.
+///
+/// Only the **negated** polarity is treated as an otherwise-connector; the
+/// positive form ("if you control it, …") is an ordinary leading conditional
+/// that gates its own clause. The caller (the Otherwise dispatch in the chunk
+/// loop) additionally requires a prior clause to carry a control condition, so
+/// this never fires without a positive antecedent to attach to.
+pub(super) fn strip_inverse_control_otherwise_connector(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag::<_, _, OracleError<'_>>("if ").parse(input)?;
+        let (input, (_filter, _use_lki, negated)) = parse_anaphoric_control_predicate(input)?;
+        // Only the negated "you don't control …" form is an else-connector.
+        if !negated {
+            return Err(nom::Err::Error(OracleError::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        let (input, _) = tag::<_, _, OracleError<'_>>(", ").parse(input)?;
+        Ok((input, ()))
     })
+    .map(|((), rest)| rest.to_string())
 }
 
 fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
@@ -2876,6 +3097,109 @@ fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
     })
 }
 
+/// CR 603.4 + CR 601.2a + CR 603.6c: Origin-zone phrase for "entered from
+/// <zone>" / "was cast from <zone>" ability gates. Zone tokens are delegated to
+/// the canonical zone-word parser so the accepted zone vocabulary stays
+/// centralized.
+fn parse_entered_or_cast_origin_zone_phrase(
+    input: &str,
+) -> nom::IResult<&str, Zone, OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+    let (input, _) = opt(alt((
+        tag::<_, _, E>("an opponent's "),
+        tag("each opponent's "),
+        tag("your "),
+        tag("their "),
+        tag("a "),
+        tag("the "),
+    )))
+    .parse(input)?;
+    parse_zone_word(input)
+}
+
+fn entered_or_cast_from_zone_condition(zone: Zone) -> AbilityCondition {
+    // CR 603.4 + CR 601.2a + CR 603.6c: Model the source-origin gate as the
+    // disjunction of entering the battlefield from that zone or being cast
+    // from that zone.
+    AbilityCondition::Or {
+        conditions: vec![
+            AbilityCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(zone),
+                destination: Zone::Battlefield,
+                filter: TargetFilter::Any,
+            },
+            AbilityCondition::CastFromZone { zone },
+        ],
+    }
+}
+
+/// CR 603.4 + CR 601.2 + CR 603.6c: "if it entered from your library or was
+/// cast from your library" and the compact "if it entered or was cast from a
+/// graveyard" class — ability-level gates for ETB draw-rider "instead" clauses
+/// (Fblthp, the Lost). Composes zone-change origin with cast-origin checks.
+fn parse_entered_or_cast_from_zone_ability_condition(lower: &str) -> Option<AbilityCondition> {
+    let (rest, plural) = alt((
+        value(false, tag::<_, _, OracleError<'_>>("it ")),
+        value(true, tag::<_, _, OracleError<'_>>("they ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Form B: "entered from <zone> or was/were cast from <zone>"
+    if let Ok((rest, zone1)) = preceded(
+        tag::<_, _, OracleError<'_>>("entered from "),
+        parse_entered_or_cast_origin_zone_phrase,
+    )
+    .parse(rest)
+    {
+        let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
+        let zone2 = if plural {
+            preceded(
+                tag::<_, _, OracleError<'_>>("were cast from "),
+                parse_entered_or_cast_origin_zone_phrase,
+            )
+            .parse(rest)
+            .ok()
+        } else {
+            preceded(
+                tag::<_, _, OracleError<'_>>("was cast from "),
+                parse_entered_or_cast_origin_zone_phrase,
+            )
+            .parse(rest)
+            .ok()
+        };
+        if let Some((rest, zone2)) = zone2 {
+            if zone1 == zone2 && rest.trim().is_empty() {
+                return Some(entered_or_cast_from_zone_condition(zone1));
+            }
+        }
+    }
+
+    // Form A: "entered or was/were cast from <zone>"
+    let (rest, _) = tag::<_, _, OracleError<'_>>("entered or ")
+        .parse(rest)
+        .ok()?;
+    let (rest, zone) = if plural {
+        preceded(
+            tag::<_, _, OracleError<'_>>("were cast from "),
+            parse_entered_or_cast_origin_zone_phrase,
+        )
+        .parse(rest)
+        .ok()?
+    } else {
+        preceded(
+            tag::<_, _, OracleError<'_>>("was cast from "),
+            parse_entered_or_cast_origin_zone_phrase,
+        )
+        .parse(rest)
+        .ok()?
+    };
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(entered_or_cast_from_zone_condition(zone))
+}
+
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
     let (type_text, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
     let (filter, leftover) = parse_type_phrase(type_text);
@@ -2889,6 +3213,33 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
             destination: Zone::Battlefield,
             filter,
         },
+        negated,
+    ))
+}
+
+/// CR 608.2c: "[effect] if at least one <filter> was <verb> this way" — the
+/// trailing (suffix) form of the prior-effect outcome gate. CR 608.2c states
+/// later text on a card may reference an earlier instruction in the same
+/// effect; here "this way" refers to the set of objects affected by the
+/// immediately-preceding instruction, and the condition fires when that set
+/// contains at least one object matching `<filter>`. Kaya, Orzhov Usurper's
+/// +1 ("Exile up to two target
+/// cards from a single graveyard. You gain 2 life if at least one creature
+/// card was exiled this way.") is the motivating case.
+///
+/// The whole condition fragment must be consumed: `parse_zone_changed_this_way_clause`
+/// already covers the existential quantifiers ("at least one"/"one or more"/
+/// article), the type/subtype filter, both tenses, the verb set, and the
+/// negation flag (`wasn't`/`isn't`). Requiring an empty remainder keeps this
+/// matcher from firing on partial overlaps with longer condition phrases.
+fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
+    let (rest, (filter, negated)) =
+        crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(lower).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(maybe_negate(
+        AbilityCondition::ZoneChangedThisWay { filter },
         negated,
     ))
 }
@@ -3151,6 +3502,40 @@ mod tests {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::counter::{CounterMatch, CounterType};
 
+    /// CR 608.2c + CR 608.2d: When the leading `If <X>, ` has no typed
+    /// recognizer AND the body begins with `"you may "`, the structural
+    /// fallback strips the head so the inner optional choice can be peeled
+    /// downstream. Issue #2277 — Amareth pattern.
+    #[test]
+    fn strip_unrecognized_conditional_head_fires_on_optional_body() {
+        let input = "If it shares a card type with that permanent, you may reveal \
+                     that card and put it into your hand";
+        let stripped = strip_unrecognized_conditional_head_when_body_optional(input);
+        assert_eq!(
+            stripped,
+            "you may reveal that card and put it into your hand"
+        );
+    }
+
+    /// CR 608.2c: Mandatory-body guard — when the body does NOT begin with
+    /// `"you may "`, the function MUST be a no-op so a mandatory effect is
+    /// never silently un-conditioned. Issue #2277 regression.
+    #[test]
+    fn strip_unrecognized_conditional_head_noop_on_mandatory_body() {
+        let input = "If you control a creature, draw a card";
+        let stripped = strip_unrecognized_conditional_head_when_body_optional(input);
+        assert_eq!(stripped, input);
+    }
+
+    /// No-If-head guard — when there is no leading conditional at all, the
+    /// function MUST return the text unchanged.
+    #[test]
+    fn strip_unrecognized_conditional_head_noop_on_no_if_head() {
+        let input = "You may search your library for a card";
+        let stripped = strip_unrecognized_conditional_head_when_body_optional(input);
+        assert_eq!(stripped, input);
+    }
+
     /// CR 603.12: After refactoring `strip_if_you_do_conditional` to delegate to
     /// the shared `parse_reflexive_conditional_connector` combinator, all eight
     /// reflexive connectors must still strip to the same `(condition, rest)`.
@@ -3234,6 +3619,48 @@ mod tests {
             }
             other => panic!("expected Typed Angel filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn suffix_outcome_this_way_kaya_creature_card_exiled() {
+        // Kaya, Orzhov Usurper +1 (PR #2447): "Exile up to two target cards
+        // from a single graveyard. You gain 2 life if at least one creature
+        // card was exiled this way." The trailing outcome gate must re-home
+        // onto the GainLife clause as `ZoneChangedThisWay { creature card }`
+        // — never drop to `condition: null` (which triggers the Condition_If
+        // swallowed-clause warning).
+        let (condition, body) = strip_suffix_conditional(
+            "You gain 2 life if at least one creature card was exiled this way.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "You gain 2 life");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        let TargetFilter::Typed(TypedFilter { type_filters, .. }) = filter else {
+            panic!("expected Typed creature-card filter, got {filter:?}");
+        };
+        assert!(
+            type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Creature)),
+            "expected Creature type filter, got {type_filters:?}"
+        );
+    }
+
+    #[test]
+    fn parse_outcome_this_way_negated_returns_not() {
+        // Build-for-the-class coverage: the suffix gate inherits the
+        // combinator's negation flag, so "wasn't exiled this way" maps to
+        // `Not { ZoneChangedThisWay { .. } }`.
+        let cond = parse_outcome_this_way_condition("a creature card wasn't exiled this way");
+        let Some(AbilityCondition::Not { condition }) = cond else {
+            panic!("expected Not, got {cond:?}");
+        };
+        assert!(matches!(
+            *condition,
+            AbilityCondition::ZoneChangedThisWay { .. }
+        ));
     }
 
     #[test]
@@ -3783,6 +4210,30 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 205.3a: Article choice must not affect anaphoric subtype
+    /// gates. "If it's an Elf" is the same condition family as "If it's a Goblin".
+    #[test]
+    fn if_its_an_subtype_parses_condition() {
+        let (cond, body) = strip_leading_general_conditional(
+            "If it's an Elf, create three 1/1 green Elf Warrior creature tokens.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "create three 1/1 green Elf Warrior creature tokens.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = cond else {
+            panic!("expected TargetMatchesFilter for 'Elf' subtype, got {cond:?}");
+        };
+        assert!(!use_lki, "present-tense 'it's an' check must not use LKI");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for subtype");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Elf".to_string())),
+            "expected Elf subtype filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
     /// CR 608.2c + CR 702.1: "If it has [keyword]" gates on FilterProp::WithKeyword.
     /// Pre-fix this dropped to `None` (only the negative "it doesn't have" arm
     /// existed), dropping the else-branch.
@@ -3853,5 +4304,83 @@ mod tests {
             "CoreType chosen-type phrase must not be hijacked into a subtype \
              TargetMatchesFilter, got {cond:?}"
         );
+    }
+
+    /// CR 603.4 + CR 601.2 + CR 603.6c: Fblthp, the Lost (issue #2374) — library
+    /// origin gate for the "draw two cards instead" rider.
+    #[test]
+    fn entered_from_library_or_cast_from_library_condition() {
+        let cond = try_nom_condition_as_ability_condition(
+            "it entered from your library or was cast from your library",
+            &mut ParseContext::default(),
+        );
+        let Some(AbilityCondition::Or { conditions }) = cond else {
+            panic!("expected Or condition, got {cond:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            &conditions[0],
+            AbilityCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &conditions[1],
+            AbilityCondition::CastFromZone {
+                zone: Zone::Library
+            }
+        ));
+    }
+
+    /// CR 608.2e: Full instead-clause assembly for Fblthp's ETB draw rider.
+    #[test]
+    fn fblthp_library_origin_instead_clause() {
+        let instead = try_parse_generic_instead_clause(
+            "If it entered from your library or was cast from your library, draw two cards instead.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        )
+        .expect("instead clause must parse");
+        assert!(matches!(&*instead.effect, Effect::Draw { .. }));
+        let cond = instead
+            .condition
+            .as_ref()
+            .expect("instead must carry condition");
+        let AbilityCondition::ConditionInstead { inner } = cond else {
+            panic!("expected ConditionInstead wrapper, got {cond:?}");
+        };
+        assert!(matches!(
+            inner.as_ref(),
+            AbilityCondition::Or { conditions } if conditions.len() == 2
+        ));
+    }
+
+    /// CR 608.2e: ETB base draw + library-origin instead override chain.
+    #[test]
+    fn fblthp_etb_draw_chain_with_library_instead() {
+        let def = parse_effect_chain(
+            "Draw a card. If it entered from your library or was cast from your library, draw two cards instead.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*def.effect, Effect::Draw { .. }));
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected instead sub_ability");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        let cond = sub.condition.as_ref().expect("instead sub must be gated");
+        assert!(matches!(
+            cond,
+            AbilityCondition::ConditionInstead { inner }
+                if matches!(inner.as_ref(), AbilityCondition::Or { .. })
+        ));
     }
 }

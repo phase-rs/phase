@@ -11,13 +11,15 @@
 //! Strict-failure: any PlayerEffect we don't recognise propagates as
 //! `UnknownVariant` so the report tracks the work queue.
 
+use engine::types::ability::{AbilityCost, CastTimingPermission};
 use engine::types::ability::{
     CardPlayMode, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::statics::{
-    CastFrequency, CastingProhibitionScope as ProhibitionScope, HandSizeModification, StaticMode,
+    CastFrequency, CastingProhibitionScope as ProhibitionScope, CostModifyMode,
+    HandSizeModification, StaticMode,
 };
 use engine::types::zones::Zone;
 
@@ -57,7 +59,24 @@ fn apply_with_controller(
     out: &mut Vec<StaticDefinition>,
 ) -> ConvResult<()> {
     for eff in effects {
-        out.push(player_effect_to_static(eff, &controller)?);
+        match eff {
+            // CR 118.9 + CR 702.8a: Combined alt-cost + flash grant (Primal
+            // Prayers). The flash permission is tied to choosing the alternative
+            // cost, not a separate unconditional keyword grant.
+            PlayerEffect::MayCastSpellsForAlternateCostAsThoughTheyHadFlash(spells, cost) => {
+                let scope = spell_scope_for_caster(spells, &controller)?;
+                let alt_cost: AbilityCost = cost_conv::convert(cost)?;
+                out.push(
+                    StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+                        cost: alt_cost,
+                        timing_permission: Some(CastTimingPermission::AsThoughHadFlash),
+                    })
+                    .affected(scope)
+                    .active_zones(vec![Zone::Battlefield]),
+                );
+            }
+            other => out.push(player_effect_to_static(other, &controller)?),
+        }
     }
     Ok(())
 }
@@ -106,28 +125,31 @@ fn player_effect_to_static(
         // skip variants need engine work (multi-step phases) and stay
         // unsupported below.
         // CR 601.2f: "Spells [player] casts of [type] cost {N} less to cast."
-        // Maps directly to the engine's existing `ReduceCost` static. Player
-        // scope rides on `affected` (set below); spell scope rides on
+        // Maps directly to the engine's existing `ModifyCost` (Reduce) static.
+        // Player scope rides on `affected` (set below); spell scope rides on
         // `spell_filter`.
-        PlayerEffect::DecreaseSpellCost(spells, reduction) => StaticMode::ReduceCost {
+        PlayerEffect::DecreaseSpellCost(spells, reduction) => StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: mana_conv::convert_reduction(reduction)?,
             spell_filter: Some(spells_to_filter(spells)?),
             dynamic_count: None,
         },
         // CR 601.2f: "Spells [player] casts of [type] cost {N} more to cast."
         // `IncreaseSpellCost(Spells, Cost)` carries a generic `Cost`; only
-        // pure-mana increases fit `RaiseCost.amount: ManaCost`.
-        PlayerEffect::IncreaseSpellCost(spells, cost) => StaticMode::RaiseCost {
+        // pure-mana increases fit `ModifyCost.amount: ManaCost`.
+        PlayerEffect::IncreaseSpellCost(spells, cost) => StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
             amount: require_pure_mana_cost(cost, "PlayerEffect::IncreaseSpellCost")?,
             spell_filter: Some(spells_to_filter(spells)?),
             dynamic_count: None,
         },
         // CR 601.2f: "Spells [player] casts of [type] cost {N} less to cast for
-        // each [thing]." Reuses `ReduceCost` with a non-None `dynamic_count`
-        // — the engine multiplies the per-unit `amount` by the resolved
-        // `QuantityRef` at cast time.
+        // each [thing]." Reuses `ModifyCost` (Reduce) with a non-None
+        // `dynamic_count` — the engine multiplies the per-unit `amount` by the
+        // resolved `QuantityRef` at cast time.
         PlayerEffect::DecreaseSpellCostForEach(spells, reduction, count) => {
-            StaticMode::ReduceCost {
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: mana_conv::convert_reduction(reduction)?,
                 spell_filter: Some(spells_to_filter(spells)?),
                 dynamic_count: Some(quantity_ref_only(count)?),
@@ -271,6 +293,12 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
             engine_type: "ProhibitionScope",
             needed_variant: "DefendingPlayer".into(),
         }),
+        // CR 613.1: A persisted "as ~ enters, choose a player" reference has no
+        // static `ProhibitionScope` meaning — strict-fail (mirrors DefendingPlayer).
+        ControllerRef::SourceChosenPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "SourceChosenPlayer".into(),
+        }),
         // CR 608.2c: A resolution-time chosen player has no static
         // `ProhibitionScope` meaning — strict-fail.
         ControllerRef::ChosenPlayer { .. } => Err(ConversionGap::EnginePrerequisiteMissing {
@@ -352,7 +380,7 @@ fn u32_from_fixed(g: &GameNumber) -> ConvResult<u32> {
 
 /// CR 107.3 + CR 601.2f: Resolve a `GameNumber` to a `QuantityRef`
 /// (not a `QuantityExpr`) for slots that only accept the ref
-/// shape — `StaticMode::ReduceCost.dynamic_count` is one such
+/// shape — `StaticMode::ModifyCost.dynamic_count` is one such
 /// slot. Wraps `quantity_conv::convert` and unwraps the inner
 /// `QuantityRef`; non-Ref shapes (Fixed/Offset/Multiply/...)
 /// strict-fail with `EnginePrerequisiteMissing` so the report

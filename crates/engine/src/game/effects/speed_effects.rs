@@ -48,21 +48,28 @@ fn players_for_filter(
             .filter(|player| player.id != controller && player.life_gained_this_turn > 0)
             .map(|player| player.id)
             .collect(),
-        // CR 120.1 + CR 510.1: Each opponent who was dealt combat damage this
-        // turn (`damage_dealt_this_turn` ledger).
-        PlayerFilter::OpponentDealtCombatDamage => state
+        // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was
+        // dealt combat damage this turn, optionally restricted to a matching
+        // source.
+        PlayerFilter::OpponentDealtCombatDamage { source } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::quantity::opponent_dealt_combat_damage_matches(
+                    state, player.id, controller, source, source_id,
+                )
+            })
+            .map(|player| player.id)
+            .collect(),
+        // CR 508.6: each opponent the subject attacked within scope.
+        PlayerFilter::OpponentAttacked { subject, scope } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
                 player.id != controller
-                    && state.damage_dealt_this_turn.iter().any(|r| {
-                        r.is_combat
-                            && matches!(
-                                r.target,
-                                crate::types::ability::TargetRef::Player(pid) if pid == player.id
-                            )
-                    })
+                    && state.opponent_attacked(*subject, *scope, controller, source_id, player.id)
             })
             .map(|player| player.id)
             .collect(),
@@ -109,7 +116,7 @@ fn players_for_filter(
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
-                crate::game::players::matches_relation(player.id, controller, *relation)
+                crate::game::players::matches_relation(state, player.id, controller, *relation)
                     && crate::game::players::performed_action_this_way(state, player.id, *action)
             })
             .map(|player| player.id)
@@ -139,7 +146,10 @@ fn players_for_filter(
             state
                 .players
                 .iter()
-                .filter(|player| !player.is_eliminated && player.id != controller)
+                .filter(|player| {
+                    !player.is_eliminated
+                        && crate::game::players::is_opponent(state, controller, player.id)
+                })
                 .filter(|player| triggering.is_none_or(|pid| pid != player.id))
                 .map(|player| player.id)
                 .collect()
@@ -173,25 +183,60 @@ fn players_for_filter(
                 .into_iter()
                 .collect()
         }
-        // CR 109.4 + CR 700.1: "each [player class] who [doesn't] control
-        // [filter]" — candidates satisfying both `relation` and the
-        // controls/controls-none predicate.
-        PlayerFilter::ControlsPermanent {
+        // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
+        // [count] [filter]" — candidates satisfying both `relation` and the
+        // controlled-permanent count comparison.
+        PlayerFilter::ControlsCount {
             relation,
-            presence,
             filter,
-        } => state
-            .players
-            .iter()
-            .filter(|player| !player.is_eliminated)
-            .filter(|player| {
-                crate::game::players::matches_relation(player.id, controller, *relation)
-                    && crate::game::effects::player_controls_matching_permanent(
-                        state, player.id, presence, filter, source_id,
-                    )
-            })
-            .map(|player| player.id)
-            .collect(),
+            comparator,
+            count,
+        } => {
+            let threshold =
+                crate::game::quantity::resolve_quantity(state, count, controller, source_id);
+            state
+                .players
+                .iter()
+                .filter(|player| !player.is_eliminated)
+                .filter(|player| {
+                    crate::game::players::matches_relation(state, player.id, controller, *relation)
+                        && crate::game::effects::player_control_count_compares(
+                            state,
+                            player.id,
+                            filter,
+                            *comparator,
+                            threshold,
+                            source_id,
+                        )
+                })
+                .map(|player| player.id)
+                .collect()
+        }
+        // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
+        // attr] [comparator] [value]" — candidates satisfying both `relation`
+        // and the per-candidate scalar comparison. `attr` is read directly off
+        // each candidate; `value` is the controller-relative threshold,
+        // resolved once.
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        } => {
+            let threshold =
+                crate::game::quantity::resolve_quantity(state, value, controller, source_id);
+            state
+                .players
+                .iter()
+                .filter(|player| !player.is_eliminated)
+                .filter(|player| {
+                    crate::game::players::matches_relation(state, player.id, controller, *relation)
+                        && crate::game::effects::candidate_player_scalar(player, attr)
+                            .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                })
+                .map(|player| player.id)
+                .collect()
+        }
     }
 }
 

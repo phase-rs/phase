@@ -46,6 +46,7 @@ pub struct RegisterGameRequest {
     pub host_peer_id: String,
     /// Draft-specific metadata for lobby display. `None` for constructed-play.
     pub draft_metadata: Option<DraftLobbyMetadata>,
+    pub ranked: bool,
 }
 
 /// Fields returned by `join_target_info` — everything the server needs to
@@ -87,6 +88,7 @@ struct LobbyGameMeta {
     room_name: Option<String>,
     host_peer_id: String,
     draft_metadata: Option<DraftLobbyMetadata>,
+    ranked: bool,
     reservations: HashMap<String, LobbyReservation>,
 }
 
@@ -137,6 +139,7 @@ impl LobbyManager {
                 room_name: req.room_name,
                 host_peer_id: req.host_peer_id,
                 draft_metadata: req.draft_metadata,
+                ranked: req.ranked,
                 reservations: HashMap::new(),
             },
         );
@@ -179,11 +182,7 @@ impl LobbyManager {
         let reservation = LobbyReservation {
             token: token.clone(),
             display_name,
-            expires_at_ms: if meta.has_password {
-                None
-            } else {
-                Some(now + PUBLIC_SEAT_RESERVATION_MS)
-            },
+            expires_at_ms: Some(now + PUBLIC_SEAT_RESERVATION_MS),
         };
         meta.reservations.insert(token, reservation.clone());
         Ok(reservation)
@@ -194,6 +193,19 @@ impl LobbyManager {
             .get_mut(game_code)
             .and_then(|meta| meta.reservations.remove(token))
             .is_some()
+    }
+
+    pub fn has_active_reservation(
+        &mut self,
+        game_code: &str,
+        token: &str,
+        env: &impl BrokerEnv,
+    ) -> bool {
+        let Some(meta) = self.games.get_mut(game_code) else {
+            return false;
+        };
+        Self::cleanup_expired_for(meta, env.now_ms());
+        meta.reservations.contains_key(token)
     }
 
     pub fn release_reservations(&mut self, reservations: &[(String, String)]) -> bool {
@@ -213,6 +225,11 @@ impl LobbyManager {
         }
         meta.current_players = (meta.current_players + 1).min(meta.max_players);
         true
+    }
+
+    /// Returns the seated player count, excluding pending reservations.
+    pub fn seated_player_count(&self, game_code: &str) -> Option<u32> {
+        self.games.get(game_code).map(|meta| meta.current_players)
     }
 
     /// Updates the `current_players` count for an existing lobby entry. No-op
@@ -309,6 +326,7 @@ impl LobbyManager {
                 .format_config
                 .as_ref()
                 .is_some_and(|fc| fc.allow_debug_actions),
+            is_ranked: meta.ranked,
             draft_metadata: meta.draft_metadata.clone(),
         }
     }
@@ -861,8 +879,9 @@ mod tests {
     }
 
     #[test]
-    fn password_protected_reservation_never_expires() {
+    fn password_protected_reservation_expires() {
         let env = FakeEnv::new();
+        env.set_now_ms(5_000);
         let mut lobby = LobbyManager::new();
         lobby.register_game(
             "GAME01",
@@ -879,7 +898,7 @@ mod tests {
         let res = lobby
             .reserve_seat("GAME01", "Bob".to_string(), &env)
             .expect("seat reserved");
-        assert_eq!(res.expires_at_ms, None);
+        assert_eq!(res.expires_at_ms, Some(5_000 + PUBLIC_SEAT_RESERVATION_MS));
     }
 
     #[test]

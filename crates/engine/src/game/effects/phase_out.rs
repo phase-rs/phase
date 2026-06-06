@@ -11,17 +11,19 @@
 //! permanent path (CR 702.26 proper). Player phasing has no formal CR rule
 //! and follows the small set of card Oracle text that says "you phase out".
 
-use crate::game::filter::{matches_target_filter, FilterContext};
+use std::collections::HashSet;
+
+use crate::game::filter::{
+    matches_target_filter, matches_target_filter_including_phased_out, FilterContext,
+};
 use crate::game::game_object::PhaseOutCause;
 use crate::game::phasing::{phase_in_object, phase_in_player, phase_out_object, phase_out_player};
 use crate::types::ability::{
-    ControllerRef, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::player::PlayerId;
 
 /// CR 702.26a: Resolve `Effect::PhaseOut` by phasing out every targeted
 /// permanent (or every permanent matching the effect's mass filter, e.g.
@@ -45,13 +47,20 @@ pub fn resolve(
     // `Player`) expands to the matching set of player ids. This dispatches
     // before the object branch so a player target never silently becomes a
     // no-op via `collect_object_targets`.
-    let player_targets = collect_player_targets(state, ability, &target);
+    let player_targets =
+        crate::game::ability_utils::collect_player_targets(state, ability, &target);
     for pid in &player_targets {
         phase_out_player(state, *pid, events);
     }
 
     let object_targets = collect_object_targets(state, ability, &target);
+    let target_set: HashSet<ObjectId> = object_targets.iter().copied().collect();
     for oid in object_targets {
+        // CR 702.26h: attachments whose host is also in this mass set phase out
+        // only indirectly via the host's CR 702.26g cascade, not as direct targets.
+        if attachment_host_in_set(state, oid, &target_set) {
+            continue;
+        }
         phase_out_object(state, oid, PhaseOutCause::Directly, events);
     }
 
@@ -78,7 +87,8 @@ pub fn resolve_phase_in(
     // players don't appear in the targeting choke point, so callers wanting
     // to phase them back in must use an explicit `TargetRef::Player` target
     // (or a player-typed mass filter such as `Controller`).
-    let player_targets = collect_player_targets(state, ability, &target);
+    let player_targets =
+        crate::game::ability_utils::collect_player_targets(state, ability, &target);
     for pid in &player_targets {
         phase_in_player(state, *pid, events);
     }
@@ -99,71 +109,14 @@ pub fn resolve_phase_in(
     Ok(())
 }
 
-/// Resolve the target player set for a `PhaseOut`/`PhaseIn` effect.
-///
-/// Explicit `TargetRef::Player` targets win. Otherwise a player-typed mass
-/// filter (`Controller`, `Player`, or a `Typed` filter with no `type_filters`
-/// and an optional `controller` ref) expands to the matching player ids.
-/// Returns an empty vec if the filter doesn't refer to players (the object
-/// branch will handle it).
-fn collect_player_targets(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    target: &TargetFilter,
-) -> Vec<PlayerId> {
-    let from_targets: Vec<PlayerId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .collect();
-    if !from_targets.is_empty() {
-        return from_targets;
-    }
-
-    match target {
-        TargetFilter::Controller => vec![ability.scoped_player.unwrap_or(ability.controller)],
-        TargetFilter::Player => state.players.iter().map(|p| p.id).collect(),
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            ..
-        }) if type_filters.is_empty() => {
-            state
-                .players
-                .iter()
-                .filter(|p| match controller {
-                    Some(ControllerRef::You) => p.id == ability.controller,
-                    Some(ControllerRef::Opponent) => p.id != ability.controller,
-                    Some(ControllerRef::ScopedPlayer) => {
-                        p.id == ability.scoped_player.unwrap_or(ability.controller)
-                    }
-                    // CR 109.4: TargetPlayer is ambiguous here (phase_out targets are
-                    // resolved from ability.targets directly); fail closed.
-                    Some(ControllerRef::TargetPlayer) => false,
-                    Some(ControllerRef::ParentTargetController) => false,
-                    Some(ControllerRef::DefendingPlayer) => false,
-                    // CR 608.2c + CR 109.4: Player chosen by an earlier
-                    // `Choose(Player)` in this resolution.
-                    Some(ControllerRef::ChosenPlayer { index }) => {
-                        ability.chosen_players.get(*index as usize).copied() == Some(p.id)
-                    }
-                    // CR 603.2 + CR 109.4: The triggering player. Resolved against
-                    // the current trigger event; fail closed when there is none.
-                    Some(ControllerRef::TriggeringPlayer) => {
-                        state.current_trigger_event.as_ref().and_then(|e| {
-                            crate::game::targeting::extract_player_from_event(e, state)
-                        }) == Some(p.id)
-                    }
-                    None => true,
-                })
-                .map(|p| p.id)
-                .collect()
-        }
-        _ => Vec::new(),
-    }
+/// True when `oid` is attached to another permanent that is also in `targets`.
+fn attachment_host_in_set(state: &GameState, oid: ObjectId, targets: &HashSet<ObjectId>) -> bool {
+    state
+        .objects
+        .get(&oid)
+        .and_then(|obj| obj.attached_to.as_ref())
+        .and_then(|t| t.as_object())
+        .is_some_and(|host| targets.contains(&host))
 }
 
 /// Resolve the target object set for a `PhaseOut` effect. Explicit
@@ -216,18 +169,86 @@ fn collect_phase_in_targets(
         return from_targets;
     }
 
-    // For mass phase-in effects, we must see phased-out permanents — that's
-    // the only sensible target set. Rely on the caller-supplied filter to
-    // narrow (e.g., "all phased-out permanents you control"). The core
-    // filter choke point hides phased-out objects, so we can't use it for
-    // non-trivial mass filters here without extending the filter API. For
-    // now, a mass phase-in with a controller-scoped filter is approximated
-    // by scanning all battlefield objects and checking controller.
-    let _ = (ability, target);
+    // CR 702.26b: phasing-in is one of the rare effects that specifically
+    // mentions phased-out permanents, so the effect's filter must be applied to
+    // the phased-out permanents themselves. `matches_target_filter_including_
+    // phased_out` evaluates the filter (controller scope, type, etc.) while
+    // bypassing the choke point's phased-out exclusion, so a card such as "phase
+    // in each phased-out permanent you control" no longer indiscriminately
+    // phases in every phased-out permanent (including an opponent's).
+    let ctx = FilterContext::from_ability(ability);
     state
         .battlefield
         .iter()
         .copied()
-        .filter(|id| state.objects.get(id).is_some_and(|obj| obj.is_phased_out()))
+        .filter(|id| {
+            let phased_out = state.objects.get(id).is_some_and(|obj| obj.is_phased_out());
+            phased_out && matches_target_filter_including_phased_out(state, *id, target, &ctx)
+        })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ControllerRef, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn add_creature(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    /// CR 702.26b: A mass phase-in effect specifically mentioning phased-out
+    /// permanents must still honor the effect's object filter. Reverting
+    /// `collect_phase_in_targets` to return every phased-out battlefield object
+    /// phases in the opponent's creature and fails this regression.
+    #[test]
+    fn phase_in_mass_filter_only_returns_matching_phased_out_objects() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Phase Source");
+        let mine = add_creature(&mut state, PlayerId(0), "Mine");
+        let theirs = add_creature(&mut state, PlayerId(1), "Theirs");
+
+        let mut events = Vec::new();
+        phase_out_object(&mut state, mine, PhaseOutCause::Directly, &mut events);
+        phase_out_object(&mut state, theirs, PhaseOutCause::Directly, &mut events);
+
+        let ability = ResolvedAbility::new(
+            Effect::PhaseIn {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+
+        resolve_phase_in(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.objects[&mine].is_phased_out(),
+            "controller's matching phased-out creature must phase in"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_out(),
+            "opponent's phased-out creature must remain phased out"
+        );
+    }
 }

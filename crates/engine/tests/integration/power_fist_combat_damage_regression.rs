@@ -100,7 +100,7 @@ fn power_fist_static_parses_trample_and_granted_trigger() {
     );
     assert!(
         def.modifications.iter().any(|m| {
-            matches!(m, ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Trample)
+            matches!(m, ContinuousModification::AddKeyword { keyword } if keyword == &Keyword::Trample)
         }),
         "expected AddKeyword(Trample), got {:?}",
         def.modifications
@@ -153,6 +153,7 @@ fn equipment_trample_present_through_combat_until_damage() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declare attackers");
     if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {

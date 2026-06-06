@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction};
+use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, WaitingFor,
@@ -10,6 +10,7 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::engine::EngineError;
 use super::{casting, casting_costs, mana_abilities};
+use casting_costs::{CostSelection, SpellCostPayment};
 
 pub(super) fn cancel_pending_cast(
     state: &mut GameState,
@@ -105,20 +106,11 @@ pub(super) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
     pending_cast: PendingCast,
-    count: usize,
-    permanents: &[ObjectId],
-    chosen: &[ObjectId],
+    paid_cost: Option<SpellCostPayment<'_>>,
+    selection: CostSelection<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    casting::handle_sacrifice_for_cost(
-        state,
-        player,
-        pending_cast,
-        count,
-        permanents,
-        chosen,
-        events,
-    )
+    casting::handle_sacrifice_for_cost(state, player, pending_cast, paid_cost, selection, events)
 }
 
 pub(super) fn handle_return_to_hand_for_cost(
@@ -282,6 +274,29 @@ pub(super) fn handle_exile_for_cost(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_exile_materials_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    materials: TargetFilter,
+    pending_cast: PendingCast,
+    bounds: (usize, usize),
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_exile_materials_for_cost(
+        state,
+        player,
+        materials,
+        pending_cast,
+        bounds,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
 pub(super) fn handle_collect_evidence_cancel(
     state: &mut GameState,
     player: PlayerId,
@@ -339,6 +354,7 @@ pub(super) fn handle_harmonize_tap_choice(
         }
     }
 
+    let base_cost = pending.base_cost.clone();
     casting_costs::pay_and_push_adventure(
         state,
         player,
@@ -346,6 +362,7 @@ pub(super) fn handle_harmonize_tap_choice(
         pending.card_id,
         pending.ability,
         &pending.cost,
+        base_cost,
         pending.casting_variant,
         pending.cast_timing_permission,
         pending.distribute,

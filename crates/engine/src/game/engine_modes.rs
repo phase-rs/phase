@@ -4,16 +4,16 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_chained_resolved, build_target_slots, flatten_targets_in_chain,
-    random_select_targets_for_ability, record_modal_mode_choices, target_constraints_from_modal,
-    validate_modal_indices,
+    ability_target_legality_needs_chosen_x, assign_targets_in_chain,
+    auto_select_targets_for_ability, begin_target_selection_for_ability, build_chained_resolved,
+    build_target_slots_labelled, flatten_targets_in_chain, random_select_targets_for_ability,
+    record_modal_mode_choices, target_constraints_from_modal, validate_modal_indices,
 };
-use super::casting;
 use super::engine::EngineError;
 use super::engine_stack;
 use super::restrictions;
 use super::triggers;
+use super::{casting, casting_costs};
 
 pub(super) fn handle_ability_mode_choice(
     state: &mut GameState,
@@ -52,6 +52,8 @@ pub(super) fn handle_ability_mode_choice(
                 ability_index,
                 ability_cost,
                 modal,
+                mode_abilities,
+                indices,
             },
             events,
         )
@@ -63,6 +65,8 @@ pub(super) fn handle_ability_mode_choice(
                 source_id,
                 resolved,
                 modal,
+                mode_abilities,
+                indices,
             },
             events,
         )
@@ -76,6 +80,12 @@ struct ActivatedModeChoice {
     ability_index: Option<usize>,
     ability_cost: Option<crate::types::ability::AbilityCost>,
     modal: crate::types::ability::ModalChoice,
+    /// CR 700.2: the card's mode definitions and the chosen indices, carried so
+    /// per-slot mode labels can be built at the SAME post-flush point as slots
+    /// (Finding 4 — slot count is state-dependent; the two vectors must come
+    /// from one `build_target_slots_labelled` call).
+    mode_abilities: Vec<crate::types::ability::AbilityDefinition>,
+    indices: Vec<usize>,
 }
 
 fn handle_activated_mode_choice(
@@ -90,14 +100,50 @@ fn handle_activated_mode_choice(
         ability_index,
         ability_cost,
         modal,
+        mode_abilities,
+        indices,
     } = choice;
 
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
+    let target_constraints = target_constraints_from_modal(&modal);
+
+    // CR 602.2b + CR 601.2b/c: Activating an ability follows the spell
+    // announcement steps. If an activated modal ability's target legality depends
+    // on an {X} activation cost, choose X after modes and before targets, then
+    // resume through the same deferred target-selection path modal spells use so
+    // per-mode labels and X-dependent legality stay in sync.
+    if ability_target_legality_needs_chosen_x(&resolved) {
+        if let Some(cost) = ability_cost.as_ref() {
+            if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
+                let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
+                pending_x.activation_cost = remaining;
+                pending_x.activation_ability_index = ability_index;
+                pending_x.target_constraints = target_constraints;
+                pending_x.deferred_target_selection = true;
+                let mut chosen_modes = indices.clone();
+                chosen_modes.sort_unstable();
+                pending_x.chosen_modes = chosen_modes;
+                state.pending_cast = Some(Box::new(pending_x));
+                return casting_costs::enter_payment_step(state, player, None, events);
+            }
+        }
     }
 
-    let target_slots = build_target_slots(state, &resolved)?;
-    let target_constraints = target_constraints_from_modal(&modal);
+    super::layers::flush_layers(state);
+
+    // CR 700.2 / CR 601.2b: Build slots and per-mode labels together against the
+    // SAME post-flush state (Finding 4 — never let the two vectors diverge in
+    // length). `resolved.context` is the chained ability's context, reapplied
+    // per-mode by the labelled builder.
+    let (target_slots, mode_labels) = build_target_slots_labelled(
+        state,
+        &mode_abilities,
+        &indices,
+        &modal.mode_descriptions,
+        source_id,
+        player,
+        &resolved.context,
+        resolved.chosen_x,
+    )?;
 
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: Random-target modal activated abilities — the
@@ -172,6 +218,7 @@ fn handle_activated_mode_choice(
                 player,
                 pending_cast: Box::new(pending),
                 target_slots,
+                mode_labels,
                 selection,
             });
         }
@@ -226,6 +273,10 @@ struct TriggeredModeChoice {
     source_id: ObjectId,
     resolved: crate::types::ability::ResolvedAbility,
     modal: crate::types::ability::ModalChoice,
+    /// CR 700.2b: mode definitions + chosen indices, carried so per-slot mode
+    /// labels build from the same state as the slots (Finding 4).
+    mode_abilities: Vec<crate::types::ability::AbilityDefinition>,
+    indices: Vec<usize>,
 }
 
 fn handle_triggered_mode_choice(
@@ -238,13 +289,26 @@ fn handle_triggered_mode_choice(
         source_id,
         resolved,
         modal,
+        mode_abilities,
+        indices,
     } = choice;
 
     let mut trigger = state
         .pending_trigger
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
-    let target_slots = build_target_slots(state, &resolved)?;
+    // CR 700.2 / CR 700.2b: slots + per-mode labels built together (Finding 4).
+    let (target_slots, mode_labels) = build_target_slots_labelled(
+        state,
+        &mode_abilities,
+        &indices,
+        &modal.mode_descriptions,
+        source_id,
+        player,
+        &resolved.context,
+        // CR 107.1b: Triggered abilities don't use a chosen X here.
+        None,
+    )?;
     let target_constraints = target_constraints_from_modal(&modal);
 
     trigger.ability = resolved;
@@ -302,9 +366,26 @@ fn handle_triggered_mode_choice(
                 &target_slots,
                 &target_constraints,
             )?;
+            // CR 601.2c + CR 603.3d + CR 109.5: a targeted "of their choice" trigger
+            // routes target selection to the scoped (upkeep) player, not the source's
+            // controller. Magus is non-modal so this is defensive class-consistency
+            // with the non-modal path in `begin_pending_trigger_target_selection`.
+            let player = pending_trigger
+                .ability
+                .target_chooser
+                .as_ref()
+                .and_then(|f| {
+                    crate::game::targeting::resolve_effect_player_ref(
+                        state,
+                        &pending_trigger.ability,
+                        f,
+                    )
+                })
+                .unwrap_or(player);
             return Ok(WaitingFor::TriggerTargetSelection {
                 player,
                 target_slots,
+                mode_labels,
                 target_constraints,
                 selection,
                 source_id: Some(source_id),

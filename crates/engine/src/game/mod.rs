@@ -1,10 +1,17 @@
 pub mod ability_utils;
 pub mod arithmetic;
+pub mod attractions;
 pub mod bending;
 pub mod bracket_estimate;
 pub mod casting;
 pub(crate) mod casting_costs;
 pub(crate) mod casting_targets;
+pub mod cipher;
+// Tests for `cipher` live in a sibling file (declared here, not in `cipher.rs`,
+// so `cipher.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "cipher_tests.rs"]
+mod cipher_tests;
 pub mod combat;
 pub mod combat_damage;
 pub mod commander;
@@ -43,6 +50,12 @@ pub mod mana_abilities;
 pub mod mana_payment;
 pub mod mana_sources;
 pub mod match_flow;
+pub mod merge;
+// Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
+// so `merge.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "merge_tests.rs"]
+mod merge_tests;
 pub mod morph;
 pub mod mulligan;
 pub(crate) mod off_zone_characteristics;
@@ -61,9 +74,11 @@ pub(crate) mod sacrifice;
 pub mod sba;
 pub mod scenario;
 pub mod scenario_db;
+pub mod specialize;
 pub mod speed;
 pub mod stack;
 pub mod static_abilities;
+pub mod static_source_index;
 pub mod targeting;
 pub mod token_presets;
 pub mod transform;
@@ -87,10 +102,10 @@ pub use deck_loading::{
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
 };
 pub use deck_validation::{
-    can_pair_commanders, evaluate_deck_compatibility, is_brawl_commander_eligible,
-    is_commander_eligible, is_tiny_leader_eligible, validate_deck_for_format,
-    validate_name_deck_for_format, CompatibilityCheck, DeckCompatibilityRequest,
-    DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
+    can_pair_commanders, deck_copy_limit_for, evaluate_deck_compatibility,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    validate_deck_for_format, validate_name_deck_for_format, CompatibilityCheck,
+    DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,

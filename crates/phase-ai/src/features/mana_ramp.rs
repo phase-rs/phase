@@ -19,7 +19,7 @@
 //! - Controller scoping: `TypedFilter.controller: Option<ControllerRef>` at
 //!   `ability.rs:815-818`.
 //!
-//! `StaticMode::ReduceCost` is deliberately out of scope — cost reducers are a
+//! `StaticMode::ModifyCost` is deliberately out of scope — cost reducers are a
 //! follow-up feature.
 
 use engine::game::DeckEntry;
@@ -349,6 +349,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -364,6 +365,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         ability
@@ -533,6 +535,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -550,6 +553,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         let mut face = card_face_with_types("Gift Spell", vec![CoreType::Sorcery]);
@@ -574,6 +578,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         fetch_ability.cost = Some(AbilityCost::Composite {
@@ -598,6 +603,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         let mut face = card_face_with_types("Fetchland", vec![CoreType::Land]);

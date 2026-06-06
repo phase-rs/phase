@@ -1,4 +1,4 @@
-use crate::types::ability::{ControllerRef, PlayerRelation};
+use crate::types::ability::{ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::game_state::LinkedExileSnapshot;
@@ -39,24 +39,82 @@ pub fn next_player(state: &GameState, current: PlayerId) -> PlayerId {
     current
 }
 
+/// CR 102.1 / CR 500.1: Previous living player in seat (turn) order.
+///
+/// Returns the previous living player in seat order before `current`, wrapping
+/// around (the seat to `current`'s right, since turn order proceeds to the
+/// left per CR 101.4 / CR 103.1). Skips eliminated players. If `current` is the
+/// only living player, returns `current`.
+pub fn previous_player(state: &GameState, current: PlayerId) -> PlayerId {
+    let seat_order = &state.seat_order;
+    let len = seat_order.len();
+    if len == 0 {
+        return current;
+    }
+
+    let current_idx = seat_order.iter().position(|&id| id == current).unwrap_or(0);
+
+    for offset in 1..=len {
+        // Walk backward through the seat ring (wrapping) by adding `len - offset`.
+        let idx = (current_idx + len - (offset % len)) % len;
+        let candidate = seat_order[idx];
+        if is_alive(state, candidate) {
+            return candidate;
+        }
+    }
+
+    // Only living player (or no living players — shouldn't happen)
+    current
+}
+
+/// CR 102.1 + CR 103.1: Single authority for seating-neighbor resolution.
+///
+/// Resolves the living player seated immediately to `controller`'s left or
+/// right. Turn order proceeds clockwise to the active player's left
+/// (CR 101.4 / CR 103.1), so `Left` walks forward in `seat_order`
+/// (`next_player`) and `Right` walks backward (`previous_player`).
+pub fn neighbor(state: &GameState, controller: PlayerId, direction: SeatDirection) -> PlayerId {
+    match direction {
+        SeatDirection::Left => next_player(state, controller),
+        SeatDirection::Right => previous_player(state, controller),
+    }
+}
+
 /// CR 102.2 / CR 102.3: Opponents in two-player and multiplayer games.
 ///
-/// Returns all living players except the given player, in seat order.
+/// Returns all living players not on the given player's team, in seat order.
 pub fn opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     state
         .seat_order
         .iter()
         .copied()
-        .filter(|&id| id != player && is_alive(state, id))
+        .filter(|&id| is_opponent(state, player, id) && is_alive(state, id))
         .collect()
 }
 
-/// CR 102.1 / CR 102.2 / CR 109.5: Match a player against a relation to the
-/// resolving effect's controller.
-pub fn matches_relation(player: PlayerId, controller: PlayerId, relation: PlayerRelation) -> bool {
+/// CR 102.2 / CR 102.3: Whether `other` is an opponent of `player`.
+pub fn is_opponent(state: &GameState, player: PlayerId, other: PlayerId) -> bool {
+    if player == other {
+        return false;
+    }
+    if state.format_config.team_based {
+        team_index(player) != team_index(other)
+    } else {
+        true
+    }
+}
+
+/// CR 102.1 / CR 102.2 / CR 102.3 / CR 109.5: Match a player against a
+/// relation to the resolving effect's controller.
+pub fn matches_relation(
+    state: &GameState,
+    player: PlayerId,
+    controller: PlayerId,
+    relation: PlayerRelation,
+) -> bool {
     match relation {
         PlayerRelation::Controller => player == controller,
-        PlayerRelation::Opponent => player != controller,
+        PlayerRelation::Opponent => is_opponent(state, controller, player),
         PlayerRelation::All => true,
     }
 }
@@ -123,6 +181,7 @@ pub fn apnap_order_from(
             | ControllerRef::TargetPlayer
             | ControllerRef::ParentTargetController
             | ControllerRef::DefendingPlayer
+            | ControllerRef::SourceChosenPlayer
             | ControllerRef::ChosenPlayer { .. }
             | ControllerRef::TriggeringPlayer,
         ) => state.active_player,
@@ -204,7 +263,7 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 
     // 2HG team pairing: even-indexed players are paired with the next odd-indexed player
     let player_idx = player.0;
-    let team_base = (player_idx / 2) * 2;
+    let team_base = team_index(player) * 2;
     let partner_idx = if player_idx == team_base {
         team_base + 1
     } else {
@@ -217,6 +276,10 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     } else {
         Vec::new()
     }
+}
+
+fn team_index(player: PlayerId) -> u8 {
+    player.0 / 2
 }
 
 #[cfg(test)]
@@ -295,6 +358,62 @@ mod tests {
         assert_eq!(next_player(&state, PlayerId(1)), PlayerId(0));
     }
 
+    // --- previous_player ---
+
+    #[test]
+    fn previous_player_returns_previous_in_seat_order() {
+        let state = make_state(3, FormatConfig::free_for_all());
+        // seat_order [P0,P1,P2]: previous of P1 is P0, previous of P2 is P1.
+        assert_eq!(previous_player(&state, PlayerId(1)), PlayerId(0));
+        assert_eq!(previous_player(&state, PlayerId(2)), PlayerId(1));
+    }
+
+    #[test]
+    fn previous_player_wraps_around() {
+        let state = make_state(3, FormatConfig::free_for_all());
+        // previous of P0 wraps to the last seat P2.
+        assert_eq!(previous_player(&state, PlayerId(0)), PlayerId(2));
+    }
+
+    #[test]
+    fn previous_player_skips_eliminated() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        // seat_order [P0,P1,P2,P3]: immediate previous of P0 is P3; eliminate it.
+        eliminate(&mut state, PlayerId(3));
+        assert_eq!(previous_player(&state, PlayerId(0)), PlayerId(2));
+    }
+
+    #[test]
+    fn previous_player_returns_self_if_only_living() {
+        let mut state = make_state(3, FormatConfig::free_for_all());
+        eliminate(&mut state, PlayerId(1));
+        eliminate(&mut state, PlayerId(2));
+        assert_eq!(previous_player(&state, PlayerId(0)), PlayerId(0));
+    }
+
+    #[test]
+    fn previous_player_two_player_standard() {
+        let state = make_state(2, FormatConfig::standard());
+        assert_eq!(previous_player(&state, PlayerId(0)), PlayerId(1));
+        assert_eq!(previous_player(&state, PlayerId(1)), PlayerId(0));
+    }
+
+    // --- neighbor ---
+
+    #[test]
+    fn neighbor_left_is_next_right_is_previous() {
+        let state = make_state(3, FormatConfig::free_for_all());
+        // seat_order [P0,P1,P2], controller P0: left = next = P1, right = prev = P2.
+        assert_eq!(
+            neighbor(&state, PlayerId(0), SeatDirection::Left),
+            PlayerId(1)
+        );
+        assert_eq!(
+            neighbor(&state, PlayerId(0), SeatDirection::Right),
+            PlayerId(2)
+        );
+    }
+
     // --- opponents ---
 
     #[test]
@@ -318,6 +437,34 @@ mod tests {
         let state = make_state(2, FormatConfig::standard());
         assert_eq!(opponents(&state, PlayerId(0)), vec![PlayerId(1)]);
         assert_eq!(opponents(&state, PlayerId(1)), vec![PlayerId(0)]);
+    }
+
+    #[test]
+    fn opponents_two_headed_giant_excludes_teammate() {
+        let state = make_state(4, FormatConfig::two_headed_giant());
+        assert_eq!(
+            opponents(&state, PlayerId(0)),
+            vec![PlayerId(2), PlayerId(3)]
+        );
+        assert!(!is_opponent(&state, PlayerId(0), PlayerId(1)));
+        assert!(is_opponent(&state, PlayerId(0), PlayerId(2)));
+    }
+
+    #[test]
+    fn matches_relation_opponent_excludes_two_headed_giant_teammate() {
+        let state = make_state(4, FormatConfig::two_headed_giant());
+        assert!(!matches_relation(
+            &state,
+            PlayerId(1),
+            PlayerId(0),
+            PlayerRelation::Opponent
+        ));
+        assert!(matches_relation(
+            &state,
+            PlayerId(2),
+            PlayerId(0),
+            PlayerRelation::Opponent
+        ));
     }
 
     // --- apnap_order ---

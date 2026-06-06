@@ -3,49 +3,14 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{ShieldKind, TargetFilter};
-use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 const VIGOR_ORACLE: &str = "Trample\n\
 If damage would be dealt to another creature you control, prevent that damage. \
 Put a +1/+1 counter on that creature for each 1 damage prevented this way.";
-
-fn plus_one_counters(runner: &engine::game::scenario::GameRunner, id: ObjectId) -> u32 {
-    runner
-        .state()
-        .objects
-        .get(&id)
-        .and_then(|obj| obj.counters.get(&CounterType::Plus1Plus1))
-        .copied()
-        .unwrap_or(0)
-}
-
-fn cast_bolt_at_creature(
-    runner: &mut engine::game::scenario::GameRunner,
-    bolt_id: ObjectId,
-    target: ObjectId,
-) {
-    let bolt_card_id = runner.state().objects[&bolt_id].card_id;
-    let result = runner
-        .act(GameAction::CastSpell {
-            object_id: bolt_id,
-            card_id: bolt_card_id,
-            targets: vec![],
-        })
-        .expect("cast bolt");
-    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
-        runner
-            .act(GameAction::SelectTargets {
-                targets: vec![engine::types::ability::TargetRef::Object(target)],
-            })
-            .expect("select creature target");
-    }
-    runner.advance_until_stack_empty();
-}
 
 #[test]
 fn vigor_does_not_prevent_damage_to_opponents_creature() {
@@ -72,18 +37,16 @@ fn vigor_does_not_prevent_damage_to_opponents_creature() {
         state.waiting_for = WaitingFor::Priority { player: P1 };
     }
 
-    cast_bolt_at_creature(&mut runner, bolt, goblin);
+    // Vigor (P0) only protects P0's other creatures, so P1's Goblin takes the
+    // full 3 damage and gets no counters.
+    let outcome = runner.cast(bolt).target_object(goblin).resolve();
 
     assert_eq!(
-        runner.state().objects[&goblin].damage_marked,
+        outcome.damage_marked(goblin),
         3,
         "damage to an opponent's creature must not be prevented by Vigor"
     );
-    assert_eq!(
-        plus_one_counters(&runner, goblin),
-        0,
-        "Vigor must not put counters on a creature it did not protect"
-    );
+    outcome.assert_counters(goblin, CounterType::Plus1Plus1, 0);
 }
 
 #[test]
@@ -141,21 +104,15 @@ fn vigor_prevents_damage_and_puts_counters_on_your_creature() {
         state.waiting_for = WaitingFor::Priority { player: P1 };
     }
 
-    cast_bolt_at_creature(&mut runner, bolt, bear);
+    let outcome = runner.cast(bolt).target_object(bear).resolve();
 
     assert_eq!(
-        runner.state().objects[&bear].damage_marked,
+        outcome.damage_marked(bear),
         0,
         "damage to your other creature must be fully prevented"
     );
-    assert_eq!(
-        plus_one_counters(&runner, bear),
-        3,
-        "one +1/+1 counter per 1 damage prevented (CR 615.5)"
-    );
-    assert_eq!(
-        plus_one_counters(&runner, vigor),
-        0,
-        "Vigor must not receive counters from protecting another creature"
-    );
+    // one +1/+1 counter per 1 damage prevented (CR 615.5)
+    outcome.assert_counters(bear, CounterType::Plus1Plus1, 3);
+    // Vigor must not receive counters from protecting another creature.
+    outcome.assert_counters(vigor, CounterType::Plus1Plus1, 0);
 }

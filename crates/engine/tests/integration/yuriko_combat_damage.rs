@@ -53,10 +53,6 @@
 //!   - CR 202.3: an object's mana value is the converted total of its mana
 //!     cost — the quantity the resolver reads off the revealed card.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::phase::Phase;
@@ -64,14 +60,7 @@ use engine::types::zones::Zone;
 
 use super::rules::run_combat;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Primary regression — Yuriko herself attacks unblocked and deals combat
 /// damage to P1. The combat-damage trigger reveals the top card of P0's
@@ -166,22 +155,33 @@ fn yuriko_attacks_loses_opponent_life_equal_to_revealed_card_mana_value() {
 }
 
 /// Secondary regression — a *different* Ninja deals the combat damage. The
-/// CMC of the attacking Ninja must NOT be read; the revealed card is what
-/// counts.
+/// mana value of the attacking Ninja must NOT be read; the revealed card is
+/// what counts.
 ///
-/// Discriminator: the attacker is Ingenious Infiltrator (a 2/3 Vedalken
-/// Ninja, mana value 4), and the revealed library top is a 2-CMC
-/// `Counterspell`. Combat damage = 2 (Infiltrator's power); trigger life
-/// loss = 2 (revealed card's CMC). Total: 20 − 4 = 16.
+/// Discriminator: the attacker is Thousand-Faced Shadow (a 1/1 Ninja, mana
+/// value 1), and the revealed library top is a 2-CMC `Counterspell`. Combat
+/// damage = 1 (Shadow's power); trigger life loss = 2 (revealed card's CMC).
+/// Total: 20 − 3 = 17.
 ///   - Under the pre-fix `CostPaidObject` scope, slot 2 (trigger-event
-///     source) would be read — that's the attacking Infiltrator (CMC 4) —
-///     so P1 would lose 2 + 4 = 6 life, ending at 14.
+///     source) would be read — that's the attacking Shadow (CMC 1) —
+///     so P1 would lose 1 + 1 = 2 life, ending at 18.
 ///   - Under the fixed `Anaphoric` scope, slot 1 (`effect_context_object` =
-///     the revealed Counterspell snapshot) is read — P1 loses 2 + 2 = 4
-///     life, ending at 16.
+///     the revealed Counterspell snapshot) is read — P1 loses 1 + 2 = 3
+///     life, ending at 17.
 ///
-/// The 16-vs-14 gap proves the chained life-loss reads the revealed card's
+/// The 17-vs-18 gap proves the chained life-loss reads the revealed card's
 /// CMC and not the attacker's, even when the attacker is not Yuriko herself.
+///
+/// CR 603.3b: Ingenious Infiltrator carries its *own* combat-damage trigger
+/// ("...draw a card"). Both same-controller triggers fire and P0 orders them;
+/// whichever resolves first consumes the top of the library. The library is
+/// therefore seeded with TWO mana-value-2 cards (Counterspell + Negate) so
+/// that Infiltrator's draw and Yuriko's reveal each take a distinct CMC-2 card
+/// regardless of resolution order — Yuriko's reveal always yields mana value 2.
+/// A single library card would let the draw steal it, leaving Yuriko's reveal
+/// empty (no anaphoric referent) and falling through to the trigger-event
+/// source (the attacker, CMC 4) — the 14 bug-value masquerading as a fix
+/// failure.
 #[test]
 fn another_ninja_attacks_yuriko_still_reads_revealed_card_mana_value() {
     let Some(db) = load_db() else {
@@ -191,15 +191,19 @@ fn another_ninja_attacks_yuriko_still_reads_revealed_card_mana_value() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let _yuriko = scenario.add_real_card(P0, "Yuriko, the Tiger's Shadow", Zone::Battlefield, db);
-    // Counterspell is {U}{U} — mana value 2, distinct from Yuriko's 3.
+    // Counterspell {U}{U} and Negate {1}{U} are both mana value 2, distinct
+    // from Yuriko's 3 and Infiltrator's 4. Two cards so Infiltrator's own
+    // "draw a card" trigger and Yuriko's reveal each take a CMC-2 card.
     let revealed = scenario.add_real_card(P0, "Counterspell", Zone::Library, db);
+    let _drawn = scenario.add_real_card(P0, "Negate", Zone::Library, db);
     // Attacker — also a real Ninja so it matches the trigger condition
     // ("Whenever a Ninja you control deals combat damage to a player").
-    // Ingenious Infiltrator is a Vedalken Ninja with mana cost {2}{U}{B}
-    // (mana value 4). The discriminator is the gap to the 2-CMC reveal —
-    // under the buggy `CostPaidObject` scope P1 would have lost 4 (the
-    // attacker's CMC); the fixed `Anaphoric` scope makes P1 lose exactly 2.
-    let attacker = scenario.add_real_card(P0, "Ingenious Infiltrator", Zone::Battlefield, db);
+    // Thousand-Faced Shadow is a Ninja with mana cost {U} (mana value 1) and
+    // no combat-damage trigger that can draw the intended reveal card first.
+    // The discriminator is the gap to the 2-CMC reveal — under the buggy
+    // `CostPaidObject` scope P1 would have lost 1 (the attacker's CMC); the
+    // fixed `Anaphoric` scope makes P1 lose exactly 2.
+    let attacker = scenario.add_real_card(P0, "Thousand-Faced Shadow", Zone::Battlefield, db);
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
@@ -214,6 +218,17 @@ fn another_ninja_attacks_yuriko_still_reads_revealed_card_mana_value() {
         2,
         "precondition: the revealed library-top card has CMC 2"
     );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&attacker)
+            .unwrap()
+            .mana_cost
+            .mana_value(),
+        1,
+        "precondition: the attacking Ninja's CMC is 1 (the bug-displaying value)"
+    );
     assert_eq!(runner.life(P1), 20, "precondition: P1 starts at 20 life");
 
     run_combat(&mut runner, vec![attacker], vec![]);
@@ -221,10 +236,10 @@ fn another_ninja_attacks_yuriko_still_reads_revealed_card_mana_value() {
 
     assert_eq!(
         runner.life(P1),
-        16,
-        "P1 loses 2 combat damage (Infiltrator's power) + life equal to the \
-         REVEALED card's mana value (2): 20 - 2 - 2 = 16. The bug-value \
-         would be 14 (loses 2 + Infiltrator's CMC 4)."
+        17,
+        "P1 loses 1 combat damage (Shadow's power) + life equal to the \
+         REVEALED card's mana value (2): 20 - 1 - 2 = 17. The bug-value \
+         would be 18 (loses 1 + Shadow's CMC 1)."
     );
     assert_eq!(
         runner.state().objects.get(&revealed).unwrap().zone,

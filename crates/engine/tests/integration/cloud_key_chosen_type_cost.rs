@@ -14,10 +14,6 @@
 //! CR 601.2f: cost reductions apply only to spells matching the effect's filter.
 //! A spell that is not of the chosen type must NOT be reduced.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::ChoiceType;
@@ -29,14 +25,7 @@ use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// With Cloud Key on the battlefield and NO card type chosen, a non-artifact
 /// spell (Cultivate, {2}{G}) must not receive any cost reduction.
@@ -110,18 +99,13 @@ fn cloud_key_reduces_only_the_chosen_card_type_after_etb_choice() {
         }
     }
 
-    let card_id = runner.state().objects[&cloud_key].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: cloud_key,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Cloud Key cast should succeed");
-    runner.advance_until_stack_empty();
+    // Pool-funded cast through the canonical pipeline. Cloud Key's ETB choice
+    // is a prompt the resolution driver does not auto-answer, so it halts there
+    // and surfaces it via `final_waiting_for()` for the caller to inspect/drive.
+    let outcome = runner.cast(cloud_key).resolve();
 
     // Bug B: the ETB choice must surface as a CardType choice keyed to Cloud Key.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::NamedChoice {
             choice_type,
             source_id,

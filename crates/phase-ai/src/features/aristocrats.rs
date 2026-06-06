@@ -487,6 +487,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Composite {
@@ -511,6 +512,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         ability
@@ -525,6 +527,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Sacrifice {
@@ -548,6 +551,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         ability
@@ -660,6 +664,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )
     }

@@ -72,6 +72,40 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.bestowSubtitle", { name: cardName }),
       };
+    case "Awaken":
+      return {
+        eyebrow: t("alternativeCost.awakenEyebrow"),
+        normalLabel: t("alternativeCost.awakenNormalLabel"),
+        altLabel: t("alternativeCost.awakenAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.awakenSubtitle", { name: cardName }),
+      };
+    case "Cleave":
+      return {
+        eyebrow: t("alternativeCost.cleaveEyebrow"),
+        normalLabel: t("alternativeCost.cleaveNormalLabel"),
+        altLabel: t("alternativeCost.cleaveAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.cleaveSubtitle", { name: cardName }),
+      };
+    case "MoreThanMeetsTheEye":
+      return {
+        eyebrow: t("alternativeCost.mtmteEyebrow"),
+        normalLabel: t("alternativeCost.mtmteNormalLabel"),
+        altLabel: t("alternativeCost.mtmteAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.mtmteSubtitle", { name: cardName }),
+      };
+    // CR 702.140a: Mutate — pay the mutate cost to cast as a mutating creature
+    // spell targeting a non-Human creature you own.
+    case "Mutate":
+      return {
+        eyebrow: t("alternativeCost.mutateEyebrow"),
+        normalLabel: t("alternativeCost.mutateNormalLabel"),
+        altLabel: t("alternativeCost.mutateAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.mutateSubtitle", { name: cardName }),
+      };
   }
 }
 
@@ -105,8 +139,8 @@ function describeAdditionalCost(
 /**
  * CR 118.9: Unified prompt for keyword-granted alternative casting costs
  * (Warp custom, Evoke per CR 702.74a, Overload per CR 702.96a, Bestow per
- * CR 702.103a). All four share the same player-decision shape; the engine's
- * `keyword` axis selects display copy only.
+ * CR 702.103a, Cleave per CR 702.148a). All share the same player-decision
+ * shape; the engine's `keyword` axis selects display copy only.
  */
 export function AlternativeCostModal() {
   const canActForWaitingState = useCanActForWaitingState();

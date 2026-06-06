@@ -10,11 +10,12 @@ use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracke
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::{
-    can_pair_commanders, estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer,
-    finalize_public_state, is_brawl_commander_eligible, is_commander_eligible,
-    is_tiny_leader_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db,
-    resolve_deck_list, start_game, start_game_with_starting_player, validate_name_deck_for_format,
-    BracketEstimate, DeckCompatibilityRequest, DeckList, PlayerDeckList,
+    can_pair_commanders, deck_copy_limit_for, estimate_bracket, evaluate_deck_compatibility,
+    filter_state_for_viewer, finalize_public_state, is_brawl_commander_eligible,
+    is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks,
+    rehydrate_game_from_card_db, resolve_deck_list, start_game, start_game_with_starting_player,
+    validate_name_deck_for_format, BracketEstimate, DeckCompatibilityRequest, DeckList,
+    PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
@@ -41,6 +42,11 @@ struct LegalActionsResult {
     /// Frontend uses this for "what can I do with this card?" lookups so it
     /// doesn't have to introspect `GameAction` variants client-side.
     legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+    /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
+    /// decision has no legal action for any authorized submitter (an engine
+    /// anomaly, not a rules outcome). `None` normally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
 }
 
 /// Serialize a Rust value to a JS object via JSON.
@@ -284,6 +290,22 @@ pub fn is_card_commander_eligible(name: &str) -> bool {
     })
 }
 
+/// CR 100.2a / CR 903.5b: The named card's per-card deck-construction copy-limit
+/// override, or `null` when the default four-of / singleton limit applies.
+/// Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
+/// `{"type":"UpTo","data":N}`); the frontend must switch on `.type`. The engine
+/// is the single authority — the frontend never re-parses Oracle text.
+#[wasm_bindgen(js_name = deckCopyLimit)]
+pub fn deck_copy_limit(name: &str) -> JsValue {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return JsValue::NULL;
+        };
+        to_js(&deck_copy_limit_for(db, name))
+    })
+}
+
 /// Whether the named card can serve as this format's command-zone leader.
 /// Reads the engine's MTGJSON-derived `CardFace` leadership fields and
 /// format-specific deck-validation predicates.
@@ -304,6 +326,7 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
             GameFormat::PauperCommander => is_commander_eligible(face),
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
+            GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
             _ => false,
         }
@@ -379,7 +402,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             main_deck: names,
             sideboard: Vec::new(),
             commander: Vec::new(),
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         let payload = resolve_player_deck_list(db, &list);
         let profile = DeckProfile::analyze(&payload.main_deck);
@@ -518,6 +541,17 @@ pub fn initialize_game(
 
     let mut state = GameState::new(format_config, count, seed);
     state.debug_mode = true;
+    // Sandbox capability: in a P2P-host (WASM-authoritative) game, the
+    // `submit_action` gate checks `debug_permitted`, mirroring server-core's
+    // WebSocket gate. server-core seeds every seat when `allow_debug_actions`
+    // is set (session.rs); the WASM host must do the same or sandbox Debug
+    // actions are rejected for everyone — the host included. Every seat is
+    // permitted by default; the host's grant/revoke flow still narrows it.
+    if state.format_config.allow_debug_actions {
+        for i in 0..count {
+            state.debug_permitted.insert(PlayerId(i));
+        }
+    }
     state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
@@ -732,9 +766,10 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         owner,
         zone,
         attach_to,
+        run_etb,
     }) = action
     {
-        return handle_debug_create_card(card_name, owner, zone, attach_to);
+        return handle_debug_create_card(card_name, owner, zone, attach_to, run_etb);
     }
 
     match with_state_mut(|state| match apply(state, actor, action) {
@@ -754,6 +789,7 @@ fn handle_debug_create_card(
     owner: PlayerId,
     zone: engine::types::zones::Zone,
     attach_to: Option<engine::game::game_object::AttachTarget>,
+    run_etb: bool,
 ) -> JsValue {
     let face = CARD_DB.with(|cell| {
         let db = cell.borrow();
@@ -799,7 +835,7 @@ fn handle_debug_create_card(
         );
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         // Hydrate `back_face` for dual-faced spawns (MDFC, Transform, Adventure,
         // Omen, Meld, Prepare). `apply_card_face_to_object` only writes the named
@@ -851,7 +887,7 @@ fn handle_debug_create_card(
         }
 
         let result = if zone == engine::types::zones::Zone::Battlefield {
-            engine::game::route_debug_create_to_battlefield(state, obj_id)
+            engine::game::route_debug_create_to_battlefield(state, obj_id, run_etb)
         } else {
             engine::types::game_state::ActionResult {
                 events: vec![],
@@ -879,8 +915,11 @@ fn handle_debug_create_card(
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
     match with_state(|state| {
+        // Single-player WASM: the human is always PlayerId(0). Scope web-slinging
+        // costs to the human's own hand even on this raw/unfiltered path.
         to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
             state,
+            Some(PlayerId(0)),
         ))
     }) {
         Ok(val) => val,
@@ -898,6 +937,7 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
         let filtered = filter_state_for_viewer(state, PlayerId(viewer));
         to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
             &filtered,
+            Some(PlayerId(viewer)),
         ))
     }) {
         Ok(val) => val,
@@ -917,6 +957,7 @@ pub fn get_legal_actions_js() -> JsValue {
             auto_pass_recommended: auto_pass,
             spell_costs,
             legal_actions_by_object,
+            stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
         })
     }) {
         Ok(val) => val,
@@ -939,6 +980,7 @@ pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
             auto_pass_recommended: auto_pass,
             spell_costs,
             legal_actions_by_object,
+            stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
         })
     }) {
         Ok(val) => val,
@@ -958,6 +1000,11 @@ struct ViewerSnapshot {
     auto_pass_recommended: bool,
     spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
     legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
+    /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
+    /// decision has no legal action for any authorized submitter (an engine
+    /// anomaly, not a rules outcome). `None` normally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
 }
 
 #[wasm_bindgen]
@@ -974,6 +1021,7 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
             auto_pass_recommended: auto_pass,
             spell_costs,
             legal_actions_by_object,
+            stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
         })
     }) {
         Ok(val) => val,
@@ -1218,6 +1266,11 @@ struct BatchResolveResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     log_entries: Vec<engine::types::log::GameLogEntry>,
     items_resolved: u32,
+    /// Stack depth at this chunk's entry. The frontend latches the FIRST
+    /// chunk's `total` as the storm-origin denominator for "resolving X of Y"
+    /// progress (this per-chunk value shrinks across chunks, so only the first
+    /// is the true origin total). Display-only; carries no rules meaning.
+    total: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -1342,6 +1395,7 @@ pub fn resolve_all(
             waiting_for: state.waiting_for.clone(),
             log_entries: all_log_entries,
             items_resolved,
+            total: initial_stack_len as u32,
         }))
     })?
 }
@@ -1369,6 +1423,8 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 main_deck: deck_data.main_deck,
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
+                attraction_deck: deck_data.attraction_deck,
+                signature_spell: deck_data.signature_spell,
                 bracket_tier: deck_data.bracket_tier,
             })
         }
@@ -1439,7 +1495,7 @@ mod bracket_estimate_tests {
             commander: vec!["Atraxa, Praetors' Voice".into()],
             main_deck: vec!["Smothering Tithe".into(), "Forest".into()],
             sideboard: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         let result = estimate_bracket_inner(&deck);
         let est = result.expect("estimate present");
@@ -1456,7 +1512,7 @@ mod bracket_estimate_tests {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         assert!(estimate_bracket_inner(&deck).is_none());
     }
@@ -1519,6 +1575,7 @@ mod tests {
             strive_cost: None,
             brawl_commander: false,
             is_commander: false,
+            deck_copy_limit: None,
             metadata: Default::default(),
         }
     }

@@ -3,7 +3,9 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use crate::database::bracket_lists::BracketSignals;
-use crate::database::card_db::{build_name_alias_index, CardDatabase};
+use crate::database::card_db::{
+    build_name_alias_index, collect_creature_type_vocabulary, CardDatabase,
+};
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::load_atomic_cards;
 use crate::database::synthesis::{
@@ -32,7 +34,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
             // B8: Multi-face cards use parser-extracted keywords only to prevent
             // MTGJSON cross-face keyword leakage (e.g., Saga back-face Flying on front).
             let face_a = build_oracle_face_multi(&faces[0], oracle_id.clone());
-            let face_b = build_oracle_face_multi(&faces[1], oracle_id);
+            let face_b = build_oracle_face_multi(&faces[1], oracle_id.clone());
             let mut legalities_by_name = HashMap::new();
             let legalities_a = normalize_legalities(&faces[0].legalities);
             if !legalities_a.is_empty() {
@@ -51,6 +53,13 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
                 LayoutKind::Modal => CardLayout::Modal(face_a, face_b),
                 // CR 702.xxx: Prepare (Strixhaven) — Adventure-family two-face layout.
                 LayoutKind::Prepare => CardLayout::Prepare(face_a, face_b),
+                LayoutKind::Specialize => {
+                    let mut variant_faces = vec![face_b];
+                    for extra in faces.iter().skip(2) {
+                        variant_faces.push(build_oracle_face_multi(extra, oracle_id.clone()));
+                    }
+                    CardLayout::Specialize(face_a, variant_faces)
+                }
                 LayoutKind::Single => CardLayout::Single(face_a),
             };
             for (face, source) in layout_faces(&layout).into_iter().zip(faces.iter()) {
@@ -100,6 +109,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         }
     }
 
+    let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
     Ok(CardDatabase {
         cards,
         name_alias_index: build_name_alias_index(face_index.keys()),
@@ -112,6 +122,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         errors,
         bracket_lists: Default::default(),
         bracket_signals_by_name,
+        creature_type_vocabulary,
     })
 }
 

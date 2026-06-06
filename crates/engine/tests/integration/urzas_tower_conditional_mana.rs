@@ -25,40 +25,13 @@
 //! `ControllerControlsMatching` filters is what makes the three lands
 //! reference each other rather than themselves.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::actions::GameAction;
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-const URZA_LAND_KEYS: [&str; 3] = ["urza's tower", "urza's mine", "urza's power plant"];
-
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| {
-        let raw = std::fs::read_to_string(&path).expect("card-data.json should be readable");
-        let export: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&raw).expect("card-data.json should be a JSON object");
-        let mut selected = serde_json::Map::new();
-        for key in URZA_LAND_KEYS {
-            let value = export
-                .get(key)
-                .unwrap_or_else(|| panic!("{key} should be in card-data.json"));
-            selected.insert(key.to_string(), value.clone());
-        }
-        CardDatabase::from_json_str(&serde_json::Value::Object(selected).to_string())
-            .expect("Urza land export records should load")
-    }))
-}
+use crate::support::shared_card_db as load_db;
 
 /// With all three Urza lands on the battlefield, tapping Urza's Tower for mana
 /// must produce three colorless (the `Add {C}` base plus the +2 delta granted
@@ -78,25 +51,19 @@ fn urzas_tower_with_mine_and_power_plant_produces_three_colorless() {
 
     let mut runner = scenario.build();
 
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: tower_id,
-            ability_index: 0,
-        })
-        .expect("activating Urza's Tower mana ability must succeed");
+    // CR 605.3b: a mana ability resolves immediately on activation (no stack),
+    // so the outcome reads the resulting pool directly.
+    let outcome = runner.activate(tower_id, 0).resolve();
 
-    let pool = &runner.state().players[P0.0 as usize].mana_pool;
     assert_eq!(
-        pool.count_color(ManaType::Colorless),
+        outcome.mana_pool_color(P0, ManaType::Colorless),
         3,
         "Urza's Tower with Urza's Mine + Urza's Power Plant must produce 3 colorless \
-         (1 base + 2 delta from satisfied sub-ability); pool = {:?}",
-        pool.mana,
+         (1 base + 2 delta from satisfied sub-ability)",
     );
     assert_eq!(
-        pool.total(),
+        outcome.mana_pool_total(P0),
         3,
-        "no other mana types must be produced; pool = {:?}",
-        pool.mana,
+        "no other mana types must be produced",
     );
 }

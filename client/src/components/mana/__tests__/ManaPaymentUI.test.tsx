@@ -147,9 +147,12 @@ describe("ManaPaymentUI", () => {
       });
     });
 
-    render(<ManaPaymentUI />);
+    const { container } = render(<ManaPaymentUI />);
 
     expect(screen.getByText("Tap creatures to help pay.")).toBeInTheDocument();
+    const outerShell = container.querySelector(".pointer-events-none.fixed");
+    expect(outerShell).not.toBeNull();
+    expect(outerShell?.querySelector(".pointer-events-auto")).not.toBeNull();
   });
 
   // CR 107.4f + CR 601.2f: When the engine reports PhyrexianPayment, clicking Pay
@@ -377,6 +380,63 @@ describe("ManaPaymentUI", () => {
 
     expect(screen.getByAltText("2")).toBeInTheDocument();
     expect(screen.getByAltText("W")).toBeInTheDocument();
+  });
+
+  it("displays activated-ability mana cost from pending_cast.activation_cost when present", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const sourceObj = {
+      id: 700,
+      name: "The Reality Chip",
+      controller: 0,
+      owner: 0,
+      card_id: 7,
+      mana_cost: { type: "Cost", shards: ["Blue"], generic: 2 },
+      zone: "Battlefield",
+      tapped: false,
+      card_types: { core_types: ["Artifact"], subtypes: ["Equipment"], supertypes: [] },
+      abilities: [],
+      colors: [],
+      counters: {},
+      damage: 0,
+      is_summon_sick: false,
+      attached_to: null,
+      cast_from_zone: null,
+      face_down: false,
+      is_commander: false,
+      is_attacking: null,
+      is_blocking: null,
+      mana_spent_to_cast: false,
+      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
+    } as unknown as GameState["objects"][number];
+
+    const gameState = createGameState({
+      objects: { 700: sourceObj },
+      pending_cast: {
+        object_id: 700,
+        // Spells use `cost`; activated abilities use `activation_cost`.
+        cost: { type: "NoCost" },
+        activation_cost: {
+          type: "Mana",
+          cost: { type: "Cost", shards: ["Blue"], generic: 2 },
+        },
+        activation_ability_index: 0,
+      } as unknown as GameState["pending_cast"],
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [{ type: "CancelCast" }, { type: "PassPriority" }],
+      });
+    });
+
+    render(<ManaPaymentUI />);
+
+    // Should display activation cost {2}{U}.
+    expect(screen.getByAltText("2")).toBeInTheDocument();
+    expect(screen.getByAltText("U")).toBeInTheDocument();
   });
 
   // pending_cast absent — fall back to the stack spell object's mana_cost.

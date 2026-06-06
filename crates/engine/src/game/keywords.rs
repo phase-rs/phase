@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use crate::game::game_object::GameObject;
 use crate::game::zones;
+use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{AbilityCost, NinjutsuVariant};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -64,6 +65,29 @@ pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Optio
     }
 }
 
+/// CR 702.146a: Effective Disturb alt-cost for an object in the graveyard.
+pub fn effective_disturb_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    let keyword =
+        effective_keyword_for_object(state, object_id, KeywordKind::Disturb).or_else(|| {
+            let obj = state.objects.get(&object_id)?;
+            // `snapshot_object_face` clears layout_kind; a still-unswapped DFC
+            // back face retains its layout kind and must not grant Disturb.
+            let stored_front_face = obj
+                .back_face
+                .as_ref()
+                .filter(|face| face.layout_kind.is_none())?;
+            stored_front_face
+                .keywords
+                .iter()
+                .find(|keyword| keyword.kind() == KeywordKind::Disturb)
+                .cloned()
+        })?;
+    match keyword {
+        Keyword::Disturb(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
 pub fn effective_escape_data(state: &GameState, object_id: ObjectId) -> Option<(ManaCost, u32)> {
     let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Escape)?;
     match keyword {
@@ -85,13 +109,20 @@ pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<Ma
     }
 }
 
-/// CR 702.188a: Effective Web-slinging alt-cost for an object.
-pub fn effective_web_slinging_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
-    let obj = state.objects.get(&object_id)?;
-    obj.keywords.iter().find_map(|keyword| match keyword {
-        Keyword::WebSlinging(cost) => Some(resolve_keyword_mana_cost(state, object_id, cost)),
-        _ => None,
-    })
+/// CR 702.188a + CR 604.1: honor web-slinging GRANTED by a CastWithKeyword static
+/// (Amazing Spider-Man), not only printed keywords. effective_spell_keywords merges
+/// printed obj.keywords with statically-granted keywords for `caster`.
+pub fn effective_web_slinging_cost(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Option<ManaCost> {
+    super::casting::effective_spell_keywords(state, caster, object_id)
+        .into_iter()
+        .find_map(|k| match k {
+            Keyword::WebSlinging(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+            _ => None,
+        })
 }
 
 fn effective_keyword_for_object(
@@ -218,16 +249,35 @@ pub fn source_matches_card_type(source: &GameObject, type_name: &str) -> bool {
     use crate::types::card_type::CoreType;
 
     let core = &source.card_types.core_types;
-    match type_name {
-        "artifacts" | "artifact" => core.contains(&CoreType::Artifact),
-        "creatures" | "creature" => core.contains(&CoreType::Creature),
-        "enchantments" | "enchantment" => core.contains(&CoreType::Enchantment),
-        "instants" | "instant" => core.contains(&CoreType::Instant),
-        "sorceries" | "sorcery" => core.contains(&CoreType::Sorcery),
-        "planeswalkers" | "planeswalker" => core.contains(&CoreType::Planeswalker),
-        "lands" | "land" => core.contains(&CoreType::Land),
-        _ => false,
+    for (core_type, singular, plural) in [
+        (CoreType::Artifact, "artifact", "artifacts"),
+        (CoreType::Creature, "creature", "creatures"),
+        (CoreType::Enchantment, "enchantment", "enchantments"),
+        (CoreType::Instant, "instant", "instants"),
+        (CoreType::Sorcery, "sorcery", "sorceries"),
+        (CoreType::Planeswalker, "planeswalker", "planeswalkers"),
+        (CoreType::Land, "land", "lands"),
+    ] {
+        if type_name.eq_ignore_ascii_case(singular) || type_name.eq_ignore_ascii_case(plural) {
+            return core.contains(&core_type);
+        }
     }
+
+    // CR 702.16a + CR 205.3m: "protection from [creature subtype]" —
+    // sources like "assassins" or "elves" are stored as CardType by the
+    // parser but must match via the creature-subtype list.
+    let quality = type_name.to_ascii_lowercase();
+    source
+        .card_types
+        .subtypes
+        .iter()
+        .any(|st| source_subtype_matches_protection_quality(&st.to_ascii_lowercase(), &quality))
+}
+
+fn source_subtype_matches_protection_quality(source_subtype: &str, quality: &str) -> bool {
+    parse_subtype(quality).is_some_and(|(subtype, consumed)| {
+        consumed == quality.len() && subtype.eq_ignore_ascii_case(source_subtype)
+    })
 }
 
 pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
@@ -450,7 +500,7 @@ pub fn activate_ninjutsu(
         source_id: ninjutsu_obj_id,
     });
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
 
     Ok(())
 }
@@ -646,6 +696,85 @@ mod tests {
         ));
     }
 
+    /// CR 702.16a + CR 205.3m + #881: "protection from [creature subtype]" — the
+    /// parser stores the subtype as `ProtectionTarget::CardType("assassins")`.
+    /// `source_matches_card_type` must recognise creature subtypes via the
+    /// source's `card_types.subtypes` list.
+    #[test]
+    fn source_matches_protection_from_creature_subtype() {
+        let mut haytham = make_obj();
+        haytham.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        haytham
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::CardType(
+                "assassins".to_string(),
+            )));
+
+        // An Assassin creature must match "protection from assassins".
+        let mut assassin_source = make_obj();
+        assassin_source.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        assassin_source
+            .card_types
+            .subtypes
+            .push("Assassin".to_string());
+
+        assert!(
+            source_matches_protection_target(
+                &ProtectionTarget::CardType("assassins".to_string()),
+                &haytham,
+                &assassin_source,
+            ),
+            "Assassin creature must match 'protection from assassins'"
+        );
+
+        // A non-Assassin creature must NOT match.
+        let mut knight_source = make_obj();
+        knight_source.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        knight_source.card_types.subtypes.push("Knight".to_string());
+
+        assert!(
+            !source_matches_protection_target(
+                &ProtectionTarget::CardType("assassins".to_string()),
+                &haytham,
+                &knight_source,
+            ),
+            "Knight creature must NOT match 'protection from assassins'"
+        );
+    }
+
+    /// CR 702.16a + CR 205.3m: subtype protection must understand MTG subtype
+    /// plurals without corrupting singular subtypes ending in "s".
+    #[test]
+    fn source_matches_protection_from_irregular_creature_subtype_plurals() {
+        for (quality, subtype) in [
+            ("elves", "Elf"),
+            ("fungi", "Fungus"),
+            ("pegasus", "Pegasus"),
+            ("pegasi", "Pegasus"),
+            ("pegasuses", "Pegasus"),
+        ] {
+            let mut protected = make_obj();
+            protected
+                .keywords
+                .push(Keyword::Protection(ProtectionTarget::CardType(
+                    quality.to_string(),
+                )));
+
+            let mut source = make_obj();
+            source.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+            source.card_types.subtypes.push(subtype.to_string());
+
+            assert!(
+                source_matches_protection_target(
+                    &ProtectionTarget::CardType(quality.to_string()),
+                    &protected,
+                    &source,
+                ),
+                "{subtype} source must match protection from {quality}"
+            );
+        }
+    }
+
     /// Issue #767 / CR 702.16k: "protection from each of your opponents"
     /// (Figure of Fable's Avatar form) — a source controlled by an opponent of
     /// the protected permanent's controller matches; a source the protected
@@ -742,6 +871,24 @@ mod tests {
             .card_types
             .core_types
             .push(crate::types::card_type::CoreType::Instant);
+
+        assert!(protection_prevents_from(&protected, &source));
+    }
+
+    #[test]
+    fn protection_from_display_case_artifact_matches_artifact_source() {
+        let mut protected = make_obj();
+        protected
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::CardType(
+                "Artifact".to_string(),
+            )));
+
+        let mut source = make_obj();
+        source
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Artifact);
 
         assert!(protection_prevents_from(&protected, &source));
     }

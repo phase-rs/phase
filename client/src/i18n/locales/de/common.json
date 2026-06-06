@@ -49,6 +49,8 @@
     "volume": "Lautstärke"
   },
   "hostControl": {
+    "collapse": "Einklappen",
+    "expand": "Host-Panel ausklappen",
     "seatHost": "Host",
     "seatPlayer": "Spieler",
     "seatOpen": "Frei",
@@ -198,6 +200,18 @@
   },
   "turnBanner": {
     "turn": "Zug {{number}}"
+  },
+  "diceRoll": {
+    "rollingForFirst": "Auswürfeln, wer beginnt",
+    "tieReroll": "Gleichstand — neu würfeln!",
+    "versus": "VS",
+    "skip": "Zum Überspringen tippen",
+    "continue": "Zum Fortfahren tippen",
+    "you": "Du",
+    "youPlayFirst": "Du beginnst",
+    "playerPlaysFirst": "{{name}} beginnt",
+    "heads": "Kopf",
+    "tails": "Zahl"
   },
   "chrome": {
     "back": "Zurück",

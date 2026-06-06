@@ -13,10 +13,6 @@
 //! partition (CR 701.23a + CR 608.2c), the tapped battlefield entry via the ETB
 //! pipeline (CR 614.1 / CR 110.5b), and the CR 609.3 single-basic fast-path.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
@@ -26,14 +22,7 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// {2}{G} for Cultivate.
 fn add_cultivate_mana(runner: &mut engine::game::scenario::GameRunner) {
@@ -71,18 +60,12 @@ fn discriminator_cultivate_splits_battlefield_and_hand() {
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     add_cultivate_mana(&mut runner);
 
-    let card_id = runner.state().objects[&cultivate].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: cultivate,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Cultivate cast should succeed");
-    runner.advance_until_stack_empty();
+    // The cast driver resolves Cultivate and stops at the SearchChoice boundary
+    // (default SearchPolicy::Stop), leaving the live runner parked there.
+    let outcome = runner.cast(cultivate).resolve();
 
     // Step 1: SearchChoice — pick BOTH basics as the found set.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::SearchChoice { cards, .. } => {
             assert!(cards.contains(&forest) && cards.contains(&mountain));
         }
@@ -162,18 +145,12 @@ fn cultivate_single_basic_auto_routes_no_partition() {
         .filter(|&&id| id != cultivate)
         .count();
 
-    let card_id = runner.state().objects[&cultivate].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: cultivate,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Cultivate cast should succeed");
-    runner.advance_until_stack_empty();
+    // The cast driver resolves Cultivate and stops at the SearchChoice boundary
+    // (default SearchPolicy::Stop), leaving the live runner parked there.
+    let outcome = runner.cast(cultivate).resolve();
 
     // Only one legal basic -> pick it.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::SearchChoice { cards, .. } => {
             assert!(cards.contains(&forest));
         }
@@ -225,15 +202,9 @@ fn search_partition_selectcards_is_dispatched() {
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     add_cultivate_mana(&mut runner);
 
-    let card_id = runner.state().objects[&cultivate].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: cultivate,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Cultivate cast should succeed");
-    runner.advance_until_stack_empty();
+    // The cast driver resolves Cultivate and stops at the SearchChoice boundary
+    // (default SearchPolicy::Stop), leaving the live runner parked there.
+    let _ = runner.cast(cultivate).resolve();
     runner
         .act(GameAction::SelectCards {
             cards: vec![forest, mountain],

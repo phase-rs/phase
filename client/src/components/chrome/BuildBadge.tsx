@@ -19,9 +19,11 @@ const didAutoUpdate = consumeRecentAutoUpdateMarker();
 interface BuildBadgeProps {
   className?: string;
   inline?: boolean;
+  /** Narrow vertical layout (version + update affordance only) for the rail. */
+  compact?: boolean;
 }
 
-export function BuildBadge({ className = "", inline = false }: BuildBadgeProps = {}) {
+export function BuildBadge({ className = "", inline = false, compact = false }: BuildBadgeProps = {}) {
   const { t } = useTranslation();
   const [showUpdatedLabel, setShowUpdatedLabel] = useState(didAutoUpdate);
   const cardDataMeta = useCardDataMeta();
@@ -67,6 +69,55 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
   const cardDataCommitUrl = cardDataMeta
     ? `${__GIT_REPO_URL__}/commit/${cardDataMeta.commit}`
     : null;
+
+  // Compact (rail) layout: a single version + refresh row that fits the 92px
+  // rail. Clicking it checks for updates; the build hash and card-data age live
+  // in its hover tooltip (the same meta the wide mobile pill shows inline).
+  if (compact) {
+    const tooltip = [
+      `v${__APP_VERSION__} · ${__BUILD_HASH__}`,
+      cardDataMeta &&
+        t("buildBadge.cardDataTitle", {
+          date: cardDataMeta.generated_at,
+          commit: cardDataMeta.commit_short,
+        }),
+      t("buildBadge.checkForUpdates"),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return (
+      <div className={`flex flex-col items-center gap-0.5 ${className}`.trim()}>
+        <button
+          type="button"
+          onClick={handleCheckUpdate}
+          aria-label={t("buildBadge.checkForUpdates")}
+          title={tooltip}
+          className="inline-flex items-center gap-1 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
+        >
+          <span>v{__APP_VERSION__}</span>
+          <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
+            ↻
+          </span>
+        </button>
+        {statusLabel && (
+          <span className="text-center text-[8px] leading-tight text-cyan-300">{statusLabel}</span>
+        )}
+        {hasUpdateIssue && !statusLabel && (
+          <button
+            type="button"
+            onClick={handleShowUpdateDebug}
+            className="text-[8px] font-semibold text-rose-300 hover:text-rose-100"
+            title={t("buildBadge.updaterIssue", { error: updateError })}
+          >
+            {t("buildBadge.updateIssue")}
+          </button>
+        )}
+        {showUpdatedLabel && !statusLabel && (
+          <span className="text-[8px] text-emerald-300">{t("buildBadge.updated")}</span>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div

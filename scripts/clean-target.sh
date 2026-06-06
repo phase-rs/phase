@@ -24,11 +24,16 @@ echo "target/ before: $before"
 sweep_args=(--time 3 --recursive "$TARGET")
 if [[ $DRY_RUN -eq 1 ]]; then
   cargo sweep --dry-run "${sweep_args[@]}"
-  echo "(dry run — skipping rm of target/tool and target/wasm-dev)"
+  echo "(dry run — skipping rm of target/tool, target/wasm-dev, target/wasm)"
 else
   cargo sweep "${sweep_args[@]}"
+  # target/wasm/ is Tilt's relocated wasm-dev tree (CARGO_TARGET_DIR=target/wasm);
+  # the default target/wasm32-unknown-unknown/wasm-dev is still produced by the
+  # no-Tilt setup.sh path. target/clippy is intentionally left to cargo-sweep's
+  # recursive prune above — a blanket rm would force a cold clippy rebuild.
   rm -rf "$TARGET/tool" \
          "$TARGET/wasm32-unknown-unknown/wasm-dev" \
+         "$TARGET/wasm/wasm32-unknown-unknown/wasm-dev" \
          "$TARGET/codex-copy" \
          "$TARGET/x86_64-unknown-linux-gnu"
 fi

@@ -59,18 +59,20 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../wasm-adapter", () => ({
-  WasmAdapter: vi.fn().mockImplementation(() => ({
-    initialize: vi.fn(async () => undefined),
-    initializeGame: mocks.initializeGame,
-    submitAction: vi.fn(async () => ({ events: [] })),
-    getState: vi.fn(async () => ({})),
-    getLegalActions: mocks.getLegalActions,
-    getLegalActionsForViewer: mocks.getLegalActionsForViewer,
-    getFilteredState: mocks.getFilteredState,
-    getViewerSnapshot: mocks.getViewerSnapshot,
-    setMultiplayerMode: mocks.setMultiplayerMode,
-    dispose: vi.fn(),
-  })),
+  WasmAdapter: vi.fn().mockImplementation(function () {
+    return {
+      initialize: vi.fn(async () => undefined),
+      initializeGame: mocks.initializeGame,
+      submitAction: vi.fn(async () => ({ events: [] })),
+      getState: vi.fn(async () => ({})),
+      getLegalActions: mocks.getLegalActions,
+      getLegalActionsForViewer: mocks.getLegalActionsForViewer,
+      getFilteredState: mocks.getFilteredState,
+      getViewerSnapshot: mocks.getViewerSnapshot,
+      setMultiplayerMode: mocks.setMultiplayerMode,
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 interface FakePeer {

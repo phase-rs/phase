@@ -110,10 +110,49 @@ pub fn resolve_combat_damage(
         if let Some(c) = &mut state.combat {
             c.first_strike_done = true;
             c.damage_step_index = None;
+            // CR 510.4: The regular combat-damage sub-step is a fresh assignment.
+            // `damage_assignments` is the per-sub-step blocker resume-skip key
+            // (CR 702.22k / CR 510.1d), so it MUST be reset between sub-steps —
+            // otherwise a double-strike blocker that divided its first-strike
+            // damage would be wrongly skipped in the regular sub-step.
+            c.damage_assignments.clear();
         }
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
         process_combat_damage_triggers(state, &damage_events, events);
+
+        // CR 510.4 + CR 603.3b: if the first-strike sub-step produced a same-
+        // controller trigger-ordering prompt, surface it now — before the regular
+        // sub-step's own trigger processing clobbers/orphans it. Returning here
+        // leaves `regular_damage_done == false`; the mandatory second (regular)
+        // combat-damage sub-step is resumed by the priority-pass completeness gate
+        // in priority.rs, which re-enters this function once the order is submitted
+        // and the resulting triggers resolve.
+        if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            return Some(state.waiting_for.clone());
+        }
+
+        // CR 510.3 + CR 510.3a + CR 510.4: The first-strike combat-damage step is a
+        // complete step. Abilities that triggered on first-strike damage (or on SBAs
+        // taken afterward) are put on the stack, and THEN the active player receives
+        // priority — players must finish with the stack before the second (regular)
+        // combat-damage sub-step begins. If the first-strike sub-step placed anything
+        // on the stack (e.g. No Mercy's "destroy that creature", a damage trigger that
+        // bounces/exiles the attacker), grant priority now so that object resolves
+        // first. Skipping this would let a now-doomed double-strike attacker deal its
+        // regular-sub-step damage before the trigger that removes it resolves (#692).
+        // Returning here leaves `regular_damage_done == false`; the mandatory regular
+        // sub-step is resumed once the stack drains and all players pass, via the
+        // empty-stack completeness gate in priority.rs.
+        if !state.stack.is_empty() {
+            // reset_priority here is defensive — unlike the sibling regular-substep entry in
+            // turns.rs, this returns mid-step after the first-strike substep, so we explicitly
+            // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
+            crate::game::priority::reset_priority(state);
+            return Some(WaitingFor::Priority {
+                player: state.active_player,
+            });
+        }
     }
 
     // --- Regular damage sub-step ---
@@ -200,8 +239,17 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
             None
         };
 
-        // CR 510.1c: Check if interactive assignment is needed (2+ blockers).
-        if needs_interactive_assignment(obj, &combat, attacker_info) {
+        // CR 510.1c + CR 702.19b: Check if interactive assignment is needed
+        // (2+ blockers, or a single-blocker trample attacker with excess damage).
+        if needs_interactive_assignment(
+            state,
+            obj,
+            &combat,
+            attacker_info,
+            power,
+            has_deathtouch,
+            trample,
+        ) {
             // Pause iteration — player must choose damage division.
             if let Some(c) = &mut state.combat {
                 c.damage_step_index = Some(i);
@@ -229,12 +277,32 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
                 trample,
             );
 
-            // The player who assigns damage is the attacker's controller.
-            let controller = state
+            // The player who assigns damage is normally the attacker's controller.
+            let mut controller = state
                 .objects
                 .get(&attacker_info.object_id)
                 .map(|o| o.controller)
                 .unwrap_or(state.active_player);
+
+            // CR 702.22j: During the combat damage step, if an attacking creature
+            // is being blocked by a creature with banding, the DEFENDING player
+            // (rather than the active player) chooses how the attacking
+            // creature's damage is assigned. We reach this branch whenever an
+            // interactive assignment is required — both the multi-blocker case
+            // (2+ blockers, a genuine division per CR 510.1c) and the single
+            // banded-blocker-with-trample case (the attacker must still choose
+            // how much excess tramples through past the blocker). Keyed on LIVE
+            // banding at damage time (CR 702.22a static ability).
+            // CR 702.22j: bands-with-other arm deferred (no Keyword::BandsWithOther).
+            let blocked_by_banding = combat
+                .blocker_assignments
+                .get(&attacker_info.object_id)
+                .into_iter()
+                .flatten()
+                .any(|&bid| crate::game::combat::has_banding(state, bid));
+            if blocked_by_banding {
+                controller = attacker_info.defending_player;
+            }
 
             // CR 702.19c: Compute PW loyalty threshold for trample-over-PW spillover
             let (pw_loyalty, pw_controller) = if trample == Some(TrampleKind::OverPlaneswalkers) {
@@ -273,11 +341,50 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
         }
     }
 
+    // CR 510.1c/d: The attacker loop has fully processed every attacker for this
+    // sub-step. Advance the cursor past the end so that a later re-entry (e.g.
+    // after an interactive CR 702.22k blocker-division prompt below) skips the
+    // attacker loop and does NOT re-push attacker auto-assignments — which would
+    // double-count attacker damage. Without an interactive blocker this is a
+    // no-op (the function returns `None` at the bottom and the sub-step applies).
+    if let Some(c) = &mut state.combat {
+        c.damage_step_index = Some(c.attackers.len());
+    }
+
     // --- Blockers ---
-    // CR 510.1d: Blocker damage division among multiple blocked attackers.
-    // Currently auto-assigned with even split (known simplification — multi-block is rare).
-    for (blocker_id, attacker_ids) in &combat.blocker_to_attacker {
-        let obj = match state.objects.get(blocker_id) {
+    // CR 510.1d: A blocking creature assigns its combat damage to the creatures
+    // it's blocking, divided as its controller chooses (CR 702.22k re-routes the
+    // chooser to the active player when a blocked attacker has banding).
+    //
+    // Re-entrancy: unlike attackers (a `Vec` indexed by `damage_step_index`),
+    // blockers live in a `HashMap` with no positional cursor. The resume-skip key
+    // is membership in `combat.damage_assignments` (keyed by blocker id), which is
+    // recorded for EVERY processed blocker — both the auto-even-split path and the
+    // interactive CR 702.22k path. This keeps an already-divided blocker from being
+    // re-pushed when we re-enter after an interactive prompt resolves. The
+    // skip-key set is reset per sub-step (see `resolve_combat_damage`), so a
+    // double-strike blocker is correctly re-processed in the regular sub-step.
+    //
+    // Deterministic order: `ObjectId(pub u64)` is not `Ord`, so we sort the
+    // blocker ids by their inner `u64` to guarantee a stable prompt sequence
+    // across AI clones and save/reload.
+    let mut blocker_ids: Vec<ObjectId> = combat.blocker_to_attacker.keys().copied().collect();
+    blocker_ids.sort_by_key(|id| id.0);
+
+    for blocker_id in blocker_ids {
+        // Resume-skip: this blocker's division was already recorded this sub-step.
+        if combat
+            .damage_assignments
+            .get(&blocker_id)
+            .is_some_and(|v| !v.is_empty())
+        {
+            continue;
+        }
+        let attacker_ids = match combat.blocker_to_attacker.get(&blocker_id) {
+            Some(ids) => ids,
+            None => continue,
+        };
+        let obj = match state.objects.get(&blocker_id) {
             Some(o) if o.zone == crate::types::zones::Zone::Battlefield => o,
             _ => continue,
         };
@@ -304,9 +411,42 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
         if power == 0 {
             continue;
         }
-        let blocker_assignments = distribute_blocker_damage(*blocker_id, power, attacker_ids);
+
+        // CR 702.22k: During the combat damage step, if a blocking creature is
+        // blocking a creature with banding, the ACTIVE player (rather than the
+        // defending player) chooses how the blocking creature's damage is
+        // divided among the attackers it's blocking. This only matters when the
+        // blocker is blocking 2+ attackers (a sole blocked attacker leaves no
+        // choice — CR 510.1d). Keyed on the ATTACKER's LIVE banding, NOT the
+        // blocker's own banding.
+        // CR 702.22k: bands-with-other arm deferred (no Keyword::BandsWithOther).
+        let active_player_divides = attacker_ids.len() >= 2
+            && attacker_ids
+                .iter()
+                .any(|&aid| crate::game::combat::has_banding(state, aid));
+
+        if active_player_divides {
+            return Some(WaitingFor::AssignBlockerDamage {
+                player: state.active_player,
+                blocker_id,
+                total_damage: power,
+                attackers: attacker_ids.clone(),
+            });
+        }
+
+        // CR 510.1d: default — controller's blocker divides evenly (auto-split).
+        let blocker_assignments = distribute_blocker_damage(blocker_id, power, attacker_ids);
         if let Some(c) = &mut state.combat {
             c.pending_damage.extend(blocker_assignments);
+            // Record into the resume-skip key so re-entry after an interactive
+            // CR 702.22k prompt does not re-push this blocker's division.
+            c.damage_assignments.insert(
+                blocker_id,
+                vec![DamageAssignment {
+                    target: DamageTarget::Object(attacker_ids[0]),
+                    amount: power,
+                }],
+            );
         }
     }
 
@@ -362,11 +502,16 @@ fn distribute_blocker_damage(
 
 /// CR 510.1c: Check if an attacker needs interactive damage assignment.
 /// Returns true when there are 2+ blockers — the attacking player should choose
-/// how to divide damage. Single-blocker and unblocked scenarios are auto-assigned.
+/// how to divide damage. Single-blocker and unblocked scenarios are auto-assigned,
+/// except a single-blocker trample attacker with excess damage (see CR 702.19b below).
 pub(crate) fn needs_interactive_assignment(
+    state: &GameState,
     obj: &GameObject,
     combat: &CombatState,
     attacker_info: &crate::game::combat::AttackerInfo,
+    power: u32,
+    has_deathtouch: bool,
+    trample: Option<TrampleKind>,
 ) -> bool {
     let blocker_count = combat
         .blocker_assignments
@@ -377,6 +522,21 @@ pub(crate) fn needs_interactive_assignment(
         let has_trample = obj.has_keyword(&Keyword::Trample)
             || obj.has_keyword(&Keyword::TrampleOverPlaneswalkers);
         return blocker_count > 0 || !has_trample;
+    }
+
+    // CR 702.19b: A trample attacker blocked by exactly one creature still gets an
+    // interactive choice when it has excess damage — the controller may keep the
+    // excess on the blocker or assign it to the player (assigning none to the player
+    // is legal). With no excess (power <= lethal) all damage goes to the blocker
+    // (CR 510.1c), so there is no choice → auto-assign.
+    if trample.is_some() && blocker_count == 1 {
+        if let Some(&blocker_id) = combat
+            .blocker_assignments
+            .get(&attacker_info.object_id)
+            .and_then(|b| b.first())
+        {
+            return power > lethal_damage_needed(state, blocker_id, has_deathtouch);
+        }
     }
 
     blocker_count >= 2
@@ -541,6 +701,11 @@ fn assign_attacker_damage(
         Some(blockers) => {
             if blockers.len() == 1 {
                 if let Some(trample_kind) = trample {
+                    // CR 702.19b: Single-blocker trample with excess is now routed to the
+                    // interactive WaitingFor::AssignCombatDamage prompt by
+                    // needs_interactive_assignment, so this auto-assign branch is reached only
+                    // when power <= lethal (excess == 0). The excess sub-block below stays as
+                    // the shared lethal-then-excess logic used by the no-blockers and PW paths.
                     // CR 702.19b: Trample — assign lethal to blocker, excess to attack target.
                     let lethal = lethal_damage_needed(state, blockers[0], has_deathtouch);
                     let to_blocker = power.min(lethal);
@@ -649,8 +814,10 @@ pub(crate) fn apply_combat_damage(
     assignments: &[(ObjectId, DamageAssignment)],
 ) -> Vec<GameEvent> {
     let mut events = Vec::new();
-    let mut combat_damage_to_players: Vec<(crate::types::player::PlayerId, Vec<ObjectId>)> =
-        Vec::new();
+    // CR 510.2: accumulates per-player, per-source damage for this step only.
+    // `(player, [(source_id, amount)], step_total)`.
+    type PerPlayerCombatDamage = (crate::types::player::PlayerId, Vec<(ObjectId, u32)>, u32);
+    let mut combat_damage_to_players: Vec<PerPlayerCombatDamage> = Vec::new();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
@@ -732,17 +899,25 @@ pub(crate) fn apply_combat_damage(
         // Combat-only bookkeeping (not part of the shared damage pipeline):
         if let DamageTarget::Player(player_id) = &entry.assignment.target {
             let source_id = entry.ctx.source_id;
-            // Track CombatDamageDealtToPlayer source batching
-            let player_sources = combat_damage_to_players
+            // CR 510.2: Track per-source amounts for this step. Each source
+            // appears at most once per player per step; dedup guards any edge
+            // where the same source is re-applied (e.g. split-damage riders).
+            if let Some((_, sources, total)) = combat_damage_to_players
                 .iter_mut()
-                .find(|(damaged_player, _)| *damaged_player == *player_id)
-                .map(|(_, source_ids)| source_ids);
-            if let Some(source_ids) = player_sources {
-                if !source_ids.contains(&source_id) {
-                    source_ids.push(source_id);
+                .find(|(damaged_player, _, _)| *damaged_player == *player_id)
+            {
+                if let Some((_, amt)) = sources.iter_mut().find(|(id, _)| *id == source_id) {
+                    *amt += actual_amount;
+                } else {
+                    sources.push((source_id, actual_amount));
                 }
+                *total += actual_amount;
             } else {
-                combat_damage_to_players.push((*player_id, vec![source_id]));
+                combat_damage_to_players.push((
+                    *player_id,
+                    vec![(source_id, actual_amount)],
+                    actual_amount,
+                ));
             }
 
             // CR 704.6c: Track commander combat damage for the 21-damage loss condition.
@@ -766,10 +941,11 @@ pub(crate) fn apply_combat_damage(
         }
     }
 
-    for (player_id, source_ids) in combat_damage_to_players {
+    for (player_id, source_amounts, total_damage) in combat_damage_to_players {
         events.push(GameEvent::CombatDamageDealtToPlayer {
             player_id,
-            source_ids,
+            source_amounts,
+            total_damage,
         });
     }
 
@@ -796,6 +972,16 @@ fn fire_combat_prevention_riders(
 ) {
     for (rid, &total_prevented) in prevention_tally {
         if total_prevented <= 0 {
+            continue;
+        }
+
+        if replacement::is_shield_counter_damage_replacement(*rid) {
+            replacement::consume_shield_counter(state, rid.source, events);
+            events.push(GameEvent::DamagePrevented {
+                source_id: rid.source,
+                target: TargetRef::Object(rid.source),
+                amount: total_prevented as u32,
+            });
             continue;
         }
 
@@ -923,6 +1109,67 @@ mod tests {
             combat.blocker_assignments.insert(attacker_id, blockers);
         }
         state.combat = Some(combat);
+    }
+
+    /// Drive `resolve_combat_damage` and, whenever it pauses on an
+    /// `AssignCombatDamage` prompt (now reachable for single-blocker trample with
+    /// excess per CR 702.19b, as well as the existing 2+ blocker case), submit the
+    /// canonical greedy split through the real apply path: lethal to each blocker
+    /// in order, then trample the remainder to the attack target (splitting
+    /// loyalty-worth to the PW and the rest to its controller for trample-over-PW).
+    /// This mirrors `run_combat` in the integration harness and the AI default, so
+    /// tests that previously relied on auto-assignment keep asserting that split.
+    fn resolve_combat_with_greedy_assignment(state: &mut GameState, events: &mut Vec<GameEvent>) {
+        if let Some(waiting) = resolve_combat_damage(state, events) {
+            state.waiting_for = waiting;
+        } else {
+            return;
+        }
+        while let WaitingFor::AssignCombatDamage {
+            attacker_id,
+            total_damage,
+            ref blockers,
+            ref trample,
+            pw_loyalty,
+            ref attack_target,
+            ..
+        } = state.waiting_for
+        {
+            let _ = attacker_id;
+            let mut remaining = total_damage;
+            let mut assignments: Vec<(ObjectId, u32)> = Vec::new();
+            for slot in blockers {
+                let assign = remaining.min(slot.lethal_minimum);
+                assignments.push((slot.blocker_id, assign));
+                remaining = remaining.saturating_sub(assign);
+            }
+            if trample.is_none() && remaining > 0 {
+                if let Some(last) = assignments.last_mut() {
+                    last.1 += remaining;
+                    remaining = 0;
+                }
+            }
+            let (trample_damage, controller_damage) = if *trample
+                == Some(TrampleKind::OverPlaneswalkers)
+                && matches!(attack_target, AttackTarget::Planeswalker(_))
+            {
+                let loyalty = pw_loyalty.unwrap_or(0);
+                let to_pw = remaining.min(loyalty);
+                (to_pw, remaining.saturating_sub(to_pw))
+            } else {
+                (if trample.is_some() { remaining } else { 0 }, 0)
+            };
+            crate::game::engine::apply_as_current(
+                state,
+                crate::types::actions::GameAction::AssignCombatDamage {
+                    mode: CombatDamageAssignmentMode::Normal,
+                    assignments,
+                    trample_damage,
+                    controller_damage,
+                },
+            )
+            .expect("greedy combat damage assignment must be legal");
+        }
     }
 
     #[test]
@@ -1099,6 +1346,72 @@ mod tests {
         }
     }
 
+    /// CR 122.1c + CR 510.2: a single shield counter prevents ALL combat damage
+    /// dealt to the permanent in one simultaneous batch and is removed exactly
+    /// once, even when multiple sources deal damage to it.
+    #[test]
+    fn shield_counter_prevents_all_simultaneous_combat_damage_once() {
+        let mut state = setup();
+        let shielded = create_creature(&mut state, PlayerId(1), "Shielded Bear", 2, 2);
+        state
+            .objects
+            .get_mut(&shielded)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        let atk1 = create_creature(&mut state, PlayerId(0), "Attacker A", 3, 3);
+        let atk2 = create_creature(&mut state, PlayerId(0), "Attacker B", 3, 3);
+
+        let assignments = vec![
+            (
+                atk1,
+                DamageAssignment {
+                    target: DamageTarget::Object(shielded),
+                    amount: 3,
+                },
+            ),
+            (
+                atk2,
+                DamageAssignment {
+                    target: DamageTarget::Object(shielded),
+                    amount: 3,
+                },
+            ),
+        ];
+        let events = apply_combat_damage(&mut state, &assignments);
+
+        assert_eq!(
+            state.objects[&shielded].damage_marked, 0,
+            "all simultaneous combat damage must be prevented"
+        );
+        assert_eq!(
+            state.objects[&shielded].counters.get(&CounterType::Shield),
+            None,
+            "exactly one shield counter consumed for the whole batch"
+        );
+        let removed = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::CounterRemoved {
+                        counter_type: CounterType::Shield,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(removed, 1, "shield counter removed exactly once");
+        let prevented = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::DamagePrevented { .. }))
+            .count();
+        assert_eq!(
+            prevented, 1,
+            "one aggregate DamagePrevented event emitted for the simultaneous batch"
+        );
+    }
+
     #[test]
     fn mutual_combat_damage() {
         let mut state = setup();
@@ -1171,10 +1484,24 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        // CR 702.19b: 5/5 trample vs a single 2/2 has excess → interactive prompt
+        // (the controller may keep the excess on the blocker or trample it through).
+        let waiting = resolve_combat_damage(&mut state, &mut events)
+            .expect("single-blocker trample with excess prompts for assignment");
+        state.waiting_for = waiting;
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 2)],
+                trample_damage: 3,
+                controller_damage: 0,
+            },
+        )
+        .expect("lethal-to-blocker + trample-through is legal");
 
-        // 2 to blocker (lethal), 3 to player (trample excess)
-        assert_eq!(state.objects[&blocker].damage_marked, 2);
+        // 2 lethal to blocker (dies via SBA), 3 trample excess to player.
+        assert!(!state.battlefield.contains(&blocker));
         assert_eq!(state.players[1].life, 17);
     }
 
@@ -1669,11 +1996,12 @@ mod tests {
                 event,
                 GameEvent::CombatDamageDealtToPlayer {
                     player_id,
-                    source_ids,
+                    source_amounts,
+                    ..
                 } if *player_id == PlayerId(1)
-                    && source_ids.len() == 2
-                    && source_ids.contains(&attacker_a)
-                    && source_ids.contains(&attacker_b)
+                    && source_amounts.len() == 2
+                    && source_amounts.iter().any(|(id, _)| *id == attacker_a)
+                    && source_amounts.iter().any(|(id, _)| *id == attacker_b)
             )
         }));
     }
@@ -1814,16 +2142,57 @@ mod tests {
             .push(Keyword::DoubleStrike);
         setup_combat(&mut state, vec![attacker], vec![]);
 
-        let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        // Stock P0's library so the per-step draw trigger never draws from empty.
+        for _ in 0..2 {
+            let card_id = CardId(state.next_object_id);
+            create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                "Lib".to_string(),
+                Zone::Library,
+            );
+        }
 
-        assert_eq!(state.stack.len(), 2);
+        let mut events = Vec::new();
+        // CR 510.4: First-strike sub-step. The double striker deals its 2 damage,
+        // the DamageDone trigger fires (stack len 1), and CR 510.3 grants priority
+        // before the regular sub-step — so resolve_combat_damage pauses here.
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+        assert!(
+            matches!(waiting, Some(WaitingFor::Priority { .. })),
+            "CR 510.3: priority is granted after the first-strike sub-step's trigger is stacked"
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "CR 510.3a: only the first-strike sub-step's trigger is on the stack so far"
+        );
         assert_eq!(
             events
                 .iter()
                 .filter(|event| matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }))
                 .count(),
-            2
+            1,
+            "CR 510.4: the double striker dealt damage once in the first-strike sub-step"
+        );
+
+        // CR 510.3 + CR 510.4: resolve the first-strike trigger, then re-enter the
+        // turn-based action for the mandatory regular (second) combat-damage sub-step.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(state.stack.is_empty(), "first-strike trigger resolved");
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 510.4: The double striker deals damage AGAIN in the regular sub-step,
+        // so the DamageDone trigger fires a second time (now on the stack).
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }))
+                .count(),
+            2,
+            "CR 510.4: the double striker dealt combat damage in both sub-steps"
         );
     }
 
@@ -1889,7 +2258,7 @@ mod tests {
             vec![attacker_a, attacker_b],
             vec![(attacker_a, vec![blocker])],
         );
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         let mut events = Vec::new();
         resolve_combat_damage(&mut state, &mut events);
@@ -2006,7 +2375,7 @@ mod tests {
         state.combat = Some(combat);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // Blocker has 2 toughness: 2 damage lethal, 3 excess to PW (not player)
         let pw_obj = state.objects.get(&pw).unwrap();
@@ -2092,7 +2461,7 @@ mod tests {
         state.combat = Some(combat);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // 7 power: 2 lethal to blocker, 3 to PW (loyalty), 2 to PW controller
         assert_eq!(
@@ -2142,7 +2511,7 @@ mod tests {
         state.combat = Some(combat);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // CR 702.19f: All 5 excess (7 - 2 lethal) goes to PW, not player
         assert_eq!(
@@ -2213,7 +2582,7 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // 5 power: 2 lethal to blocker, 3 trample to player (same as standard trample)
         assert_eq!(
@@ -2345,7 +2714,7 @@ mod tests {
         state.combat = Some(combat);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // 6 power: 1 deathtouch lethal to blocker, 3 to PW (loyalty), 2 to controller
         assert_eq!(
@@ -2523,12 +2892,14 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // 2 lethal to the blocker, 3 trample over to the shielded player.
-        assert_eq!(
-            state.objects[&blocker].damage_marked, 2,
-            "blocker takes its lethal portion — to-creature damage is not prevented"
+        // The 0/2 Wall takes its lethal portion and dies via SBA (CR 704.5g) —
+        // to-creature damage is not prevented by the player-scoped shield.
+        assert!(
+            !state.battlefield.contains(&blocker),
+            "blocker takes its lethal portion (not prevented) and dies"
         );
         assert_eq!(state.players[1].life, 20, "trample-over damage prevented");
         // CR 615.7: only the 3 player-targeted damage is aggregated.
@@ -2701,5 +3072,296 @@ mod tests {
             Some(5),
             "unprevented commander accrues 5 combat damage"
         );
+    }
+
+    // === CR 702.19b: single-blocker trample interactive-assignment truth table ===
+    //
+    // Build a REAL combat state with the blocker present in state.objects so
+    // lethal_damage_needed reads its real toughness, then exercise
+    // needs_interactive_assignment directly.
+    fn needs_interactive(
+        power: i32,
+        blocker_toughness: i32,
+        trample: Option<TrampleKind>,
+        deathtouch: bool,
+        extra_blocker_toughness: Option<i32>,
+    ) -> bool {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", power, power);
+        if let Some(kind) = trample {
+            let kw = match kind {
+                TrampleKind::Standard => Keyword::Trample,
+                TrampleKind::OverPlaneswalkers => Keyword::TrampleOverPlaneswalkers,
+            };
+            state.objects.get_mut(&attacker).unwrap().keywords.push(kw);
+        }
+        if deathtouch {
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .keywords
+                .push(Keyword::Deathtouch);
+        }
+        let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 1, blocker_toughness);
+        let mut blockers = vec![blocker];
+        if let Some(t) = extra_blocker_toughness {
+            let blocker2 = create_creature(&mut state, PlayerId(1), "Blocker2", 1, t);
+            blockers.push(blocker2);
+        }
+        setup_combat(&mut state, vec![attacker], vec![(attacker, blockers)]);
+
+        let combat = state.combat.as_ref().unwrap().clone();
+        let attacker_info = combat
+            .attackers
+            .iter()
+            .find(|a| a.object_id == attacker)
+            .unwrap()
+            .clone();
+        let obj = state.objects.get(&attacker).unwrap().clone();
+        needs_interactive_assignment(
+            &state,
+            &obj,
+            &combat,
+            &attacker_info,
+            power.max(0) as u32,
+            deathtouch,
+            trample,
+        )
+    }
+
+    #[test]
+    fn single_blocker_trample_with_excess_needs_interactive() {
+        // CR 702.19b: 5/5 trample vs 2/2 → 3 excess → controller chooses.
+        assert!(needs_interactive(
+            5,
+            2,
+            Some(TrampleKind::Standard),
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn single_blocker_trample_no_excess_auto_assigns() {
+        // CR 510.1c: 2/2 trample vs 2/2 → power == lethal → no choice.
+        assert!(!needs_interactive(
+            2,
+            2,
+            Some(TrampleKind::Standard),
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn single_blocker_no_trample_auto_assigns() {
+        // CR 510.1c: single blocker without trample → all damage to blocker.
+        assert!(!needs_interactive(5, 2, None, false, None));
+    }
+
+    #[test]
+    fn two_blockers_need_interactive() {
+        // CR 510.1c: 2+ blockers → controller divides.
+        assert!(needs_interactive(5, 2, None, false, Some(2)));
+    }
+
+    #[test]
+    fn single_blocker_trample_deathtouch_with_excess_needs_interactive() {
+        // CR 702.2c + CR 702.19b: deathtouch makes lethal 1; power 5 > 1 → excess.
+        assert!(needs_interactive(
+            5,
+            2,
+            Some(TrampleKind::Standard),
+            true,
+            None
+        ));
+    }
+
+    #[test]
+    fn single_blocker_trample_deathtouch_no_excess_auto_assigns() {
+        // CR 702.2c: deathtouch lethal is 1; power 1 == lethal → no choice.
+        assert!(!needs_interactive(
+            1,
+            2,
+            Some(TrampleKind::Standard),
+            true,
+            None
+        ));
+    }
+
+    // === CR 702.19b: single-blocker trample runtime, driven through the pipeline ===
+
+    #[test]
+    fn single_blocker_trample_excess_prompts_assignment() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fatty", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+
+        // CR 702.19b: single-blocker trample with excess → interactive prompt.
+        match waiting {
+            Some(WaitingFor::AssignCombatDamage {
+                ref blockers,
+                trample,
+                total_damage,
+                ..
+            }) => {
+                assert_eq!(blockers.len(), 1);
+                assert_eq!(blockers[0].lethal_minimum, 2);
+                assert_eq!(trample, Some(TrampleKind::Standard));
+                assert_eq!(total_damage, 5);
+            }
+            other => panic!("Expected AssignCombatDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_blocker_trample_outcome_a_trample_through() {
+        // Outcome A: keep lethal on blocker, trample excess to player.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fatty", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events)
+            .expect("single-blocker trample with excess must prompt");
+        // A bare return from resolve_combat_damage does not write state.waiting_for;
+        // the apply path requires it, so set it from the returned WaitingFor.
+        state.waiting_for = waiting;
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 2)],
+                trample_damage: 3,
+                controller_damage: 0,
+            },
+        )
+        .expect("trample-through assignment is legal");
+
+        // CR 702.19b: 2 lethal to blocker (it dies via SBA → off battlefield, so
+        // damage_marked is cleared on the zone change), 3 excess tramples to the
+        // defending player. Player life is the discriminator vs Outcome B.
+        assert!(
+            !state.battlefield.contains(&blocker),
+            "blocker took lethal (2) and should have died"
+        );
+        assert_eq!(state.players[1].life, 17);
+    }
+
+    #[test]
+    fn trample_multi_blocker_power_below_combined_lethal_no_excess_is_legal() {
+        // CR 702.19b + CR 510.1c: a 4/4 trample attacker blocked by two 3/3s has
+        // combined lethal 6 > power 4, so the controller cannot assign lethal to
+        // both AND send excess to the player.  The controller MUST be allowed to
+        // freely distribute all 4 damage among the two blockers with trample_damage=0.
+        // (The frontend #1491 bug: trampleLethalMet unconditionally required lethal
+        // to every blocker, deadlocking combat here.)
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Rampager", 4, 4);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker_a = create_creature(&mut state, PlayerId(1), "Guard A", 3, 3);
+        let blocker_b = create_creature(&mut state, PlayerId(1), "Guard B", 3, 3);
+        setup_combat(
+            &mut state,
+            vec![attacker],
+            vec![(attacker, vec![blocker_a, blocker_b])],
+        );
+
+        let mut events = Vec::new();
+        let waiting =
+            resolve_combat_damage(&mut state, &mut events).expect("2 blockers must always prompt");
+        state.waiting_for = waiting;
+
+        // Assign 2 to each blocker, 0 trample through; this must succeed even though
+        // neither blocker gets lethal (CR 702.19b: lethal gating only applies when
+        // excess is being sent to the player/PW).
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker_a, 2), (blocker_b, 2)],
+                trample_damage: 0,
+                controller_damage: 0,
+            },
+        )
+        .expect("distributing all damage among blockers with trample_damage=0 is legal");
+
+        // Neither blocker takes lethal; both survive. Defending player untouched.
+        assert!(
+            state.battlefield.contains(&blocker_a),
+            "blocker_a took 2 < lethal (3) and must survive"
+        );
+        assert!(
+            state.battlefield.contains(&blocker_b),
+            "blocker_b took 2 < lethal (3) and must survive"
+        );
+        assert_eq!(state.players[1].life, 20, "no trample damage to player");
+    }
+
+    #[test]
+    fn single_blocker_trample_outcome_b_keep_on_blocker() {
+        // Outcome B (the user's case): controller keeps ALL 5 on the blocker and
+        // tramples nothing through. CR 702.19b: assigning no excess to the player
+        // is legal (need not assign lethal to blocker before keeping excess there).
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fatty", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events)
+            .expect("single-blocker trample with excess must prompt");
+        state.waiting_for = waiting;
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 5)],
+                trample_damage: 0,
+                controller_damage: 0,
+            },
+        )
+        .expect("keeping all damage on the blocker is legal (CR 702.19b)");
+
+        // CR 702.19b: all 5 stay on the blocker (it dies via SBA → off battlefield),
+        // and NONE tramples through — the defending player is untouched. The
+        // unchanged player life (20) is the proof the controller may decline to
+        // assign excess to the player (the user's reported case).
+        assert!(
+            !state.battlefield.contains(&blocker),
+            "blocker took 5 (>= lethal) and should have died"
+        );
+        assert_eq!(state.players[1].life, 20);
     }
 }

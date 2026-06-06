@@ -99,12 +99,14 @@ describe("Discard cost modal", () => {
 
   it("allows cancelling discard costs", () => {
     setWaitingFor({
-      type: "DiscardForCost",
+      type: "PayCost",
       data: {
         player: 0,
+        kind: { type: "Discard" },
+        choices: [],
         count: 1,
-        cards: [],
-        pending_cast: {},
+        min_count: 0,
+        resume: { type: "Spell", Spell: {} },
       },
     } as unknown as WaitingFor);
 
@@ -116,21 +118,25 @@ describe("Discard cost modal", () => {
 
   it.each([
     [
-      "SacrificeForCost",
+      "PayCost Sacrifice",
       {
         player: 0,
+        kind: { type: "Sacrifice" },
+        choices: [],
         count: 1,
-        permanents: [],
-        pending_cast: {},
+        min_count: 0,
+        resume: { type: "Spell", Spell: {} },
       },
     ],
     [
-      "ReturnToHandForCost",
+      "PayCost ReturnToHand",
       {
         player: 0,
+        kind: { type: "ReturnToHand" },
+        choices: [],
         count: 1,
-        permanents: [],
-        pending_cast: {},
+        min_count: 0,
+        resume: { type: "Spell", Spell: {} },
       },
     ],
     [
@@ -143,13 +149,14 @@ describe("Discard cost modal", () => {
       },
     ],
     [
-      "ExileForCost",
+      "PayCost ExileFromZone",
       {
         player: 0,
-        zone: "Graveyard",
+        kind: { type: "ExileFromZone", zone: "Graveyard" },
+        choices: [],
         count: 1,
-        cards: [],
-        pending_cast: {},
+        min_count: 0,
+        resume: { type: "Spell", Spell: {} },
       },
     ],
     [
@@ -169,7 +176,10 @@ describe("Discard cost modal", () => {
         pending_cast: {},
       },
     ],
-  ])("allows cancelling %s", (type, data) => {
+  ])("allows cancelling %s", (label, data) => {
+    // BlightChoice/CollectEvidence/Harmonize keep their own variant `type`;
+    // the PayCost-prefixed labels all map to the unified `PayCost` variant.
+    const type = label.startsWith("PayCost") ? "PayCost" : label;
     setWaitingFor({ type, data } as unknown as WaitingFor);
 
     render(<CardChoiceModal />);
@@ -180,12 +190,14 @@ describe("Discard cost modal", () => {
 
   it("handles discard prompts for mana ability costs", () => {
     setWaitingFor({
-      type: "DiscardForManaAbility",
+      type: "PayCost",
       data: {
         player: 0,
+        kind: { type: "Discard" },
+        choices: [],
         count: 1,
-        cards: [],
-        pending_mana_ability: {},
+        min_count: 0,
+        resume: { type: "ManaAbility", ManaAbility: {} },
       },
     } as unknown as WaitingFor);
 
@@ -214,6 +226,43 @@ describe("Discard cost modal", () => {
     expect(screen.getByText("Put on Library")).toBeInTheDocument();
     expect(screen.getByText("Choose 2 cards to put on top of your library")).toBeInTheDocument();
     expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
+  });
+
+  it("describes hand destination without saying battlefield", () => {
+    setWaitingFor(
+      {
+        type: "EffectZoneChoice",
+        data: {
+          player: 0,
+          cards: [10],
+          count: 1,
+          min_count: 0,
+          up_to: false,
+          source_id: 1,
+          effect_kind: "ReturnToHand",
+          zone: "Battlefield",
+          destination: "Hand",
+        },
+      } as unknown as WaitingFor,
+      {
+        10: { ...makeObject(10, "Kor Skyfisher"), zone: "Battlefield" },
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Return")).toBeInTheDocument();
+    expect(screen.getByText("Choose 1 permanent to return to its owner's hand")).toBeInTheDocument();
+    expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Kor Skyfisher/i }));
+    expect(screen.getAllByText("Return")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Return (1/1)" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
   });
 
   it("shows topdeck order and dispatches selected cards in click order", () => {

@@ -56,7 +56,7 @@ pub fn apply_debug_action(
                 super::sba::check_state_based_actions(state, events);
                 super::triggers::process_triggers(state, events);
             }
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::CreateCard { .. } => {
@@ -88,7 +88,29 @@ pub fn apply_debug_action(
 
             zones::remove_from_zone(state, object_id, zone, owner);
             state.objects.remove(&object_id);
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
+        }
+
+        DebugAction::Sacrifice { object_id } => {
+            validate_object(state, object_id)?;
+            // CR 701.21: A player sacrifices a permanent they control. Route
+            // through the single sacrifice authority so the replacement pipeline
+            // (e.g. Rest in Peace → exile) and dies/leaves-the-battlefield
+            // triggers fire — unlike `RemoveObject`, which deletes the object
+            // outright with no triggers.
+            let controller = state.objects[&object_id].controller;
+            match super::sacrifice::sacrifice_permanent(state, object_id, controller, events)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?
+            {
+                super::sacrifice::SacrificeOutcome::Complete => {
+                    super::triggers::process_triggers(state, events); // CR 603: dies/LTB triggers
+                    super::sba::check_state_based_actions(state, events); // CR 704
+                }
+                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {
+                    state.waiting_for =
+                        super::replacement::replacement_choice_waiting_for(player, state);
+                }
+            }
         }
 
         DebugAction::DrawCards { player_id, count } => {
@@ -119,6 +141,26 @@ pub fn apply_debug_action(
             }
         }
 
+        DebugAction::Reveal { player_id, count } => {
+            validate_player(state, player_id)?;
+            // CR 701.20a/b: Reveal the top `count` cards of the player's library
+            // via the real `Effect::RevealTop` resolver — marks them revealed and
+            // emits `CardsRevealed` without moving the cards. `TargetFilter::Any`
+            // + an explicit `TargetRef::Player` makes the resolver reveal exactly
+            // the requested library (see `reveal_top::resolve`).
+            let ability = ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Any,
+                    count,
+                },
+                vec![TargetRef::Player(player_id)],
+                ObjectId(0),
+                player_id,
+            );
+            super::effects::reveal_top::resolve(state, &ability, events)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
+        }
+
         DebugAction::ShuffleLibrary { player_id } => {
             validate_player(state, player_id)?;
             shuffle_library(state, player_id, events);
@@ -143,7 +185,7 @@ pub fn apply_debug_action(
             if let Some(t) = toughness {
                 obj.base_toughness = Some(t);
             }
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::ModifyCounters {
@@ -182,11 +224,26 @@ pub fn apply_debug_action(
                 let lore = obj.counters.get(&CounterType::Lore).copied().unwrap_or(0);
                 obj.class_level = Some((lore as u8).max(1));
             }
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::SetTapped { object_id, tapped } => {
             validate_object_mut(state, object_id)?.tapped = tapped;
+        }
+
+        DebugAction::SetPrepared {
+            object_id,
+            prepared,
+        } => {
+            // CR 722.3a/b: Route through the single authority so the
+            // prepare-face gate and Became(Un)Prepared events are honored
+            // instead of writing `obj.prepared` directly.
+            validate_object_mut(state, object_id)?;
+            if prepared {
+                super::effects::prepare::prepare_object(state, object_id, events);
+            } else {
+                super::effects::prepare::unprepare_object(state, object_id, events);
+            }
         }
 
         DebugAction::SetController {
@@ -203,7 +260,7 @@ pub fn apply_debug_action(
             // `apply_battlefield_entry_controller_override` writes both fields.
             obj.base_controller = Some(controller);
             obj.controller = controller;
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::SetSummoningSickness { object_id, sick } => {
@@ -226,7 +283,7 @@ pub fn apply_debug_action(
             if let Some(f) = flipped {
                 obj.flipped = f;
             }
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::Attach { object_id, target } => {
@@ -241,7 +298,7 @@ pub fn apply_debug_action(
                     attach_to_player(state, object_id, target_player);
                 }
             }
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::Detach { object_id } => {
@@ -255,7 +312,7 @@ pub fn apply_debug_action(
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.attached_to = None;
             }
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::GrantKeyword { object_id, keyword } => {
@@ -268,7 +325,7 @@ pub fn apply_debug_action(
             if !obj.base_keywords.contains(&keyword) {
                 obj.base_keywords.push(keyword);
             }
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::RemoveKeyword { object_id, keyword } => {
@@ -276,7 +333,7 @@ pub fn apply_debug_action(
             // CR 613.1 + CR 613.1f: write the base keyword set (the Layer-6 input)
             // so the removal survives the layer recompute; see GrantKeyword above.
             obj.base_keywords.retain(|k| k != &keyword);
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
 
         DebugAction::SetLife { player_id, life } => {
@@ -314,6 +371,17 @@ pub fn apply_debug_action(
             }
         }
 
+        DebugAction::SetInfiniteMana { player_id, enabled } => {
+            validate_player(state, player_id)?;
+            if enabled {
+                state.debug_infinite_mana.insert(player_id);
+                // Seed immediately so the pool reads full before the next probe.
+                super::mana_payment::refill_infinite_mana(state);
+            } else {
+                state.debug_infinite_mana.remove(&player_id);
+            }
+        }
+
         DebugAction::SetPhase {
             phase,
             active_player,
@@ -334,7 +402,7 @@ pub fn apply_debug_action(
             super::triggers::process_triggers(state, events);
         }
 
-        DebugAction::CreateToken { request } => {
+        DebugAction::CreateToken { request, run_etb } => {
             let (owner, characteristics, enter_with_counters, preset_image_ref) = match request {
                 DebugTokenRequest::Preset {
                     preset_id,
@@ -383,6 +451,7 @@ pub fn apply_debug_action(
             let proposed = ProposedEvent::CreateToken {
                 owner,
                 spec: Box::new(spec),
+                copy: None,
                 enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                 count: 1,
                 applied: HashSet::new(),
@@ -400,8 +469,14 @@ pub fn apply_debug_action(
                             }
                         }
                     }
-                    super::triggers::process_triggers(state, events); // CR 603: Process triggers
-                    super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
+                    // "Run ETB effects" unchecked: the token is still created
+                    // (with its replacement-window counters) but its ETB triggers
+                    // and the SBA pass are skipped — mirrors the raw placement of
+                    // `MoveToZone { simulate: false }`.
+                    if run_etb {
+                        super::triggers::process_triggers(state, events); // CR 603: Process triggers
+                        super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
+                    }
                 }
                 super::replacement::ReplacementResult::Prevented => {}
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
@@ -518,10 +593,27 @@ fn apply_energy_delta(
 pub fn route_debug_create_to_battlefield(
     state: &mut GameState,
     object_id: ObjectId,
+    run_etb: bool,
 ) -> ActionResult {
     use super::replacement::{self, ReplacementResult};
 
     let mut events: Vec<GameEvent> = vec![];
+
+    // "Run ETB effects" unchecked: place the staged object on the battlefield
+    // raw — no replacement window, no ETB triggers, no SBA pass. This mirrors
+    // `MoveToZone { simulate: false }`, letting a board position be staged
+    // without the entering permanent's "when ~ enters" abilities going on the
+    // stack.
+    if !run_etb {
+        zones::move_to_zone(state, object_id, Zone::Battlefield, &mut events);
+        crate::game::layers::mark_layers_full(state);
+        return ActionResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        };
+    }
+
     let from = state
         .objects
         .get(&object_id)
@@ -533,10 +625,12 @@ pub fn route_debug_create_to_battlefield(
         from,
         to: Zone::Battlefield,
         cause: None,
+        attach_to: None,
         enter_tapped: Default::default(),
         enter_with_counters: vec![],
         controller_override: None,
         enter_transformed: false,
+        face_down_profile: None,
         applied: HashSet::new(),
     };
 
@@ -599,12 +693,16 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::BackFaceData;
     use crate::game::zones::create_object;
+    use crate::types::ability::{AbilityDefinition, AbilityKind};
     use crate::types::actions::GameAction;
+    use crate::types::card::LayoutKind;
+    use crate::types::definitions::Definitions;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaColor;
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::proposed_event::TokenCharacteristics;
     use crate::types::CoreType;
 
@@ -627,6 +725,39 @@ mod tests {
         }
     }
 
+    fn prepare_back_face() -> BackFaceData {
+        let mut card_types = crate::types::card_type::CardType::default();
+        card_types.core_types.push(CoreType::Sorcery);
+        BackFaceData {
+            name: "Test Prepare Face".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types,
+            mana_cost: ManaCost::default(),
+            keywords: Vec::new(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )],
+            trigger_definitions: Definitions::default(),
+            replacement_definitions: Definitions::default(),
+            static_definitions: Definitions::default(),
+            color: Vec::new(),
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Prepare),
+        }
+    }
+
     /// CR 122.6a + CR 614.1: A debug-created 0/0 creature token with
     /// `+1/+1` counters in `enter_with_counters` enters as a 2/2 because
     /// the counters apply during the same ETB replacement window that
@@ -640,6 +771,7 @@ mod tests {
                 characteristics: zero_zero_creature(),
                 enter_with_counters: vec![(CounterType::Plus1Plus1, 2)],
             },
+            run_etb: true,
         });
         let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
             .expect("debug CreateToken should succeed");
@@ -749,6 +881,63 @@ mod tests {
         assert_eq!(token.name, "Copy Source");
         assert_eq!(token.power, Some(2));
         assert_eq!(token.toughness, Some(3));
+    }
+
+    #[test]
+    fn debug_set_prepared_routes_through_prepare_gate() {
+        let mut state = sandbox_state();
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Permanent".to_string(),
+            Zone::Battlefield,
+        );
+
+        let no_face_result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetPrepared {
+                object_id,
+                prepared: true,
+            }),
+        )
+        .expect("debug SetPrepared should be accepted");
+        assert!(state.objects[&object_id].prepared.is_none());
+        assert!(!no_face_result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::BecamePrepared { .. })));
+
+        state.objects.get_mut(&object_id).unwrap().back_face = Some(prepare_back_face());
+
+        let prepared_result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetPrepared {
+                object_id,
+                prepared: true,
+            }),
+        )
+        .expect("debug SetPrepared should prepare eligible object");
+        assert!(state.objects[&object_id].prepared.is_some());
+        assert!(prepared_result.events.iter().any(
+            |event| matches!(event, GameEvent::BecamePrepared { object_id: id } if *id == object_id)
+        ));
+
+        let unprepared_result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetPrepared {
+                object_id,
+                prepared: false,
+            }),
+        )
+        .expect("debug SetPrepared should unprepare object");
+        assert!(state.objects[&object_id].prepared.is_none());
+        assert!(unprepared_result.events.iter().any(
+            |event| matches!(event, GameEvent::BecameUnprepared { object_id: id } if *id == object_id)
+        ));
     }
 
     /// Issue #464 — CR 110.2 + CR 613.1b: `DebugAction::SetController` must
@@ -1112,6 +1301,7 @@ mod tests {
                 characteristics: zero_zero_creature(),
                 enter_with_counters: Vec::new(),
             },
+            run_etb: true,
         });
         let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
             .expect("debug CreateToken should succeed");

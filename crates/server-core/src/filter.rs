@@ -107,6 +107,21 @@ mod tests {
     }
 
     #[test]
+    fn non_seat_spectator_sees_no_player_hands() {
+        let state = setup_state();
+        let filtered = filter_state_for_player(&state, PlayerId(u8::MAX));
+
+        for player in &filtered.players {
+            let hand = &player.hand;
+            assert_eq!(hand.len(), 1, "hand size remains public");
+            let obj = filtered.objects.get(&hand[0]).unwrap();
+            assert_eq!(obj.name, "Hidden Card");
+            assert!(obj.face_down);
+            assert!(obj.abilities.is_empty());
+        }
+    }
+
+    #[test]
     fn library_contents_hidden_for_both() {
         let state = setup_state();
         let filtered = filter_state_for_player(&state, PlayerId(0));
@@ -175,6 +190,7 @@ mod tests {
                 triggers: vec![],
                 static_abilities: vec![],
                 replacements: vec![],
+                cleave_variant: None,
                 color_override: None,
                 color_identity: vec![],
                 scryfall_oracle_id: None,
@@ -187,8 +203,11 @@ mod tests {
                 parse_warnings: vec![],
                 brawl_commander: false,
                 is_commander: false,
+                is_oathbreaker: false,
+                deck_copy_limit: None,
                 metadata: Default::default(),
                 rarities: Default::default(),
+                attraction_lights: vec![],
             },
             count: 4,
         };
@@ -438,6 +457,7 @@ mod tests {
             description: Some(description.to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         PendingTriggerContext {
             pending,

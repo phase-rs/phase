@@ -308,7 +308,7 @@ mod tests {
             commander: commander.into_iter().map(String::from).collect(),
             main_deck: main.into_iter().map(String::from).collect(),
             sideboard: Vec::new(),
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 

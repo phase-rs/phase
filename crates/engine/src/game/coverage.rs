@@ -3,19 +3,21 @@ use crate::database::CardDatabase;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
-use crate::parser::oracle::is_commander_permission_sentence;
+use crate::parser::oracle::{
+    is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
+};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
-    DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp,
-    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
+    AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
+    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
+    FilterProp, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
+    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -24,7 +26,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 use nom::bytes::complete::tag;
@@ -41,12 +43,14 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
         StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
-            | StaticMode::ReduceCost { .. }
-            | StaticMode::RaiseCost { .. }
-            | StaticMode::MinimumCost { .. }
+            | StaticMode::ModifyCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::CantBeCast { .. }
+            // CR 601.3 + CR 109.5: CantCastFrom carries `who`; the prohibited-zone
+            // list rides `affected`. Runtime enforcement is in
+            // casting.rs::is_blocked_from_casting_from_zone().
+            | StaticMode::CantCastFrom { .. }
             | StaticMode::CantCastDuring { .. }
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
@@ -59,7 +63,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // and casting_costs.rs.
             | StaticMode::ExileCastPermission { .. }
             | StaticMode::CastWithKeyword { .. }
-            // CR 118.9: CastWithAlternativeCost carries a `ManaCost` — runtime
+            // CR 118.9: CastWithAlternativeCost carries an `AbilityCost` — runtime
             // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
             | StaticMode::CastWithAlternativeCost { .. }
             // CR 702.16: PlayerProtection carries a `ProtectionTarget` (Strings) —
@@ -71,6 +75,21 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
+            // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
+            // the attacker that must be blocked (Provoke). Enforced by direct
+            // match in combat.rs declare-blockers validation.
+            | StaticMode::MustBlockAttacker { .. }
+            // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
+            // attacked (Alluring Siren). Enforced by direct match in combat.rs
+            // declare-attackers validation.
+            | StaticMode::MustAttackPlayer { .. }
+            // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
+            // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
+            | StaticMode::CantBeBlockedByMoreThan { .. }
+            // CR 301.5 + CR 303.4 + CR 701.3a: AttachmentRestriction carries the
+            // `TargetFilter` of legal hosts (Strata Scythe, Konda's Banner).
+            // Enforced via active static definitions in effects/attach.rs::attachment_illegality.
+            | StaticMode::AttachmentRestriction { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
@@ -78,6 +97,8 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
+            // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile carries `cause`.
+            | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
             | StaticMode::SuppressTriggers { .. }
             // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
@@ -104,6 +125,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // support via is_data_carrying_static() because the variant is
             // parameterized.
             | StaticMode::RevealTopOfLibrary { .. }
+            // CR 614.1c + CR 122.1: EntersWithAdditionalCounters carries the
+            // CounterType + fixed count. Runtime enforcement is in the
+            // battlefield-entry counter hook in effects/change_zone.rs, which
+            // scans active statics whose `affected` filter matches the entering
+            // object. Parameterized — no registry entry; coverage support here.
+            | StaticMode::EntersWithAdditionalCounters { .. }
     )
 }
 
@@ -358,12 +385,17 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
+        TargetFilter::SourceChosenPlayer => "source's chosen player".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
         }
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
+        TargetFilter::Neighbor { direction } => match direction {
+            SeatDirection::Left => "player to your left".into(),
+            SeatDirection::Right => "player to your right".into(),
+        },
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
         TargetFilter::TrackedSetFiltered { id, filter } => {
             format!("tracked set #{} matching {}", id.0, fmt_target(filter))
@@ -465,14 +497,22 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttachedToSource => parts.push("attached to self".into()),
             FilterProp::AttachedToRecipient => parts.push("attached to it".into()),
             FilterProp::Unpaired => parts.push("unpaired".into()),
-            FilterProp::HasAttachment { kind, controller } => {
+            FilterProp::HasAttachment {
+                kind,
+                controller,
+                exclude_source,
+            } => {
                 let kind_s = match kind {
                     crate::types::ability::AttachmentKind::Aura => "aura",
                     crate::types::ability::AttachmentKind::Equipment => "equipment",
                 };
+                let qualifier = if *exclude_source { " another" } else { "" };
                 match controller {
-                    None => parts.push(format!("attached by {kind_s}")),
-                    Some(c) => parts.push(format!("attached by {kind_s} ({})", fmt_controller(c))),
+                    None => parts.push(format!("attached by{qualifier} {kind_s}")),
+                    Some(c) => parts.push(format!(
+                        "attached by{qualifier} {kind_s} ({})",
+                        fmt_controller(c)
+                    )),
                 }
             }
             FilterProp::HasAnyAttachmentOf { kinds, controller } => {
@@ -542,6 +582,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::DefendingPlayer => "defending player's",
+                    ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
                     ControllerRef::TriggeringPlayer => "triggering player's",
                 };
@@ -642,6 +683,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::DefendingPlayer => "defending player",
+                ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
                 ControllerRef::TriggeringPlayer => "triggering player",
             };
@@ -709,6 +751,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::DefendingPlayer => "defending player controls",
+        ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
         ControllerRef::TriggeringPlayer => "triggering player controls",
     }
@@ -746,6 +789,9 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
         QuantityExpr::Offset { inner, offset } => {
             format!("{}+{}", fmt_quantity(inner), offset)
         }
+        QuantityExpr::ClampMin { inner, minimum } => {
+            format!("max({}, {})", fmt_quantity(inner), minimum)
+        }
         QuantityExpr::Multiply { factor, inner } => {
             format!("{}*{}", factor, fmt_quantity(inner))
         }
@@ -769,6 +815,9 @@ fn fmt_duration(d: &Duration) -> String {
         Duration::UntilEndOfCombat => "until end of combat".to_string(),
         Duration::UntilNextTurnOf { player } => {
             format!("until next turn ({})", fmt_player_scope(player))
+        }
+        Duration::UntilEndOfNextTurnOf { player } => {
+            format!("until end of next turn ({})", fmt_player_scope(player))
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::UntilNextStepOf { step, player } => {
@@ -828,6 +877,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
+        PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -873,13 +923,29 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("# of {} {}", quality_str, fmt_target(filter))
         }
+        QuantityRef::ObjectCountBySharedQuality {
+            filter,
+            quality,
+            aggregate,
+        } => {
+            let func = match aggregate {
+                AggregateFunction::Max => "greatest",
+                AggregateFunction::Min => "fewest",
+                AggregateFunction::Sum => "total",
+            };
+            format!(
+                "{func} shared {:?} count among {}",
+                quality,
+                fmt_target(filter)
+            )
+        }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
         QuantityRef::CountersOn {
             scope,
             counter_type,
         } => {
             let scope_str = match scope {
-                ObjectScope::Source | ObjectScope::Anaphoric => "self",
+                ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => "self",
                 ObjectScope::Target => "target",
                 ObjectScope::Recipient => "recipient",
                 ObjectScope::EventSource => "event source",
@@ -899,35 +965,54 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         },
         QuantityRef::Variable { name } => name.clone(),
         QuantityRef::Power { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "self power".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self power".into()
+            }
             ObjectScope::Target => "target's power".into(),
             ObjectScope::Recipient => "recipient's power".into(),
             ObjectScope::EventSource => "event source's power".into(),
             ObjectScope::CostPaidObject => "referenced object's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "self toughness".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self toughness".into()
+            }
             ObjectScope::Target => "target's toughness".into(),
             ObjectScope::Recipient => "recipient's toughness".into(),
             ObjectScope::EventSource => "event source's toughness".into(),
             ObjectScope::CostPaidObject => "referenced object's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "self mana value".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self mana value".into()
+            }
             ObjectScope::Target => "target's mana value".into(),
             ObjectScope::Recipient => "recipient's mana value".into(),
             ObjectScope::EventSource => "event source's mana value".into(),
             ObjectScope::CostPaidObject => "referenced object's mana value".into(),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "self colors".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "self colors".into()
+            }
             ObjectScope::Target => "target's colors".into(),
             ObjectScope::Recipient => "recipient's colors".into(),
             ObjectScope::EventSource => "event source's colors".into(),
             ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
         },
+        QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "typeline components on self".into()
+            }
+            ObjectScope::Target => "typeline components on target".into(),
+            ObjectScope::Recipient => "typeline components on recipient".into(),
+            ObjectScope::EventSource => "typeline components on event source".into(),
+            ObjectScope::CostPaidObject => "typeline components on cost-paid object".into(),
+        },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => "words in self name".into(),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                "words in self name".into()
+            }
             ObjectScope::Target => "words in target's name".into(),
             ObjectScope::Recipient => "words in recipient's name".into(),
             ObjectScope::EventSource => "words in event source's name".into(),
@@ -935,7 +1020,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
-                ObjectScope::Source | ObjectScope::Anaphoric => "self",
+                ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => "self",
                 ObjectScope::Target => "target",
                 ObjectScope::Recipient => "recipient",
                 ObjectScope::EventSource => "event source",
@@ -1017,6 +1102,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
+        QuantityRef::FilteredTrackedSetSize { filter } => {
+            format!("filtered tracked set ({})", fmt_target(filter))
+        }
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
         QuantityRef::LifeLostThisTurn { player } => {
             format!("life lost this turn ({})", fmt_player_scope(player))
@@ -1047,9 +1135,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsDrawnThisTurn { player } => {
             format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
-        QuantityRef::LandsPlayedThisTurn { player } => {
-            format!("lands played this turn ({})", fmt_player_scope(player))
-        }
+        QuantityRef::LandsPlayedThisTurn { player, from_zones } => from_zones.as_ref().map_or_else(
+            || format!("lands played this turn ({})", fmt_player_scope(player)),
+            |zones| {
+                format!(
+                    "lands played this turn ({}, from {:?})",
+                    fmt_player_scope(player),
+                    zones
+                )
+            },
+        ),
         QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => {
             format!(
                 "{} zone changes this turn ({from:?}->{to:?})",
@@ -1061,14 +1156,21 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             target,
             aggregate,
             group_by,
+            damage_kind,
         } => {
             let group = match group_by {
                 None => "ungrouped".to_string(),
                 Some(crate::types::ability::DamageGroupKey::SourceId) => "by-source".to_string(),
             };
+            let kind = match damage_kind {
+                crate::types::ability::DamageKindFilter::Any => "",
+                crate::types::ability::DamageKindFilter::CombatOnly => " combat",
+                crate::types::ability::DamageKindFilter::NoncombatOnly => " noncombat",
+            };
             format!(
-                "{} damage dealt this turn ({} -> {}) [{group}]",
+                "{}{} damage dealt this turn ({} -> {}) [{group}]",
                 fmt_aggregate_function(*aggregate),
+                kind,
                 fmt_target(source),
                 fmt_target(target)
             )
@@ -1138,6 +1240,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             let scope_s = match scope {
                 CountScope::Controller | CountScope::Owner => "you have",
                 CountScope::ScopedPlayer => "the scoped player has",
+                CountScope::SourceChosenPlayer => "the chosen player has",
                 CountScope::Opponents => "each opponent has",
                 CountScope::All => "each player has",
             };
@@ -1161,16 +1264,28 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
-    use crate::types::ability::{ControlPresence, PlayerRelation};
+    use crate::types::ability::PlayerRelation;
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
         PlayerFilter::DefendingPlayer => "defending player",
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
-        PlayerFilter::OpponentDealtCombatDamage => {
+        PlayerFilter::OpponentDealtCombatDamage { .. } => {
             "each opponent who was dealt combat damage this turn"
         }
+        PlayerFilter::OpponentAttacked { subject, scope } => match (subject, scope) {
+            (AttackSubject::You, AttackScope::ThisTurn) => "each opponent you attacked this turn",
+            (AttackSubject::Source, AttackScope::ThisTurn) => {
+                "each opponent this source attacked this turn"
+            }
+            (AttackSubject::You, AttackScope::ThisCombat) => {
+                "each opponent you attacked this combat"
+            }
+            (AttackSubject::Source, AttackScope::ThisCombat) => {
+                "each opponent this source attacked this combat"
+            }
+        },
         PlayerFilter::All => "each player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
@@ -1180,20 +1295,35 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
         PlayerFilter::VotedFor { .. } => "each player who voted for this option",
         PlayerFilter::ParentObjectTargetController => "the parent target's controller",
-        // CR 109.4 + CR 700.1: "each [player class] who [doesn't] control [filter]"
-        PlayerFilter::ControlsPermanent {
-            relation, presence, ..
+        // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
+        // [count] matching permanents"
+        PlayerFilter::ControlsCount {
+            relation,
+            comparator,
+            count,
+            ..
         } => {
             let who = match relation {
                 PlayerRelation::Controller => "you",
                 PlayerRelation::Opponent => "each opponent",
                 PlayerRelation::All => "each player",
             };
-            let verb = match presence {
-                ControlPresence::Controls => "who controls",
-                ControlPresence::ControlsNone => "who doesn't control",
+            return format!("{who} who controls {comparator:?} {count:?} matching permanents");
+        }
+        // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
+        // attr] [comparator] [value]"
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
             };
-            return format!("{who} {verb} a matching permanent");
+            return format!("{who} whose {attr:?} {comparator:?} {value:?}");
         }
     }
     .into()
@@ -1434,6 +1564,7 @@ fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
         CountScope::Controller | CountScope::Owner => "your",
         CountScope::ScopedPlayer => "their",
+        CountScope::SourceChosenPlayer => "the chosen player's",
         CountScope::All => "all",
         CountScope::Opponents => "opponents'",
     }
@@ -1549,6 +1680,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Transform { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
@@ -1736,16 +1868,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::GainLife { amount, player } => {
             d.push(("amount".into(), fmt_quantity(amount)));
-            if !matches!(player, GainLifePlayer::Controller) {
-                d.push((
-                    "player".into(),
-                    match player {
-                        GainLifePlayer::TargetedController => "target's controller",
-                        GainLifePlayer::TargetPlayer => "target player",
-                        GainLifePlayer::Controller => unreachable!(),
-                    }
-                    .into(),
-                ));
+            if !player.is_context_ref() {
+                d.push(("player".into(), fmt_target(player)));
             }
         }
         Effect::LoseLife { amount, .. } => {
@@ -1965,10 +2089,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
         }
         Effect::RollDie {
+            count,
             sides,
             results,
             modifier,
         } => {
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), fmt_quantity(count)));
+            }
             d.push(("sides".into(), sides.to_string()));
             if !results.is_empty() {
                 d.push(("branches".into(), results.len().to_string()));
@@ -2044,6 +2172,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CreateDamageReplacement {
             modification,
             redirect_to,
+            redirect_amount,
             combat_scope,
             redirect_object_filter,
             recipient_object_filter,
@@ -2054,6 +2183,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(r) = redirect_to {
                 d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            if let Some(a) = redirect_amount {
+                d.push(("redirect_amount".into(), format!("{a:?}")));
             }
             if let Some(cs) = combat_scope {
                 d.push(("combat_scope".into(), format!("{cs:?}")));
@@ -2232,12 +2364,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             phase,
             after,
             followed_by,
+            count,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
             d.push(("after".into(), format!("{after:?}")));
             if !followed_by.is_empty() {
                 d.push(("followed by".into(), format!("{followed_by:?}")));
+            }
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), format!("{count:?}")));
             }
         }
         Effect::Double {
@@ -2318,6 +2454,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Investigate
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::SolveCase
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
@@ -2325,8 +2464,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
-        | Effect::LoseTheGame
-        | Effect::WinTheGame
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
         | Effect::RingTemptsYou
         | Effect::GrantCastingPermission { .. }
         | Effect::Manifest { .. }
@@ -2338,10 +2477,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Learn
         | Effect::SwitchPT { .. }
         | Effect::Myriad
+        | Effect::Encore
+        | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::Populate
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
         | Effect::Clash
         | Effect::Vote { .. }
@@ -2352,7 +2495,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::ReturnAsAura { .. } => {}
+        | Effect::ReturnAsAura { .. }
+        | Effect::Specialize => {}
     }
     d
 }
@@ -2373,8 +2517,8 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
         d.push((
             "targets".into(),
             match &mt.max {
-                Some(max) => format!("{}-{}", mt.min, fmt_quantity(max)),
-                None => format!("{}+", mt.min),
+                Some(max) => format!("{}-{}", fmt_quantity(&mt.min), fmt_quantity(max)),
+                None => format!("{}+", fmt_quantity(&mt.min)),
             },
         ));
     }
@@ -2489,6 +2633,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         }
         ContinuousModification::AddAllCreatureTypes => "all creature types".into(),
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
+        ContinuousModification::AddAllLandTypes => "all land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
         ContinuousModification::AddChosenColor => "add chosen color".into(),
         // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the
@@ -2515,6 +2660,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::SetBasicLandType { land_type } => {
             format!("set land type {}", land_type.as_subtype_str())
         }
+        ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
@@ -2543,6 +2689,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
                 None => format!("enter with {count_str} {} counter", counter_type.as_str()),
             }
         }
+        ContinuousModification::RemoveManaCost => "no mana cost".to_string(),
     }
 }
 
@@ -3336,9 +3483,6 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // Check replacements
         check_replacements(&face.replacements, &mut missing);
 
-        // Check parse warnings
-        check_parse_warnings(&face.parse_warnings, &mut missing);
-
         // Validate subtype references in AddSubtype modifications against
         // the printed-corpus lexicon. Catches parser misfires where English
         // filler words (`Gets`, `Until`, `And`) were tokenized as subtypes.
@@ -3351,6 +3495,11 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         // Flag cards where the parser consumed Oracle text without producing
         // a corresponding parse item. Uses the parse tree computed above.
         check_silent_drops(&face.oracle_text, &parse_details, &mut missing);
+
+        let supported_before_parse_warnings = missing.is_empty();
+
+        // Check parse warnings
+        check_parse_warnings(&face.parse_warnings, &mut missing);
 
         let supported = missing.is_empty();
 
@@ -3386,16 +3535,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         let mut gap_details = extract_gap_details(&parse_details);
         // Append parse-warning gaps so they appear in per-card gap reporting.
         for warning in &face.parse_warnings {
-            if let crate::parser::oracle_ir::diagnostic::OracleDiagnostic::TargetFallback {
-                context,
-                ..
-            } = warning
-            {
-                let handler = if context.contains("trigger subject") {
-                    "ParseWarning:trigger-subject".to_string()
-                } else {
-                    "ParseWarning:target-fallback".to_string()
-                };
+            if let Some(handler) = parse_warning_gap_label(warning) {
                 gap_details.push(GapDetail {
                     handler,
                     source_text: Some(warning.to_string()),
@@ -3408,7 +3548,12 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             parse_warning_patterns
                 .entry((category, pattern))
                 .or_default()
-                .push(&face.name, supported, gap_count == 1, &legal_formats);
+                .push(
+                    &face.name,
+                    supported_before_parse_warnings,
+                    gap_count == 1,
+                    &legal_formats,
+                );
         }
 
         let printings = card_db
@@ -4051,27 +4196,49 @@ fn check_resolver_features(face: &CardFace, missing: &mut Vec<String>) {
     }
 }
 
-/// Target-fallback warnings indicate degraded targeting (TargetFilter::Any instead of a
-/// specific filter). Cards with these have silently incorrect behavior at runtime.
-fn check_parse_warnings(
-    warnings: &[crate::parser::oracle_ir::diagnostic::OracleDiagnostic],
-    missing: &mut Vec<String>,
-) {
-    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+/// Parse warnings indicate Oracle text the parser accepted but did not faithfully
+/// represent, so the card has silently incorrect behavior at runtime:
+///
+/// - `TargetFallback` — degraded targeting (`TargetFilter::Any` instead of a
+///   specific filter).
+/// - `SwallowedClause` — a load-bearing clause (condition, duration, optional,
+///   activation limit, dynamic quantity, replacement, APNAP ordering) was
+///   dropped from the AST while the surrounding ability still parsed. The
+///   swallow-check detectors fire only when the marker phrase is present AND
+///   the AST has no representation for it, so a fired warning is an unrepresented
+///   clause, not detector noise. Folding these into the supported predicate
+///   stops coverage from marking such cards green (umbrella issue #2243; per
+///   detector: #2229–#2241).
+/// - `CascadeLoss` — a cascade slot was populated but did not land on the final
+///   ability definition, so the parsed card is missing load-bearing behavior.
+///
+/// `IgnoredRemainder` stays informational because it can be parser-internal
+/// trivia rather than a demonstrated missing semantic clause.
+fn check_parse_warnings(warnings: &[OracleDiagnostic], missing: &mut Vec<String>) {
     for warning in warnings {
-        let label = match warning {
-            OracleDiagnostic::TargetFallback { context, .. } => {
-                if context.contains("trigger subject") {
-                    "ParseWarning:trigger-subject".to_string()
-                } else {
-                    "ParseWarning:target-fallback".to_string()
-                }
-            }
-            _ => continue,
+        let Some(label) = parse_warning_gap_label(warning) else {
+            continue;
         };
         if !missing.contains(&label) {
             missing.push(label);
         }
+    }
+}
+
+fn parse_warning_gap_label(warning: &OracleDiagnostic) -> Option<String> {
+    match warning {
+        OracleDiagnostic::TargetFallback { context, .. } => {
+            if context.contains("trigger subject") {
+                Some("ParseWarning:trigger-subject".to_string())
+            } else {
+                Some("ParseWarning:target-fallback".to_string())
+            }
+        }
+        OracleDiagnostic::SwallowedClause { detector, .. } => Some(format!("Swallow:{detector}")),
+        OracleDiagnostic::CascadeLoss { slot, .. } => {
+            Some(format!("ParseWarning:cascade-loss:{slot:?}"))
+        }
+        OracleDiagnostic::IgnoredRemainder { .. } => None,
     }
 }
 
@@ -4260,6 +4427,9 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
 
         let lower = stripped.to_lowercase();
         if is_commander_permission_sentence(&lower) {
+            continue;
+        }
+        if is_deck_construction_copy_limit_sentence(stripped) {
             continue;
         }
 
@@ -4985,9 +5155,9 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
             let (name, support) = quantity_ref_feature(qref);
             features.insert(format!("quantity_ref:{name}"), support);
         }
-        QuantityExpr::Offset { inner, .. } | QuantityExpr::Multiply { inner, .. } => {
-            extract_quantity_features(inner, features);
-        }
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => extract_quantity_features(inner, features),
         QuantityExpr::DivideRounded { inner, .. } => {
             extract_quantity_features(inner, features);
         }
@@ -5046,6 +5216,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
+        AbilityCondition::AlternativeManaCostPaid => ("AlternativeManaCostPaid", Handled),
         AbilityCondition::EffectOutcome { signal } => match signal {
             EffectOutcomeSignal::OptionalEffectPerformed => {
                 ("EffectOutcomeOptionalPerformed", Handled)
@@ -5096,11 +5267,18 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ZoneChangeObjectMatchesFilter { .. } => {
             ("ZoneChangeObjectMatchesFilter", Handled)
         }
-        // Variants below are parsed but have no runtime resolver today.
-        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
-        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
-        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Unhandled),
-        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Unhandled),
+        // CR 400.7 + CR 608.2c: Target filter conditions — resolved by
+        // `evaluate_condition` (effects/mod.rs) with current-state and optional
+        // LKI paths.
+        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Handled),
+        // CR 608.2c: Source filter conditions — resolved by `evaluate_condition`
+        // against the ability source object.
+        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 608.2c: Zone-change-this-way — resolved by `evaluate_condition`
+        // against `state.last_zone_changed_ids`.
+        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
+        // CR 608.2c: Source tapped check — resolved by `evaluate_condition`.
+        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Handled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -5119,6 +5297,10 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
             ("CostPaidObjectMatchesFilter", Handled)
         }
         AbilityCondition::SourceLacksKeyword { .. } => ("SourceLacksKeyword", Handled),
+        // CR 101.3 + CR 109.5: per-iteration scoped-player filter check; handled by
+        // `evaluate_condition` (effects/mod.rs). Used by cross-scope decline-tail
+        // gates (Liliana, Waker of the Dead — parent `All`, decline `Opponent`).
+        AbilityCondition::ScopedPlayerMatches { .. } => ("ScopedPlayerMatches", Handled),
     }
 }
 
@@ -5135,47 +5317,67 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Speed { .. } => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
+        QuantityRef::ObjectCountBySharedQuality { .. } => ("ObjectCountBySharedQuality", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
         QuantityRef::Variable { .. } => ("Variable", Handled),
         QuantityRef::Power { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SelfPower", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SelfPower", Handled)
+            }
             ObjectScope::Target => ("TargetPower", Handled),
             ObjectScope::Recipient => ("RecipientPower", Handled),
             ObjectScope::EventSource => ("EventSourcePower", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SelfToughness", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SelfToughness", Handled)
+            }
             ObjectScope::Target => ("TargetToughness", Handled),
             ObjectScope::Recipient => ("RecipientToughness", Handled),
             ObjectScope::EventSource => ("EventSourceToughness", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SelfManaValue", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SelfManaValue", Handled)
+            }
             ObjectScope::Target => ("TargetManaValue", Handled),
             ObjectScope::Recipient => ("RecipientManaValue", Handled),
             ObjectScope::EventSource => ("EventSourceManaValue", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SourceObjectColorCount", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SourceObjectColorCount", Handled)
+            }
             ObjectScope::Target => ("TargetObjectColorCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => ("SourceObjectNameWordCount", Handled),
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SourceObjectNameWordCount", Handled)
+            }
             ObjectScope::Target => ("TargetObjectNameWordCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectNameWordCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectNameWordCount", Handled),
             ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
         },
+        QuantityRef::ObjectTypelineComponentCount { scope } => match scope {
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
+                ("SourceObjectTypelineComponentCount", Handled)
+            }
+            ObjectScope::Target => ("TargetObjectTypelineComponentCount", Handled),
+            ObjectScope::Recipient => ("RecipientObjectTypelineComponentCount", Handled),
+            ObjectScope::EventSource => ("EventSourceObjectTypelineComponentCount", Handled),
+            ObjectScope::CostPaidObject => ("CostPaidObjectTypelineComponentCount", Handled),
+        },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
-            ObjectScope::Source | ObjectScope::Anaphoric => {
+            ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
                 ("SourceManaSymbolsInManaCost", Handled)
             }
             ObjectScope::Target => ("TargetManaSymbolsInManaCost", Handled),
@@ -5196,6 +5398,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
+        QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
@@ -5252,7 +5455,8 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
-        PlayerFilter::OpponentDealtCombatDamage => ("OpponentDealtCombatDamage", Handled),
+        PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
+        PlayerFilter::OpponentAttacked { .. } => ("OpponentAttacked", Handled),
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
         // Previously emitted via Debug formatting; never appeared in the handled set.
         PlayerFilter::Controller => ("Controller", Unhandled),
@@ -5263,7 +5467,8 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
         PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
         PlayerFilter::ParentObjectTargetController => ("ParentObjectTargetController", Handled),
-        PlayerFilter::ControlsPermanent { .. } => ("ControlsPermanent", Handled),
+        PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
+        PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
     }
 }
 
@@ -5281,6 +5486,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // `layers::evaluate_condition_with_context` alongside `ChosenColorIs`.
         StaticCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
+        StaticCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
         StaticCondition::RecipientMatchesFilter { .. } => ("RecipientMatchesFilter", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
@@ -5469,7 +5675,9 @@ fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) ->
         | CounterType::Stun
         | CounterType::Lore
         | CounterType::Time
+        | CounterType::Fade
         | CounterType::Age
+        | CounterType::Shield
         | CounterType::Generic(_) => {
             let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
             lower.contains(&needle)
@@ -6222,6 +6430,17 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             continue;
         }
 
+        // CR 100.2a / CR 903.5b: Deck-construction copy-limit lines ("A deck can
+        // have any number of cards named X.", "...up to seven cards named Seven
+        // Dwarves.", the Megalegendary line, etc.) are consumed by the parser as
+        // typed `DeckCopyLimit` metadata (see `compute_deck_copy_limit_from_text`,
+        // read by `deck_validation`), not as a resolvable ability — they
+        // legitimately produce no `ParsedElement`. Skip them so they are not
+        // falsely reported as `SilentDrop`.
+        if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
+
         // Skip very short lines (single keywords, type lines)
         if lower.len() < 5 {
             continue;
@@ -6464,24 +6683,26 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantBeCast { .. } => {
                 effective_lower.contains("can't cast") && !effective_lower.contains("during")
             }
-            StaticMode::CantCastFrom => effective_lower.contains("can't cast"),
+            StaticMode::CantCastFrom { .. } => effective_lower.contains("can't cast"),
             StaticMode::RevealTopOfLibrary { .. } => {
                 effective_lower.contains("play with the top card")
                     || effective_lower.contains("play with the top")
             }
-            StaticMode::ReduceCost { .. } => {
-                effective_lower.contains("cost") && effective_lower.contains("less")
-            }
-            StaticMode::RaiseCost { .. } => {
-                effective_lower.contains("cost") && effective_lower.contains("more")
-            }
-            // CR 601.2f: Trinisphere class — "each spell that would cost less than N
-            // mana to cast costs N mana to cast." Coverage marker: "would cost less than"
-            // is the discriminator from RaiseCost ("more"), ReduceCost ("less to cast").
-            StaticMode::MinimumCost { .. } => {
-                effective_lower.contains("would cost less than")
-                    && effective_lower.contains("mana to cast")
-            }
+            // CR 601.2f: ReduceCost / RaiseCost / MinimumCost coverage markers,
+            // discriminated by the `mode` axis. Trinisphere's "would cost less than"
+            // distinguishes Minimum from Reduce ("less to cast") and Raise ("more").
+            StaticMode::ModifyCost { mode, .. } => match mode {
+                CostModifyMode::Reduce => {
+                    effective_lower.contains("cost") && effective_lower.contains("less")
+                }
+                CostModifyMode::Raise => {
+                    effective_lower.contains("cost") && effective_lower.contains("more")
+                }
+                CostModifyMode::Minimum => {
+                    effective_lower.contains("would cost less than")
+                        && effective_lower.contains("mana to cast")
+                }
+            },
             StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
             StaticMode::CantBeCopied => effective_lower.contains("can't be copied"),
             // CR 119.7: "can't gain life" or its compound form "life total can't change"
@@ -6507,6 +6728,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::LegendRuleDoesntApply => {
                 effective_lower.contains("legend rule") && effective_lower.contains("doesn't apply")
             }
+            StaticMode::CantCauseSacrificeOrExile { .. } => {
+                effective_lower.contains("triggered abilities")
+                    && effective_lower.contains("can't cause you to")
+                    && (effective_lower.contains("sacrifice or exile")
+                        || effective_lower.contains("exile or sacrifice"))
+            }
             StaticMode::NoMaximumHandSize => effective_lower.contains("no maximum hand size"),
             StaticMode::MaximumHandSize { .. } => effective_lower.contains("maximum hand size is"),
             StaticMode::CantUntap => {
@@ -6515,6 +6742,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            StaticMode::CantCrew => {
+                effective_lower.contains("can't crew") || effective_lower.contains("cannot crew")
+            }
             StaticMode::CastWithFlash => {
                 effective_lower.contains("as though it had flash")
                     || effective_lower.contains("as though they had flash")
@@ -6548,6 +6778,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            // CR 301.5 + CR 303.4: positive "can be attached only to {filter}"
+            // restriction. Anchor on the verb phrase; the filter half is the
+            // reused TargetFilter and is validated by parser tests.
+            StaticMode::AttachmentRestriction { .. } => {
+                effective_lower.contains("can be attached only to")
+            }
             StaticMode::StepEndUnspentMana { action, .. } => match action {
                 crate::types::mana::StepEndManaAction::Retain => {
                     effective_lower.contains("don't lose unspent")
@@ -6592,7 +6828,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             } = &*a.effect
             {
                 static_abilities.iter().any(|s| match &s.mode {
-                    StaticMode::MustBeBlocked => {
+                    // CR 509.1c: "All creatures able to block ~ do so" lowers to the
+                    // lure-strength MustBeBlockedByAll (not the one-blocker MustBeBlocked).
+                    StaticMode::MustBeBlockedByAll => {
                         effective_lower.contains("able to block")
                             && effective_lower.contains("do so")
                     }
@@ -6640,7 +6878,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         || effective_lower.contains("gift wasn't promised")
                 }
                 Effect::GenericEffect { .. } => false,
-                Effect::LoseTheGame => {
+                Effect::LoseTheGame { .. } => {
                     // "You don't lose the game for ..." parsed as LoseTheGame prevention
                     effective_lower.contains("don't lose the game")
                         || effective_lower.contains("can't lose the game")
@@ -7759,6 +7997,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "investigate",
         "food ",
         "squad ",
+        "replicate ",
         "backup ",
         "devour ",
         "modular ",
@@ -7811,7 +8050,6 @@ fn is_keyword_line(lower: &str) -> bool {
         "gravestorm",
         "conspire",
         "retrace",
-        "rebound",
         "miracle ",
         "cipher",
         "extort",
@@ -8161,6 +8399,7 @@ mod tests {
 
     use super::*;
     use crate::database::legality::{legalities_to_export_map, LegalityStatus};
+    use crate::parser::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
     use crate::types::ability::{
         AbilityKind, CounterTransferMode, Effect, PreventionAmount, PreventionScope,
         ReplacementCondition, TargetFilter,
@@ -8180,6 +8419,61 @@ mod tests {
             "Test Card".to_string(),
             Zone::Battlefield,
         )
+    }
+
+    #[test]
+    fn apnap_swallowed_clause_warning_counts_as_coverage_gap() {
+        let warnings = vec![OracleDiagnostic::SwallowedClause {
+            detector: "APNAP".to_string(),
+            description: "Repeat the following process for each opponent in turn order."
+                .to_string(),
+            line_index: 0,
+        }];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:APNAP"]);
+    }
+
+    #[test]
+    fn swallowed_clause_warning_counts_as_coverage_gap() {
+        let warnings = vec![
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                detector: "Condition_If".to_string(),
+                description: "If foo, draw a card.".to_string(),
+                line_index: 0,
+            },
+        ];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:Condition_If"]);
+    }
+
+    #[test]
+    fn cascade_loss_warning_counts_as_coverage_gap() {
+        let warnings = vec![
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::CascadeLoss {
+                slot: crate::parser::oracle_ir::diagnostic::CascadeSlot::Condition,
+                effect_name: "DrawCards".to_string(),
+                line_index: 0,
+            },
+        ];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["ParseWarning:cascade-loss:Condition"]);
+    }
+
+    #[test]
+    fn ignored_remainder_warning_remains_informational_for_coverage() {
+        let warnings = vec![
+            crate::parser::oracle_ir::diagnostic::OracleDiagnostic::IgnoredRemainder {
+                text: "tail".to_string(),
+                parser: "test".to_string(),
+                line_index: 0,
+            },
+        ];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert!(missing.is_empty());
     }
 
     #[test]
@@ -8241,6 +8535,73 @@ mod tests {
         check_subtype_lexicon(&face, &valid, &mut missing);
 
         assert!(missing.is_empty());
+    }
+
+    /// A fired `SwallowedClause` diagnostic must demote the card from
+    /// "supported" via a `Swallow:{detector}` gap label (issue #2230 / #2243).
+    /// The label format is a contract: parser tests in `oracle.rs` grep for
+    /// exactly `"Swallow:{detector}"`, so this locks it.
+    #[test]
+    fn check_parse_warnings_flags_swallowed_clause() {
+        let warnings = vec![OracleDiagnostic::SwallowedClause {
+            detector: "Condition_If".into(),
+            description: "if you control a creature, …".into(),
+            line_index: 0,
+        }];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:Condition_If".to_string()]);
+    }
+
+    /// Multiple swallowed clauses sharing a detector collapse to one gap label,
+    /// matching the dedupe semantics of the existing `ParseWarning:*` arms.
+    #[test]
+    fn check_parse_warnings_dedupes_same_detector() {
+        let warnings = vec![
+            OracleDiagnostic::SwallowedClause {
+                detector: "DynamicQty".into(),
+                description: "equal to the number of charge counters".into(),
+                line_index: 0,
+            },
+            OracleDiagnostic::SwallowedClause {
+                detector: "DynamicQty".into(),
+                description: "equal to that card's mana value".into(),
+                line_index: 1,
+            },
+        ];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:DynamicQty".to_string()]);
+    }
+
+    /// CR 608.2d: A swallowed `Optional_YouMay` clause must demote the card
+    /// from "supported" via a `Swallow:Optional_YouMay` gap label. This is
+    /// the regression contract for issue #2277 — dropped `you may` optional
+    /// sub-effects must not be counted as supported.
+    #[test]
+    fn check_parse_warnings_flags_optional_you_may() {
+        let warnings = vec![OracleDiagnostic::SwallowedClause {
+            detector: "Optional_YouMay".into(),
+            description: "you may reveal that card and put it into your hand".into(),
+            line_index: 0,
+        }];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["Swallow:Optional_YouMay".to_string()]);
+    }
+
+    /// `CascadeLoss` means a cascade slot was parsed but did not land on the
+    /// final ability definition, so it must demote coverage.
+    #[test]
+    fn check_parse_warnings_flags_cascade_loss() {
+        let warnings = vec![OracleDiagnostic::CascadeLoss {
+            slot: CascadeSlot::Condition,
+            effect_name: "DrawCards".into(),
+            line_index: 0,
+        }];
+        let mut missing = Vec::new();
+        check_parse_warnings(&warnings, &mut missing);
+        assert_eq!(missing, vec!["ParseWarning:cascade-loss:Condition"]);
     }
 
     #[test]
@@ -8311,6 +8672,7 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
+            cleave_variant: None,
             color_override: None,
             color_identity: vec![],
             scryfall_oracle_id: None,
@@ -8323,8 +8685,11 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            is_oathbreaker: false,
+            deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
+            attraction_lights: vec![],
         }
     }
 
@@ -8503,6 +8868,66 @@ mod tests {
         assert!(!beta.supported);
         assert_eq!(beta.gap_count, 1);
         assert_eq!(beta.gap_details[0].handler, "Effect:beta_gap");
+    }
+
+    #[test]
+    fn analyze_coverage_surfaces_swallowed_clause_gap_details() {
+        let export = serde_json::json!({
+            "alpha": {
+                "name": "Alpha",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": "If you control a creature, draw a card.",
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "parse_warnings": [{
+                    "type": "SwallowedClause",
+                    "detector": "Condition_If",
+                    "description": "if you control a creature",
+                    "line_index": 0
+                }]
+            }
+        })
+        .to_string();
+
+        let db = CardDatabase::from_json_str(&export).expect("test export should deserialize");
+        let summary = analyze_coverage(&db);
+        let card = summary
+            .cards
+            .iter()
+            .find(|card| card.card_name == "Alpha")
+            .unwrap();
+
+        assert!(!card.supported);
+        assert_eq!(card.gap_count, 1);
+        assert_eq!(card.gap_details[0].handler, "Swallow:Condition_If");
+        let top_gap = summary
+            .top_gaps
+            .iter()
+            .find(|gap| gap.handler == "Swallow:Condition_If")
+            .unwrap();
+        assert_eq!(top_gap.total_count, 1);
+        assert_eq!(top_gap.single_gap_cards, 1);
+        assert!(top_gap.single_gap_by_format.is_empty());
+        assert_eq!(top_gap.oracle_patterns.len(), 1);
+        assert_eq!(top_gap.oracle_patterns[0].count, 1);
+        assert_eq!(
+            top_gap.oracle_patterns[0].example_cards,
+            vec!["Alpha".to_string()]
+        );
+        assert!(top_gap.independence_ratio.is_none());
+        assert!(top_gap.co_occurrences.is_empty());
     }
 
     #[test]
@@ -8803,6 +9228,7 @@ mod tests {
                     active_zones: vec![],
                     characteristic_defining: false,
                     description: None,
+                    attack_defended: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -8846,6 +9272,7 @@ mod tests {
                     active_zones: vec![],
                     characteristic_defining: false,
                     description: None,
+                    attack_defended: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -9675,6 +10102,40 @@ mod tests {
     }
 
     #[test]
+    fn deck_construction_copy_limit_line_does_not_count_as_silent_drop() {
+        // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
+        // (and the "up to N" / bare-Megalegendary variants) is consumed by the
+        // parser as typed DeckCopyLimit metadata, not a resolvable ability, so
+        // it must not be flagged as a SilentDrop. Covers the class, not one card.
+        let mut face = make_face();
+        for oracle in [
+            "A deck can have any number of cards named Relentless Rats.",
+            "A deck can have up to seven cards named Seven Dwarves.",
+            "A deck can have up to nine cards named Nazgûl.",
+            "Megalegendary",
+            "Megalegendary (Your deck can have any number of cards named Vazal, the Compleat.)",
+        ] {
+            face.oracle_text = Some(oracle.to_string());
+            assert!(
+                audit_card_lines(oracle, &face).is_empty(),
+                "deck-construction line falsely flagged as a finding: {oracle}"
+            );
+
+            let mut missing = Vec::new();
+            check_silent_drops(&Some(oracle.to_string()), &[], &mut missing);
+            assert!(
+                missing.is_empty(),
+                "deck-construction line falsely counted as SilentDrop: {oracle} -> {missing:?}"
+            );
+            assert_eq!(
+                count_effective_oracle_lines(oracle),
+                0,
+                "deck-construction line should not count as a runtime oracle line: {oracle}"
+            );
+        }
+    }
+
+    #[test]
     fn defiler_cost_reduction_static_does_not_count_as_silent_drop() {
         let mut face = make_face();
         let oracle = "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost {U} less to cast if you paid life this way. This effect reduces only the amount of blue mana you pay.";
@@ -9699,6 +10160,7 @@ mod tests {
             description: Some(
                 "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
             ),
+            attack_defended: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -9729,6 +10191,7 @@ mod tests {
             description: Some(
                 "As an additional cost to cast blue permanent spells, you may pay 2 life. Those spells cost less to cast.".to_string(),
             ),
+            attack_defended: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -9757,6 +10220,7 @@ mod tests {
             active_zones: vec![],
             characteristic_defining: false,
             description: None,
+            attack_defended: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -9782,6 +10246,42 @@ mod tests {
             FeatureSupport::Handled,
             "AbilityCondition::IsYourTurn must classify as Handled",
         );
+    }
+
+    #[test]
+    fn resolved_ability_conditions_are_marked_handled() {
+        let conditions = [
+            (
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Any,
+                    use_lki: false,
+                },
+                "TargetMatchesFilter",
+            ),
+            (
+                AbilityCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Any,
+                },
+                "SourceMatchesFilter",
+            ),
+            (
+                AbilityCondition::ZoneChangedThisWay {
+                    filter: TargetFilter::Any,
+                },
+                "ZoneChangedThisWay",
+            ),
+            (AbilityCondition::SourceIsTapped, "SourceIsTapped"),
+        ];
+
+        for (condition, expected_name) in conditions {
+            let (name, support) = condition_feature(&condition);
+            assert_eq!(name, expected_name);
+            assert_eq!(
+                support,
+                FeatureSupport::Handled,
+                "AbilityCondition::{expected_name} is resolved by effects::evaluate_condition",
+            );
+        }
     }
 
     #[test]
@@ -9825,6 +10325,7 @@ mod tests {
             active_zones: vec![],
             characteristic_defining: false,
             description: Some("Skip your draw step.".to_string()),
+            attack_defended: None,
         });
 
         assert!(
@@ -9863,6 +10364,7 @@ mod tests {
             active_zones: vec![],
             characteristic_defining: false,
             description: Some("Players can't draw cards.".to_string()),
+            attack_defended: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -9892,6 +10394,7 @@ mod tests {
             active_zones: vec![],
             characteristic_defining: false,
             description: Some("You can't draw cards.".to_string()),
+            attack_defended: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -9929,6 +10432,7 @@ mod tests {
                 active_zones: vec![],
                 characteristic_defining: false,
                 description: Some(description.to_string()),
+                attack_defended: None,
             });
         }
 
@@ -9936,6 +10440,33 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 702.39a + CR 509.1b-c: data-carrying combat statics are enforced by
+    /// direct combat validation rather than exact registry-key lookup.
+    #[test]
+    fn data_carrying_combat_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MustBlockAttacker {
+                attacker: ObjectId(42),
+            })
+            .description("Target creature blocks this creature this turn if able.".to_string()),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan { max: 1 })
+                .affected(TargetFilter::SelfRef)
+                .description(
+                    "This creature can't be blocked by more than one creature.".to_string(),
+                ),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Data-carrying combat statics should be fully supported, but got gaps: {:?}",
             gaps
         );
     }

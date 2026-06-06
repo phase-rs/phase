@@ -292,6 +292,7 @@ pub fn convert_permanent_rule(
         // CR 509.1b: Attack/block bare prohibitions/requirements.
         P::CantAttack => StaticMode::CantAttack,
         P::CantBlock => StaticMode::CantBlock,
+        P::CantCrew => StaticMode::CantCrew,
         P::CantAttackAlone => StaticMode::CantAttackAlone,
         P::CantBlockAlone => StaticMode::CantBlockAlone,
         P::MustAttack => StaticMode::MustAttack,
@@ -340,6 +341,9 @@ pub fn convert_permanent_rule(
         // restriction. `StaticMode::CantBeBlockedBy { filter }` is the
         // documented inverse of `CantBeBlockedExceptBy` (statics.rs:484).
         P::CantBeBlockedByDefenders(p) => StaticMode::CantBeBlockedBy {
+            filter: filter::convert(p)?,
+        },
+        P::CanBeAttachedOnlyToAPermanent(p) => StaticMode::AttachmentRestriction {
             filter: filter::convert(p)?,
         },
 
@@ -1002,6 +1006,34 @@ mod tests {
 
         assert_eq!(converted.mode, StaticMode::BlockRestriction);
         assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn can_be_attached_only_to_permanent_lowers_to_attach_filter_static() {
+        use crate::schema::types::{CardType, PermanentRule, Permanents, SuperType};
+        use engine::types::ability::{FilterProp, TargetFilter, TypeFilter};
+        use engine::types::card_type::Supertype as EngineSupertype;
+        use engine::types::statics::StaticMode;
+
+        let converted = convert_permanent_rule(
+            &PermanentRule::CanBeAttachedOnlyToAPermanent(Box::new(Permanents::And(vec![
+                Permanents::IsCardtype(CardType::Creature),
+                Permanents::IsSupertype(SuperType::Legendary),
+            ]))),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(
+                converted.mode,
+                StaticMode::AttachmentRestriction { filter: TargetFilter::Typed(ref tf) }
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.iter().any(|p| matches!(p, FilterProp::HasSupertype { value: EngineSupertype::Legendary }))
+            ),
+            "got {:?}",
+            converted.mode
+        );
     }
 
     #[test]

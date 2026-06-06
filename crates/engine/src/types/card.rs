@@ -7,6 +7,7 @@ use super::ability::{
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use super::card_type::CardType;
+use super::format::DeckCopyLimit;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -87,6 +88,24 @@ pub struct TokenImageRef {
     pub preset_id: String,
 }
 
+/// CR 702.148a-b + CR 612: The alternate (cleave-cost) text variant of a spell
+/// with Cleave. Cleave's second ability is a text-changing effect that removes
+/// every square-bracketed span from the spell's rules text. Because the removal
+/// can change which effects/triggers/statics/replacements the spell produces
+/// (Dig Up loses its "reveal it" step; Winged Portent loses its flyer filter),
+/// the parser runs a second pass over the bracket-removed text and stores the
+/// resulting ability set here. When a spell is cast for its cleave cost
+/// (`CastingVariant::Cleave`), the casting flow swaps these onto the stack
+/// object before the spell is prepared. Absent for every non-cleave face, so
+/// `card-data.json` stays byte-identical for the rest of the corpus.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleaveVariant {
+    pub abilities: Vec<AbilityDefinition>,
+    pub triggers: Vec<TriggerDefinition>,
+    pub static_abilities: Vec<StaticDefinition>,
+    pub replacements: Vec<ReplacementDefinition>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardFace {
     pub name: String,
@@ -104,6 +123,11 @@ pub struct CardFace {
     pub triggers: Vec<TriggerDefinition>,
     pub static_abilities: Vec<StaticDefinition>,
     pub replacements: Vec<ReplacementDefinition>,
+    /// CR 702.148a-b: Alternate ability set used when this face is cast for its
+    /// cleave cost (bracketed text removed). `None` for every non-cleave face,
+    /// keeping serialized card data byte-identical for the rest of the corpus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleave_variant: Option<CleaveVariant>,
     pub color_override: Option<Vec<ManaColor>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub color_identity: Vec<ManaColor>,
@@ -144,6 +168,22 @@ pub struct CardFace {
     /// `brawl_commander` so we stay correct when MTGJSON is missing or stale.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_commander: bool,
+    /// Oathbreaker RC: Whether this card can serve as an Oathbreaker.
+    /// Derived from MTGJSON `leadershipSkills.oathbreaker` UNION type-line
+    /// analysis (legendary Planeswalker). Mirrors the `is_commander` /
+    /// `brawl_commander` synthesis pattern.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_oathbreaker: bool,
+    /// CR 100.2a / CR 903.5b: Per-card override to the default constructed copy
+    /// limit, parsed from deck-construction Oracle text ("A deck can have any
+    /// number of cards named ~." / "A deck can have up to N cards named ~." /
+    /// the singleton override). `None` means the default four-of (or Commander
+    /// singleton) limit applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deck_copy_limit: Option<DeckCopyLimit>,
+    /// CR 717.1: Lit-up roll numbers for Attraction card variants (d6 values 1–6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attraction_lights: Vec<u8>,
     /// Parser diagnostic warnings — silent fallbacks, ignored remainders, bare filters.
     /// Populated at build time by the Oracle parser warning accumulator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

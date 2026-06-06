@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use crate::game::combat::AttackTarget;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{battlefield_active_statics, game_functioning_statics};
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
@@ -31,6 +32,9 @@ pub struct StaticCheckContext {
     pub target_id: Option<ObjectId>,
     pub player_id: Option<PlayerId>,
     pub card_name: Option<String>,
+    /// CR 508.1d: When checking scoped `CantAttack` statics (`attack_defended`),
+    /// the declared attack target for the creature in `target_id`.
+    pub attack_target: Option<AttackTarget>,
 }
 
 /// Process-wide cached static-ability registry.
@@ -72,6 +76,11 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // enforcement is in effects/search_library.rs::resolve(). Coverage support is via
     // is_data_carrying_static().
     //
+    // CR 603.2 + CR 609.3: CantCauseSacrificeOrExile is a data-carrying variant —
+    // runtime enforcement is in effects/sacrifice.rs and effects/change_zone.rs via
+    // triggered_cause_sacrifice_or_exile_muzzled(). Coverage support is via
+    // is_data_carrying_static().
+    //
     // CR 603.2g + CR 603.6a + CR 700.4: SuppressTriggers is a data-carrying variant —
     // runtime enforcement is in triggers.rs via event_is_suppressed_by_static_triggers().
     // Coverage support is via is_data_carrying_static(). Per CR 603.6d, static
@@ -79,7 +88,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // triggered and are unaffected by this variant.
     // CR 702.8a: CastWithFlash — card may be cast at instant speed.
     registry.insert(StaticMode::CastWithFlash, handle_rule_mod);
-    // CR 601.2f: ReduceCost/RaiseCost are data-carrying variants — runtime checks are
+    // CR 601.2f: ModifyCost (Reduce/Raise modes) is a data-carrying variant — runtime checks are
     // in game/casting.rs::apply_battlefield_cost_modifiers(). Coverage support is via
     // is_data_carrying_static() in game/coverage.rs.
     // Note: ReduceAbilityCost runtime checks are in game/keywords.rs::apply_ability_cost_reduction().
@@ -116,6 +125,12 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // Runtime enforcement is in effects/copy_spell.rs via active_static_definitions.
     registry.insert(StaticMode::CantBeCopied, handle_cant_be_copied);
     registry.insert(StaticMode::CantBeDestroyed, handle_cant_be_destroyed);
+    // CR 701.19c: CantBeRegenerated — a marked permanent's regeneration shields
+    // are not applied the next time it would be destroyed. Passive rule
+    // modification; runtime enforcement is in replacement.rs::destroy_applier via
+    // object_has_active_cant_be_regenerated(). Registered as a rule-mod so coverage
+    // marks the standalone "can't be regenerated" effect as supported.
+    registry.insert(StaticMode::CantBeRegenerated, handle_rule_mod);
     // CR 702.34: FlashBack — allows casting from graveyard, exiled after resolution.
     registry.insert(StaticMode::FlashBack, handle_flashback);
     // CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -143,11 +158,16 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantUntap, handle_rule_mod);
     // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
     registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
+    // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
+    // must do so ("All creatures able to block ~ do so"; enforced in combat.rs).
+    registry.insert(StaticMode::MustBeBlockedByAll, handle_rule_mod);
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
     registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
     registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
+    // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
+    registry.insert(StaticMode::CantCrew, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
     // CR 104.3b: CantLoseTheGame — player can't lose the game (Platinum Angel).
     // Runtime enforcement is in sba.rs::player_has_cant_lose().
@@ -215,10 +235,13 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
 
     // CR 614.1d: Zone-based restriction handlers.
     // Enforcement happens in zones.rs (CantEnterBattlefieldFrom) and casting.rs (CantCastFrom),
-    // not through the standard handler flow, but we register them as rule_mod so that
-    // `check_static_ability` queries work.
+    // not through the standard handler flow, but we register CantEnterBattlefieldFrom as
+    // rule_mod so that `check_static_ability` queries work.
     registry.insert(StaticMode::CantEnterBattlefieldFrom, handle_rule_mod);
-    registry.insert(StaticMode::CantCastFrom, handle_rule_mod);
+    // Note: CantCastFrom is a data-carrying variant (carries `who` + the prohibited-zone
+    // list on `affected`) — parameterized, so no registry entry. Runtime enforcement is in
+    // casting.rs::is_blocked_from_casting_from_zone(). Coverage support is via
+    // is_data_carrying_static().
     // Note: CantCastDuring is a data-carrying variant — runtime enforcement will be in
     // casting.rs. Coverage support is via is_data_carrying_static().
     // Note: CantActivateDuring is a data-carrying variant — runtime enforcement is in
@@ -259,7 +282,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     //   - ChangesZoneAll            → `TriggerMode::ChangesZoneAll`
     //   - PreventDamage             → `Effect::PreventDamage`
     //   - DamageReduction / cost-mod variants → typed `StaticMode` variants
-    //     (`ReduceCost`, `RaiseCost`, `DefilerCostReduction`, etc.)
+    //     (`ModifyCost`, `DefilerCostReduction`, etc.)
     //   - ETBReplacement / LeavesPlay → `ReplacementDefinition`
     //     (ChangeZone / Moved events)
     //
@@ -325,6 +348,55 @@ pub(crate) fn prohibition_scope_matches_player(
             None => false,
         },
     }
+}
+
+/// CR 603.2: True when the effect currently resolving was put on the stack as a
+/// triggered ability (including delayed triggers created during resolution).
+fn is_resolving_triggered_ability(state: &GameState) -> bool {
+    use crate::types::game_state::StackEntryKind;
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+}
+
+/// CR 603.2 + CR 609.3: Check whether a triggered ability controlled by
+/// `ability.controller` is muzzled from causing `acting_player` to sacrifice or
+/// exile `object_id` by an active `CantCauseSacrificeOrExile` static.
+///
+/// E.g., The Master, Multiplied: "Triggered abilities you control can't cause
+/// you to sacrifice or exile creature tokens you control."
+pub(crate) fn triggered_cause_sacrifice_or_exile_muzzled(
+    state: &GameState,
+    ability: &crate::types::ability::ResolvedAbility,
+    object_id: crate::types::identifiers::ObjectId,
+    acting_player: crate::types::player::PlayerId,
+) -> bool {
+    use crate::types::statics::StaticMode;
+
+    if !is_resolving_triggered_ability(state) {
+        return false;
+    }
+    // "cause you to" — only the ability's controller is protected as the actor.
+    if acting_player != ability.controller {
+        return false;
+    }
+    for (bf_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::CantCauseSacrificeOrExile { ref cause } = def.mode else {
+            continue;
+        };
+        if !prohibition_scope_matches_player(cause, ability.controller, bf_obj.id, state) {
+            continue;
+        }
+        let Some(affected) = def.affected.as_ref() else {
+            continue;
+        };
+        let ctx = crate::game::filter::FilterContext::from_source(state, bf_obj.id);
+        if crate::game::filter::matches_target_filter(state, object_id, affected, &ctx) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Handler for the Continuous mode -- layers.rs handles the actual evaluation.
@@ -562,6 +634,26 @@ pub fn check_static_ability(
             continue;
         }
 
+        // CR 508.1d: Scoped attack prohibitions (Eriette, Propaganda-family flat
+        // restrictions) only apply when the declared target matches `attack_defended`.
+        // When no target is in context (eligibility queries), skip scoped statics so
+        // the creature remains able to attack other players.
+        if matches!(
+            def.mode,
+            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
+        ) {
+            if let Some(defended) = def.attack_defended.as_ref() {
+                if !super::restrictions::attack_target_matches_defended_scope(
+                    state,
+                    context.attack_target.as_ref(),
+                    defended,
+                    obj.controller,
+                ) {
+                    continue;
+                }
+            }
+        }
+
         // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
         // against the affected object's controller (the player whose creature/spell
         // is restricted), distinct from the source-relative `condition` gate above.
@@ -755,6 +847,19 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
             ..Default::default()
         },
     ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantLoseLife)
+}
+
+/// CR 702.11e: Check if `player_id` may target creatures as though they didn't
+/// have hexproof, including "hexproof from [quality]" variants.
+pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::IgnoreHexproof,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
 }
 
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static
@@ -1046,6 +1151,14 @@ fn static_condition_matches_context(
     })
 }
 
+/// CR 702.122c: Returns true when the creature has an active "can't crew Vehicles" static.
+pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::functioning_abilities::active_static_definitions(state, obj)
+            .any(|def| def.mode == StaticMode::CantCrew)
+    })
+}
+
 /// Check if a static ability named `name` applies to a specific object
 /// (target-scoped query). Used for object-targeted prohibitions like
 /// `CantBeSacrificed`, `CantBeEnchanted`, `CantTransform`, etc.
@@ -1118,6 +1231,8 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TargetPlayer => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
+                        // CR 613.1: chosen-player scope has no static context here.
+                        crate::types::ability::ControllerRef::SourceChosenPlayer => false,
                         // CR 109.4: Chosen-player scope has no static context.
                         crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
                         // CR 603.2 + CR 109.4: Triggering-player scope has no
@@ -1127,6 +1242,18 @@ pub(crate) fn static_filter_matches(
                 }
                 return true;
             }
+            // CR 119.7 + CR 109.1: an object-scoped restriction is never a
+            // player restriction. A transient `CantGainLife` grant bound to a
+            // specific object — e.g. Screaming Nemesis redirecting its damage to
+            // a CREATURE, which pins the rider's `ParentTarget` to
+            // `SpecificObject { id }` — must NOT satisfy a player-scoped query
+            // ("can this player gain life?"). Fail CLOSED for object-pin filters
+            // so the redirect-to-creature case locks no player, while the
+            // redirect-to-player case (bound `SpecificPlayer`) is handled by the
+            // transient player-scope scan. Without this arm the catch-all below
+            // fails open and locks every player whenever any creature carries a
+            // granted `CantGainLife`.
+            TargetFilter::SpecificObject { .. } | TargetFilter::SelfRef => return false,
             _ => return true,
         }
     }
@@ -1883,5 +2010,101 @@ mod tests {
         // Remove the transient — mirrors the cleanup path in layers.rs.
         state.transient_continuous_effects.clear();
         assert!(!player_has_protection_from_everything(&state, PlayerId(0)));
+    }
+
+    #[test]
+    fn triggered_sacrifice_or_exile_muzzle_blocks_creature_tokens() {
+        use crate::types::ability::{Effect, FilterProp, ResolvedAbility, TypedFilter};
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        use crate::types::identifiers::ObjectId;
+        use crate::types::player::PlayerId;
+        use crate::types::statics::ProhibitionScope;
+
+        let mut state = setup();
+        let master = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Master, Multiplied".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&master)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantCauseSacrificeOrExile {
+                    cause: ProhibitionScope::Controller,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .properties(vec![FilterProp::Token])
+                        .controller(ControllerRef::You),
+                )),
+            );
+
+        let token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Myriad Copy".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![crate::types::ability::TargetRef::Object(token)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(1000),
+            controller: PlayerId(0),
+            source_id: ObjectId(99),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(99),
+                ability: Box::new(ability.clone()),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+
+        assert!(triggered_cause_sacrifice_or_exile_muzzled(
+            &state,
+            &ability,
+            token,
+            PlayerId(0),
+        ));
+
+        state.resolving_stack_entry = None;
+        assert!(!triggered_cause_sacrifice_or_exile_muzzled(
+            &state,
+            &ability,
+            token,
+            PlayerId(0),
+        ));
     }
 }

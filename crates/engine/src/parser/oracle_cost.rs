@@ -6,12 +6,14 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
+use super::oracle_effect::imperative::parse_discard_card_filter;
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_quantity::parse_for_each_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
@@ -26,6 +28,33 @@ use crate::types::zones::Zone;
 /// Input: the raw text before the colon, e.g., "{T}", "{2}{W}, Sacrifice a creature", "Pay 3 life".
 /// Returns an AbilityCost (possibly Composite for multi-part costs).
 pub fn parse_oracle_cost(text: &str) -> AbilityCost {
+    let text = text.trim();
+    let lower = text.to_lowercase();
+
+    // CR 118.3: Top-level " or " splits the entire cost into alternatives.
+    // E.g., "{3}, {T} or {R}, {T}" → OneOf([Composite([Mana(3), Tap]), Composite([Mana(R), Tap])]).
+    // Must check before comma-splitting so the `or` isn't consumed as part of a segment.
+    // Guard: both sides must contain `{` (mana/tap symbols) to distinguish from
+    // filter phrases like "creature or artifact" inside a Sacrifice cost.
+    if let Ok((_, (before, _after))) = split_once_on(&lower, " or ") {
+        let consumed = before.len();
+        let left_text = &text[..consumed];
+        let right_text = &text[consumed + " or ".len()..];
+        if left_text.contains('{') && right_text.contains('{') {
+            let left = parse_oracle_cost_no_or(left_text);
+            let right = parse_oracle_cost_no_or(right_text);
+            return AbilityCost::OneOf {
+                costs: vec![left, right],
+            };
+        }
+    }
+
+    parse_oracle_cost_no_or(text)
+}
+
+/// Inner cost parser that handles comma-splitting but NOT top-level `or`.
+/// Prevents infinite recursion when parsing each alternative of a OneOf.
+fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
     let text = text.trim();
 
     // Split on ", " for composite costs
@@ -215,6 +244,17 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((u32::MAX, counter_type));
     }
+    // CR 601.2b / CR 602.2b: "any number of" is a casting/activation-time
+    // variable choice. u32::MAX lets the runtime clamp to the actual count via
+    // saturating subtraction.
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        tag::<_, _, E<'_>>("any number of "),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((u32::MAX, counter_type));
+    }
     if let Ok((_, (count, counter_type))) = all_consuming(pair(
         terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
         parse_remove_counter_kind,
@@ -291,22 +331,42 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 count: 1,
             };
         }
+        // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
+        // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
+        if let Some(((), rest_after_any)) = nom_on_lower(rest, &rest_lower, |i| {
+            value((), tag("any number of ")).parse(i)
+        }) {
+            let filter_text = rest_after_any.trim().trim_end_matches('.');
+            let target_phrase = format!("target {filter_text}");
+            let (filter, remainder) = parse_target(&target_phrase);
+            if remainder.trim().is_empty() {
+                return AbilityCost::Sacrifice {
+                    target: filter,
+                    count: u32::MAX,
+                };
+            }
+        }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
-        let (use_count, filter_text) =
-            if let Some((count, rest_after_count)) = parse_number(&rest_lower) {
-                if count > 1 {
-                    // Parsed a count > 1 — use it and strip the count from the filter text
-                    (count, rest_after_count.trim().to_string())
-                } else {
-                    // Count was 1 — treat as single sacrifice with article stripping
-                    let stripped = strip_article(rest, &rest_lower);
-                    (1, stripped.to_string())
-                }
+        // CR 107.3a: `X` in an activation or additional cost is chosen as part
+        // of activating or casting, so preserve it as a variable cost marker.
+        let (use_count, filter_text) = if let Some(((), rest_after_x)) =
+            nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
+        {
+            (u32::MAX, rest_after_x.trim().to_string())
+        } else if let Some((count, rest_after_count)) = parse_number(&rest_lower) {
+            if count > 1 {
+                // Parsed a count > 1 — use it and strip the count from the filter text
+                (count, rest_after_count.trim().to_string())
             } else {
-                // No number found — strip article
+                // Count was 1 — treat as single sacrifice with article stripping
                 let stripped = strip_article(rest, &rest_lower);
                 (1, stripped.to_string())
-            };
+            }
+        } else {
+            // No number found — strip article
+            let stripped = strip_article(rest, &rest_lower);
+            (1, stripped.to_string())
+        };
         let (filter, _) = parse_target(&format!("target {}", filter_text));
         return AbilityCost::Sacrifice {
             target: filter,
@@ -438,6 +498,25 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 random: false,
                 self_ref: false,
             };
+        }
+        // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
+        // card-type filter so only matching cards can pay the cost (Lotleth
+        // Troll: "Discard a creature card:"). Without this the typed
+        // restriction is dropped and any card pays the cost. Mirrors the
+        // effect-form discard and the trigger-side cost parser, which both
+        // delegate to `parse_discard_card_filter`: `parse_count_expr` eats the
+        // leading count token ("a "/"two ") and the remainder is the typed noun
+        // phrase. Ordered before the plain `parse_number` arm so "two creature
+        // cards" is not swallowed as an untyped count.
+        if let Some((count, after_count)) = parse_count_expr(&rest_lower) {
+            if let Some(filter) = parse_discard_card_filter(after_count.trim_start()) {
+                return AbilityCost::Discard {
+                    count,
+                    filter: Some(filter),
+                    random: false,
+                    self_ref: false,
+                };
+            }
         }
         if let Some((n, _)) = parse_number(&rest_lower) {
             return AbilityCost::Discard {
@@ -1255,6 +1334,39 @@ mod tests {
     }
 
     #[test]
+    fn cost_sacrifice_any_number_nonland_permanents() {
+        match parse_oracle_cost("Sacrifice any number of nonland permanents") {
+            AbilityCost::Sacrifice { target, count } => {
+                assert_eq!(count, u32::MAX);
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed(ref tf)
+                        if tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Non(_)))
+                ));
+            }
+            other => panic!("Expected Sacrifice any number nonland, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_x_squirrels() {
+        match parse_oracle_cost("Sacrifice X Squirrels") {
+            AbilityCost::Sacrifice { target, count } => {
+                assert_eq!(count, u32::MAX);
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed(ref tf)
+                        if tf
+                            .type_filters
+                            .iter()
+                            .any(|filter| matches!(filter, TypeFilter::Subtype(name) if name == "Squirrel"))
+                ));
+            }
+            other => panic!("Expected Sacrifice, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn cost_tap_untapped_creature_you_control() {
         assert_eq!(
             parse_oracle_cost("Tap an untapped creature you control"),
@@ -1386,6 +1498,37 @@ mod tests {
         );
     }
 
+    /// CR 701.9a + CR 608.2c: A typed cost-form discard must capture its
+    /// card-type filter (Lotleth Troll: "Discard a creature card:"). Before this
+    /// the filter was dropped, letting any card pay the cost.
+    #[test]
+    fn cost_discard_typed_creature_card() {
+        assert_eq!(
+            parse_oracle_cost("Discard a creature card"),
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                random: false,
+                self_ref: false,
+            }
+        );
+    }
+
+    /// The typed-filter arm must not swallow plural untyped discards: "Discard
+    /// two cards" stays `filter: None, count: 2`.
+    #[test]
+    fn cost_discard_two_untyped_cards_keeps_no_filter() {
+        assert_eq!(
+            parse_oracle_cost("Discard two cards"),
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                filter: None,
+                random: false,
+                self_ref: false,
+            }
+        );
+    }
+
     #[test]
     fn cost_discard_this_card() {
         assert_eq!(
@@ -1442,6 +1585,37 @@ mod tests {
                 assert!(matches!(costs[1], AbilityCost::Exile { .. }));
             }
             other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_exile_colored_card_with_mana_value_x_from_hand() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Exile a green card with mana value X from your hand") {
+            AbilityCost::Exile {
+                zone,
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => {
+                assert_eq!(zone, Some(Zone::Hand));
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Green
+                    }
+                )));
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name }
+                        }
+                    } if name == "X"
+                )));
+            }
+            other => panic!("Expected Exile with green + CmcEQ(X), got {:?}", other),
         }
     }
 
@@ -1736,6 +1910,46 @@ mod tests {
     }
 
     #[test]
+    fn cost_remove_any_number_of_storage_counters_from_self() {
+        assert_eq!(
+            parse_oracle_cost("Remove any number of storage counters from ~"),
+            AbilityCost::RemoveCounter {
+                count: u32::MAX,
+                counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                    "storage".to_string()
+                ),),
+                target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_remove_any_number_of_charge_counters_from_self() {
+        assert_eq!(
+            parse_oracle_cost("Remove any number of charge counters from ~"),
+            AbilityCost::RemoveCounter {
+                count: u32::MAX,
+                counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                    "charge".to_string()
+                ),),
+                target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_remove_any_number_of_counters_from_self() {
+        assert_eq!(
+            parse_oracle_cost("Remove any number of counters from ~"),
+            AbilityCost::RemoveCounter {
+                count: u32::MAX,
+                counter_type: CounterMatch::Any,
+                target: None,
+            }
+        );
+    }
+
+    #[test]
     fn cost_cohort_tap_prefix() {
         assert_eq!(parse_oracle_cost("Cohort — {T}"), AbilityCost::Tap,);
     }
@@ -1766,6 +1980,65 @@ mod tests {
                 assert_eq!(costs[2], AbilityCost::Blight { count: 1 });
             }
             other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    /// CR 118.3: Mirrodin Shard cycle — "{3}, {T} or {R}, {T}" produces
+    /// OneOf([Composite([Mana(3), Tap]), Composite([Mana(R), Tap])]).
+    /// The " or " splits the entire cost into two alternatives.
+    #[test]
+    fn cost_tap_or_mana_granite_shard() {
+        match parse_oracle_cost("{3}, {T} or {R}, {T}") {
+            AbilityCost::OneOf { costs } => {
+                assert_eq!(costs.len(), 2, "expected 2 alternatives, got {:?}", costs);
+                // Left alternative: {3}, {T}
+                match &costs[0] {
+                    AbilityCost::Composite { costs: left } => {
+                        assert_eq!(left.len(), 2);
+                        assert!(matches!(&left[0], AbilityCost::Mana { .. }));
+                        assert_eq!(left[1], AbilityCost::Tap);
+                    }
+                    other => panic!("Expected Composite for left alt, got {:?}", other),
+                }
+                // Right alternative: {R}, {T}
+                match &costs[1] {
+                    AbilityCost::Composite { costs: right } => {
+                        assert_eq!(right.len(), 2);
+                        assert!(matches!(&right[0], AbilityCost::Mana { .. }));
+                        assert_eq!(right[1], AbilityCost::Tap);
+                    }
+                    other => panic!("Expected Composite for right alt, got {:?}", other),
+                }
+            }
+            other => panic!("Expected OneOf, got {:?}", other),
+        }
+    }
+
+    /// Crystal Shard uses blue: "{3}, {T} or {U}, {T}".
+    #[test]
+    fn cost_tap_or_mana_crystal_shard() {
+        match parse_oracle_cost("{3}, {T} or {U}, {T}") {
+            AbilityCost::OneOf { costs } => {
+                assert_eq!(costs.len(), 2);
+                // Left: {3}, {T}
+                assert!(matches!(&costs[0], AbilityCost::Composite { .. }));
+                // Right: {U}, {T}
+                assert!(matches!(&costs[1], AbilityCost::Composite { .. }));
+            }
+            other => panic!("Expected OneOf, got {:?}", other),
+        }
+    }
+
+    /// Standalone "{T} or {G}" — two single-cost alternatives.
+    #[test]
+    fn cost_tap_or_mana_standalone() {
+        match parse_oracle_cost("{T} or {G}") {
+            AbilityCost::OneOf { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert_eq!(costs[0], AbilityCost::Tap);
+                assert!(matches!(&costs[1], AbilityCost::Mana { .. }));
+            }
+            other => panic!("Expected OneOf, got {:?}", other),
         }
     }
 }

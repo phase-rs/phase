@@ -15,7 +15,8 @@ use crate::types::actions::{
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{
-    ConvokeMode, CounterMoveChoice, GameState, TargetSelectionSlot, WaitingFor,
+    CastOfferKind, ConvokeMode, CounterMoveChoice, GameState, PayCostKind, TargetSelectionSlot,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -403,17 +404,20 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             ..
         } => legal_targets
             .iter()
-            .map(|&target_id| {
+            .map(|target| {
                 candidate(
                     GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(target_id)),
+                        target: Some(target.clone()),
                     },
                     TacticalClass::Selection,
                     Some(*player),
                 )
             })
             .collect(),
-        WaitingFor::DiscoverChoice { player, .. } => vec![
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Discover { .. },
+        } => vec![
             candidate(
                 GameAction::DiscoverChoice {
                     choice: CastChoice::Cast,
@@ -467,8 +471,9 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
         // preferred over a no-effect cast that still consumes the resource.
         // Both candidates remain legal — the selector / search may still
         // pick either based on deeper evaluation.
-        WaitingFor::CascadeChoice {
-            player, hit_card, ..
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Cascade { hit_card, .. },
         } => {
             let cast_first = state.objects.get(hit_card).is_some_and(|obj| {
                 crate::game::casting::spell_has_legal_targets(state, obj, *player)
@@ -528,6 +533,21 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 701.30b: One candidate per choosable opponent.
+        WaitingFor::ClashChooseOpponent {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseClashOpponent {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::BetweenGamesChoosePlayDraw { player, .. } => vec![
             candidate(
                 GameAction::ChoosePlayDraw { play_first: true },
@@ -714,28 +734,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             saddle_power,
             eligible_creatures,
         } => saddle_mount_candidates(state, *player, *mount_id, *saddle_power, eligible_creatures),
-        WaitingFor::TapCreaturesForManaAbility {
-            player,
-            count,
-            creatures,
-            ..
-        } => select_cards_variants(*player, creatures, Some(*count)),
-        // CR 117.1 + CR 118.3 + CR 605.3b: Pick which object(s) to exile to
-        // pay the mana ability cost.
-        WaitingFor::ExileForManaAbility {
-            player,
-            count,
-            cards,
-            ..
-        } => select_cards_variants(*player, cards, Some(*count)),
-        // CR 117.1 + CR 118.3 + CR 605.3b: Phyrexian Altar class — pick which
-        // permanent(s) to sacrifice to pay the mana ability cost.
-        WaitingFor::SacrificeForManaAbility {
-            player,
-            count,
-            permanents,
-            ..
-        } => select_cards_variants(*player, permanents, Some(*count)),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
         } => options
@@ -799,6 +797,31 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
+        WaitingFor::CoinFlipKeepChoice {
+            player,
+            results,
+            keep_count,
+        } => {
+            // CR 705.1 + CR 614.1a: Krark's Thumb keep choice. `keep_count` is
+            // always 1 for the only consumer today, so each candidate keeps a
+            // single index. (Generalization: enumerate C(results.len(),
+            // keep_count) combos if a multi-keep effect is ever added.)
+            if *keep_count == 1 {
+                (0..results.len())
+                    .map(|index| {
+                        candidate(
+                            GameAction::SelectCoinFlips {
+                                keep_indices: vec![index],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
         WaitingFor::DigChoice {
             player,
             keep_count,
@@ -1038,25 +1061,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 };
                 for existing in &all_combos {
                     for opt in &options {
-                        // Skip if this object was already chosen in a prior category.
-                        if let Some(_id) = opt {
-                            if existing.iter().any(|prev| prev == opt) {
-                                // Allow None duplicates, but not object duplicates.
-                                // However, also need None as fallback if all are taken.
-                                continue;
-                            }
-                        }
                         let mut combo = existing.clone();
                         combo.push(*opt);
-                        new_combos.push(combo);
-                    }
-                    // If all options for this category conflict, allow None.
-                    if category_eligible
-                        .iter()
-                        .all(|id| existing.contains(&Some(*id)))
-                    {
-                        let mut combo = existing.clone();
-                        combo.push(None);
                         new_combos.push(combo);
                     }
                 }
@@ -1377,25 +1383,39 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        WaitingFor::DiscardForCost {
+        // CR 118.3 + CR 601.2b + CR 605.3b: AI selects objects to pay a cost.
+        // RemoveCounter chooses exactly one source (one permanent per
+        // candidate); Sacrifice honors the [min, max] range; every other kind
+        // selects exactly `count` objects.
+        WaitingFor::PayCost {
             player,
-            count,
-            cards,
+            kind: PayCostKind::RemoveCounter { .. },
+            choices,
             ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
-        WaitingFor::DiscardForManaAbility {
+        } => choices
+            .iter()
+            .map(|id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![*id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::PayCost {
             player,
+            kind: PayCostKind::Sacrifice,
+            choices,
             count,
-            cards,
+            min_count,
             ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
-        // CR 118.3: AI selects permanents to sacrifice as cost
-        WaitingFor::SacrificeForCost {
+        } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
+        WaitingFor::PayCost {
             player,
+            choices,
             count,
-            permanents,
             ..
-        } => bounded_select_card_candidates(*player, permanents, [*count]),
+        } => bounded_select_card_candidates(*player, choices, [*count]),
         // CR 118.12a: AI selects a branch of a disjunctive activation cost.
         WaitingFor::ActivationCostOneOfChoice {
             player,
@@ -1408,24 +1428,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             .map(|(i, _)| {
                 candidate(
                     GameAction::ChooseActivationCostBranch { index: i },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        WaitingFor::ReturnToHandForCost {
-            player,
-            count,
-            permanents,
-            ..
-        } => bounded_select_card_candidates(*player, permanents, [*count]),
-        WaitingFor::RemoveCounterForCost {
-            player, permanents, ..
-        } => permanents
-            .iter()
-            .map(|id| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![*id] },
                     TacticalClass::Selection,
                     Some(*player),
                 )
@@ -1444,28 +1446,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        WaitingFor::BeholdForCost {
-            player,
-            count,
-            choices,
-            ..
-        } => bounded_select_card_candidates(*player, choices, [*count]),
-        // CR 702.34a: AI selects creatures to tap as part of paying flashback tap cost.
-        WaitingFor::TapCreaturesForSpellCost {
-            player,
-            count,
-            creatures,
-            ..
-        } => bounded_select_card_candidates(*player, creatures, [*count]),
-        // CR 118.9a + CR 601.2b + CR 601.2h: AI selects cards to exile as part
-        // of paying an alternative or additional casting cost — escape
-        // (CR 702.138a, graveyard) or pitch spells (hand).
-        WaitingFor::ExileForCost {
-            player,
-            count,
-            cards,
-            ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
         WaitingFor::CollectEvidenceChoice {
             player,
             minimum_mana_value,
@@ -1525,7 +1505,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
-        WaitingFor::AdventureCastChoice { player, .. } => vec![
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Adventure { .. },
+        } => vec![
             candidate(
                 GameAction::ChooseAdventureFace { creature: true },
                 TacticalClass::Selection,
@@ -1569,6 +1552,44 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 702.140c + CR 730.2a: Mutate merge — the controller chooses whether
+        // the mutating spell goes on top of or under the target creature. Both
+        // sides are always legal options.
+        WaitingFor::MutateMergeChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChooseMutateMergeSide {
+                    side: crate::game::merge::MergeSide::Top,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChooseMutateMergeSide {
+                    side: crate::game::merge::MergeSide::Bottom,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
+        // CR 702.99a: Cipher encode — encode on each legal host creature, or
+        // decline (`creature: None`, card → graveyard).
+        WaitingFor::CipherEncodeChoice {
+            player, creatures, ..
+        } => std::iter::once(candidate(
+            GameAction::CipherEncode { creature: None },
+            TacticalClass::Selection,
+            Some(*player),
+        ))
+        .chain(creatures.iter().map(|id| {
+            candidate(
+                GameAction::CipherEncode {
+                    creature: Some(*id),
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            )
+        }))
+        .collect(),
         WaitingFor::CastingVariantChoice {
             player, options, ..
         } => options
@@ -1827,6 +1848,18 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::SpecializeColor {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|&color| {
+                candidate(
+                    GameAction::ChooseSpecializeColor { color },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 702.139a: Companion reveal candidates
         WaitingFor::CompanionReveal {
             player,
@@ -2052,6 +2085,27 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
             candidates
         }
+        // CR 510.1d + CR 702.22k: A banded blocker's damage is divided by the
+        // ACTIVE player among the attackers it blocks. AI heuristic: dump the
+        // blocker's full power onto the first (lowest-ObjectId, deterministic)
+        // blocked attacker. The handler validates only total conservation and
+        // blocked-attacker membership (no lethal rule), so this is always legal.
+        WaitingFor::AssignBlockerDamage {
+            player,
+            total_damage,
+            attackers,
+            ..
+        } => {
+            let mut assignments: Vec<(crate::types::identifiers::ObjectId, u32)> = Vec::new();
+            if let Some(first) = attackers.first() {
+                assignments.push((*first, *total_damage));
+            }
+            vec![candidate(
+                GameAction::AssignBlockerDamage { assignments },
+                TacticalClass::Selection,
+                Some(*player),
+            )]
+        }
         // CR 601.2d: Distribute — even split as default.
         WaitingFor::DistributeAmong {
             player,
@@ -2151,12 +2205,19 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
-        | WaitingFor::DiscoverChoice { .. }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::Discover { .. },
+            ..
+        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::Cascade { .. },
+            ..
+        }
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::RepeatDecision { .. }
-        | WaitingFor::CascadeChoice { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
+        | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
         | WaitingFor::OrderTriggers { .. }
@@ -2199,10 +2260,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         }
         // CR 702.94a: Miracle cast offer — the trigger has resolved; cast if
         // the miracle cost is affordable, otherwise decline.
-        WaitingFor::MiracleCastOffer {
+        WaitingFor::CastOffer {
             player,
-            object_id,
-            cost,
+            kind: CastOfferKind::Miracle { object_id, cost },
         } => {
             let card_id = state
                 .objects
@@ -2231,10 +2291,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         }
         // CR 702.35a: Madness cast offer — cast if the madness cost is affordable,
         // otherwise decline and put the card into its owner's graveyard.
-        WaitingFor::MadnessCastOffer {
+        WaitingFor::CastOffer {
             player,
-            object_id,
-            cost,
+            kind: CastOfferKind::Madness { object_id, cost },
         } => {
             let card_id = state
                 .objects
@@ -2261,7 +2320,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ));
             v
         }
-        WaitingFor::ParadigmCastOffer { player, offers } => {
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Paradigm { offers },
+        } => {
             let mut v: Vec<CandidateAction> = offers
                 .iter()
                 .map(|source| {
@@ -2927,7 +2989,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
             for hand_id in hand_ids {
-                if keywords::effective_web_slinging_cost(state, hand_id).is_none() {
+                if keywords::effective_web_slinging_cost(state, player, hand_id).is_none() {
                     continue;
                 }
                 let Some(card_id) = state.objects.get(&hand_id).map(|o| o.card_id) else {
@@ -3010,6 +3072,8 @@ fn attacker_actions(
     let mut actions = vec![candidate(
         GameAction::DeclareAttackers {
             attacks: Vec::new(),
+            // CR 702.22c: AI does not form attacking bands in v1.
+            bands: vec![],
         },
         TacticalClass::Attack,
         Some(player),
@@ -3023,6 +3087,7 @@ fn attacker_actions(
         actions.push(candidate(
             GameAction::DeclareAttackers {
                 attacks: vec![(id, target)],
+                bands: vec![],
             },
             TacticalClass::Attack,
             Some(player),
@@ -3037,6 +3102,7 @@ fn attacker_actions(
                     .copied()
                     .map(|id| (id, target))
                     .collect(),
+                bands: vec![],
             },
             TacticalClass::Attack,
             Some(player),
@@ -3370,6 +3436,17 @@ fn mana_payment_actions(
     ));
     if let Some(mode) = convoke_mode {
         // CR 702.51a + CR 302.6: Summoning sickness does not restrict tapping for convoke.
+        // CR 702.51a: a Convoke tap reduces the cost by {1} (a Colorless marker) or by one
+        // mana of the creature's color (a colored marker, which pays ONLY a matching colored
+        // pip — see `mana_payment`). Capture the locked spell cost's shards so a colored tap
+        // is offered only when the cost actually contains a pip of that color; tapping for a
+        // color the cost can't use spends the creature for nothing. Unavailable cost ⇒ offer
+        // every color (never prune a possibly-useful option on missing information).
+        let convoke_cost_shards: Option<&[crate::types::mana::ManaCostShard]> =
+            state.pending_cast.as_ref().and_then(|pc| match &pc.cost {
+                crate::types::mana::ManaCost::Cost { shards, .. } => Some(shards.as_slice()),
+                _ => None,
+            });
         for (obj_id, obj) in &state.objects {
             match mode {
                 ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
@@ -3404,8 +3481,17 @@ fn mana_payment_actions(
                         TacticalClass::Mana,
                         Some(player),
                     ));
-                    // Plus one per color the creature has
+                    // CR 702.51a: one colored tap per color the creature has — but only
+                    // colors the cost can actually use. A colored convoke marker pays only a
+                    // matching colored pip, so a color absent from the cost is a wasted tap.
+                    // `contributes_to` covers hybrid/Phyrexian/two-brid pips. When the cost is
+                    // unavailable, offer every color rather than risk pruning a useful option.
                     for color in &obj.color {
+                        if let Some(shards) = convoke_cost_shards {
+                            if !shards.iter().any(|shard| shard.contributes_to(*color)) {
+                                continue;
+                            }
+                        }
                         actions.push(candidate(
                             GameAction::TapForConvoke {
                                 object_id: *obj_id,
@@ -4048,6 +4134,7 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: Default::default(),
             source_id: None,
@@ -4074,8 +4161,8 @@ mod tests {
         };
 
         let actions = candidate_actions(&state);
-        assert!(actions.iter().any(|a| matches!(a.action, GameAction::DeclareAttackers { ref attacks } if attacks.is_empty())));
-        assert!(actions.iter().any(|a| matches!(a.action, GameAction::DeclareAttackers { ref attacks } if attacks.len() == 2)));
+        assert!(actions.iter().any(|a| matches!(a.action, GameAction::DeclareAttackers { ref attacks, .. } if attacks.is_empty())));
+        assert!(actions.iter().any(|a| matches!(a.action, GameAction::DeclareAttackers { ref attacks, .. } if attacks.len() == 2)));
     }
 
     #[test]
@@ -4360,7 +4447,7 @@ mod tests {
             };
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         let actions = candidate_actions(&state);
         assert!(actions.iter().any(|candidate| {
@@ -4465,6 +4552,101 @@ mod tests {
                 GameAction::TapLandForMana { object_id } if object_id == blank_land
             )
         }));
+    }
+
+    #[test]
+    fn convoke_offers_only_cost_relevant_colored_taps() {
+        // CR 702.51a: a Convoke tap reduces the cost by {1} (Colorless marker) or by one
+        // mana of the creature's color (a colored marker that pays ONLY a matching colored
+        // pip). For a {4}{W} cost, a green creature can only help via the generic {1} — a
+        // green colored tap pays nothing and wastes the creature. The generator must offer
+        // the Colorless tap for every eligible creature, suppress the green colored tap, and
+        // still offer the white creature's white tap (the cost contains a {W} pip).
+        let mut state = GameState::new_two_player(42);
+
+        // Lock in a {4}{W} pending cast — the convoke spell being paid.
+        let spell = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Venerated Loxodon".to_string(),
+            Zone::Stack,
+        );
+        state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast::new(
+            spell,
+            CardId(400),
+            crate::types::ability::ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "test".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                spell,
+                PlayerId(0),
+            ),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 4,
+            },
+        )));
+
+        // Mono-green creature: its color is absent from the cost.
+        let green = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&green).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color = vec![ManaColor::Green];
+        }
+        // Mono-white creature: its color is present in the cost.
+        let white = create_object(
+            &mut state,
+            CardId(402),
+            PlayerId(0),
+            "Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&white).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color = vec![ManaColor::White];
+        }
+
+        let actions = mana_payment_actions(&state, PlayerId(0), Some(ConvokeMode::Convoke));
+        let has = |object_id, mana_type| {
+            actions.iter().any(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::TapForConvoke { object_id: o, mana_type: m }
+                        if o == object_id && m == mana_type
+                )
+            })
+        };
+
+        // Generic tap: always available for any convoke-eligible creature.
+        assert!(
+            has(green, ManaType::Colorless),
+            "green creature must offer the generic convoke tap"
+        );
+        assert!(
+            has(white, ManaType::Colorless),
+            "white creature must offer the generic convoke tap"
+        );
+        // Green is absent from {4}{W} → no green colored tap (the wasted-tap bug).
+        assert!(
+            !has(green, ManaType::Green),
+            "green convoke must NOT be offered for a cost with no green pip"
+        );
+        // White is present in {4}{W} → the white creature's colored tap is offered.
+        assert!(
+            has(white, ManaType::White),
+            "white convoke must be offered when the cost contains a white pip"
+        );
     }
 
     #[test]
@@ -4688,11 +4870,13 @@ mod tests {
     #[test]
     fn ai_adventure_generates_face_choice() {
         let mut state = GameState::new_two_player(42);
-        state.waiting_for = WaitingFor::AdventureCastChoice {
+        state.waiting_for = WaitingFor::CastOffer {
             player: PlayerId(0),
-            object_id: crate::types::identifiers::ObjectId(1),
-            card_id: CardId(70),
-            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            kind: CastOfferKind::Adventure {
+                object_id: crate::types::identifiers::ObjectId(1),
+                card_id: CardId(70),
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
         };
 
         let actions = candidate_actions(&state);
@@ -5059,6 +5243,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )
         .cost(AbilityCost::Mana {

@@ -1,12 +1,9 @@
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, WaitingFor } from "../../adapter/types.ts";
+import type { GameAction } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
-
-type CascadeChoiceState = Extract<WaitingFor, { type: "CascadeChoice" }>;
-type DiscoverChoiceState = Extract<WaitingFor, { type: "DiscoverChoice" }>;
 
 /**
  * CR 702.85a: Cascade — when a cascade-source spell finds an eligible nonland
@@ -19,31 +16,30 @@ export function CascadeChoiceModal() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
 
-  if (waitingFor?.type !== "CascadeChoice" && waitingFor?.type !== "DiscoverChoice") return null;
+  if (waitingFor?.type !== "CastOffer") return null;
+  const kind = waitingFor.data.kind;
+  if (kind.type !== "Cascade" && kind.type !== "Discover") return null;
   if (!canActForWaitingState) return null;
 
-  if (waitingFor.type === "DiscoverChoice") {
-    const data = waitingFor.data as DiscoverChoiceState["data"];
+  if (kind.type === "Discover") {
     return (
       <CascadeChoiceContent
         actionType="DiscoverChoice"
-        hitCardId={data.hit_card}
-        missCount={data.exiled_misses.length}
+        hitCardId={kind.hit_card}
+        missCount={kind.exiled_misses.length}
         promptKind="Discover"
         dispatch={dispatch}
       />
     );
   }
 
-  const data = waitingFor.data as CascadeChoiceState["data"];
-
   return (
     <CascadeChoiceContent
       actionType="CascadeChoice"
-      hitCardId={data.hit_card}
-      missCount={data.exiled_misses.length}
+      hitCardId={kind.hit_card}
+      missCount={kind.exiled_misses.length}
       promptKind="Cascade"
-      sourceMv={data.source_mv}
+      sourceMv={kind.source_mv}
       dispatch={dispatch}
     />
   );

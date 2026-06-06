@@ -670,7 +670,7 @@ pub fn parse_alt_cost_keyword_name_to_kind(input: &str) -> OracleResult<'_, Keyw
 /// Matches common Oracle text action verbs: "destroy", "exile", "draw",
 /// "create", "sacrifice", "discard", "return", "put", "counter", "gain",
 /// "lose", "deal", "tap", "untap", "search", "shuffle", "reveal", "mill",
-/// "scry", "surveil", "fight".
+/// "scry", "surveil", "fight", "seek", "choose", "double".
 /// Returns the matched verb as a string slice.
 pub fn parse_verb(input: &str) -> OracleResult<'_, &str> {
     static VERBS: &[&str] = &[
@@ -727,6 +727,12 @@ pub fn parse_verb(input: &str) -> OracleResult<'_, &str> {
         "bolster",
         "explore",
         "adapt",
+        "seeks",
+        "seek",
+        "chooses",
+        "choose",
+        "doubles",
+        "double",
     ];
 
     for &verb in VERBS {
@@ -745,6 +751,20 @@ pub fn parse_verb(input: &str) -> OracleResult<'_, &str> {
         input,
         nom::error::ErrorKind::Fail,
     )))
+}
+
+/// Test whether a lowercased candidate word is a complete Oracle-text imperative
+/// verb (e.g. `search`, `destroy`, `return`). Used by `normalize_card_name_refs`
+/// strategy-5 guard to reject single-word card-name first-word replacements that
+/// would corrupt a sentence-initial instruction verb (e.g. `Search for Tomorrow`
+/// must not rewrite `Search your library...` to `~ your library...`).
+///
+/// Uses `all_consuming(parse_verb)` so only a candidate that *is* a verb in its
+/// entirety returns true; a card-name prefix that merely starts with a verb does
+/// not. CR 201.5: self-references are by name, never by an instruction verb, so
+/// no genuine self-reference is ever an imperative verb.
+pub(crate) fn is_verb_word(candidate_lower: &str) -> bool {
+    all_consuming(parse_verb).parse(candidate_lower).is_ok()
 }
 
 /// Parse common Oracle phrase fragments.

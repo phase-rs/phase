@@ -243,6 +243,27 @@ function SetTappedForm({ onDispatch }: Props) {
   );
 }
 
+function SetPreparedForm({ onDispatch }: Props) {
+  const [objectId, setObjectId] = useState<ObjectId | null>(null);
+  const [prepared, setPrepared] = useState(true);
+
+  return (
+    <>
+      <ObjectSelect value={objectId} onChange={setObjectId} filter={onBattlefield} />
+      <CheckboxInput checked={prepared} onChange={setPrepared} label="Prepared" />
+      <SubmitButton
+        disabled={objectId == null}
+        onClick={() =>
+          objectId != null &&
+          onDispatch({ type: "SetPrepared", data: { object_id: objectId, prepared } })
+        }
+      >
+        Set Prepared State
+      </SubmitButton>
+    </>
+  );
+}
+
 function SetControllerForm({ onDispatch }: Props) {
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [controller, setController] = useState<PlayerId>(0);
@@ -437,6 +458,9 @@ export function DebugObjectActions({ onDispatch }: Props) {
       </AccordionItem>
       <AccordionItem label="Set Tapped" expanded={expanded === "tapped"} onToggle={() => toggle("tapped")}>
         <SetTappedForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Set Prepared" expanded={expanded === "prepared"} onToggle={() => toggle("prepared")}>
+        <SetPreparedForm onDispatch={onDispatch} />
       </AccordionItem>
       <AccordionItem label="Set Controller" expanded={expanded === "controller"} onToggle={() => toggle("controller")}>
         <SetControllerForm onDispatch={onDispatch} />

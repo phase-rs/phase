@@ -93,6 +93,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                 supertypes: obj.card_types.supertypes.clone(),
                 keywords: obj.keywords.clone(),
                 colors: obj.color.clone(),
+                chosen_attributes: obj.chosen_attributes.clone(),
                 // CR 400.7: Capture counters for "if it had counters on it" patterns.
                 counters: obj.counters.clone(),
             };
@@ -175,7 +176,45 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         };
         if !preserve_bestow_form && obj_mut.bestow_form.is_some() {
             super::casting::revert_bestow_aura_form(obj_mut);
-            state.layers_dirty = true;
+            state.layers_dirty.mark_full();
+        }
+
+        // CR 702.148a + CR 612: A cleave spell's text-changing effect functions
+        // only "while a spell with cleave is on the stack." The bracket-removed
+        // ability set is installed on the hand object at cast time and must be
+        // reverted to the printed form when the spell leaves the stack —
+        // whether it resolved (Stack → Graveyard/Exile), was countered, or
+        // fizzled. Without this revert the same object id carries the cleave
+        // (bracket-removed) abilities into the graveyard, and a graveyard→hand
+        // recursion (Regrowth, Eternal Witness) — which reuses the object id
+        // without re-projecting the printed face — would let a later
+        // normal-cost recast resolve with the wrong (cleave) text.
+        //
+        // Gated the same way as bestow (preserve only on → Stack and on
+        // Stack → Battlefield) so the logic is uniform and future-proof, even
+        // though cleave instants/sorceries never resolve onto the battlefield.
+        let preserve_cleave_form = match from {
+            _ if to == Zone::Stack => true,
+            Zone::Stack if to == Zone::Battlefield => true,
+            _ => false,
+        };
+        if !preserve_cleave_form && obj_mut.cleave_form.is_some() {
+            super::casting::revert_cleave_text_change(obj_mut);
+        }
+
+        // CR 702.160a + CR 400.7: Prototype's alternative characteristics
+        // apply only to the spell/permanent produced by casting it prototyped.
+        // Preserve the marker while the cast becomes a stack spell and while
+        // that spell resolves to the battlefield; clear it for every other
+        // zone change so the new object reverts to printed characteristics.
+        let preserve_prototype_form = match from {
+            _ if to == Zone::Stack => true,
+            Zone::Stack if to == Zone::Battlefield => true,
+            _ => false,
+        };
+        if !preserve_prototype_form && obj_mut.prototype_form.is_some() {
+            super::casting::clear_prototype_form(obj_mut);
+            state.layers_dirty.mark_full();
         }
 
         // CR 122.2: Counters cease to exist when an object changes zones.
@@ -192,7 +231,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {
         super::pairing::break_pair(state, object_id);
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
         super::layers::prune_host_left_effects(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);
         for tapped in state.lands_tapped_for_mana.values_mut() {
@@ -251,7 +290,7 @@ pub fn create_object(
 pub fn move_to_zone(
     state: &mut GameState,
     object_id: ObjectId,
-    to: Zone,
+    mut to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 903.9a: A fresh zone change resets the "declined zone return" flag
@@ -289,9 +328,44 @@ pub fn move_to_zone(
         }
     }
 
+    // CR 730.3: When a merged permanent leaves the battlefield, each absorbed
+    // component is routed to its own owner's destination zone before the surviving
+    // object completes its move. No-op for non-merged objects. Done here (while
+    // the object is still on the battlefield with its `merged_components` intact,
+    // before `apply_zone_exit_cleanup` clears them).
+    {
+        let leaving_battlefield = state
+            .objects
+            .get(&object_id)
+            .is_some_and(|o| o.zone == Zone::Battlefield && !o.merged_components.is_empty());
+        if leaving_battlefield {
+            super::merge::split_merged_permanent_on_leave(state, object_id, to, events);
+        }
+    }
+
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
+
+    // CR 603.2g + CR 603.6a: A Battlefield → Battlefield no-op does not put a
+    // permanent onto the battlefield, so no trigger event occurs and no ETB
+    // ability can trigger. No new object is created and no ZoneChanged event is
+    // emitted.
+    // Without this guard, move_to_zone(coiling_id, Battlefield) while Coiling
+    // Oracle is already on the battlefield removes then re-adds it, emits a
+    // spurious ZoneChanged{from:Battlefield, to:Battlefield} event, and fires
+    // its own ETB trigger again — causing an infinite loop.
+    if from == Zone::Battlefield && to == Zone::Battlefield {
+        return;
+    }
+
     let owner = obj.owner;
+    let redirect_attraction_to_command = super::attractions::is_attraction_card(obj)
+        && !matches!(to, Zone::Battlefield | Zone::Exile | Zone::Command);
+    if redirect_attraction_to_command {
+        // CR 717.6: Astrotorium-backed cards that would move to any zone other
+        // than battlefield, exile, or command move to command instead.
+        to = Zone::Command;
+    }
     let unattached_from = if from == Zone::Battlefield {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -311,6 +385,15 @@ pub fn move_to_zone(
     apply_zone_exit_cleanup(state, object_id, from, to);
 
     remove_from_zone(state, object_id, from, owner);
+    if redirect_attraction_to_command {
+        // CR 717.6a: Cards redirected this way are kept in the command-zone
+        // junkyard pile, separate from the Attraction deck.
+        state
+            .objects
+            .get_mut(&object_id)
+            .expect("object exists")
+            .in_attraction_deck = false;
+    }
     add_to_zone(state, object_id, to, owner);
 
     // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
@@ -356,7 +439,7 @@ pub fn move_to_zone(
     // CR 702.94a + CR 400.3: hand-zone continuous effects require re-evaluation
     // when a hand object appears or departs.
     if to == Zone::Battlefield || to == Zone::Hand || from == Zone::Hand {
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
     }
 
     // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
@@ -420,6 +503,86 @@ pub fn move_to_zone(
         to,
         record: Box::new(zone_change_record),
     });
+}
+
+/// CR 603.10a: Record that every member of `group` left the battlefield in the
+/// SAME simultaneous event, so leaves-the-battlefield / dies observers that are
+/// themselves in the group observe each other via last-known information (the
+/// CR 603.10a worked example: a Blood Artist destroyed by the same Wrath of God
+/// as the creatures it counts triggers once per co-dying creature).
+///
+/// Producers of a simultaneous departure batch — one board wipe (`DestroyAll`),
+/// one state-based-action destruction pass (CR 704.7), one mass bounce/exile —
+/// call this on the events they just produced, AFTER moving every member. This
+/// is the authority for simultaneity: it is established here at the
+/// event-production layer rather than inferred downstream from the shape of the
+/// accumulated event vector, so sequential departures within a single
+/// resolution are never grouped (a member only appears in another member's
+/// `co_departed` when they truly left together).
+pub fn mark_simultaneous_departures(events: &mut [GameEvent], group: &[ObjectId]) {
+    if group.len() < 2 {
+        return;
+    }
+    for event in events.iter_mut() {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if group.contains(object_id) {
+                record.co_departed = group
+                    .iter()
+                    .copied()
+                    .filter(|&member| member != *object_id)
+                    .collect();
+            }
+        }
+    }
+}
+
+/// CR 603.10a: Filter `ids` to those whose object has actually left the
+/// battlefield (now resides in some other zone). Producers that accumulate a
+/// candidate ID list — bounce, change-zone, sacrifice, destroy — pass that list
+/// through this filter before `mark_simultaneous_departures` so that a member
+/// which never actually departed (regenerated, sacrifice-prevented, bounce
+/// guarded out) is excluded from every survivor's `co_departed` group.
+pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
+    ids.iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.zone != Zone::Battlefield)
+        })
+        .collect()
+}
+
+/// CR 603.10a: Stamp simultaneous departure on a slice of events produced by a
+/// sweep that does not expose an explicit ID list (e.g. `sacrifice_unchosen`
+/// internal loops). Collects every battlefield-origin `ZoneChanged` in `slice`
+/// whose object is now off-battlefield, then groups them as co-departed.
+pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent]) {
+    let departed: Vec<ObjectId> = slice
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            } if state
+                .objects
+                .get(object_id)
+                .is_some_and(|o| o.zone != Zone::Battlefield) =>
+            {
+                Some(*object_id)
+            }
+            _ => None,
+        })
+        .collect();
+    mark_simultaneous_departures(slice, &departed);
 }
 
 fn capture_linked_exile_snapshot(
@@ -577,7 +740,23 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
             state.stack_paid_facts.remove(&object_id);
         }
         Zone::Exile => state.exile.retain(|id| *id != object_id),
-        Zone::Command => state.command_zone.retain(|id| *id != object_id),
+        Zone::Command => {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_attraction_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .attraction_deck
+                    .retain(|id| *id != object_id);
+            } else {
+                state.command_zone.retain(|id| *id != object_id);
+            }
+        }
     }
 }
 
@@ -601,7 +780,23 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
         Zone::Battlefield => state.battlefield.push_back(object_id),
         Zone::Stack => {} // Stack entries are managed separately via StackEntry
         Zone::Exile => state.exile.push_back(object_id),
-        Zone::Command => state.command_zone.push_back(object_id),
+        Zone::Command => {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_attraction_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .attraction_deck
+                    .push_back(object_id);
+            } else {
+                state.command_zone.push_back(object_id);
+            }
+        }
     }
 }
 
@@ -785,6 +980,30 @@ mod tests {
             }
             _ => panic!("expected ZoneChanged event"),
         }
+    }
+
+    /// CR 603.2g + CR 603.6a: a no-op Battlefield → Battlefield move does not
+    /// create a zone-change event, so ETB triggers have no event to observe.
+    #[test]
+    fn move_battlefield_to_battlefield_is_no_op() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Coiling Oracle".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        assert!(state.battlefield.contains(&id));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert!(
+            events.is_empty(),
+            "same-zone battlefield move must not emit ZoneChanged events"
+        );
     }
 
     #[test]

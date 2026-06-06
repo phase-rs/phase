@@ -7,7 +7,7 @@ use crate::types::ability::{
     StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntryKind};
+use crate::types::game_state::{CastingVariant, GameState, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -117,12 +117,13 @@ pub fn resolve(
                 // Aftermath, and Harmonize exile when leaving the stack for
                 // any reason, including when countered. Escape (CR 702.138)
                 // has no such clause — countered escape spells go to graveyard.
-                let exiles_on_counter = match &state.stack[idx].kind {
+                let casting_variant = match &state.stack[idx].kind {
                     StackEntryKind::Spell {
                         casting_variant, ..
-                    } => casting_variant.replaces_stack_to_graveyard_with_exile(),
-                    _ => false,
+                    } => *casting_variant,
+                    _ => CastingVariant::Normal,
                 };
+                let exiles_on_counter = casting_variant.replaces_stack_to_graveyard_with_exile();
                 let source_permanent_id = state.stack[idx].source_id;
                 let removed_entry_id = state.stack[idx].id;
                 state.stack.remove(idx);
@@ -137,6 +138,9 @@ pub fn resolve(
                         Zone::Graveyard
                     };
                     zones::move_to_zone(state, obj_id, dest, events);
+                    if casting_variant.restores_front_face_after_stack_exit() {
+                        super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
+                    }
                 } else {
                     // CR 110.1 / CR 701.8a: An ability was countered, so its
                     // source is a permanent the rider can act on. Defer the
@@ -148,6 +152,7 @@ pub fn resolve(
                 events.push(GameEvent::SpellCountered {
                     object_id: obj_id,
                     countered_by: ability.source_id,
+                    countered_by_controller: ability.controller,
                 });
             }
         }
@@ -275,12 +280,13 @@ pub fn resolve_all(
         // CR 702.34a / CR 702.127a / CR 702.180a: Flashback / Aftermath /
         // Harmonize exile on leaving the stack for any reason, including
         // counter. Escape (CR 702.138) has no such clause.
-        let exiles_on_counter = match &state.stack[idx].kind {
+        let casting_variant = match &state.stack[idx].kind {
             StackEntryKind::Spell {
                 casting_variant, ..
-            } => casting_variant.replaces_stack_to_graveyard_with_exile(),
-            _ => false,
+            } => *casting_variant,
+            _ => CastingVariant::Normal,
         };
+        let exiles_on_counter = casting_variant.replaces_stack_to_graveyard_with_exile();
         let removed_entry_id = state.stack[idx].id;
         state.stack.remove(idx);
         state.stack_paid_facts.remove(&removed_entry_id);
@@ -294,6 +300,9 @@ pub fn resolve_all(
                 Zone::Graveyard
             };
             zones::move_to_zone(state, obj_id, dest, events);
+            if casting_variant.restores_front_face_after_stack_exit() {
+                super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
+            }
         }
         // For abilities, removing the stack entry above is sufficient — they
         // aren't cards and have no zone to move to.
@@ -301,6 +310,7 @@ pub fn resolve_all(
         events.push(GameEvent::SpellCountered {
             object_id: obj_id,
             countered_by: ability.source_id,
+            countered_by_controller: ability.controller,
         });
     }
 
@@ -540,6 +550,7 @@ mod tests {
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -694,6 +705,7 @@ mod tests {
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -854,6 +866,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn jumpstart_spell_exiles_when_countered() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Jump-start Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::JumpStart,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let counter_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_rider: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &counter_ability, &mut events).unwrap();
+
+        // CR 702.133a: "exile this card instead of putting it anywhere else any
+        // time it would leave the stack" — a countered jump-started spell exiles,
+        // it does not go to the graveyard.
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Exile,
+            "Jump-start spell should be exiled when countered, not put in the graveyard"
+        );
+    }
+
     /// CR 118.12 (M1 fold): Post the 2026-05-09 fold, the counter resolver
     /// has no bespoke `unless_pay` branch — the modifier flows through the
     /// generic `ResolvedAbility.unless_pay` path in `effects::mod`. This
@@ -985,6 +1042,7 @@ mod tests {
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -1168,6 +1226,7 @@ mod tests {
                     description: None,
                     source_name: String::new(),
                     subject_match_count: None,
+                    die_result: None,
                 },
             });
         }
@@ -1281,6 +1340,7 @@ mod tests {
                     description: None,
                     source_name: String::new(),
                     subject_match_count: None,
+                    die_result: None,
                 },
             });
         }

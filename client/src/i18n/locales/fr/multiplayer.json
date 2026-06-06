@@ -81,14 +81,19 @@
     "waitTimeHours": "il y a {{count}} h",
     "buildMismatchTitle": "L'hôte est en {{version}} ({{commit}}) — votre version est différente. Actualisez pour mettre à jour.",
     "gameFull": "Cette partie est complète.",
+    "youAreHosting": "Vous hébergez cette partie.",
+    "hosting": "Hébergement",
     "sandboxConfirm": "Il s'agit d'une partie bac à sable. Les joueurs disposant de la permission de débogage peuvent manipuler directement l'état de la partie. Continuer ?",
     "draftBadgeTitle": "Draft {{kind}} — {{setCode}}",
     "draftBadge": "Draft {{setCode}}",
     "p2pBadgeTitle": "Partie pair-à-pair (l'hôte exécute le moteur)",
     "sandboxBadgeTitle": "Cette partie autorise les actions de débogage. À utiliser pour des tests — pas pour un match compétitif.",
+    "rankedBadgeTitle": "Salon classé",
+    "rankedBadge": "CLASSÉ",
     "anonymous": "Anonyme",
     "by": "par {{name}}",
-    "passwordProtected": "Protégé par mot de passe"
+    "passwordProtected": "Protégé par mot de passe",
+    "join": "Rejoindre"
   },
   "serverPicker": {
     "title": "Serveur",
@@ -151,7 +156,8 @@
     "hostGame": "Héberger une partie",
     "hostP2PGame": "Héberger une partie P2P",
     "passwordRequired": "Mot de passe requis",
-    "passwordPlaceholder": "Saisissez le mot de passe"
+    "passwordPlaceholder": "Saisissez le mot de passe",
+    "watch": "Watch"
   },
   "hostSetup": {
     "hostDirectMatch": "Héberger un match direct",
@@ -179,6 +185,7 @@
     "human": "Humain",
     "waitingForPlayer": "En attente d'un joueur",
     "startWhenFull": "Démarrer une fois complet",
+    "ranked": "Classé",
     "listInLobby": "Répertorier dans le salon",
     "sandboxMode": "Mode bac à sable — autoriser les actions de débogage",
     "sandboxModeHelp": "L'hôte peut manipuler directement l'état de la partie (déplacer des cartes, modifier les points de vie, modifier les marqueurs) et accorder la permission de débogage à d'autres joueurs. À utiliser pour des tests ou du jeu bac à sable — pas pour des matchs compétitifs. Ce paramètre ne peut pas être modifié une fois la partie lancée.",

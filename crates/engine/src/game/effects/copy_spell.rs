@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    CopyRetargetPermission, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef,
+    ControllerRef, CopyRetargetPermission, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor};
@@ -36,8 +36,9 @@ pub fn resolve(
 
     // CR 707.10: The player under whose control the copy is put on the stack.
     // Twincast/Gogo: the effect's controller. Chain cycle ("that player may
-    // copy this spell"): the targeted player.
-    let copy_controller = copy_controller(ability);
+    // copy this spell"): the targeted player. CR 702.144a (Demonstrate): the
+    // `copier` override routes the copy to a player relative to the controller.
+    let copy_controller = resolve_copy_controller(state, ability);
 
     // Allocate a new stack ID for the copy.
     let copy_id = ObjectId(state.next_object_id);
@@ -79,6 +80,7 @@ pub fn resolve(
         {
             set_resolved_source_recursive(a, copy_id);
             a.context.additional_cost_paid = false;
+            a.context.alternative_mana_cost_paid = false;
             a.context.additional_cost_payment_count = 0;
             a.context.kickers_paid.clear();
         }
@@ -213,6 +215,61 @@ fn copy_controller(ability: &ResolvedAbility) -> PlayerId {
         .unwrap_or(ability.controller)
 }
 
+/// CR 707.10: Determine the player who puts the copy onto the stack (and thus
+/// controls it). An explicit `TargetRef::Player` (the Chain cycle's inherited
+/// player target) always wins. Otherwise an `Effect::CopySpell { copier:
+/// Some(ref), .. }` override resolves a player relative to the controller — CR
+/// 702.144a (Demonstrate) sets `copier: Opponent` so a chosen opponent copies.
+/// With no target and no copier, the effect's controller copies
+/// (Twincast/Casualty/Replicate).
+fn resolve_copy_controller(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+    if let Effect::CopySpell {
+        copier: Some(cref), ..
+    } = &ability.effect
+    {
+        // A declared player target (Chain cycle) takes precedence over the
+        // copier override; otherwise resolve the override to a concrete player.
+        let has_player_target = ability
+            .targets
+            .iter()
+            .any(|t| matches!(t, TargetRef::Player(_)));
+        if !has_player_target {
+            if let Some(player) = resolve_copier_player(state, cref, ability.controller) {
+                return player;
+            }
+        }
+    }
+    copy_controller(ability)
+}
+
+/// CR 702.144a + CR 102.2 / CR 102.3: Resolve a `copier` `ControllerRef` to a
+/// concrete player relative to the copy's controller. Only the variants
+/// meaningful as a copier are handled: `You` (the controller) and `Opponent`
+/// (the controller's opponent). Other refs return `None`, so the caller falls
+/// back to the default controller. NOTE: with multiple opponents, "choose an
+/// opponent" (CR 702.144a) resolves to the first opponent in turn order; an
+/// interactive multiplayer choice is left as a follow-up. In two-player games
+/// (the common case) this is exact, since there is a single opponent.
+fn resolve_copier_player(
+    state: &GameState,
+    cref: &ControllerRef,
+    controller: PlayerId,
+) -> Option<PlayerId> {
+    match cref {
+        ControllerRef::You => Some(controller),
+        ControllerRef::Opponent => crate::game::players::opponents(state, controller)
+            .into_iter()
+            .next(),
+        ControllerRef::ScopedPlayer
+        | ControllerRef::TargetPlayer
+        | ControllerRef::ParentTargetController
+        | ControllerRef::DefendingPlayer
+        | ControllerRef::ChosenPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::TriggeringPlayer => None,
+    }
+}
+
 /// CR 707.10 + CR 614.1a: Apply active "copy an additional time" replacement
 /// effects (Twinning Staff) to the number of copies a `CopySpell` effect would
 /// create. `base` is the count the effect would otherwise produce (its
@@ -316,7 +373,30 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
         }
         return None;
     }
+    if let Some(entry) = triggering_spell_stack_entry(state) {
+        return Some(entry);
+    }
     state.stack.last().cloned()
+}
+
+/// CR 601.2i + CR 603.2 + CR 707.10: "Copy that spell" / `Trigger_ThatSpell`
+/// on a `SpellCast` trigger (Mendicant Core, Guidelight; Twincast-style copies
+/// gated on optional costs). When another triggered ability sits above the cast
+/// spell on the stack (Rhystic Study, Monastery Mentor, etc.), `stack.last()`
+/// points at the wrong entry — bind from the triggering event's spell instead.
+fn triggering_spell_stack_entry(state: &GameState) -> Option<StackEntry> {
+    let event = state.current_trigger_event.as_ref()?;
+    let object_id = crate::game::targeting::extract_source_from_event(event)?;
+    let mut fallback = None;
+    for entry in &state.stack {
+        if entry.id == object_id {
+            return Some(entry.clone());
+        }
+        if fallback.is_none() && entry.source_id == object_id {
+            fallback = Some(entry.clone());
+        }
+    }
+    fallback
 }
 
 fn stack_entry_cant_be_copied(state: &GameState, entry: &StackEntry) -> bool {
@@ -384,7 +464,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        CopyRetargetPermission, Effect, QuantityExpr, TargetFilter, TargetRef,
+        ControllerRef, CopyRetargetPermission, Effect, QuantityExpr, TargetFilter, TargetRef,
     };
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
@@ -444,6 +524,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             ObjectId(20),
@@ -488,6 +569,308 @@ mod tests {
         }
     }
 
+    /// CR 702.144a + CR 707.10: a `CopySpell { copier: Some(Opponent) }` puts the
+    /// copy onto the stack under an OPPONENT's control (Demonstrate's
+    /// opponent-copy). In a two-player game the single opponent is chosen
+    /// deterministically. Revert-discriminating: before the `copier` field the
+    /// copy was always controlled by the effect's controller.
+    #[test]
+    fn copy_spell_copier_opponent_routes_copy_to_opponent() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt",
+            original_ability,
+            CastingVariant::Normal,
+        );
+
+        // The copy effect is controlled by P0, but `copier: Opponent` means P1
+        // puts the copy onto the stack and controls it.
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: Some(ControllerRef::Opponent),
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        assert_eq!(state.stack.len(), 2, "the copy was added to the stack");
+        let copy_id = state.stack[1].id;
+        let copy_obj = state.objects.get(&copy_id).expect("copy object exists");
+        assert_eq!(
+            copy_obj.controller,
+            PlayerId(1),
+            "CR 702.144a: the chosen opponent controls the Demonstrate copy"
+        );
+        // The copy's resolved ability chain is re-controllered to the opponent.
+        if let StackEntryKind::Spell {
+            ability: Some(a), ..
+        } = &state.stack[1].kind
+        {
+            assert_eq!(a.controller, PlayerId(1));
+        } else {
+            panic!("copy should be a Spell with an ability");
+        }
+    }
+
+    /// CR 702.144a + CR 608.2c: Demonstrate's opponent copy is conditional on
+    /// the controller accepting the optional self-copy. A declined optional
+    /// self-copy must not run the opponent sub-copy.
+    #[test]
+    fn demonstrate_decline_skips_opponent_subcopy() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Creative Technique",
+            original_ability,
+            CastingVariant::Normal,
+        );
+
+        let opponent_copy = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: Some(ControllerRef::Opponent),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let mut demonstrate = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        )
+        .sub_ability(opponent_copy);
+        demonstrate.optional = true;
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &demonstrate, &mut events, 0)
+            .unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "Demonstrate self-copy should pause for the optional choice"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "declining Demonstrate must not put either copy onto the stack"
+        );
+        assert!(
+            state.pending_continuation.is_none(),
+            "declining Demonstrate must not leave the opponent copy queued"
+        );
+        assert!(
+            state
+                .objects
+                .values()
+                .all(|obj| !obj.is_token || obj.zone != Zone::Stack),
+            "declining Demonstrate must not create a spell-copy token"
+        );
+    }
+
+    /// CR 707.10: `copier: None` (the default for Twincast/Casualty/Replicate)
+    /// keeps the copy under the effect controller's control — the new field is
+    /// inert unless explicitly set.
+    #[test]
+    fn copy_spell_copier_none_keeps_controller() {
+        let mut state = GameState::new_two_player(42);
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt",
+            original_ability,
+            CastingVariant::Normal,
+        );
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack[1].id;
+        let copy_obj = state.objects.get(&copy_id).expect("copy object exists");
+        assert_eq!(copy_obj.controller, PlayerId(0));
+    }
+
+    /// CR 707.10: an explicit `TargetRef::Player` (the Chain cycle's inherited
+    /// player target) takes precedence over a `copier` override — guards the
+    /// `has_player_target` short-circuit in `resolve_copy_controller`.
+    #[test]
+    fn copy_spell_explicit_player_target_beats_copier() {
+        let mut state = GameState::new_two_player(42);
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt",
+            original_ability,
+            CastingVariant::Normal,
+        );
+        // copier says "You" (P0), but an explicit player target (P1) must win.
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: Some(ControllerRef::You),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+        let copy_id = state.stack[1].id;
+        assert_eq!(
+            state.objects.get(&copy_id).unwrap().controller,
+            PlayerId(1),
+            "an explicit player target must control the copy over the copier override"
+        );
+    }
+
+    /// CR 707.10: `copier: Some(You)` resolves to the effect controller.
+    #[test]
+    fn copy_spell_copier_you_resolves_to_controller() {
+        let mut state = GameState::new_two_player(42);
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt",
+            original_ability,
+            CastingVariant::Normal,
+        );
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: Some(ControllerRef::You),
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+        let copy_id = state.stack[1].id;
+        assert_eq!(state.objects.get(&copy_id).unwrap().controller, PlayerId(0));
+    }
+
+    /// Back-compat: the new `copier` field is `#[serde(default, skip_serializing_if
+    /// = "Option::is_none")]`, so `None` is omitted from serialized card data
+    /// (older JSON without the field still loads) and a set copier round-trips.
+    #[test]
+    fn copy_spell_copier_serde_default_and_roundtrip() {
+        let none = Effect::CopySpell {
+            target: TargetFilter::Any,
+            retarget: CopyRetargetPermission::KeepOriginalTargets,
+            copier: None,
+        };
+        let json_none = serde_json::to_string(&none).unwrap();
+        assert!(
+            !json_none.contains("copier"),
+            "copier: None must be skipped so existing serialized data is unchanged"
+        );
+        // Old data (no `copier` key) deserializes back to `None`.
+        assert_eq!(serde_json::from_str::<Effect>(&json_none).unwrap(), none);
+
+        let with = Effect::CopySpell {
+            target: TargetFilter::Any,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: Some(ControllerRef::Opponent),
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains("copier"));
+        assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), with);
+    }
+
     #[test]
     fn copy_spell_resets_additional_cost_payment_history() {
         let mut state = GameState::new_two_player(42);
@@ -529,6 +912,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             ObjectId(20),
@@ -557,6 +941,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             ObjectId(20),
@@ -597,6 +982,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
             },
             vec![],
             ObjectId(20),
@@ -644,6 +1030,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             ObjectId(20),
@@ -698,6 +1085,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             ObjectId(20),
@@ -725,6 +1113,18 @@ mod tests {
         owner: PlayerId,
         ability: ResolvedAbility,
     ) {
+        push_trigger_with_event(state, obj_id, card_id, owner, ability, None);
+    }
+
+    /// Helper: push a triggered ability onto the stack with an optional trigger event.
+    fn push_trigger_with_event(
+        state: &mut GameState,
+        obj_id: ObjectId,
+        card_id: CardId,
+        owner: PlayerId,
+        ability: ResolvedAbility,
+        trigger_event: Option<GameEvent>,
+    ) {
         let obj = crate::game::game_object::GameObject::new(
             obj_id,
             card_id,
@@ -741,10 +1141,11 @@ mod tests {
                 source_id: obj_id,
                 ability: Box::new(ability),
                 condition: None,
-                trigger_event: None,
+                trigger_event,
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
     }
@@ -769,6 +1170,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(ObjectId(99))],
             ObjectId(10),
@@ -820,6 +1222,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
             },
             vec![],
             ObjectId(10), // source_id = original spell
@@ -847,6 +1250,173 @@ mod tests {
                 .is_some_and(|a| matches!(a.effect, Effect::ChangeZone { .. })),
             "Copy should replicate ChangeZone (Anguished Unmaking), not the trigger"
         );
+    }
+
+    /// CR 601.2i + CR 603.2 + CR 707.10 (issue #1672): Mendicant Core,
+    /// Guidelight — copy the triggering artifact spell even when another
+    /// triggered ability sits above it on the stack (Rhystic Study class).
+    #[test]
+    fn copy_spell_triggering_spell_finds_cast_spell_past_intermediate_trigger() {
+        let mut state = GameState::new_two_player(42);
+        let cast_spell_id = ObjectId(10);
+        let rhystic_trigger_id = ObjectId(11);
+
+        let cast_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            cast_spell_id,
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            cast_spell_id,
+            CardId(1),
+            PlayerId(0),
+            "Rhystic Study",
+            cast_ability,
+            CastingVariant::Normal,
+        );
+
+        let rhystic_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            rhystic_trigger_id,
+            PlayerId(1),
+        );
+        push_trigger(
+            &mut state,
+            rhystic_trigger_id,
+            CardId(2),
+            PlayerId(1),
+            rhystic_ability,
+        );
+
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(1),
+            object_id: cast_spell_id,
+            controller: PlayerId(0),
+        });
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.stack.len(),
+            3,
+            "cast spell, rhystic trigger, and copy"
+        );
+        let copy_entry = state.stack.back().unwrap();
+        assert!(
+            copy_entry
+                .ability()
+                .is_some_and(|a| matches!(a.effect, Effect::Draw { .. })),
+            "copy should replicate the cast spell, not the Rhystic trigger on top"
+        );
+    }
+
+    /// CR 601.2i + CR 603.2 + CR 707.10: the real stack resolver sets
+    /// `current_trigger_event` from the triggered stack entry before executing
+    /// the copy effect, so the copy source must still be the triggering spell
+    /// rather than the intervening topmost trigger.
+    #[test]
+    fn copy_spell_triggering_spell_uses_stack_entry_trigger_event() {
+        let mut state = GameState::new_two_player(42);
+        let cast_spell_id = ObjectId(10);
+        let rhystic_trigger_id = ObjectId(11);
+        let copy_trigger_id = ObjectId(12);
+
+        let cast_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            cast_spell_id,
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            cast_spell_id,
+            CardId(1),
+            PlayerId(0),
+            "Mendicant artifact spell",
+            cast_ability,
+            CastingVariant::Normal,
+        );
+
+        let rhystic_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            rhystic_trigger_id,
+            PlayerId(1),
+        );
+        push_trigger(
+            &mut state,
+            rhystic_trigger_id,
+            CardId(2),
+            PlayerId(1),
+            rhystic_ability,
+        );
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        push_trigger_with_event(
+            &mut state,
+            copy_trigger_id,
+            CardId(3),
+            PlayerId(0),
+            copy_ability,
+            Some(GameEvent::SpellCast {
+                card_id: CardId(1),
+                object_id: cast_spell_id,
+                controller: PlayerId(0),
+            }),
+        );
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.stack.len(),
+            3,
+            "cast spell, rhystic trigger, and copy"
+        );
+        let copy_entry = state.stack.back().unwrap();
+        assert!(
+            copy_entry
+                .ability()
+                .is_some_and(|a| matches!(a.effect, Effect::Draw { .. })),
+            "copy should replicate the cast spell, not the Rhystic trigger on top"
+        );
+        assert!(state.current_trigger_event.is_none());
     }
 
     /// CR 707.10: "A copy of a spell is controlled by the player under whose
@@ -887,6 +1457,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(10),
@@ -948,6 +1519,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![TargetRef::Object(ObjectId(10))],
             ObjectId(20),
@@ -977,6 +1549,7 @@ mod tests {
                     controller: Some(crate::types::ability::ControllerRef::You),
                 },
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             gogo_id,
@@ -1000,6 +1573,7 @@ mod tests {
                     controller: Some(crate::types::ability::ControllerRef::You),
                 },
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![TargetRef::Object(ObjectId(40))],
             other_id,
@@ -1092,6 +1666,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             ObjectId(10),
@@ -1188,6 +1763,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             ObjectId(10),
@@ -1264,6 +1840,7 @@ mod tests {
                 description: Some("At the beginning of your end step".to_string()),
                 source_name: "Hope Estheim".to_string(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
         state.stack.push_back(StackEntry {
@@ -1286,6 +1863,7 @@ mod tests {
                 description: Some("Opponent trigger".to_string()),
                 source_name: "Opponent Source".to_string(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -1307,6 +1885,7 @@ mod tests {
             Effect::CopySpell {
                 target: gogo_target_filter,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![TargetRef::Object(hope_trigger_entry)],
             gogo_id,
@@ -1381,6 +1960,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
             },
             vec![],
             ObjectId(800),
@@ -1583,6 +2163,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
             },
             vec![],
             ObjectId(70),
@@ -1659,6 +2240,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             vec![],
             ObjectId(70),

@@ -3,11 +3,12 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, BounceSelection, CastingPermission,
-    ControllerRef, CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction,
-    ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost,
-    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter,
+    ControllerRef, CounterSourceRider, Duration, Effect, FaceDownProfile, LibraryPosition,
+    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
+    PaymentCost, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
 use crate::types::keywords::Keyword;
@@ -61,6 +62,11 @@ pub(crate) struct TokenDescription {
     pub(crate) power: Option<crate::types::ability::PtValue>,
     pub(crate) toughness: Option<crate::types::ability::PtValue>,
     pub(crate) types: Vec<String>,
+    /// CR 205.4a: Supertypes parsed from the inline token grammar (e.g. the
+    /// "legendary" in "a legendary 20/20 black Avatar creature token"). Captured
+    /// rather than discarded so legendary/snow tokens (Marit Lage, etc.) carry
+    /// their supertype — load-bearing for the legend rule (CR 704.5j).
+    pub(crate) supertypes: Vec<Supertype>,
     pub(crate) colors: Vec<ManaColor>,
     pub(crate) keywords: Vec<Keyword>,
     pub(crate) tapped: bool,
@@ -121,6 +127,10 @@ pub(crate) struct SearchLibraryDetails {
     /// destinations (cultivate-class "put one onto the battlefield tapped and
     /// the other into your hand"). Lowered to `Effect::SearchLibrary.split`.
     pub(crate) split: Option<SearchDestinationSplit>,
+    /// CR 701.23a: Zones the search looks through. Defaults to `[Library]`;
+    /// God-Pharaoh's-Gift-class cards set `[Graveyard, Hand, Library]`. Lowered
+    /// to `Effect::SearchLibrary.source_zones`.
+    pub(crate) source_zones: Vec<Zone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -272,15 +282,30 @@ pub(crate) enum ContinuationAst {
     /// NOT routed to a fixed destination; subsequent sub_abilities route them
     /// by type via `TargetFilter::TrackedSetFiltered` (Zimone's Experiment).
     DigFromAmong {
-        count: u32,
-        up_to: bool,
+        /// CR 701.20e / CR 701.17c: How many of the from-among set are taken.
+        /// `All` is the mass quantifier ("put all creature cards milled this
+        /// way ..."); `Up(n)` / `Exactly(n)` are the bounded singular forms.
+        quantity: PutCount,
         filter: TargetFilter,
         destination: Option<Zone>,
         /// Set when the same clause encodes both kept and rest destinations, e.g.,
         /// "put two of them into your hand and the rest on the bottom of your library".
         /// When None, a subsequent PutRest continuation handles rest_destination.
         rest_destination: Option<Zone>,
+        /// CR 110.2a: Controller override for the kept cards' battlefield entry
+        /// ("... onto the battlefield ... under your control"). `None` leaves
+        /// them under their owner's control.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
+        /// CR 708.2a + CR 708.3: When `Some`, the kept cards enter the battlefield
+        /// face down with these characteristics ("... face down ... They're 2/2
+        /// Cyberman artifact creatures."). `None` = normal face-up entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<FaceDownProfile>,
     },
+    /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
+    /// put-face-down clause — refines the preceding face-down move's profile.
+    FaceDownProfileSpec { profile: FaceDownProfile },
     /// CR 508.4 / CR 614.1: "It/The token enters tapped and attacking [that player]"
     /// Absorbs into preceding CopyTokenOf, Token, or ChangeZone by setting
     /// enters_attacking and tapped/enter_tapped flags.
@@ -333,6 +358,23 @@ pub(crate) enum ContinuationAst {
         count: QuantityExpr,
         face_down: bool,
     },
+    /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
+    /// following a choose-and-sacrifice-rest effect, optionally narrowing the
+    /// final sacrifice sweep ("all other nonland permanents they control").
+    ChooseAndSacrificeRestFilter {
+        sacrifice_filter: Option<TargetFilter>,
+    },
+}
+
+/// CR 701.20e / CR 701.17c: How many cards a "from among [set]" continuation
+/// takes. `All` is the mass quantifier ("put all creature cards milled this
+/// way ...") that lowers to a `ChangeZoneAll`; the bounded forms lower to a
+/// singular `ChangeZone` (`Up` → up_to, `Exactly` → fixed count).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum PutCount {
+    All,
+    Up(u32),
+    Exactly(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -355,6 +397,16 @@ pub(crate) enum ImperativeFamilyAst {
     Connive,
     /// CR 509.1g: Block this turn if able.
     ForceBlock,
+    /// CR 508.1d: Attack a required player this turn/combat if able. The
+    /// `required_player` filter selects whom the forced attacker must attack —
+    /// `TargetFilter::Controller` for "attacks you", or
+    /// `ControllerRef::ChosenPlayer { index }` for "attacks that player" (the
+    /// opponent chosen by a preceding "choose an opponent" instruction in the
+    /// same resolution, e.g. Ruhan of the Fomori).
+    ForceAttack {
+        duration: Duration,
+        required_player: TargetFilter,
+    },
     /// CR 701.15a: Goad target creature.
     Goad,
     /// CR 701.12a: Exchange control of two target permanents. Carries a distinct
@@ -396,6 +448,12 @@ pub(crate) enum ImperativeFamilyAst {
     VentureIntoUndercity,
     /// CR 725: "take the initiative"
     TakeTheInitiative,
+    /// CR 701.51b: "open N Attractions"
+    OpenAttractions {
+        count: u32,
+    },
+    /// CR 701.52: "roll to visit your Attractions"
+    RollToVisitAttractions,
     Proliferate,
     /// CR 701.56a: Time travel — add or remove time counters.
     TimeTravel,
@@ -406,10 +464,14 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 104.3a: "[you/target player] win(s) the game"
     WinTheGame,
     /// CR 706: Roll a die with N sides.
+    /// CR 706.1: `count` is how many dice of this kind to roll ("roll two
+    /// six-sided dice", "roll X d12"). Emitted for the multi-dice form;
+    /// the single-die path lowers with `count = Fixed(1)`.
     /// CR 706.2: Optional additive/subtractive modifier applied to the natural
     /// result before result-table lookup ("Roll a d20 and add the number of
     /// cards in your hand").
     RollDie {
+        count: crate::types::ability::QuantityExpr,
         sides: u8,
         modifier: Option<crate::types::ability::DieRollModifier>,
     },
@@ -662,6 +724,8 @@ pub(crate) enum TargetedImperativeAst {
         enters_under: Option<ControllerRef>,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
+        /// CR 508.4: "tapped and attacking" — enters attacking.
+        enters_attacking: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
@@ -679,6 +743,9 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
+        /// CR 110.2a: Controller override for mass returns to the battlefield.
+        /// `None` preserves default controller assignment.
+        enters_under: Option<ControllerRef>,
         enter_tapped: bool,
     },
     Fight {
@@ -737,6 +804,9 @@ pub(crate) enum SearchCreationImperativeAst {
         /// onto the battlefield tapped and the other into your hand"). Lowered
         /// to `Effect::SearchLibrary.split`.
         split: Option<SearchDestinationSplit>,
+        /// CR 701.23a: Zones searched. `[Library]` for ordinary tutors;
+        /// `[Graveyard, Hand, Library]` for God-Pharaoh's-Gift-class cards.
+        source_zones: Vec<Zone>,
     },
     SearchOutsideGame {
         filter: TargetFilter,
@@ -882,6 +952,8 @@ pub(crate) enum ChooseImperativeAst {
     CategoryAndSacrificeRest {
         categories: Vec<crate::types::card_type::CoreType>,
         chooser_scope: crate::types::ability::CategoryChooserScope,
+        choose_filter: crate::types::ability::TargetFilter,
+        sacrifice_filter: crate::types::ability::TargetFilter,
     },
     /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
     /// target slots declared in a single targeting clause (Goblin Welder shape).
@@ -923,7 +995,7 @@ pub(crate) enum PutImperativeAst {
         /// CR 107.1c + CR 608.2c: Cardinality for non-targeted zone-change
         /// choices made during resolution, e.g. "put any number of creature
         /// cards from your hand onto the battlefield."
-        choice_count: Option<MultiTargetSpec>,
+        choice_count: Option<Box<MultiTargetSpec>>,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.
@@ -1150,6 +1222,12 @@ pub(crate) fn with_clause_duration(
             ..
         } => {
             *perm_dur = duration;
+        }
+        Effect::CastFromZone {
+            duration: ref mut effect_duration,
+            ..
+        } => {
+            *effect_duration = Some(duration);
         }
         _ => {}
     }

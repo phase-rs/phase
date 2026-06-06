@@ -1,17 +1,18 @@
 use indexmap::IndexMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Effect, PostReplacementContinuation,
-    PreventionAmount, QuantityExpr, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ShieldKind, TargetFilter, TargetRef,
+    PreventionAmount, QuantityExpr, QuantityModification, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 
 use super::filter::{
-    matches_target_filter, matches_target_filter_on_battlefield_entry, FilterContext,
+    matches_target_filter, matches_target_filter_on_battlefield_entry,
+    matches_target_filter_on_damage_record_source, FilterContext,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
@@ -21,6 +22,127 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterMoveStage, EtbTapState, ProposedEvent, ReplacementId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
+
+// CR 122.1c shield-counter effects are intrinsic to counters, not stored
+// `ReplacementDefinition`s: ordinary `ShieldKind` definitions expire at cleanup,
+// while shield counters persist. Use reserved per-object candidate IDs so the
+// existing CR 616 replacement-ordering pipeline can still own choice/application.
+const SHIELD_COUNTER_DESTROY_INDEX: usize = usize::MAX;
+const SHIELD_COUNTER_DAMAGE_INDEX: usize = usize::MAX - 1;
+/// CR 702.89a: Umbra armor — virtual destroy-replacement keyed on the enchanted
+/// permanent (the `source` is the would-be-destroyed host, not the Aura). Reserved
+/// candidate id so the CR 616 replacement-ordering pipeline owns its application.
+const UMBRA_ARMOR_DESTROY_INDEX: usize = usize::MAX - 2;
+
+fn umbra_armor_replacement_id(aura_id: ObjectId) -> ReplacementId {
+    ReplacementId {
+        source: aura_id,
+        index: UMBRA_ARMOR_DESTROY_INDEX,
+    }
+}
+
+fn is_umbra_armor_replacement(rid: ReplacementId) -> bool {
+    rid.index == UMBRA_ARMOR_DESTROY_INDEX
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShieldCounterReplacementKind {
+    Destroy,
+    Damage,
+}
+
+fn shield_counter_replacement_id(
+    object_id: ObjectId,
+    kind: ShieldCounterReplacementKind,
+) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: match kind {
+            ShieldCounterReplacementKind::Destroy => SHIELD_COUNTER_DESTROY_INDEX,
+            ShieldCounterReplacementKind::Damage => SHIELD_COUNTER_DAMAGE_INDEX,
+        },
+    }
+}
+
+fn shield_counter_replacement_kind(rid: ReplacementId) -> Option<ShieldCounterReplacementKind> {
+    match rid.index {
+        SHIELD_COUNTER_DESTROY_INDEX => Some(ShieldCounterReplacementKind::Destroy),
+        SHIELD_COUNTER_DAMAGE_INDEX => Some(ShieldCounterReplacementKind::Damage),
+        _ => None,
+    }
+}
+
+pub(crate) fn is_shield_counter_damage_replacement(rid: ReplacementId) -> bool {
+    matches!(
+        shield_counter_replacement_kind(rid),
+        Some(ShieldCounterReplacementKind::Damage)
+    )
+}
+
+fn object_has_shield_counter(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.counters.get(&CounterType::Shield))
+        .is_some_and(|count| *count > 0)
+}
+
+fn is_functioning_umbra_armor_aura(state: &GameState, aura_id: ObjectId) -> bool {
+    state.objects.get(&aura_id).is_some_and(|aura| {
+        aura.zone == Zone::Battlefield
+            && aura.is_phased_in()
+            && aura.card_types.subtypes.iter().any(|s| s == "Aura")
+            && aura.has_keyword(&crate::types::keywords::Keyword::TotemArmor)
+    })
+}
+
+/// CR 702.89a: Iterate functioning Umbras (Auras with umbra/totem armor)
+/// attached to `object_id`. Each Aura's umbra-armor static replaces destruction
+/// of the permanent it enchants, so every attached Umbra is a separate CR 616
+/// candidate and the affected permanent's controller chooses which one applies.
+fn umbra_armor_attachments(
+    state: &GameState,
+    object_id: ObjectId,
+) -> impl Iterator<Item = ObjectId> + '_ {
+    state
+        .objects
+        .get(&object_id)
+        .into_iter()
+        .flat_map(|host| host.attachments.iter().copied())
+        .filter(|aura_id| is_functioning_umbra_armor_aura(state, *aura_id))
+}
+
+/// CR 122.1c: Remove one shield counter from the permanent, emitting
+/// `CounterRemoved`. Returns `true` if a shield counter was present and removed
+/// (so the caller should treat the destruction/damage as replaced/prevented),
+/// `false` otherwise. Mirrors the CR 122.1d stun-counter removal model in
+/// `turns.rs`: decrement, drop the map entry at zero, and emit one
+/// `CounterRemoved { count: 1 }` event so counter-removal triggers observe it.
+pub(crate) fn consume_shield_counter(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Some(obj) = state.objects.get_mut(&object_id) else {
+        return false;
+    };
+    let Some(entry) = obj.counters.get_mut(&CounterType::Shield) else {
+        return false;
+    };
+    if *entry == 0 {
+        return false;
+    }
+    *entry -= 1;
+    if *entry == 0 {
+        obj.counters.remove(&CounterType::Shield);
+    }
+    events.push(GameEvent::CounterRemoved {
+        object_id,
+        counter_type: CounterType::Shield,
+        count: 1,
+    });
+    true
+}
 
 /// CR 614.1: Replacement effects modify events as they would occur.
 #[derive(Debug, Clone, PartialEq)]
@@ -96,8 +218,12 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                     let accept_desc = p
                         .candidates
                         .first()
-                        .and_then(|rid| state.objects.get(&rid.source))
-                        .and_then(|obj| obj.replacement_definitions.get(p.candidates[0].index))
+                        .and_then(|rid| {
+                            state
+                                .objects
+                                .get(&rid.source)
+                                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                        })
                         .map(|repl| match &repl.mode {
                             ReplacementMode::MayCost { cost, .. } => {
                                 replacement_cost_description(cost)
@@ -112,19 +238,13 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                 } else {
                     // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
                     // outcome-descriptive label derived from its `execute`
-                    // effect. `map` (not `filter_map`) guarantees the vec is
-                    // never shorter than `candidate_count`, so the frontend
-                    // index lookup stays aligned.
+                    // effect, or from its synthetic shield-counter kind.
+                    // `map` (not `filter_map`) guarantees the vec is never
+                    // shorter than `candidate_count`, so the frontend index
+                    // lookup stays aligned.
                     p.candidates
                         .iter()
-                        .map(|rid| {
-                            state
-                                .objects
-                                .get(&rid.source)
-                                .and_then(|obj| obj.replacement_definitions.get(rid.index))
-                                .map(replacement_choice_label)
-                                .unwrap_or_else(|| "Replacement effect".to_string())
-                        })
+                        .map(|rid| replacement_choice_label_for_rid(state, *rid))
                         .collect()
                 };
                 (count, descs)
@@ -167,6 +287,7 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
@@ -224,6 +345,28 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
             _ => fallback(),
         },
         None => fallback(),
+    }
+}
+
+fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> String {
+    if is_umbra_armor_replacement(rid) {
+        return state
+            .objects
+            .get(&rid.source)
+            .map(|aura| format!("Umbra armor: destroy {} instead", aura.name))
+            .unwrap_or_else(|| "Umbra armor: destroy the Aura instead".to_string());
+    }
+    match shield_counter_replacement_kind(rid) {
+        Some(ShieldCounterReplacementKind::Destroy) => "Remove a shield counter".to_string(),
+        Some(ShieldCounterReplacementKind::Damage) => {
+            "Prevent damage with shield counter".to_string()
+        }
+        None => state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .map(replacement_choice_label)
+            .unwrap_or_else(|| "Replacement effect".to_string()),
     }
 }
 
@@ -349,10 +492,12 @@ fn discard_applier(
             from: Zone::Hand,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            face_down_profile: None,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -505,13 +650,20 @@ fn damage_done_applier(
         return ApplyResult::Modified(event);
     }
 
-    // Branch 1b: CR 614.9 — one-shot redirection shield. Replace the damage
-    // event's recipient with the redirection target, then consume the shield.
-    if let Some(ShieldKind::Redirection { recipient }) = shield_kind_for_rid(state, rid) {
+    // Branch 1b: CR 614.9 — one-shot redirection shield. Whole-event
+    // redirections replace the damage event's recipient; amount-capped
+    // redirections split the event, route the redirected portion through the
+    // same replacement/damage application path, and leave any remainder on the
+    // original recipient.
+    if let Some(ShieldKind::Redirection {
+        recipient,
+        amount: redirect_amount,
+    }) = shield_kind_for_rid(state, rid)
+    {
         if let ProposedEvent::Damage {
             source_id,
             target,
-            amount,
+            amount: damage_amount,
             is_combat,
             applied,
         } = event
@@ -519,11 +671,11 @@ fn damage_done_applier(
             // CR 614.7a: A source that would deal 0 damage deals no damage at
             // all — there is no damage event to redirect. Pass through and do
             // not consume the shield (no opportunity was spent).
-            if amount == 0 {
+            if damage_amount == 0 {
                 return ApplyResult::Modified(ProposedEvent::Damage {
                     source_id,
                     target,
-                    amount,
+                    amount: damage_amount,
                     is_combat,
                     applied,
                 });
@@ -540,23 +692,95 @@ fn damage_done_applier(
                     )
                 });
 
-            // CR 614.5: The one-shot opportunity is spent on this event whether
-            // or not the redirection succeeds — consume the shield in both the
-            // success and the "does nothing" (illegal recipient per CR 614.9)
-            // outcomes.
-            consume_prevention_shield(state, rid, None);
+            match redirect_amount {
+                PreventionAmount::All => {
+                    // CR 614.5: The one-shot opportunity is spent on this event
+                    // whether or not the redirection succeeds — consume the
+                    // shield in both the success and the "does nothing" (illegal
+                    // recipient per CR 614.9) outcomes.
+                    consume_prevention_shield(state, rid, None);
 
-            // CR 614.9: A legal recipient takes the damage instead; an illegal
-            // one (left the battlefield, no longer a battle/creature/planeswalker,
-            // or a player who left the game) makes the redirection do nothing,
-            // so the damage stays on the original recipient.
-            return ApplyResult::Modified(ProposedEvent::Damage {
-                source_id,
-                target: new_recipient.unwrap_or(target),
-                amount,
-                is_combat,
-                applied,
-            });
+                    // CR 614.9: A legal recipient takes the damage instead; an
+                    // illegal one (left the battlefield, no longer a
+                    // battle/creature/planeswalker, or a player who left the
+                    // game) makes the redirection do nothing, so the damage
+                    // stays on the original recipient.
+                    return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_id,
+                        target: new_recipient.unwrap_or(target),
+                        amount: damage_amount,
+                        is_combat,
+                        applied,
+                    });
+                }
+                PreventionAmount::Next(n) => {
+                    let redirected_amount = damage_amount.min(n);
+                    let remaining_amount = damage_amount.saturating_sub(redirected_amount);
+                    if redirected_amount == n {
+                        consume_prevention_shield(state, rid, None);
+                    } else {
+                        update_redirection_shield(
+                            state,
+                            rid,
+                            recipient,
+                            PreventionAmount::Next(n - redirected_amount),
+                        );
+                    }
+
+                    if let Some(new_target) = new_recipient.filter(|_| redirected_amount > 0) {
+                        let redirected_event = ProposedEvent::Damage {
+                            source_id,
+                            target: new_target,
+                            amount: redirected_amount,
+                            is_combat,
+                            applied: applied.clone(),
+                        };
+                        match replace_event(state, redirected_event, events) {
+                            ReplacementResult::Execute(event) => {
+                                let ctx = super::effects::deal_damage::DamageContext::from_source(
+                                    state, source_id,
+                                )
+                                .unwrap_or_else(|| {
+                                    let controller = state
+                                        .objects
+                                        .get(&source_id)
+                                        .map(|obj| obj.controller)
+                                        .unwrap_or(PlayerId(0));
+                                    super::effects::deal_damage::DamageContext::fallback(
+                                        source_id, controller,
+                                    )
+                                });
+                                let _ = super::effects::deal_damage::apply_damage_after_replacement(
+                                    state, &ctx, event, is_combat, events,
+                                );
+                            }
+                            ReplacementResult::Prevented => {}
+                            ReplacementResult::NeedsChoice(_) => {
+                                state.pending_replacement = None;
+                            }
+                        }
+                    } else {
+                        return ApplyResult::Modified(ProposedEvent::Damage {
+                            source_id,
+                            target,
+                            amount: damage_amount,
+                            is_combat,
+                            applied,
+                        });
+                    }
+
+                    if remaining_amount == 0 {
+                        return ApplyResult::Prevented;
+                    }
+                    return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_id,
+                        target,
+                        amount: remaining_amount,
+                        is_combat,
+                        applied,
+                    });
+                }
+            }
         }
         return ApplyResult::Modified(event);
     }
@@ -708,10 +932,48 @@ fn consume_prevention_shield(
     }
 }
 
+fn update_redirection_shield(
+    state: &mut GameState,
+    rid: ReplacementId,
+    recipient: crate::types::ability::DamageRedirectTarget,
+    amount: PreventionAmount,
+) {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get_mut(rid.index)
+    } else {
+        state
+            .objects
+            .get_mut(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+    };
+
+    if let Some(repl) = repl {
+        repl.shield_kind = ShieldKind::Redirection { recipient, amount };
+    }
+}
+
 // --- 3. Destroy ---
 
 fn destroy_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Destroy { .. })
+}
+
+/// CR 701.19c: Returns true if `object_id` is currently marked with an active
+/// `StaticMode::CantBeRegenerated` static. The standalone "[creature] can't be
+/// regenerated this turn" effect (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort)
+/// grants this mode onto the affected creature's `static_definitions` via a
+/// transient until-end-of-turn continuous effect (CR 514.2 auto-expiry at
+/// cleanup), so the mark is observed directly on the object through the
+/// CR-gated `active_static_definitions` iterator.
+fn object_has_active_cant_be_regenerated(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
+            matches!(
+                def.mode,
+                crate::types::statics::StaticMode::CantBeRegenerated
+            )
+        })
+    })
 }
 
 /// CR 701.19: Regeneration shield applier for Destroy events.
@@ -740,12 +1002,24 @@ fn destroy_applier(
         return ApplyResult::Modified(event);
     }
 
-    // CR 701.19: "It can't be regenerated" bypasses regeneration shields.
-    if let ProposedEvent::Destroy {
-        cant_regenerate: true,
-        ..
-    } = &event
-    {
+    // CR 701.19c: Regeneration shields are not applied when the destruction
+    // forbids regeneration. Two sources of this prohibition:
+    //   1. The inline "Destroy X. It can't be regenerated." one-shot rides on the
+    //      event's `cant_regenerate: true` flag (Effect::Destroy { cant_regenerate }).
+    //   2. The standalone "[creature] can't be regenerated this turn" effect marks
+    //      the destroy target with an active `StaticMode::CantBeRegenerated` static
+    //      (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
+    // In both cases the shield is left unconsumed (CR 701.19c: shields are not
+    // applied, not destroyed) and destruction proceeds.
+    let target_cant_regenerate = match &event {
+        ProposedEvent::Destroy {
+            object_id,
+            cant_regenerate,
+            ..
+        } => *cant_regenerate || object_has_active_cant_be_regenerated(state, *object_id),
+        _ => false,
+    };
+    if target_cant_regenerate {
         return ApplyResult::Modified(event);
     }
 
@@ -774,6 +1048,141 @@ fn destroy_applier(
 
     events.push(GameEvent::Regenerated { object_id: oid });
     ApplyResult::Prevented
+}
+
+// clippy::result_large_err: both arms of this Result carry a `ProposedEvent`
+// (the replacement pipeline returns the modified event on success and the
+// unmodified event in `ApplyResult::Modified` on the no-op path), so the Err
+// size is inherent to the design — boxing one arm of every applier would
+// ripple across the whole pipeline. The `ZoneChange` variant is the largest
+// `ProposedEvent` shape; see the note on `ProposedEvent::ZoneChange.face_down_profile`.
+#[allow(clippy::result_large_err)]
+fn apply_shield_counter_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    rid: ReplacementId,
+    kind: ShieldCounterReplacementKind,
+    events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    match (kind, event) {
+        (
+            ShieldCounterReplacementKind::Destroy,
+            ProposedEvent::Destroy {
+                object_id,
+                source,
+                cant_regenerate,
+                applied,
+            },
+        ) if object_id == rid.source => {
+            if consume_shield_counter(state, rid.source, events) {
+                Err(ApplyResult::Prevented)
+            } else {
+                Ok(ProposedEvent::Destroy {
+                    object_id,
+                    source,
+                    cant_regenerate,
+                    applied,
+                })
+            }
+        }
+        (
+            ShieldCounterReplacementKind::Damage,
+            ProposedEvent::Damage {
+                source_id,
+                target,
+                amount,
+                is_combat,
+                applied,
+            },
+        ) if matches!(target, TargetRef::Object(object_id) if object_id == rid.source) => {
+            let event = ProposedEvent::Damage {
+                source_id,
+                target: target.clone(),
+                amount,
+                is_combat,
+                applied,
+            };
+
+            // CR 615.12: Damage that can't be prevented is still subject to the
+            // prevention effect, but no damage is prevented. The shield counter's
+            // additional "remove a counter" effect still happens.
+            if is_prevention_disabled(state, &event) {
+                consume_shield_counter(state, rid.source, events);
+                return Ok(event);
+            }
+
+            // CR 510.2 + CR 122.1c: one shield counter prevents all simultaneous
+            // combat damage dealt to the permanent in the batch. Defer counter
+            // removal until the post-batch aggregation fires exactly once.
+            if let Some(tally) = state.combat_prevention_tally.as_mut() {
+                *tally.entry(rid).or_insert(0) += amount as i32;
+                return Err(ApplyResult::Prevented);
+            }
+
+            if consume_shield_counter(state, rid.source, events) {
+                events.push(GameEvent::DamagePrevented {
+                    source_id,
+                    target,
+                    amount,
+                });
+                Err(ApplyResult::Prevented)
+            } else {
+                Ok(event)
+            }
+        }
+        (_, other) => Ok(other),
+    }
+}
+
+/// CR 702.89a: Umbra armor — "If enchanted permanent would be destroyed, instead
+/// remove all damage marked on it and destroy this Aura." Applied as a virtual
+/// destroy-replacement keyed on the host (`rid.source`). Unlike regeneration
+/// (CR 701.19), it does NOT tap the permanent or remove it from combat, and the
+/// "shield" consumed is the Aura itself, which is destroyed.
+#[allow(clippy::result_large_err)]
+fn apply_umbra_armor_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    rid: ReplacementId,
+    events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    let ProposedEvent::Destroy {
+        object_id, source, ..
+    } = event
+    else {
+        return Ok(event);
+    };
+    // The virtual replacement is keyed on the Aura so multiple Umbras on the
+    // same host remain distinct CR 616 choices. Re-confirm the chosen Aura is
+    // still attached to this host at apply time.
+    let umbra_id = rid.source;
+    if !umbra_armor_attachments(state, object_id).any(|id| id == umbra_id) {
+        return Ok(event);
+    }
+
+    // CR 702.89a: remove all damage marked on the enchanted permanent. (No tap and
+    // no combat removal — that is regeneration, CR 701.19b/c, not umbra armor.)
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.damage_marked = 0;
+        obj.dealt_deathtouch_damage = false;
+    }
+
+    // CR 702.89a: destroy this Aura. Routed through the post-replacement destroy so
+    // the Aura's leave-the-battlefield triggers fire; it is not a creature, so
+    // `cant_regenerate` is irrelevant.
+    let _ = crate::game::effects::destroy::apply_destroy_after_replacement(
+        state,
+        ProposedEvent::Destroy {
+            object_id: umbra_id,
+            source,
+            cant_regenerate: false,
+            applied: std::collections::HashSet::new(),
+        },
+        events,
+    );
+
+    // The enchanted permanent's destruction is replaced.
+    Err(ApplyResult::Prevented)
 }
 
 // --- 4. Draw ---
@@ -901,6 +1310,55 @@ fn scry_applier(
     }
 }
 
+// --- 4c. CoinFlip (Krark's Thumb) ---
+
+// CR 705.1 + CR 614.1a: A coin flip is about to happen. Krark's Thumb replaces
+// each individual flip ("instead flip two coins and ignore one"), so the
+// matcher fires per flip while `count > 0`.
+fn coin_flip_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::CoinFlip { count, .. } if *count > 0)
+}
+
+fn coin_flip_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::CoinFlip {
+        player_id,
+        count,
+        applied,
+    } = event
+    else {
+        return ApplyResult::Modified(event);
+    };
+
+    // CR 614.1a: "instead flip two coins" — double the flip count via the
+    // replacement definition's `FlipCoins { count: Multiply { factor: 2, .. } }`.
+    let execute = state
+        .objects
+        .get(&rid.source)
+        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|def| def.execute.as_deref());
+
+    let new_count = match execute {
+        Some(ability) if ability.sub_ability.is_none() => match &*ability.effect {
+            Effect::FlipCoins { count: qty, .. } => resolve_event_replacement_quantity(qty, count)
+                .map(|resolved| resolved.max(0) as u32)
+                .unwrap_or(count),
+            _ => count,
+        },
+        _ => count,
+    };
+
+    ApplyResult::Modified(ProposedEvent::CoinFlip {
+        player_id,
+        count: new_count,
+        applied,
+    })
+}
+
 fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
@@ -921,6 +1379,9 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
         }
         QuantityExpr::Offset { inner, offset } => {
             Some(resolve_event_replacement_quantity(inner, event_count)? + offset)
+        }
+        QuantityExpr::ClampMin { inner, minimum } => {
+            Some(resolve_event_replacement_quantity(inner, event_count)?.max(*minimum))
         }
         QuantityExpr::Multiply { factor, inner } => {
             Some(factor * resolve_event_replacement_quantity(inner, event_count)?)
@@ -1299,6 +1760,7 @@ fn create_token_applier(
     if let ProposedEvent::CreateToken {
         owner,
         mut spec,
+        mut copy,
         enter_tapped,
         count,
         applied,
@@ -1328,6 +1790,9 @@ fn create_token_applier(
         // and end up attacking the player who now controls it.
         if owner != original_owner {
             spec.controller = owner;
+            if let Some(copy) = copy.as_mut() {
+                copy.controller = owner;
+            }
         }
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
@@ -1362,13 +1827,12 @@ fn create_token_applier(
                 .unwrap_or(owner);
             extra.source_id = rid.source;
             extra.controller = source_controller;
-            // CR 614.1a: Mark this replacement as already-applied on the
-            // appended batch so the same Chatterfang-class replacement does
-            // not re-fire on its own output (which would be an infinite loop
-            // since the appended batch matches the same owner scope). Other
-            // replacements (Doubling Season, Parallel Lives) still see the
-            // appended batch as a fresh CreateToken event.
-            let mut applied_on_extra = HashSet::new();
+            // CR 614.5: Inherit the primary event's applied set to prevent
+            // replacements that already applied to the primary event from
+            // re-applying to the recursive extra event. Insert this
+            // Chatterfang-class replacement too so it cannot re-fire on its own
+            // appended batch.
+            let mut applied_on_extra = applied.clone();
             applied_on_extra.insert(rid);
             // CR 614.1c: The appended batch is a separate event — it does not
             // inherit an `enter_tapped` override applied to the primary batch.
@@ -1379,6 +1843,7 @@ fn create_token_applier(
             let extra_proposed = ProposedEvent::CreateToken {
                 owner,
                 spec: extra,
+                copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: new_count,
                 applied: applied_on_extra,
@@ -1427,11 +1892,15 @@ fn create_token_applier(
                 }
                 extra.source_id = rid.source;
                 extra.controller = source_controller;
-                let mut applied_on_extra = HashSet::new();
+                // CR 614.5: Inherit the primary event's applied set to prevent
+                // replacements that already applied to the primary event from
+                // re-applying to the recursive extra event.
+                let mut applied_on_extra = applied.clone();
                 applied_on_extra.insert(rid);
                 let extra_proposed = ProposedEvent::CreateToken {
                     owner,
                     spec: Box::new(extra),
+                    copy: None,
                     enter_tapped: EtbTapState::Unspecified,
                     count: new_count,
                     applied: applied_on_extra,
@@ -1452,6 +1921,7 @@ fn create_token_applier(
         ApplyResult::Modified(ProposedEvent::CreateToken {
             owner,
             spec,
+            copy,
             enter_tapped,
             count: new_count,
             applied,
@@ -1582,6 +2052,9 @@ fn empty_mana_pool_applier(
 /// `Keep` (CR 614.6, `StepEndManaAction::Retain`) or `Recolor(_)`
 /// (CR 614.1a, `StepEndManaAction::Transform(_)`). Records the handler on
 /// the event's `applied` set so CR 614.5 prevents re-application.
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
 fn apply_empty_mana_pool_replacement(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -1933,6 +2406,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
             applier: scry_applier,
         },
     );
+    registry.insert(
+        ReplacementEvent::CoinFlip,
+        ReplacementHandlerEntry {
+            matcher: coin_flip_matcher,
+            applier: coin_flip_applier,
+        },
+    );
     registry.insert(ReplacementEvent::DrawCards, stub()); // stays stub (alias for Draw)
     registry.insert(
         ReplacementEvent::GainLife,
@@ -2096,7 +2576,7 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
 
 // --- Prevention gating ---
 
-/// CR 614.16: Check if damage prevention is disabled by a GameRestriction.
+/// CR 615.12: Check if damage prevention is disabled by a GameRestriction.
 /// When active, prevention-type replacement effects are skipped in the pipeline.
 fn is_prevention_disabled(state: &GameState, proposed: &ProposedEvent) -> bool {
     use crate::types::ability::{GameRestriction, RestrictionScope};
@@ -2186,32 +2666,45 @@ fn matches_damage_target_filter(
     filter: &DamageTargetFilter,
     target: &TargetRef,
     repl_controller: PlayerId,
+    repl_source: ObjectId,
     state: &GameState,
 ) -> bool {
     fn player_scope_matches(
         scope: &DamageTargetPlayerScope,
         player: PlayerId,
         repl_controller: PlayerId,
+        repl_source: ObjectId,
+        state: &GameState,
     ) -> bool {
         match scope {
             DamageTargetPlayerScope::Any => true,
             DamageTargetPlayerScope::Opponent => player != repl_controller,
             DamageTargetPlayerScope::Controller => player == repl_controller,
+            DamageTargetPlayerScope::SourceChosenPlayer => {
+                // CR 607.2d + CR 614.1a: A damage replacement can scope
+                // "the chosen player" through the replacement source's linked
+                // persisted choice.
+                crate::game::game_object::source_chosen_player(state, repl_source)
+                    .is_some_and(|chosen| player == chosen)
+            }
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
         }
     }
 
     match filter {
         DamageTargetFilter::Player { player } => match target {
-            TargetRef::Player(pid) => player_scope_matches(player, *pid, repl_controller),
+            TargetRef::Player(pid) => {
+                player_scope_matches(player, *pid, repl_controller, repl_source, state)
+            }
             TargetRef::Object(_) => false,
         },
         DamageTargetFilter::PlayerOrPermanentsControlledBy { player } => match target {
-            TargetRef::Player(pid) => player_scope_matches(player, *pid, repl_controller),
-            TargetRef::Object(oid) => state
-                .objects
-                .get(oid)
-                .is_some_and(|obj| player_scope_matches(player, obj.controller, repl_controller)),
+            TargetRef::Player(pid) => {
+                player_scope_matches(player, *pid, repl_controller, repl_source, state)
+            }
+            TargetRef::Object(oid) => state.objects.get(oid).is_some_and(|obj| {
+                player_scope_matches(player, obj.controller, repl_controller, repl_source, state)
+            }),
         },
         DamageTargetFilter::CreatureOnly => match target {
             TargetRef::Player(_) => false,
@@ -2340,6 +2833,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 613.1: "the chosen player" is undefined at replacement-check
+                // time here. Fail closed.
+                Some(ControllerRef::SourceChosenPlayer) => false,
                 // CR 109.4: Chosen-player scope is undefined at replacement-check
                 // time (no resolution context). Fail closed.
                 Some(ControllerRef::ChosenPlayer { .. }) => false,
@@ -2372,6 +2868,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 613.1: "the chosen player" is undefined at replacement-check
+                // time here. Fail closed.
+                Some(ControllerRef::SourceChosenPlayer) => false,
                 // CR 109.4: Chosen-player scope is undefined at replacement-check
                 // time (no resolution context). Fail closed.
                 Some(ControllerRef::ChosenPlayer { .. }) => false,
@@ -2468,8 +2967,11 @@ fn evaluate_replacement_condition(
             };
             let ctx = FilterContext::from_source(state, source_id);
             state.damage_dealt_this_turn.iter().any(|record| {
+                // CR 608.2i + CR 608.2h: match the damage source against its
+                // damage-time snapshot (look-back), consistent with
+                // DamageDealtThisTurn / OpponentDealtCombatDamage.
                 record.target == TargetRef::Object(affected_id)
-                    && matches_target_filter(state, record.source_id, source, &ctx)
+                    && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
             })
         }
         ReplacementCondition::EventSourceControlledBy {
@@ -2497,6 +2999,7 @@ fn evaluate_replacement_condition(
                 | ControllerRef::TargetPlayer
                 | ControllerRef::ParentTargetController
                 | ControllerRef::DefendingPlayer
+                | ControllerRef::SourceChosenPlayer
                 | ControllerRef::ChosenPlayer { .. }
                 | ControllerRef::TriggeringPlayer => false,
             }
@@ -2587,6 +3090,43 @@ pub fn find_applicable_replacements(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<ReplacementId> {
     let mut candidates = Vec::new();
+
+    match event {
+        ProposedEvent::Destroy { object_id, .. }
+            if object_has_shield_counter(state, *object_id) =>
+        {
+            let rid =
+                shield_counter_replacement_id(*object_id, ShieldCounterReplacementKind::Destroy);
+            if !event.already_applied(&rid) {
+                candidates.push(rid);
+            }
+        }
+        ProposedEvent::Damage {
+            target: TargetRef::Object(object_id),
+            amount,
+            ..
+        } if *amount > 0 && object_has_shield_counter(state, *object_id) => {
+            let rid =
+                shield_counter_replacement_id(*object_id, ShieldCounterReplacementKind::Damage);
+            if !event.already_applied(&rid) {
+                candidates.push(rid);
+            }
+        }
+        _ => {}
+    }
+
+    // CR 702.89a: Umbra armor — a destroy of a permanent enchanted by an Umbra is
+    // a candidate for the virtual umbra-armor replacement. Offered independently of
+    // the shield-counter match above so a permanent carrying both a shield counter
+    // and an Umbra exposes both candidates for CR 616 ordering.
+    if let ProposedEvent::Destroy { object_id, .. } = event {
+        for umbra_id in umbra_armor_attachments(state, *object_id) {
+            let rid = umbra_armor_replacement_id(umbra_id);
+            if !event.already_applied(&rid) {
+                candidates.push(rid);
+            }
+        }
+    }
 
     // CR 614.12: Self-replacement effects on a card entering the battlefield.
     // apply even though the card isn't on the battlefield yet. We must scan the
@@ -2720,7 +3260,13 @@ pub fn find_applicable_replacements(
                     // CR 614.1a: Damage target filter — restricts which damage recipients trigger this replacement.
                     if let Some(ref tf) = repl_def.damage_target_filter {
                         if let ProposedEvent::Damage { target, .. } = event {
-                            if !matches_damage_target_filter(tf, target, obj.controller, state) {
+                            if !matches_damage_target_filter(
+                                tf,
+                                target,
+                                obj.controller,
+                                obj.id,
+                                state,
+                            ) {
                                 continue;
                             }
                         }
@@ -2738,7 +3284,7 @@ pub fn find_applicable_replacements(
                             _ => {}
                         }
                     }
-                    // CR 614.16: Skip damage prevention replacements when prevention is disabled
+                    // CR 615.12: Skip damage prevention replacements when prevention is disabled.
                     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
                         && is_prevention_disabled(state, event)
                     {
@@ -2763,6 +3309,9 @@ pub fn find_applicable_replacements(
                                     false
                                 }
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
+                                // CR 613.1: chosen-player scope has no meaning
+                                // for static token-creation replacements.
+                                crate::types::ability::ControllerRef::SourceChosenPlayer => false,
                                 // CR 109.4: Chosen-player scope has no meaning
                                 // for static token-creation replacements.
                                 crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
@@ -2782,7 +3331,8 @@ pub fn find_applicable_replacements(
                     if let ProposedEvent::LifeGain { player_id, .. }
                     | ProposedEvent::Draw { player_id, .. }
                     | ProposedEvent::Scry { player_id, .. }
-                    | ProposedEvent::Mill { player_id, .. } = event
+                    | ProposedEvent::Mill { player_id, .. }
+                    | ProposedEvent::CoinFlip { player_id, .. } = event
                     {
                         let player_ok = match &repl_def.valid_player {
                             // CR 614.1a: opponent-scoped replacement (Tainted Remedy).
@@ -2917,7 +3467,13 @@ pub fn find_applicable_replacements(
                 }
                 if let Some(ref tf) = repl_def.damage_target_filter {
                     if let ProposedEvent::Damage { target, .. } = event {
-                        if !matches_damage_target_filter(tf, target, PlayerId(0), state) {
+                        if !matches_damage_target_filter(
+                            tf,
+                            target,
+                            PlayerId(0),
+                            ObjectId(0),
+                            state,
+                        ) {
                             continue;
                         }
                     }
@@ -3324,6 +3880,9 @@ fn optional_decline_is_noop(
     tap_already && counters_already && redirect_noop
 }
 
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
 fn apply_single_replacement(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -3343,6 +3902,14 @@ fn apply_single_replacement(
     // pipeline pauses.
     if matches!(proposed, ProposedEvent::EmptyManaPool { .. }) {
         return apply_empty_mana_pool_replacement(state, proposed, rid, events);
+    }
+
+    if let Some(kind) = shield_counter_replacement_kind(rid) {
+        return apply_shield_counter_replacement(state, proposed, rid, kind, events);
+    }
+
+    if is_umbra_armor_replacement(rid) {
+        return apply_umbra_armor_replacement(state, proposed, rid, events);
     }
 
     // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
@@ -3583,7 +4150,6 @@ fn apply_single_replacement(
 /// without changing the result. The auto-resolve path still iterates per the
 /// CR 616.1f repeat semantics — it only suppresses a player choice that cannot
 /// affect anything.
-///
 /// A candidate set is *material* (the prompt must be shown) iff *either*:
 /// - *any* candidate is an unconditionally order-sensitive shape — a
 ///   destination-redirecting `Effect::ChangeZone` (CR 614.6 — Rest in Peace
@@ -3622,15 +4188,17 @@ pub(crate) fn replacement_ordering_is_material(
     //    + Spelunking both write `enter_tapped`; Doubling Season + Hardened
     //    Scales both modify an `AddCounter` count). A single modifier of a field
     //    has no conflict.
-    let mut seen_fields: Vec<EventField> = Vec::new();
+    let mut seen_writes: Vec<(EventField, CommuteClass)> = Vec::new();
     for rid in candidates {
         match candidate_materiality(state, *rid, proposed_to) {
             CandidateMateriality::Unconditional => return true,
-            CandidateMateriality::Writes(field) => {
-                if seen_fields.contains(&field) {
-                    return true;
+            CandidateMateriality::Writes { field, commute } => {
+                for (seen_field, seen_commute) in &seen_writes {
+                    if *seen_field == field && !commute.commutes_with(*seen_commute) {
+                        return true;
+                    }
                 }
-                seen_fields.push(field);
+                seen_writes.push((field, commute));
             }
             CandidateMateriality::Disjoint => {}
         }
@@ -3648,17 +4216,52 @@ enum EventField {
     /// `ZoneChange::enter_tapped` — overwritten by `Effect::Tap` / `Effect::Untap`.
     EnterTapped,
     /// The count of a count-bearing event (`AddCounter`, `CreateToken`, `Draw`,
-    /// `Mill`, …) — modified by a `quantity_modification` side field
-    /// (`Double` / `Plus` / `Minus`, which do not pairwise commute).
+    /// `Mill`, ...) — modified by a `quantity_modification` side field. Same-class
+    /// arithmetic modifiers commute; mixed classes do not.
     Count,
     /// The produced mana type/amount of a `ProduceMana` event — modified by a
     /// `mana_modification` side field (`ReplaceWith` / `Multiply`).
     ManaType,
     /// The `amount` of a `ProposedEvent::Damage`, modified by a
     /// `damage_modification` side field (`Double` / `Triple` / `Plus` /
-    /// `Minus` / `SetToSourcePower` / `SetTo` — these do not pairwise
-    /// commute, e.g. Furnace of Rath `Double` + Torbran `Plus{2}`).
+    /// `Minus` / `SetToSourcePower` / `SetTo`). Same-class arithmetic modifiers
+    /// commute; mixed classes do not, e.g. Furnace of Rath `Double` + Torbran
+    /// `Plus{2}`.
     Damage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommuteClass {
+    NonCommuting,
+    Multiplicative,
+    Additive,
+    Subtractive,
+}
+
+impl CommuteClass {
+    fn commutes_with(self, other: Self) -> bool {
+        self != Self::NonCommuting && self == other
+    }
+}
+
+fn quantity_commute_class(modification: &QuantityModification) -> CommuteClass {
+    match modification {
+        QuantityModification::Double => CommuteClass::Multiplicative,
+        QuantityModification::Plus { .. } => CommuteClass::Additive,
+        QuantityModification::Minus { .. } => CommuteClass::Subtractive,
+        QuantityModification::Prevent => CommuteClass::NonCommuting,
+    }
+}
+
+fn damage_commute_class(modification: &DamageModification) -> CommuteClass {
+    match modification {
+        DamageModification::Double | DamageModification::Triple => CommuteClass::Multiplicative,
+        DamageModification::Plus { .. } => CommuteClass::Additive,
+        DamageModification::Minus { .. } => CommuteClass::Subtractive,
+        DamageModification::SetToSourcePower
+        | DamageModification::SetTo { .. }
+        | DamageModification::LifeFloor { .. } => CommuteClass::NonCommuting,
+    }
 }
 
 /// CR 616.1 classification of a single replacement candidate.
@@ -3668,7 +4271,10 @@ enum CandidateMateriality {
     Unconditional,
     /// A pure event-field modifier. Immaterial alone; material iff another
     /// candidate modifies the same field with a non-commuting modification.
-    Writes(EventField),
+    Writes {
+        field: EventField,
+        commute: CommuteClass,
+    },
     /// Touches no event field that another candidate could also touch
     /// (`Effect::Choose` post-effect, null/no-op pass-through with no side field).
     Disjoint,
@@ -3698,6 +4304,23 @@ fn candidate_materiality(
     rid: ReplacementId,
     proposed_to: Option<Zone>,
 ) -> CandidateMateriality {
+    match shield_counter_replacement_kind(rid) {
+        Some(ShieldCounterReplacementKind::Destroy) => return CandidateMateriality::Unconditional,
+        Some(ShieldCounterReplacementKind::Damage) => {
+            return CandidateMateriality::Writes {
+                field: EventField::Damage,
+                commute: CommuteClass::NonCommuting,
+            }
+        }
+        None => {}
+    }
+
+    // CR 702.89a: Umbra armor fully replaces the destruction (prevents it), so it
+    // is unconditional like the shield-counter destroy replacement.
+    if is_umbra_armor_replacement(rid) {
+        return CandidateMateriality::Unconditional;
+    }
+
     let repl_def = state
         .objects
         .get(&rid.source)
@@ -3706,6 +4329,20 @@ fn candidate_materiality(
         // Unknown definition — be conservative.
         return CandidateMateriality::Unconditional;
     };
+    // CR 615 + CR 616.1: A damage prevention shield modifies the damage amount,
+    // so it writes the `Damage` field and is order-material against any other
+    // `Damage` writer — a doubler (Furnace of Rath `Double`), Torbran (`Plus`),
+    // or another prevention shield — because prevent-then-double and
+    // double-then-prevent do not commute ((3-2)*2 = 2 vs (3*2)-2 = 4). A bare
+    // prevention shield leaves `execute`/`damage_modification` unset, so without
+    // this it fell through to `Disjoint` and the CR 616.1 order choice was
+    // silently skipped.
+    if matches!(repl_def.shield_kind, ShieldKind::Prevention { .. }) {
+        return CandidateMateriality::Writes {
+            field: EventField::Damage,
+            commute: CommuteClass::NonCommuting,
+        };
+    }
     let Some(execute) = repl_def.execute.as_deref() else {
         // CR 616.1: a `null` `execute` is not a guaranteed no-op. A count-event
         // replacement (Doubling Season, Hardened Scales) modifies the count via
@@ -3716,14 +4353,23 @@ fn candidate_materiality(
         // one event are order-material — `Double` and `Plus` do not commute
         // ((x*2)+2 vs (x+2)*2). A `null` `execute` with no side field is a
         // genuine pass-through (test fixtures, structural placeholders).
-        if repl_def.quantity_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::Count);
+        if let Some(modification) = repl_def.quantity_modification.as_ref() {
+            return CandidateMateriality::Writes {
+                field: EventField::Count,
+                commute: quantity_commute_class(modification),
+            };
         }
         if repl_def.mana_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::ManaType);
+            return CandidateMateriality::Writes {
+                field: EventField::ManaType,
+                commute: CommuteClass::NonCommuting,
+            };
         }
-        if repl_def.damage_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::Damage);
+        if let Some(modification) = repl_def.damage_modification.as_ref() {
+            return CandidateMateriality::Writes {
+                field: EventField::Damage,
+                commute: damage_commute_class(modification),
+            };
         }
         return CandidateMateriality::Disjoint;
     };
@@ -3765,7 +4411,10 @@ fn candidate_materiality(
         current = def.sub_ability.as_deref();
     }
     match field {
-        Some(field) => CandidateMateriality::Writes(field),
+        Some(field) => CandidateMateriality::Writes {
+            field,
+            commute: CommuteClass::NonCommuting,
+        },
         None => CandidateMateriality::Disjoint,
     }
 }
@@ -4017,6 +4666,8 @@ pub fn continue_replacement(
             });
             let post = if real_work.is_some() {
                 real_work
+            } else if EventModifiers::has_only_event_modifier(accept_effect.as_deref()) {
+                None
             } else {
                 accept_effect
             };
@@ -4094,7 +4745,7 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr,
+        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, QuantityExpr,
         ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
     };
     use crate::types::game_state::DamageRecord;
@@ -4375,11 +5026,13 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {
@@ -4409,6 +5062,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                face_down_profile: None,
             },
         ))
     }
@@ -4617,6 +5271,198 @@ mod tests {
     }
 
     #[test]
+    fn prevention_shield_and_damage_doubler_prompt_for_order() {
+        // CR 615 + CR 616.1e: A prevention shield ("prevent the next 2") and a
+        // damage doubler (Furnace of Rath `Double`) both modify the amount of a
+        // single `ProposedEvent::Damage`, and they do NOT commute:
+        // (3-2)*2 = 2 vs (3*2)-2 = 4. The affected player must choose the order.
+        // Before the fix the prevention shield classified `Disjoint` (its
+        // `execute`/`damage_modification` are unset), so the set was deemed
+        // immaterial and the CR 616.1 order prompt was skipped.
+        let mut state = GameState::new_two_player(42);
+        let mut furnace = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Furnace of Rath".to_string(),
+            Zone::Battlefield,
+        );
+        furnace.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .damage_modification(DamageModification::Double)]
+            .into();
+        state.objects.insert(ObjectId(10), furnace);
+        state.battlefield.push_back(ObjectId(10));
+
+        // Global prevention shield ("prevent the next 2 damage").
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(PreventionAmount::Next(2)),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(_)),
+            "prevention shield + doubler must prompt for order per CR 616.1e, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn shield_counter_and_damage_doubler_prompt_for_order() {
+        // CR 122.1c + CR 616.1e: A shield counter's prevention effect and a
+        // damage doubler both modify the damage event. The shield counter must be
+        // a pipeline candidate so the affected object's controller chooses the
+        // order instead of the counter always preempting the doubler.
+        use crate::types::ability::DamageModification;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let mut doubler = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Furnace of Rath".to_string(),
+            Zone::Battlefield,
+        );
+        doubler.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .damage_modification(DamageModification::Double)]
+            .into();
+        state.objects.insert(ObjectId(10), doubler);
+        state.battlefield.push_back(ObjectId(10));
+
+        let mut target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(1),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        target.counters.insert(CounterType::Shield, 1);
+        state.objects.insert(ObjectId(30), target);
+        state.battlefield.push_back(ObjectId(30));
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(30)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for shield counter + doubler, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(1));
+    }
+
+    #[test]
+    fn shield_counter_and_regeneration_prompt_for_destroy_order() {
+        // CR 122.1c + CR 614.8 + CR 616.1e: Shield counters and regeneration
+        // shields are both destruction replacements with different observable
+        // outcomes (remove a counter vs. consume regeneration/tap/remove from
+        // combat). The affected object's controller must choose.
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let mut target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(1),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        target.counters.insert(CounterType::Shield, 1);
+        target.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .regeneration_shield()]
+            .into();
+        state.objects.insert(ObjectId(30), target);
+        state.battlefield.push_back(ObjectId(30));
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Destroy {
+            object_id: ObjectId(30),
+            source: Some(ObjectId(50)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for shield counter + regeneration, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(1));
+    }
+
+    #[test]
+    fn shield_counter_on_unpreventable_damage_removes_counter_without_preventing() {
+        // CR 615.12: A prevention effect is still applied to unpreventable damage,
+        // but it prevents no damage. For CR 122.1c shield counters, the additional
+        // "remove a shield counter" effect still happens.
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let mut target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(1),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        target.counters.insert(CounterType::Shield, 1);
+        state.objects.insert(ObjectId(30), target);
+        state.battlefield.push_back(ObjectId(30));
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(99),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None,
+            });
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(30)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Damage { amount: 3, .. })
+            ),
+            "unpreventable damage must survive shield-counter replacement, got {result:?}"
+        );
+        assert_eq!(
+            state.objects[&ObjectId(30)]
+                .counters
+                .get(&CounterType::Shield),
+            None
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::DamagePrevented { .. })),
+            "unpreventable damage must not emit DamagePrevented"
+        );
+    }
+
+    #[test]
     fn gate_land_enters_tapped_and_prompts_color_without_modal() {
         // Issue #482 Defect A: a Gate land has two mandatory `Moved` ETB
         // replacements — `Tap SelfRef` (enters tapped) and a `Choose` (as it
@@ -4706,7 +5552,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ))
             .description("X".to_string());
@@ -4801,7 +5647,7 @@ mod tests {
                             qty: crate::types::ability::QuantityRef::EventContextAmount,
                         }),
                     },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -4847,7 +5693,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -5268,11 +6114,13 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
 
         let result = replace_event(&mut state, proposed.clone(), &mut events);
@@ -5478,6 +6326,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ))
             .destination_zone(Zone::Graveyard)
@@ -5697,6 +6546,7 @@ mod tests {
                 PlayerId(0),
                 crate::types::card_type::CoreType::Creature,
             )),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             applied: HashSet::new(),
         };
@@ -5720,6 +6570,7 @@ mod tests {
                 PlayerId(1),
                 crate::types::card_type::CoreType::Creature,
             )),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             applied: HashSet::new(),
         };
@@ -5999,13 +6850,14 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.insert(ObjectId(20), victim);
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(10),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(20)),
             target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         let cond = ReplacementCondition::DealtDamageThisTurnBySource {
@@ -6042,13 +6894,14 @@ mod tests {
         );
         victim.controller = PlayerId(0);
         state.objects.insert(ObjectId(20), victim);
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(10),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(20)),
             target_controller: PlayerId(1),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         assert!(evaluate_replacement_condition(
@@ -6090,13 +6943,14 @@ mod tests {
         state.objects.insert(ObjectId(30), victim);
         state.objects.get_mut(&ObjectId(10)).unwrap().attached_to =
             Some(AttachTarget::Object(ObjectId(20)));
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(20),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(30)),
             target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         assert!(evaluate_replacement_condition(
@@ -6111,6 +6965,105 @@ mod tests {
         ));
     }
 
+    /// CR 608.2i + CR 608.2h: `DealtDamageThisTurnBySource` matches the damage
+    /// source against its damage-time *snapshot*, not the live object. A Dragon
+    /// deals damage this turn and is then transformed into a non-Dragon (or
+    /// leaves the battlefield). A live-object source match would now read the
+    /// current characteristics and fail; the snapshot match still recognizes
+    /// the source was a Dragon when the damage was dealt. This is the
+    /// discriminating regression guard for the lookback unification — it would
+    /// FAIL under the previous `matches_target_filter(state, record.source_id,
+    /// ..)` live read.
+    #[test]
+    fn dealt_damage_by_source_uses_damage_time_snapshot() {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let dragon_id = ObjectId(20);
+        let victim_id = ObjectId(30);
+
+        // The damage source: a Dragon creature controlled by PlayerId(0) at damage time.
+        let mut dragon = GameObject::new(
+            dragon_id,
+            CardId(2),
+            PlayerId(0),
+            "Shivan Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        dragon.card_types.core_types.push(CoreType::Creature);
+        dragon.card_types.subtypes.push("Dragon".to_string());
+        state.objects.insert(dragon_id, dragon);
+        state.battlefield.push_back(dragon_id);
+
+        let victim = GameObject::new(
+            victim_id,
+            CardId(3),
+            PlayerId(0),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(victim_id, victim);
+
+        // Record damage with the Dragon characteristics captured at damage time.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: dragon_id,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(victim_id),
+            target_controller: PlayerId(0),
+            amount: 3,
+            is_combat: false,
+            source_subtypes: vec!["Dragon".to_string()],
+            source_core_types: vec![CoreType::Creature],
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            ..Default::default()
+        });
+
+        // Now mutate the LIVE source: strip its Dragon subtype (transformed into
+        // a non-Dragon permanent). A live-object match would no longer see a Dragon.
+        let live = state.objects.get_mut(&dragon_id).unwrap();
+        live.card_types.subtypes.clear();
+        live.card_types.core_types.clear();
+
+        let dragon_filter =
+            TargetFilter::Typed(TypedFilter::default().subtype("Dragon".to_string()));
+        let cond = ReplacementCondition::DealtDamageThisTurnBySource {
+            source: dragon_filter,
+        };
+
+        // The snapshot says the source was a Dragon at damage time → matches.
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                Some(victim_id),
+                &dummy_begin_turn_event(),
+            ),
+            "source matched its damage-time Dragon snapshot even after the live \
+             object lost the Dragon subtype (CR 608.2i lookback)"
+        );
+
+        // A non-matching filter (Goblin) must NOT match the Dragon snapshot —
+        // confirms the swap discriminates on snapshot characteristics, not Any.
+        let goblin_cond = ReplacementCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::Typed(TypedFilter::default().subtype("Goblin".to_string())),
+        };
+        assert!(
+            !evaluate_replacement_condition(
+                &goblin_cond,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                Some(victim_id),
+                &dummy_begin_turn_event(),
+            ),
+            "Dragon snapshot must not satisfy a Goblin source filter"
+        );
+    }
+
     #[test]
     fn untap_override_replaces_seeded_zone_change_tap_state() {
         let repl = spelunking_replacement();
@@ -6123,11 +7076,13 @@ mod tests {
             from: Zone::Hand,
             to: Zone::Battlefield,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Tapped,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
 
         let replaced = apply_single_replacement(
@@ -6235,6 +7190,7 @@ mod tests {
                 PlayerId(0),
                 crate::types::card_type::CoreType::Creature,
             )),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             applied: HashSet::new(),
         };
@@ -6274,6 +7230,7 @@ mod tests {
             owner: PlayerId(0),
             count: 1,
             spec: Box::new(spec),
+            copy: None,
             enter_tapped: EtbTapState::Tapped,
             applied: HashSet::new(),
         };
@@ -6512,20 +7469,19 @@ mod tests {
 
     #[test]
     fn damage_double_chaining_two_doublers() {
-        // Two Double replacements → 3 * 2 * 2 = 12
+        // CR 616.1: Two pure damage doublers commute just like two pure token
+        // doublers, so the replacement pipeline can auto-resolve without a
+        // player ordering prompt.
         let repl1 = damage_repl(DamageModification::Double);
         let repl2 = damage_repl(DamageModification::Double);
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl1, repl2]);
         let mut events = Vec::new();
         let proposed = damage_event(3);
-        let initial_result = replace_event(&mut state, proposed, &mut events);
-        let result = resolve_first_replacement_choice(&mut state, initial_result, &mut events);
-        match result {
-            ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
-                assert_eq!(amount, 12, "Two doublers should quadruple: 3 * 2 * 2 = 12");
-            }
-            other => panic!("Expected Execute with Damage, got {other:?}"),
-        }
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) = result else {
+            panic!("expected auto-resolved Damage with no CR 616.1 prompt, got {result:?}");
+        };
+        assert_eq!(amount, 12, "Two doublers should quadruple: 3 * 2 * 2 = 12");
     }
 
     // ── Damage pipeline filter tests ──
@@ -6671,6 +7627,108 @@ mod tests {
     }
 
     #[test]
+    fn damage_target_filter_source_chosen_player_scopes_replacement() {
+        let repl = damage_repl(DamageModification::Double).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+            },
+        );
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+        let registry = build_replacement_registry();
+
+        let chosen_player_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &chosen_player_damage, &registry).is_empty(),
+            "damage to the source's chosen player should match"
+        );
+
+        let unchosen_player_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &unchosen_player_damage, &registry).is_empty(),
+            "damage to another player should not match"
+        );
+    }
+
+    #[test]
+    fn damage_target_filter_source_chosen_player_matches_their_permanent() {
+        let repl = damage_repl(DamageModification::Double).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+            },
+        );
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+
+        let chosen_permanent = GameObject::new(
+            ObjectId(60),
+            CardId(3),
+            PlayerId(1),
+            "Chosen Player Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(60), chosen_permanent);
+        state.battlefield.push_back(ObjectId(60));
+
+        let other_permanent = GameObject::new(
+            ObjectId(61),
+            CardId(4),
+            PlayerId(0),
+            "Other Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(61), other_permanent);
+        state.battlefield.push_back(ObjectId(61));
+
+        let registry = build_replacement_registry();
+        let chosen_permanent_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(60)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &chosen_permanent_damage, &registry).is_empty(),
+            "damage to a permanent the source's chosen player controls should match"
+        );
+
+        let other_permanent_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(61)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &other_permanent_damage, &registry).is_empty(),
+            "damage to another player's permanent should not match"
+        );
+    }
+
+    #[test]
     fn damage_boost_not_blocked_by_prevention_disabled() {
         use crate::types::ability::{GameRestriction, RestrictionExpiry};
         // Damage boost with damage_modification should still apply even when prevention is disabled
@@ -6723,6 +7781,205 @@ mod tests {
             obj.replacement_definitions.push(shield);
         }
         id
+    }
+
+    fn create_creature_with_umbra(state: &mut GameState, owner: PlayerId) -> (ObjectId, ObjectId) {
+        let creature = crate::game::zones::create_object(
+            state,
+            CardId(1),
+            owner,
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+        let umbra = crate::game::zones::create_object(
+            state,
+            CardId(2),
+            owner,
+            "Hyena Umbra".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura = state.objects.get_mut(&umbra).unwrap();
+            aura.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(crate::types::keywords::Keyword::TotemArmor);
+            aura.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(umbra);
+        (creature, umbra)
+    }
+
+    #[test]
+    fn umbra_armor_replaces_destruction_and_destroys_the_aura() {
+        let mut state = GameState::new_two_player(42);
+        let (creature, umbra) = create_creature_with_umbra(&mut state, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.damage_marked = 5;
+            obj.dealt_deathtouch_damage = true;
+            obj.tapped = false;
+        }
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: creature,
+            source: Some(ObjectId(100)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // CR 702.89a: the destruction is replaced.
+        assert_eq!(result, ReplacementResult::Prevented);
+        // The enchanted creature survives with all damage removed, and — unlike
+        // regeneration (CR 701.19b) — is NOT tapped.
+        assert!(state.battlefield.contains(&creature));
+        let obj = state.objects.get(&creature).unwrap();
+        assert_eq!(obj.damage_marked, 0);
+        assert!(!obj.dealt_deathtouch_damage);
+        assert!(
+            !obj.tapped,
+            "umbra armor does not tap (unlike regeneration)"
+        );
+        // CR 702.89a: the Umbra Aura is destroyed.
+        assert!(
+            !state.battlefield.contains(&umbra),
+            "the Umbra Aura should be destroyed"
+        );
+    }
+
+    #[test]
+    fn umbra_armor_applies_even_when_cant_regenerate() {
+        // CR 702.89a: umbra armor is a replacement, not regeneration, so a
+        // "can't be regenerated" destruction does NOT bypass it.
+        let mut state = GameState::new_two_player(42);
+        let (creature, umbra) = create_creature_with_umbra(&mut state, PlayerId(0));
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: creature,
+            source: None,
+            cant_regenerate: true,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert_eq!(result, ReplacementResult::Prevented);
+        assert!(state.battlefield.contains(&creature));
+        assert!(!state.battlefield.contains(&umbra));
+    }
+
+    #[test]
+    fn multiple_umbra_armor_auras_prompt_for_aura_choice() {
+        // CR 616.1 + CR 702.89a: each Umbra on the enchanted permanent creates
+        // its own replacement effect. The controller chooses which Aura is
+        // destroyed; the engine must not deterministically pick the first.
+        let mut state = GameState::new_two_player(42);
+        let (creature, hyena_umbra) = create_creature_with_umbra(&mut state, PlayerId(0));
+        let bear_umbra = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear Umbra".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura = state.objects.get_mut(&bear_umbra).unwrap();
+            aura.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(crate::types::keywords::Keyword::TotemArmor);
+            aura.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(bear_umbra);
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: creature,
+            source: Some(ObjectId(100)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for two Umbra armor replacements, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(0));
+
+        let WaitingFor::ReplacementChoice {
+            candidate_count,
+            candidate_descriptions,
+            ..
+        } = replacement_choice_waiting_for(player, &state)
+        else {
+            panic!("expected ReplacementChoice waiting_for");
+        };
+        assert_eq!(candidate_count, 2);
+        let labels: HashSet<&str> = candidate_descriptions.iter().map(String::as_str).collect();
+        assert_eq!(
+            labels,
+            HashSet::from([
+                "Umbra armor: destroy Hyena Umbra instead",
+                "Umbra armor: destroy Bear Umbra instead",
+            ])
+        );
+        assert!(state.battlefield.contains(&hyena_umbra));
+        assert!(state.battlefield.contains(&bear_umbra));
+    }
+
+    #[test]
+    fn umbra_armor_noop_without_umbra() {
+        let mut state = GameState::new_two_player(42);
+        let creature = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: creature,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // No Umbra → the destruction is not replaced.
+        assert!(matches!(result, ReplacementResult::Execute(_)));
     }
 
     #[test]
@@ -6806,6 +8063,69 @@ mod tests {
         // Shield not consumed
         let obj = state.objects.get(&bear_id).unwrap();
         assert!(!obj.replacement_definitions[0].is_consumed);
+    }
+
+    /// CR 701.19c: A creature marked with `StaticMode::CantBeRegenerated`
+    /// (granted by the standalone "[creature] can't be regenerated this turn"
+    /// effect — Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort) has its
+    /// regeneration shield bypassed at destroy time, even though the Destroy
+    /// event itself carries `cant_regenerate: false`. Mirrors
+    /// `cant_regenerate_bypasses_shield` but exercises the static-driven path.
+    #[test]
+    fn cant_be_regenerated_static_bypasses_shield() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        // Grant the regeneration prohibition onto the creature, mirroring the
+        // transient until-end-of-turn continuous effect's `AddStaticMode`
+        // propagation onto the affected creature's `static_definitions`.
+        state
+            .objects
+            .get_mut(&bear_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::types::ability::StaticDefinition::new(
+                    crate::types::statics::StaticMode::CantBeRegenerated,
+                )
+                .affected(TargetFilter::SelfRef),
+            );
+
+        // Helper observes the active mark.
+        assert!(object_has_active_cant_be_regenerated(&state, bear_id));
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            // Note: the inline flag is false — the bypass is driven purely by the
+            // static mark, not by the destroy event.
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Destruction proceeds; the shield does NOT save the creature.
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Destroy { .. })
+            ),
+            "CantBeRegenerated static should bypass the shield, got {:?}",
+            result
+        );
+        // CR 701.19c: shields are not applied, not consumed.
+        let obj = state.objects.get(&bear_id).unwrap();
+        assert!(!obj.replacement_definitions[0].is_consumed);
+    }
+
+    /// Negative control for `object_has_active_cant_be_regenerated`: a creature
+    /// with no regeneration prohibition is not reported as marked.
+    #[test]
+    fn object_without_cant_be_regenerated_is_not_marked() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+        assert!(!object_has_active_cant_be_regenerated(&state, bear_id));
     }
 
     #[test]
@@ -7814,6 +9134,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(plant_spec),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 2,
             applied: HashSet::new(),
@@ -7906,6 +9227,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(treasure),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
@@ -7943,6 +9265,518 @@ mod tests {
             1,
             "missing Food emitted by ensure-all"
         );
+    }
+
+    /// CR 616.1: Multiple pure `Double` token doublers commute and should not
+    /// trigger a CR 616.1 ordering prompt. Three doublers (Doubling Season,
+    /// Adrix and Nev, Primal Vigor) on a single token creation should auto-resolve
+    /// and multiply correctly: 1 * 2 * 2 * 2 = 8.
+    #[test]
+    fn multiple_pure_token_doublers_commute_no_prompt() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        let doubling_season = ObjectId(10);
+        let adrix_nev = ObjectId(20);
+        let primal_vigor = ObjectId(30);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Double);
+
+        let mut state = GameState::new_two_player(42);
+        let mut ds = GameObject::new(
+            doubling_season,
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds.replacement_definitions = vec![doubler_repl.clone()].into();
+        let mut an = GameObject::new(
+            adrix_nev,
+            CardId(2),
+            PlayerId(0),
+            "Adrix and Nev".to_string(),
+            Zone::Battlefield,
+        );
+        an.replacement_definitions = vec![doubler_repl.clone()].into();
+        let mut pv = GameObject::new(
+            primal_vigor,
+            CardId(3),
+            PlayerId(0),
+            "Primal Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        pv.replacement_definitions = vec![doubler_repl].into();
+
+        state.objects.insert(doubling_season, ds);
+        state.objects.insert(adrix_nev, an);
+        state.objects.insert(primal_vigor, pv);
+        state.battlefield.push_back(doubling_season);
+        state.battlefield.push_back(adrix_nev);
+        state.battlefield.push_back(primal_vigor);
+
+        let food_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Food".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![crate::types::card_type::CoreType::Artifact],
+                subtypes: vec!["Food".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "Food".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(0),
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(food_spec),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Should auto-resolve without a prompt since all doublers commute
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute (auto-resolve), got {:?}", result);
+        };
+
+        let ProposedEvent::CreateToken { count, .. } = primary else {
+            panic!("expected CreateToken event");
+        };
+
+        assert_eq!(
+            count, 8,
+            "Three doublers should multiply: 1 * 2 * 2 * 2 = 8"
+        );
+    }
+
+    /// CR 616.1: Mixed `Double` and `Plus` quantity modifications do NOT commute
+    /// and should trigger a CR 616.1 ordering prompt. Doubling Season (`Double`)
+    /// and Hardened Scales (`Plus{1}`) on a counter placement must prompt the player.
+    #[test]
+    fn mixed_double_and_plus_do_not_commute_prompt_required() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterType;
+
+        let doubling_season = ObjectId(10);
+        let hardened_scales = ObjectId(20);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Double);
+        let plus_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Plus { value: 1 });
+
+        let mut state = GameState::new_two_player(42);
+        let mut ds = GameObject::new(
+            doubling_season,
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds.replacement_definitions = vec![doubler_repl].into();
+        let mut hs = GameObject::new(
+            hardened_scales,
+            CardId(2),
+            PlayerId(0),
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        hs.replacement_definitions = vec![plus_repl].into();
+
+        state.objects.insert(doubling_season, ds);
+        state.objects.insert(hardened_scales, hs);
+        state.battlefield.push_back(doubling_season);
+        state.battlefield.push_back(hardened_scales);
+
+        let target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(30), target);
+
+        let proposed = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
+            object_id: ObjectId(30),
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Should trigger a prompt since Double and Plus do not commute
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!(
+                "expected NeedsChoice for non-commuting Double+Plus, got {:?}",
+                result
+            );
+        };
+        assert_eq!(player, PlayerId(0));
+    }
+
+    /// CR 614.5 + CR 614.1a: Academy Manufactor's recursive token events should
+    /// inherit the primary event's `applied` set to prevent Doubling Season from
+    /// re-applying to the recursive batches. With Manufactor + Doubling Season,
+    /// creating 1 Food should result in exactly 2 Foods, 2 Clues, and 2 Treasures
+    /// (not 4 of each, which would indicate incorrect re-application).
+    #[test]
+    fn academy_manufactor_plus_doubling_season_correct_stacking() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        fn artifact_spec(name: &str) -> TokenSpec {
+            TokenSpec {
+                characteristics: TokenCharacteristics {
+                    display_name: name.to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Artifact],
+                    subtypes: vec![name.to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: name.to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: None,
+            }
+        }
+
+        let manufactor = ObjectId(700);
+        let doubling_season = ObjectId(10);
+
+        let manufactor_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .condition(ReplacementCondition::TokenSubtypeMatches {
+                subtypes: vec![
+                    "Clue".to_string(),
+                    "Food".to_string(),
+                    "Treasure".to_string(),
+                ],
+            })
+            .ensure_token_specs(vec![
+                artifact_spec("Clue"),
+                artifact_spec("Food"),
+                artifact_spec("Treasure"),
+            ]);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Double);
+
+        let mut state = GameState::new_two_player(42);
+        let mut m = GameObject::new(
+            manufactor,
+            CardId(1),
+            PlayerId(0),
+            "Academy Manufactor".to_string(),
+            Zone::Battlefield,
+        );
+        m.replacement_definitions = vec![manufactor_repl].into();
+        let mut ds = GameObject::new(
+            doubling_season,
+            CardId(2),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds.replacement_definitions = vec![doubler_repl].into();
+
+        state.objects.insert(manufactor, m);
+        state.objects.insert(doubling_season, ds);
+        state.battlefield.push_back(manufactor);
+        state.battlefield.push_back(doubling_season);
+
+        let mut treasure = artifact_spec("Treasure");
+        treasure.source_id = manufactor;
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute; got {:?}", result);
+        };
+        crate::game::effects::token::apply_create_token_after_replacement(
+            &mut state,
+            primary,
+            &mut events,
+        );
+
+        let count_subtype = |sub: &str| {
+            state
+                .objects
+                .values()
+                .filter(|o| o.is_token && o.card_types.subtypes.iter().any(|s| s == sub))
+                .count()
+        };
+
+        // With correct applied set inheritance, Doubling Season applies once
+        // to the primary event (1 → 2) and does NOT re-apply to the recursive
+        // Manufactor batches. Result: 2 of each subtype.
+        assert_eq!(
+            count_subtype("Treasure"),
+            2,
+            "primary Treasure doubled once"
+        );
+        assert_eq!(count_subtype("Clue"), 2, "Clue batch doubled once");
+        assert_eq!(count_subtype("Food"), 2, "Food batch doubled once");
+    }
+
+    /// CR 614.1a + CR 109.5: Academy Manufactor's "If *you* would create..."
+    /// is scoped to the source's controller. When a different player creates a
+    /// Treasure token, the replacement must NOT fire — only the single Treasure
+    /// is created, with no Clue or Food (issue #1967). Mirrors the
+    /// `token_owner_scope` enforcement in the main applicability loop.
+    #[test]
+    fn academy_manufactor_does_not_apply_to_other_players_tokens_cr_614_1a() {
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        fn artifact_spec(name: &str) -> TokenSpec {
+            TokenSpec {
+                characteristics: TokenCharacteristics {
+                    display_name: name.to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Artifact],
+                    subtypes: vec![name.to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: name.to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: None,
+            }
+        }
+
+        let manufactor = ObjectId(700);
+        // CR 614.1a + CR 109.5: `token_owner_scope(You)` is what the parser now
+        // emits for the "if you would create" Manufactor shape.
+        let manufactor_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .condition(ReplacementCondition::TokenSubtypeMatches {
+                subtypes: vec![
+                    "Clue".to_string(),
+                    "Food".to_string(),
+                    "Treasure".to_string(),
+                ],
+            })
+            .token_owner_scope(ControllerRef::You)
+            .ensure_token_specs(vec![
+                artifact_spec("Clue"),
+                artifact_spec("Food"),
+                artifact_spec("Treasure"),
+            ]);
+
+        // Manufactor is controlled by PlayerId(0); the opponent PlayerId(1)
+        // will be the one creating a Treasure.
+        let mut state =
+            test_state_with_object(manufactor, Zone::Battlefield, vec![manufactor_repl]);
+
+        let mut treasure = artifact_spec("Treasure");
+        treasure.source_id = manufactor;
+        treasure.controller = PlayerId(1);
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            spec: Box::new(treasure),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute; got {:?}", result);
+        };
+        crate::game::effects::token::apply_create_token_after_replacement(
+            &mut state,
+            primary,
+            &mut events,
+        );
+
+        let count_subtype = |sub: &str| {
+            state
+                .objects
+                .values()
+                .filter(|o| o.is_token && o.card_types.subtypes.iter().any(|s| s == sub))
+                .count()
+        };
+
+        // The opponent's lone Treasure is created unmodified; Manufactor does
+        // not bolt on a Clue and a Food because it does not own the event.
+        assert_eq!(
+            count_subtype("Treasure"),
+            1,
+            "opponent's single Treasure is created unmodified"
+        );
+        assert_eq!(
+            count_subtype("Clue"),
+            0,
+            "Manufactor must not add a Clue to another player's token creation"
+        );
+        assert_eq!(
+            count_subtype("Food"),
+            0,
+            "Manufactor must not add a Food to another player's token creation"
+        );
+    }
+
+    /// CR 616.1: When candidates have both commuting Count modifications
+    /// AND non-commutative EnterTapped modifications, the set must still
+    /// be material and trigger a prompt. This catches the early-return bug
+    /// where commuting Count would incorrectly return false before checking
+    /// other candidates.
+    #[test]
+    fn commuting_count_plus_non_commuting_entertapped_material() {
+        use crate::types::ability::{AbilityKind, Effect, QuantityModification};
+
+        let doubler1 = ObjectId(10);
+        let doubler2 = ObjectId(15);
+        let tap_effect1 = ObjectId(20);
+        let tap_effect2 = ObjectId(25);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Double);
+
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ),
+        );
+
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::SelfRef,
+                },
+            ),
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let mut ds1 = GameObject::new(
+            doubler1,
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds1.replacement_definitions = vec![doubler_repl.clone()].into();
+        let mut ds2 = GameObject::new(
+            doubler2,
+            CardId(2),
+            PlayerId(0),
+            "Adrix and Nev".to_string(),
+            Zone::Battlefield,
+        );
+        ds2.replacement_definitions = vec![doubler_repl].into();
+        let mut te1 = GameObject::new(
+            tap_effect1,
+            CardId(3),
+            PlayerId(0),
+            "Tap Effect".to_string(),
+            Zone::Battlefield,
+        );
+        te1.replacement_definitions = vec![tap_repl].into();
+        let mut te2 = GameObject::new(
+            tap_effect2,
+            CardId(4),
+            PlayerId(0),
+            "Untap Effect".to_string(),
+            Zone::Battlefield,
+        );
+        te2.replacement_definitions = vec![untap_repl].into();
+
+        state.objects.insert(doubler1, ds1);
+        state.objects.insert(doubler2, ds2);
+        state.objects.insert(tap_effect1, te1);
+        state.objects.insert(tap_effect2, te2);
+        state.battlefield.push_back(doubler1);
+        state.battlefield.push_back(doubler2);
+        state.battlefield.push_back(tap_effect1);
+        state.battlefield.push_back(tap_effect2);
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(TokenSpec {
+                characteristics: crate::types::proposed_event::TokenCharacteristics {
+                    display_name: "Token".to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Creature],
+                    subtypes: Vec::new(),
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: "Token".to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: None,
+            }),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Should trigger a prompt since EnterTapped is non-commutative
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!(
+                "expected NeedsChoice for non-commutative EnterTapped, got {:?}",
+                result
+            );
+        };
+        assert_eq!(player, PlayerId(0));
     }
 
     /// CR 121.1 + CR 504.1 + CR 614.6 — Alhammarret's Archive's

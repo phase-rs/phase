@@ -17,32 +17,51 @@ use super::players;
 /// - For team-based formats (2HG): also eliminates all teammates
 /// - Checks if the game is over (1 or fewer living players/teams remain)
 pub fn eliminate_player(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
-    // Skip if already eliminated
-    if state
-        .players
-        .iter()
-        .any(|p| p.id == player && p.is_eliminated)
-    {
-        return;
-    }
+    eliminate_players_simultaneously(state, &[player], events);
+}
 
-    do_eliminate(state, player, events);
+/// CR 704.3 + CR 104.4a: Eliminate a set of players who lost in the SAME
+/// state-based-action event.
+///
+/// All eliminations (and, for team formats, their teammate eliminations) are
+/// applied BEFORE the single `check_game_over`, so the game-over check observes
+/// the true post-event living set. When every remaining player is in the set
+/// the result is a draw (`GameOver { winner: None }`) per CR 104.4a, rather than
+/// crowning whichever player happened to be processed first. With a single loser
+/// this is exactly the previous per-player behavior.
+pub fn eliminate_players_simultaneously(
+    state: &mut GameState,
+    players_to_eliminate: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+) {
+    let mut eliminated_any = false;
 
-    // For team-based formats, eliminate teammates too
-    if state.format_config.team_based {
-        let team = players::teammates(state, player);
-        for teammate in team {
-            if !state
-                .players
-                .iter()
-                .any(|p| p.id == teammate && p.is_eliminated)
-            {
+    for &player in players_to_eliminate {
+        // Skip if already eliminated (e.g. a teammate eliminated alongside an
+        // earlier loser in this same batch).
+        if !players::is_alive(state, player) {
+            continue;
+        }
+
+        do_eliminate(state, player, events);
+        eliminated_any = true;
+
+        // For team-based formats, eliminate teammates too.
+        if state.format_config.team_based {
+            let team = players::teammates(state, player);
+            for teammate in team {
                 do_eliminate(state, teammate, events);
             }
         }
     }
 
-    // Check if game is over
+    if !eliminated_any {
+        return;
+    }
+
+    // CR 704.3 + CR 104.4a: a SINGLE game-over check after all simultaneous
+    // eliminations — so a finish where every remaining player lost at once
+    // resolves to a draw (`winner: None`) rather than a spurious winner.
     check_game_over(state, events);
 
     // CR 800.4a: If the active `WaitingFor` was waiting on any newly-eliminated
@@ -218,6 +237,24 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
     // CR 800.4a: Remove spells they control from the stack
     state.stack.retain(|entry| entry.controller != player);
 
+    // CR 800.4a: Abandon any not-yet-resolved cast this player controls. A spell
+    // paused mid-cast (e.g. a convoke spell awaiting `WaitingFor::ManaPayment`)
+    // is held in `state.pending_cast`, not as a stack entry, so the stack retain
+    // above does not clear it. Left behind, the in-progress cast lingers in the
+    // GameState after the player leaves — and because the WASM engine is a
+    // singleton reused across games, it can resurface as a stuck mana-payment
+    // window in a later game. Only clear a pending cast the *leaving* player
+    // controls; another living player's mid-cast must survive an opponent's
+    // departure, so key off the spell object's controller (the caster).
+    if state
+        .pending_cast
+        .as_ref()
+        .and_then(|pc| state.objects.get(&pc.object_id))
+        .is_some_and(|obj| obj.controller == player)
+    {
+        state.pending_cast = None;
+    }
+
     // CR 800.4a: Exile permanents they own from the battlefield
     let to_exile: Vec<_> = state
         .battlefield
@@ -314,6 +351,7 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
                     description: Some("Take the initiative — venture into Undercity".to_string()),
                     may_trigger_origin: None,
                     subject_match_count: None,
+                    die_result: None,
                 },
                 events,
             );
@@ -380,9 +418,11 @@ pub(super) fn ensure_game_over_if_terminal(state: &mut GameState, events: &mut V
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, ResolvedAbility};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
-    use crate::types::identifiers::CardId;
+    use crate::types::game_state::{CastingVariant, PendingCast, StackEntry, StackEntryKind};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaCost;
 
     fn setup_two_player() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -469,6 +509,83 @@ mod tests {
         ));
     }
 
+    // --- Simultaneous loss / draw (CR 104.4a + CR 704.3) ---
+
+    #[test]
+    fn simultaneous_two_player_loss_is_a_draw() {
+        // CR 104.4a + CR 704.3: when all remaining players lose in a single SBA
+        // event, the game is a DRAW (winner: None) — NOT a win for whichever
+        // player happened to be processed first.
+        let mut state = setup_two_player();
+        let mut events = Vec::new();
+
+        eliminate_players_simultaneously(&mut state, &[PlayerId(0), PlayerId(1)], &mut events);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "simultaneous loss of all players must be a draw, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn simultaneous_single_loss_has_sole_winner() {
+        // Only one player loses → the other wins (single-loser behavior preserved).
+        let mut state = setup_two_player();
+        let mut events = Vec::new();
+
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "a single loser leaves the other player as sole winner, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn three_player_two_simultaneous_losses_leave_sole_winner() {
+        // Two of three players die together; the lone survivor wins (not a draw).
+        let mut state = setup_three_player();
+        let mut events = Vec::new();
+
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1), PlayerId(2)], &mut events);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "two simultaneous losses with one survivor → that survivor wins, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn three_player_all_simultaneous_losses_is_a_draw() {
+        let mut state = setup_three_player();
+        let mut events = Vec::new();
+
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(0), PlayerId(1), PlayerId(2)],
+            &mut events,
+        );
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "all players losing simultaneously is a draw, got {:?}",
+            state.waiting_for
+        );
+    }
+
     // --- Elimination cleanup ---
 
     #[test]
@@ -516,6 +633,74 @@ mod tests {
         // Permanent should be exiled, not on battlefield
         assert!(!state.battlefield.contains(&id));
         assert!(state.exile.contains(&id));
+    }
+
+    /// Build a mid-cast spell (on the stack, awaiting payment) controlled by
+    /// `caster` and stash it in `state.pending_cast`, mirroring the engine state
+    /// during `WaitingFor::ManaPayment` (e.g. a convoke spell awaiting taps).
+    fn stash_pending_cast(state: &mut GameState, caster: PlayerId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(99),
+            caster,
+            "Convoke Spell".to_string(),
+            Zone::Stack,
+        );
+        if let Some(obj) = state.objects.get_mut(&obj_id) {
+            obj.controller = caster;
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "test".to_string(),
+                description: None,
+            },
+            vec![],
+            obj_id,
+            caster,
+        );
+        state.pending_cast = Some(Box::new(PendingCast::new(
+            obj_id,
+            CardId(99),
+            ability,
+            ManaCost::NoCost,
+        )));
+        obj_id
+    }
+
+    // --- CR 800.4a: abandon the leaving player's in-progress cast ---
+
+    #[test]
+    fn elimination_abandons_leaving_players_pending_cast() {
+        // Repro: conceding mid-convoke (WaitingFor::ManaPayment) must not strand
+        // the in-progress cast in the (singleton) GameState, where it would
+        // resurface as a stuck mana-payment window in a later game.
+        let mut state = setup_three_player();
+        stash_pending_cast(&mut state, PlayerId(1));
+        assert!(state.pending_cast.is_some());
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            state.pending_cast.is_none(),
+            "the leaving player's mid-cast must be abandoned"
+        );
+    }
+
+    #[test]
+    fn elimination_preserves_other_players_pending_cast() {
+        // A living player's mid-cast must survive an opponent's departure —
+        // pending_cast is keyed off the spell's controller, not cleared blindly.
+        let mut state = setup_three_player();
+        stash_pending_cast(&mut state, PlayerId(0));
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            state.pending_cast.is_some(),
+            "an opponent leaving must not abandon the caster's in-progress spell"
+        );
     }
 
     #[test]

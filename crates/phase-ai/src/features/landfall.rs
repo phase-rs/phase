@@ -272,6 +272,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let put_in_play = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -286,6 +287,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         );
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);

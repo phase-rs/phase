@@ -16,16 +16,6 @@ export const BASIC_LAND_NAMES = new Set([
   "Snow-Covered Forest",
 ]);
 
-/**
- * CR 100.2a: Certain cards override the 4-copy deck construction limit
- * via Oracle text "a deck can have any number of cards named ~".
- * This is a UI convenience check — real validation goes through the engine.
- */
-export function hasUnlimitedCopies(oracleText: string | undefined): boolean {
-  if (!oracleText) return false;
-  return oracleText.toLowerCase().includes("a deck can have any number of cards named");
-}
-
 /** Action types that don't reveal hidden information and are safe to undo. */
 export const UNDOABLE_ACTIONS = new Set([
   "PassPriority",
@@ -42,6 +32,12 @@ export const PLAYER_ID = 0;
 
 /** Player ID for the AI opponent (always player 1 in WASM mode). */
 export const AI_PLAYER_ID = 1;
+
+/**
+ * Non-seat viewer id used by the multiplayer server for spectators
+ * (`SPECTATOR_PLAYER_ID` in `crates/phase-server/src/main.rs`).
+ */
+export const SPECTATOR_PLAYER_ID = 255;
 
 /** Brief visual beat between auto-passed phases in ms. */
 export const AUTO_PASS_BEAT_MS = 200;
