@@ -344,7 +344,7 @@ export function LimitedDeckBuilder({
 
           {/* Mana curve */}
           <section>
-            <ManaCurve pool={pool} cards={mainDeck} />
+            <ManaCurve pool={pool} pool={pool} cards={mainDeck} />
           </section>
 
           {/* Actions */}

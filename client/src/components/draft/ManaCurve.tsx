@@ -7,6 +7,7 @@ import type { DraftCardInstance } from "../../adapter/draft-adapter";
 
 interface ManaCurveProps {
   pool: DraftCardInstance[];
+  pool: DraftCardInstance[];
   cards: string[];
 }
 
@@ -16,11 +17,8 @@ const CMC_BUCKETS = ["0", "1", "2", "3", "4", "5", "6+"] as const;
 const MAX_BAR_HEIGHT = 100;
 
 // ── Component ───────────────────────────────────────────────────────────
-
 export function ManaCurve({ pool, cards }: ManaCurveProps) {
-  const { t } = useTranslation("draft");
-
-  const counts = useMemo(() => {
+  const { t } = useTranslation("draft")
     const cmcByName = new Map<string, number>();
     for (const card of pool) {
       cmcByName.set(card.name, card.cmc);
