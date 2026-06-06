@@ -13,7 +13,7 @@ use super::super::oracle_nom::condition::inject_controller_you;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
-use super::super::oracle_target::parse_type_phrase;
+use super::super::oracle_target::{parse_type_phrase, parse_zone_word};
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -2295,7 +2295,29 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    if let Some(condition) = parse_entered_or_cast_from_zone_ability_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_zone_change_object_matches_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    // CR 608.2c: trailing "this way" outcome gate — "[effect] if at least one
+    // <filter> was <verb> this way". CR 608.2c explicitly defines that later
+    // text on a card may reference an earlier instruction in the same effect
+    // ("if that spell is countered this way") — here "this way" names the set
+    // of objects affected by the immediately-preceding instruction. The suffix
+    // lands here after
+    // `strip_suffix_conditional` peels the effect, so the residual condition
+    // text is the bare existential "<quantifier> <filter> (was|is) <verb> this
+    // way". Delegate to the shared `parse_zone_changed_this_way_clause`
+    // combinator — the same authority the leading-form
+    // `strip_if_you_do_conditional` uses — so prefix ("if a creature card is
+    // exiled this way, …") and suffix ("… if at least one creature card was
+    // exiled this way") forms produce the identical
+    // `AbilityCondition::ZoneChangedThisWay { filter }` representation.
+    if let Some(condition) = parse_outcome_this_way_condition(lower.as_str()) {
         return Some(condition);
     }
 
@@ -3075,6 +3097,109 @@ fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
     })
 }
 
+/// CR 603.4 + CR 601.2a + CR 603.6c: Origin-zone phrase for "entered from
+/// <zone>" / "was cast from <zone>" ability gates. Zone tokens are delegated to
+/// the canonical zone-word parser so the accepted zone vocabulary stays
+/// centralized.
+fn parse_entered_or_cast_origin_zone_phrase(
+    input: &str,
+) -> nom::IResult<&str, Zone, OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+    let (input, _) = opt(alt((
+        tag::<_, _, E>("an opponent's "),
+        tag("each opponent's "),
+        tag("your "),
+        tag("their "),
+        tag("a "),
+        tag("the "),
+    )))
+    .parse(input)?;
+    parse_zone_word(input)
+}
+
+fn entered_or_cast_from_zone_condition(zone: Zone) -> AbilityCondition {
+    // CR 603.4 + CR 601.2a + CR 603.6c: Model the source-origin gate as the
+    // disjunction of entering the battlefield from that zone or being cast
+    // from that zone.
+    AbilityCondition::Or {
+        conditions: vec![
+            AbilityCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(zone),
+                destination: Zone::Battlefield,
+                filter: TargetFilter::Any,
+            },
+            AbilityCondition::CastFromZone { zone },
+        ],
+    }
+}
+
+/// CR 603.4 + CR 601.2 + CR 603.6c: "if it entered from your library or was
+/// cast from your library" and the compact "if it entered or was cast from a
+/// graveyard" class — ability-level gates for ETB draw-rider "instead" clauses
+/// (Fblthp, the Lost). Composes zone-change origin with cast-origin checks.
+fn parse_entered_or_cast_from_zone_ability_condition(lower: &str) -> Option<AbilityCondition> {
+    let (rest, plural) = alt((
+        value(false, tag::<_, _, OracleError<'_>>("it ")),
+        value(true, tag::<_, _, OracleError<'_>>("they ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Form B: "entered from <zone> or was/were cast from <zone>"
+    if let Ok((rest, zone1)) = preceded(
+        tag::<_, _, OracleError<'_>>("entered from "),
+        parse_entered_or_cast_origin_zone_phrase,
+    )
+    .parse(rest)
+    {
+        let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
+        let zone2 = if plural {
+            preceded(
+                tag::<_, _, OracleError<'_>>("were cast from "),
+                parse_entered_or_cast_origin_zone_phrase,
+            )
+            .parse(rest)
+            .ok()
+        } else {
+            preceded(
+                tag::<_, _, OracleError<'_>>("was cast from "),
+                parse_entered_or_cast_origin_zone_phrase,
+            )
+            .parse(rest)
+            .ok()
+        };
+        if let Some((rest, zone2)) = zone2 {
+            if zone1 == zone2 && rest.trim().is_empty() {
+                return Some(entered_or_cast_from_zone_condition(zone1));
+            }
+        }
+    }
+
+    // Form A: "entered or was/were cast from <zone>"
+    let (rest, _) = tag::<_, _, OracleError<'_>>("entered or ")
+        .parse(rest)
+        .ok()?;
+    let (rest, zone) = if plural {
+        preceded(
+            tag::<_, _, OracleError<'_>>("were cast from "),
+            parse_entered_or_cast_origin_zone_phrase,
+        )
+        .parse(rest)
+        .ok()?
+    } else {
+        preceded(
+            tag::<_, _, OracleError<'_>>("was cast from "),
+            parse_entered_or_cast_origin_zone_phrase,
+        )
+        .parse(rest)
+        .ok()?
+    };
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(entered_or_cast_from_zone_condition(zone))
+}
+
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
     let (type_text, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
     let (filter, leftover) = parse_type_phrase(type_text);
@@ -3088,6 +3213,33 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
             destination: Zone::Battlefield,
             filter,
         },
+        negated,
+    ))
+}
+
+/// CR 608.2c: "[effect] if at least one <filter> was <verb> this way" — the
+/// trailing (suffix) form of the prior-effect outcome gate. CR 608.2c states
+/// later text on a card may reference an earlier instruction in the same
+/// effect; here "this way" refers to the set of objects affected by the
+/// immediately-preceding instruction, and the condition fires when that set
+/// contains at least one object matching `<filter>`. Kaya, Orzhov Usurper's
+/// +1 ("Exile up to two target
+/// cards from a single graveyard. You gain 2 life if at least one creature
+/// card was exiled this way.") is the motivating case.
+///
+/// The whole condition fragment must be consumed: `parse_zone_changed_this_way_clause`
+/// already covers the existential quantifiers ("at least one"/"one or more"/
+/// article), the type/subtype filter, both tenses, the verb set, and the
+/// negation flag (`wasn't`/`isn't`). Requiring an empty remainder keeps this
+/// matcher from firing on partial overlaps with longer condition phrases.
+fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
+    let (rest, (filter, negated)) =
+        crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(lower).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(maybe_negate(
+        AbilityCondition::ZoneChangedThisWay { filter },
         negated,
     ))
 }
@@ -3467,6 +3619,48 @@ mod tests {
             }
             other => panic!("expected Typed Angel filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn suffix_outcome_this_way_kaya_creature_card_exiled() {
+        // Kaya, Orzhov Usurper +1 (PR #2447): "Exile up to two target cards
+        // from a single graveyard. You gain 2 life if at least one creature
+        // card was exiled this way." The trailing outcome gate must re-home
+        // onto the GainLife clause as `ZoneChangedThisWay { creature card }`
+        // — never drop to `condition: null` (which triggers the Condition_If
+        // swallowed-clause warning).
+        let (condition, body) = strip_suffix_conditional(
+            "You gain 2 life if at least one creature card was exiled this way.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "You gain 2 life");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        let TargetFilter::Typed(TypedFilter { type_filters, .. }) = filter else {
+            panic!("expected Typed creature-card filter, got {filter:?}");
+        };
+        assert!(
+            type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Creature)),
+            "expected Creature type filter, got {type_filters:?}"
+        );
+    }
+
+    #[test]
+    fn parse_outcome_this_way_negated_returns_not() {
+        // Build-for-the-class coverage: the suffix gate inherits the
+        // combinator's negation flag, so "wasn't exiled this way" maps to
+        // `Not { ZoneChangedThisWay { .. } }`.
+        let cond = parse_outcome_this_way_condition("a creature card wasn't exiled this way");
+        let Some(AbilityCondition::Not { condition }) = cond else {
+            panic!("expected Not, got {cond:?}");
+        };
+        assert!(matches!(
+            *condition,
+            AbilityCondition::ZoneChangedThisWay { .. }
+        ));
     }
 
     #[test]
@@ -4110,5 +4304,83 @@ mod tests {
             "CoreType chosen-type phrase must not be hijacked into a subtype \
              TargetMatchesFilter, got {cond:?}"
         );
+    }
+
+    /// CR 603.4 + CR 601.2 + CR 603.6c: Fblthp, the Lost (issue #2374) — library
+    /// origin gate for the "draw two cards instead" rider.
+    #[test]
+    fn entered_from_library_or_cast_from_library_condition() {
+        let cond = try_nom_condition_as_ability_condition(
+            "it entered from your library or was cast from your library",
+            &mut ParseContext::default(),
+        );
+        let Some(AbilityCondition::Or { conditions }) = cond else {
+            panic!("expected Or condition, got {cond:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(matches!(
+            &conditions[0],
+            AbilityCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &conditions[1],
+            AbilityCondition::CastFromZone {
+                zone: Zone::Library
+            }
+        ));
+    }
+
+    /// CR 608.2e: Full instead-clause assembly for Fblthp's ETB draw rider.
+    #[test]
+    fn fblthp_library_origin_instead_clause() {
+        let instead = try_parse_generic_instead_clause(
+            "If it entered from your library or was cast from your library, draw two cards instead.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        )
+        .expect("instead clause must parse");
+        assert!(matches!(&*instead.effect, Effect::Draw { .. }));
+        let cond = instead
+            .condition
+            .as_ref()
+            .expect("instead must carry condition");
+        let AbilityCondition::ConditionInstead { inner } = cond else {
+            panic!("expected ConditionInstead wrapper, got {cond:?}");
+        };
+        assert!(matches!(
+            inner.as_ref(),
+            AbilityCondition::Or { conditions } if conditions.len() == 2
+        ));
+    }
+
+    /// CR 608.2e: ETB base draw + library-origin instead override chain.
+    #[test]
+    fn fblthp_etb_draw_chain_with_library_instead() {
+        let def = parse_effect_chain(
+            "Draw a card. If it entered from your library or was cast from your library, draw two cards instead.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*def.effect, Effect::Draw { .. }));
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected instead sub_ability");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        let cond = sub.condition.as_ref().expect("instead sub must be gated");
+        assert!(matches!(
+            cond,
+            AbilityCondition::ConditionInstead { inner }
+                if matches!(inner.as_ref(), AbilityCondition::Or { .. })
+        ));
     }
 }

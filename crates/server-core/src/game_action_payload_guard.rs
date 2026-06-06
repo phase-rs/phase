@@ -227,6 +227,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         | DebugAction::SetLife { .. }
         | DebugAction::ModifyPlayerCounters { .. }
         | DebugAction::ModifyEnergy { .. }
+        | DebugAction::SetInfiniteMana { .. }
         | DebugAction::SetPhase { .. }
         | DebugAction::RunStateBasedActions
         | DebugAction::CreateTokenCopy { .. } => {}
@@ -361,7 +362,6 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::Transform { .. }
         | GameAction::PlayFaceDown { .. }
         | GameAction::TurnFaceUp { .. }
-        | GameAction::LookAtFaceDownCard { .. }
         | GameAction::ChoosePlayDraw { .. }
         | GameAction::ChoosePile { .. }
         | GameAction::ChooseBranch { .. }

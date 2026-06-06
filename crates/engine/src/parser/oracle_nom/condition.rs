@@ -18,7 +18,8 @@ use super::primitives::{
 };
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{
-    parse_type_phrase, parse_zone_suffix, parse_zone_word, peek_zone_boundary,
+    cast_capable_zones_except, parse_type_phrase, parse_zone_suffix, parse_zone_word,
+    peek_zone_boundary,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
@@ -1213,9 +1214,27 @@ fn parse_subject_has_property(input: &str) -> OracleResult<'_, QuantityRef> {
 /// axis that varies is the `PlayerScope` of the resulting `HandSize` ref, so
 /// the suffixes themselves compose cleanly with any subject. Also accepts
 /// the canonical "their hand" form for plural-friendly readings.
+fn consume_cards_in_hand_suffix(input: &str) -> Option<&str> {
+    tag::<_, _, OracleError<'_>>(" cards in hand")
+        .parse(input)
+        .ok()
+        .map(|(rest, _)| rest)
+        .or_else(|| {
+            tag::<_, _, OracleError<'_>>(" cards in your hand")
+                .parse(input)
+                .ok()
+                .map(|(rest, _)| rest)
+        })
+}
+
 fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, StaticCondition)> {
     // "no cards in hand" → HandSize EQ 0
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no cards in hand").parse(rest) {
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("no cards in hand"),
+        tag::<_, _, OracleError<'_>>("no cards in your hand"),
+    ))
+    .parse(rest)
+    {
         return Some((
             rest,
             StaticCondition::QuantityComparison {
@@ -1235,11 +1254,23 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
         nom::sequence::preceded(tag::<_, _, OracleError<'_>>("fewer than "), parse_number)
             .parse(rest)
     {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" cards in hand").parse(after_n) {
+        if let Some(rest) = consume_cards_in_hand_suffix(after_n) {
             return Some((
                 rest,
                 make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::LT, n),
             ));
+        }
+    }
+
+    // "exactly N cards in hand" → HandSize EQ N (Triskaidekaphile).
+    if let Ok((after_exactly, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(rest) {
+        if let Ok((after_n, n)) = parse_number(after_exactly) {
+            if let Some(rest) = consume_cards_in_hand_suffix(after_n) {
+                return Some((
+                    rest,
+                    make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::EQ, n),
+                ));
+            }
         }
     }
 
@@ -1265,11 +1296,21 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
 
     // "N or more cards in hand" → HandSize GE N
     let (after_n, n) = parse_number(rest).ok()?;
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more cards in hand").parse(after_n) {
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>(" or more cards in hand"),
+        tag::<_, _, OracleError<'_>>(" or more cards in your hand"),
+    ))
+    .parse(after_n)
+    {
         return Some((rest, make_quantity_ge(QuantityRef::HandSize { player }, n)));
     }
     // "N or fewer cards in hand" → HandSize LE N
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or fewer cards in hand").parse(after_n) {
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>(" or fewer cards in hand"),
+        tag::<_, _, OracleError<'_>>(" or fewer cards in your hand"),
+    ))
+    .parse(after_n)
+    {
         return Some((
             rest,
             make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::LE, n),
@@ -2723,6 +2764,9 @@ fn parse_first_spell_this_game_condition(input: &str) -> OracleResult<'_, Static
 /// CR 700.13: Crime tracking.
 fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you've ").parse(input)?;
+    if let Ok(parsed) = parse_youve_played_land_or_cast_spell_this_turn(rest) {
+        return Ok(parsed);
+    }
     alt((
         parse_youve_spell_history_condition,
         parse_youve_card_history_condition,
@@ -2730,8 +2774,79 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_youve_life_history_condition,
         parse_youve_combat_history_condition,
         parse_youve_player_action_history_condition,
+        // CR 305.2a + CR 603.4: "you've played a land [this turn]" — land-play
+        // history condition. Backs intervening-if predicates like Spider-Man
+        // 2099's "if you've played a land or cast a spell this turn from
+        // anywhere other than your hand".
+        // The " this turn" suffix is optional so the combinator also serves as
+        // the LHS of `parse_condition_disjunction` when "played a land" is
+        // followed by " or" rather than " this turn".
+        map((tag("played a land"), opt(tag(" this turn"))), |_| {
+            make_quantity_ge(
+                QuantityRef::LandsPlayedThisTurn {
+                    player: PlayerScope::Controller,
+                    from_zones: None,
+                },
+                1,
+            )
+        }),
     ))
     .parse(rest)
+}
+
+fn parse_youve_played_land_or_cast_spell_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("played a land or cast ").parse(input)?;
+    let (rest, spell_condition) = parse_one_spell_this_turn_after_cast(rest)?;
+    let land_from_zones = spell_condition_origin_zones(&spell_condition);
+    Ok((
+        rest,
+        StaticCondition::Or {
+            conditions: vec![
+                make_quantity_ge(
+                    QuantityRef::LandsPlayedThisTurn {
+                        player: PlayerScope::Controller,
+                        from_zones: land_from_zones,
+                    },
+                    1,
+                ),
+                spell_condition,
+            ],
+        },
+    ))
+}
+
+fn spell_condition_origin_zones(condition: &StaticCondition) -> Option<Vec<Zone>> {
+    let StaticCondition::QuantityComparison {
+        lhs:
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::SpellsCastThisTurn {
+                        filter: Some(filter),
+                        ..
+                    },
+            },
+        ..
+    } = condition
+    else {
+        return None;
+    };
+    target_filter_origin_zones(filter)
+}
+
+fn target_filter_origin_zones(filter: &TargetFilter) -> Option<Vec<Zone>> {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().find_map(|prop| match prop {
+            FilterProp::InZone { zone } => Some(vec![*zone]),
+            FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            _ => None,
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().find_map(target_filter_origin_zones)
+        }
+        _ => None,
+    }
 }
 
 fn parse_youve_spell_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -3730,9 +3845,14 @@ fn parse_one_spell_this_turn_filter(input: &str) -> OracleResult<'_, Option<Targ
     let (rest, _) = parse_article(input)?;
     let (rest, type_text) = take_until(" this turn").parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
+    let (rest, origin_props) = parse_spell_history_post_this_turn_origin(rest);
     if let Ok((empty, _)) = tag::<_, _, OracleError<'_>>("spell").parse(type_text) {
         if empty.trim().is_empty() {
-            return Ok((rest, None));
+            return Ok((
+                rest,
+                origin_props
+                    .map(|props| add_spell_history_filter_qualifiers(TargetFilter::Any, props)),
+            ));
         }
     }
     let Some(filter) = parse_spell_history_filter(type_text) else {
@@ -3741,7 +3861,14 @@ fn parse_one_spell_this_turn_filter(input: &str) -> OracleResult<'_, Option<Targ
             nom::error::ErrorKind::Fail,
         )));
     };
-    Ok((rest, Some(filter)))
+    Ok((
+        rest,
+        Some(
+            origin_props
+                .map(|props| add_spell_history_filter_qualifiers(filter.clone(), props))
+                .unwrap_or(filter),
+        ),
+    ))
 }
 
 fn parse_you_cast_both_spell_kinds_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -4070,13 +4197,55 @@ fn parse_spell_history_filter_with_zone_suffix(type_text: &str) -> Option<Target
     let (suffix, base_text) = take_until::<_, _, OracleError<'_>>(" from ")
         .parse(type_text)
         .ok()?;
-    let (props, _controller, consumed) = parse_zone_suffix(suffix)?;
+    let (props, consumed) = parse_spell_history_origin_props(suffix)?;
     if !suffix[consumed..].trim().is_empty() {
         return None;
     }
 
     let base_filter = parse_spell_history_base_filter(base_text.trim())?;
     Some(add_spell_history_filter_qualifiers(base_filter, props))
+}
+
+fn parse_spell_history_post_this_turn_origin(input: &str) -> (&str, Option<Vec<FilterProp>>) {
+    parse_spell_history_origin_props(input).map_or((input, None), |(props, consumed)| {
+        (&input[consumed..], Some(props))
+    })
+}
+
+fn parse_spell_history_origin_props(input: &str) -> Option<(Vec<FilterProp>, usize)> {
+    parse_cast_origin_anywhere_other_than_suffix(input).or_else(|| {
+        let (props, _controller, consumed) = parse_zone_suffix(input)?;
+        Some((props, consumed))
+    })
+}
+
+fn parse_cast_origin_anywhere_other_than_suffix(input: &str) -> Option<(Vec<FilterProp>, usize)> {
+    let trimmed = input.trim_start();
+    let leading_ws = input.len() - trimmed.len();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("from anywhere other than ")
+        .parse(trimmed)
+        .ok()?;
+    let (rest, _) = opt(alt((
+        value((), tag::<_, _, OracleError<'_>>("your ")),
+        value((), tag("their ")),
+        value((), tag("his ")),
+        value((), tag("her ")),
+        value((), tag("its ")),
+        value((), tag("a ")),
+        value((), tag("the ")),
+    )))
+    .parse(rest)
+    .ok()?;
+    let (rest, zone) = parse_zone_word(rest).ok()?;
+    let (rest, _) = peek_zone_boundary(rest).ok()?;
+
+    let consumed = leading_ws + trimmed.len() - rest.len();
+    Some((
+        vec![FilterProp::InAnyZone {
+            zones: cast_capable_zones_except(zone),
+        }],
+        consumed,
+    ))
 }
 
 fn parse_spell_history_base_filter(type_text: &str) -> Option<TargetFilter> {
@@ -5707,6 +5876,95 @@ mod tests {
         assert!(parse_condition("when something happens").is_err());
     }
 
+    #[test]
+    fn parse_played_land_or_cast_spell_from_outside_hand_this_turn() {
+        let (rest, condition) = parse_inner_condition(
+            "you've played a land or cast a spell this turn from anywhere other than your hand",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+
+        let StaticCondition::Or { conditions } = condition else {
+            panic!("expected Or condition, got {condition:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::LandsPlayedThisTurn {
+                            player: PlayerScope::Controller,
+                            from_zones: Some(land_zones),
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = &conditions[0]
+        else {
+            panic!(
+                "expected LandsPlayedThisTurn condition, got {:?}",
+                conditions[0]
+            );
+        };
+        assert!(!land_zones.contains(&Zone::Hand));
+        assert!(land_zones.contains(&Zone::Exile));
+
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = &conditions[1]
+        else {
+            panic!(
+                "expected SpellsCastThisTurn condition, got {:?}",
+                conditions[1]
+            );
+        };
+
+        let zones = properties.iter().find_map(|prop| match prop {
+            FilterProp::InAnyZone { zones } => Some(zones),
+            _ => None,
+        });
+        let zones = zones.expect("expected InAnyZone origin qualifier");
+        assert!(!zones.contains(&Zone::Hand));
+        assert!(zones.contains(&Zone::Exile));
+        assert!(zones.contains(&Zone::Graveyard));
+    }
+
+    #[test]
+    fn parse_cast_spell_this_turn_from_zone_after_turn_phrase() {
+        let (rest, condition) =
+            parse_inner_condition("you've cast a creature spell this turn from your graveyard")
+                .unwrap();
+        assert_eq!(rest, "");
+
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::SpellsCastThisTurn {
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            ..
+                        },
+                },
+            ..
+        } = condition
+        else {
+            panic!("expected SpellsCastThisTurn condition, got {condition:?}");
+        };
+        assert!(properties.iter().any(|prop| prop
+            == &FilterProp::InZone {
+                zone: Zone::Graveyard
+            }));
+    }
+
     // -- Generalized control conditions --
 
     #[test]
@@ -6758,6 +7016,31 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1000 },
             } => {}
             other => panic!("expected LifeTotal GE 1000, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_have_exactly_cards_in_hand() {
+        for text in [
+            "you have exactly thirteen cards in hand",
+            "you have exactly thirteen cards in your hand",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "");
+            match c {
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::HandSize {
+                                    player: PlayerScope::Controller,
+                                },
+                        },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 13 },
+                } => {}
+                other => panic!("expected HandSize EQ 13 for {text:?}, got {other:?}"),
+            }
         }
     }
 

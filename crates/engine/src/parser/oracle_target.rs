@@ -1279,6 +1279,39 @@ fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> 
     }
 }
 
+/// CR 201.2: Scan `name_text` (the lowercase text after "named ") for the
+/// first word boundary where a conjugated verb begins, indicating the card
+/// name has ended and a verb phrase follows. Returns the byte offset of the
+/// space preceding the verb, or `None` if no verb boundary is found.
+///
+/// Delegates to `nom_primitives::scan_split_at_phrase` for word-boundary
+/// scanning with nom `tag()` combinators.
+fn find_verb_boundary_in_named(name_text: &str) -> Option<usize> {
+    // Conjugated 3rd-person verbs that commonly follow a card name in
+    // "each player who controls a permanent named X [verb]" patterns.
+    // Only verbs that do NOT appear in real MTG card names are included.
+    // Excluded: "gains" (Ill-Gotten Gains), "deals" (Orzhova, the Church
+    // of Deals), "gets" (Bird Gets the Worm), "has"/"is"/"are"/"enters"
+    // (too generic and appear in card names).
+    nom_primitives::scan_split_at_phrase(name_text, |i| {
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("draws ")),
+            value((), tag("loses ")),
+            value((), tag("creates ")),
+            value((), tag("destroys ")),
+            value((), tag("discards ")),
+            value((), tag("exiles ")),
+            value((), tag("mills ")),
+            value((), tag("puts ")),
+            value((), tag("reveals ")),
+            value((), tag("sacrifices ")),
+            value((), tag("searches ")),
+        ))
+        .parse(i)
+    })
+    .map(|(prefix, _)| prefix.len().saturating_sub(1))
+}
+
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
 /// "creature you control", "creature an opponent controls".
 ///
@@ -2045,6 +2078,14 @@ pub fn parse_type_phrase_with_ctx<'a>(
             .is_ok()
         {
             pos += choice_offset + suffix.len();
+            // CR 601.2c + CR 603.3d: a TARGETED "of their choice" whose target filter
+            // is controlled by the phase-trigger active player ("destroy target X that
+            // player controls of their choice") announces its target at stack placement —
+            // the chooser is that scoped player. Distinct from CR 608.2d resolution-time
+            // sacrifices (controller not ScopedPlayer → stays None).
+            if controller.as_ref() == Some(&ControllerRef::ScopedPlayer) {
+                ctx.target_chooser = Some(TargetFilter::ScopedPlayer);
+            }
             break;
         }
     }
@@ -2054,8 +2095,12 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let remaining_named = lower[pos..].trim_start();
     let named_offset = lower[pos..].len() - remaining_named.len();
     if let Ok((name_text, _)) = tag::<_, _, OracleError<'_>>("named ").parse(remaining_named) {
-        // Name extends to end-of-clause markers: comma, period, "you control", "that", or end.
-        let name_end = name_text.find([',', '.']).unwrap_or(name_text.len());
+        // Name extends to end-of-clause markers: comma, period, conjugated
+        // verb at a word boundary (CR 201.2), or end-of-input.
+        let punct_end = name_text.find([',', '.']).unwrap_or(name_text.len());
+        let name_end = find_verb_boundary_in_named(name_text)
+            .unwrap_or(punct_end)
+            .min(punct_end);
         let raw_name = name_text[..name_end].trim();
         if !raw_name.is_empty() {
             // Reconstruct original-case name from the same position in `text`
@@ -2774,9 +2819,10 @@ fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
     Some((prop, text.len() - rest.len()))
 }
 
-/// CR 509.1h / CR 302.6: Parse status prefixes from type phrases.
+/// CR 509.1h / CR 302.6 / CR 701.60b: Parse status prefixes from type phrases.
 /// Called in a loop to consume multiple prefixes (e.g. "unblocked attacking ").
-/// Handles combat status (attacking, unblocked) and tap status (tapped, untapped).
+/// Handles combat status (attacking, unblocked), tap status (tapped, untapped),
+/// and designation status (suspected — CR 701.60b).
 ///
 /// Delegates to `nom_filter::parse_property_filter` for the common property keywords,
 /// then handles "face-down " (hyphenated variant not in the nom combinator).
@@ -2792,6 +2838,9 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::Tapped
                 | FilterProp::Untapped
                 | FilterProp::FaceDown
+                // CR 701.60b: "suspected" is a battlefield designation that appears
+                // as an adjective prefix in type phrases ("suspected creatures").
+                | FilterProp::Suspected
         ) {
             // Must be followed by space (prefix, not standalone)
             if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
@@ -3685,6 +3734,39 @@ fn parse_ownership_or_controller_suffix(
             });
             return own_ctrl_offset + phrase.len();
         }
+    }
+    // CR 108.3 + CR 109.4: anaphoric ownership suffix, composed as subject ×
+    // action so the whole class is one combinator rather than a per-phrase tag.
+    // Each subject `tag` maps directly to its owner scope:
+    //   "that player owns" → the player chosen as the enclosing ability's target
+    //     (Oblivion Sower: "target opponent exiles ... then you may put any
+    //     number of land cards that player owns from exile ..."), resolved at
+    //     runtime against the first `TargetRef::Player` in `ability.targets`, so
+    //     the pool is the cards the *target* player owns — not every card, and
+    //     not the controller's own;
+    //   "they own"        → the iterating player in each-player effects.
+    // Actions are matched longest-first ("own and control" before "owns" before
+    // "own"); the trailing "and control" maps to `true` and additionally pins
+    // the resolved player as the `*controller` of the filtered objects.
+    let subject = alt((
+        tag("that player").map(|_| ControllerRef::TargetPlayer),
+        tag("they").map(|_| ControllerRef::ScopedPlayer),
+    ));
+    let action = alt((
+        tag("own and control").map(|_| true),
+        tag("owns").map(|_| false),
+        tag("own").map(|_| false),
+    ));
+    let parsed: nom::IResult<&str, (ControllerRef, &str, bool), OracleError<'_>> =
+        (subject, space1, action).parse(own_ctrl);
+    if let Ok((rest, (owner, _, also_control))) = parsed {
+        properties.push(FilterProp::Owned {
+            controller: owner.clone(),
+        });
+        if also_control {
+            *controller = Some(owner);
+        }
+        return own_ctrl_offset + (own_ctrl.len() - rest.len());
     }
 
     let (ctrl, ctrl_len) =
@@ -4774,6 +4856,22 @@ pub(crate) fn parse_zone_suffix(
     Some((props, ctrl, leading_ws + consumed))
 }
 
+/// CR 601.2a: The zones a spell can be cast from, excluding the named allowed
+/// zone. Used for "from anywhere other than <zone>" cast-origin predicates.
+pub(crate) fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
+    const CAST_CAPABLE_ZONES: [Zone; 5] = [
+        Zone::Hand,
+        Zone::Graveyard,
+        Zone::Library,
+        Zone::Exile,
+        Zone::Command,
+    ];
+    CAST_CAPABLE_ZONES
+        .into_iter()
+        .filter(|zone| *zone != allowed)
+        .collect()
+}
+
 fn parse_zone_suffix_nom(
     i: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>)> {
@@ -5368,6 +5466,23 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::Attacking])
+            )
+        );
+        assert_eq!(rest, "");
+    }
+
+    // CR 701.60b: "suspected" is a battlefield designation usable as a type-phrase
+    // prefix, parallel to "attacking"/"tapped". Covers Clandestine Meddler, Frantic
+    // Scapegoat, Deadly Complication, and the broader suspected-creature filter class.
+    #[test]
+    fn suspected_creatures_you_control() {
+        let (f, rest) = parse_type_phrase("suspected creatures you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Suspected])
             )
         );
         assert_eq!(rest, "");
@@ -10533,5 +10648,43 @@ mod tests {
                 "leg {tf:?} missing superlative Cmc/Aggregate prop"
             );
         }
+    }
+
+    /// Issue #2016: "a permanent named Bonder's Ornament draws a card" must
+    /// terminate the card name at the verb "draws" so the remainder carries
+    /// the verb phrase. Without the verb-boundary scan, the name swallows
+    /// "draws a card" and the remainder is empty.
+    #[test]
+    fn named_card_terminates_at_verb_boundary() {
+        let (filter, rest) = parse_type_phrase("a permanent named Bonder's Ornament draws a card");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Named { name } if name == "Bonder's Ornament"
+            )),
+            "expected Named prop with 'Bonder's Ornament', got {tf:?}"
+        );
+        assert_eq!(rest.trim(), "draws a card");
+    }
+
+    /// Ensure the verb-boundary scan does not fire on card names that happen
+    /// to contain verb-like substrings when followed by a comma delimiter.
+    #[test]
+    fn named_card_with_comma_delimiter_still_works() {
+        let (filter, rest) = parse_type_phrase("a creature named Falkenrath Gorger, it gains");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Named { name } if name == "Falkenrath Gorger"
+            )),
+            "expected Named prop with 'Falkenrath Gorger', got {tf:?}"
+        );
+        assert_eq!(rest.trim_start_matches([',', ' ']), "it gains");
     }
 }

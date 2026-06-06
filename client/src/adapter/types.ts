@@ -1426,6 +1426,7 @@ export type DebugAction =
   | { type: "ModifyPlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "ModifyEnergy"; data: { player_id: PlayerId; delta: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
+  | { type: "SetInfiniteMana"; data: { player_id: PlayerId; enabled: boolean } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
   | { type: "RunStateBasedActions" }
   | {
@@ -1468,7 +1469,6 @@ export type GameAction =
   | { type: "Transform"; data: { object_id: ObjectId } }
   | { type: "PlayFaceDown"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "TurnFaceUp"; data: { object_id: ObjectId } }
-  | { type: "LookAtFaceDownCard"; data: { object_id: ObjectId } }
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
@@ -1972,6 +1972,17 @@ export interface SubmitResult {
 }
 
 /** Bundles legal actions with the engine's auto-pass recommendation. */
+/**
+ * Engine-owned non-fatal diagnostic (an engine-level progress wedge, not a
+ * rules outcome): an owed decision has no legal action for any authorized
+ * submitter, i.e. a wedged game. Display-only — the frontend surfaces it as a
+ * toast so a hung game informs the user.
+ */
+export interface StuckDecisionDiagnostic {
+  waitingForKind: string;
+  stuckPlayers: number[];
+}
+
 export interface LegalActionsResult {
   actions: GameAction[];
   autoPassRecommended: boolean;
@@ -1984,6 +1995,8 @@ export interface LegalActionsResult {
    * availability from objects.
    */
   legalActionsByObject?: Record<string, GameAction[]>;
+  /** Engine progress-wedge diagnostic: present only when the current decision is wedged. */
+  stuckDiagnostic?: StuckDecisionDiagnostic;
 }
 
 /**
@@ -2000,6 +2013,14 @@ export interface ViewerSnapshot {
   autoPassRecommended: boolean;
   spellCosts?: Record<string, ManaCost>;
   legalActionsByObject?: Record<string, GameAction[]>;
+  /**
+   * Engine progress-wedge diagnostic, mirrored from `LegalActionsResult` for
+   * shape parity. Currently inert on this path: the store's `stuckDiagnostic`
+   * slice is fed exclusively via `legalResultState` (the `LegalActionsResult`
+   * path), and the P2P broadcast wire format (`LegalActionsWire`) does not
+   * carry this field, so the snapshot copy is a deliberate parity placeholder.
+   */
+  stuckDiagnostic?: StuckDecisionDiagnostic;
 }
 
 export interface BatchResolveResult {

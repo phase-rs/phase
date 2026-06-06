@@ -303,6 +303,217 @@ fn cant_attack_split_declines_scoped_restrictions() {
     );
 }
 
+/// CR 701.21: Assault Suit — "Equipped creature gets +2/+2, has haste, can't
+/// attack you or planeswalkers you control, and can't be sacrificed." must
+/// include an `Other("CantBeSacrificed")` static alongside the +2/+2 grant.
+/// Previously the sacrifice prohibition was dropped, so the equipped creature
+/// could still be sacrificed.
+#[test]
+fn cant_be_sacrificed_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +2/+2, has haste, can't attack you or planeswalkers you control, and can't be sacrificed.",
+    );
+    let continuous = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("expected the +2/+2 and haste grant to be preserved");
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "expected +2 power grant, got {:?}",
+        continuous.modifications
+    );
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }),
+        "expected +2 toughness grant, got {:?}",
+        continuous.modifications
+    );
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }),
+        "expected haste grant, got {:?}",
+        continuous.modifications
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string()))
+        .expect("expected a CantBeSacrificed static");
+    assert_eq!(
+        cant.affected, continuous.affected,
+        "CantBeSacrificed companion must share the grant's affected set"
+    );
+    assert!(
+        cant.affected.is_some(),
+        "CantBeSacrificed companion must have an affected set"
+    );
+}
+
+/// CR 701.21: A simple pump compounded with the sacrifice prohibition also
+/// splits, with `CantBeSacrificed` sharing the grant's affected set.
+#[test]
+fn cant_be_sacrificed_static_splits_from_pump() {
+    let defs = parse_static_line_multi("Enchanted creature gets +1/+1 and can't be sacrificed.");
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string()))
+        .expect("expected a CantBeSacrificed static");
+    assert!(
+        cant.affected.is_some(),
+        "CantBeSacrificed companion must share the grant's affected set"
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +1/+1 grant must be preserved"
+    );
+}
+
+/// CR 701.21: A qualified "can't be sacrificed unless …" tail must not be
+/// mis-split into a plain `CantBeSacrificed` — the terminal guard declines.
+#[test]
+fn cant_be_sacrificed_split_declines_qualified_tail() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't be sacrificed unless you pay 2 life.",
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string())),
+        "qualified \"unless …\" tail must make the split decline, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 702.5: Consecrate Land — "Enchanted land has indestructible and can't be
+/// enchanted by other Auras." must decompose into BOTH the indestructible grant
+/// AND a `CantBeEnchanted` static affecting the enchanted permanent. Previously
+/// the attach prohibition was dropped, so other Auras could still be attached.
+#[test]
+fn cant_be_attached_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted land has indestructible and can't be enchanted by other Auras.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string())),
+        "expected a CantBeEnchanted static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the indestructible grant must be preserved"
+    );
+}
+
+/// CR 702.5: Anti-Magic Aura — "Enchanted creature can't be the target of spells
+/// and can't be enchanted by other Auras." splits into BOTH the targeting
+/// restriction AND a `CantBeEnchanted` static.
+#[test]
+fn cant_be_attached_static_splits_from_restriction() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature can't be the target of spells and can't be enchanted by other Auras.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string()))
+        .expect("expected a CantBeEnchanted static");
+    assert!(
+        cant.affected.is_some(),
+        "CantBeEnchanted companion must share the first clause's affected set"
+    );
+    assert!(
+        defs.len() >= 2,
+        "the first clause must be preserved alongside CantBeEnchanted, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 702.5 + CR 702.6: A compound "can't be equipped or enchanted" tail yields
+/// BOTH attach prohibitions (equipped-first, matching the standalone dispatch).
+#[test]
+fn cant_be_attached_static_splits_both_prohibitions() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't be equipped or enchanted.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEquipped".to_string())),
+        "expected CantBeEquipped, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeEnchanted".to_string())),
+        "expected CantBeEnchanted, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 602.5: Viper's Kiss — "Enchanted creature gets -1/-1, and its activated
+/// abilities can't be activated." must decompose into BOTH the -1/-1 grant AND a
+/// `CantBeActivated` static. Previously the activation prohibition was dropped,
+/// so the enchanted creature's activated abilities still worked.
+#[test]
+fn cant_activate_abilities_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::CantBeActivated { .. })),
+        "expected a CantBeActivated static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the -1/-1 grant must be preserved"
+    );
+}
+
+/// CR 602.5 + CR 603.2a: The split `CantBeActivated` prohibits every player from
+/// activating the ENCHANTED creature's abilities. Because the static lives on the
+/// Aura and `is_blocked_by_cant_be_activated` matches `source_filter` from the
+/// Aura source (ignoring `affected`, and with no re-homing for this static mode),
+/// the companion's `source_filter` must be the host filter (`EnchantedBy`) — NOT
+/// `SelfRef`, which would resolve to the Aura itself (a silent runtime no-op).
+#[test]
+fn cant_activate_abilities_static_targets_enchanted_creature() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+    );
+    let prohibition = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::CantBeActivated { .. }))
+        .expect("expected a CantBeActivated static");
+    let StaticMode::CantBeActivated {
+        who, source_filter, ..
+    } = &prohibition.mode
+    else {
+        unreachable!("matched CantBeActivated above");
+    };
+    assert_eq!(
+        *who,
+        ProhibitionScope::AllPlayers,
+        "every player is prohibited"
+    );
+    assert!(
+        matches!(
+            source_filter,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::EnchantedBy)
+        ),
+        "source_filter must be the host (EnchantedBy) filter so it resolves to the \
+         enchanted creature from the Aura source, got {source_filter:?}"
+    );
+}
+
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
 /// blocked by more than one creature." must decompose into BOTH the P/T grant
 /// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
@@ -428,8 +639,13 @@ fn alt_cost_rooftop_storm_zombie_creature_zero() {
     )
     .expect("Rooftop Storm must parse to a CastWithAlternativeCost static");
     match &def.mode {
-        StaticMode::CastWithAlternativeCost { cost } => {
-            assert_eq!(*cost, crate::types::mana::ManaCost::zero());
+        StaticMode::CastWithAlternativeCost { cost, .. } => {
+            assert_eq!(
+                *cost,
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::zero()
+                }
+            );
         }
         other => panic!("expected CastWithAlternativeCost, got {other:?}"),
     }
@@ -463,19 +679,21 @@ fn alt_cost_fist_of_suns_any_spell_wubrg() {
     )
     .expect("Fist of Suns must parse to a CastWithAlternativeCost static");
     match &def.mode {
-        StaticMode::CastWithAlternativeCost { cost } => {
+        StaticMode::CastWithAlternativeCost { cost, .. } => {
             use crate::types::mana::{ManaCost, ManaCostShard};
             assert_eq!(
                 *cost,
-                ManaCost::Cost {
-                    shards: vec![
-                        ManaCostShard::White,
-                        ManaCostShard::Blue,
-                        ManaCostShard::Black,
-                        ManaCostShard::Red,
-                        ManaCostShard::Green,
-                    ],
-                    generic: 0,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![
+                            ManaCostShard::White,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Black,
+                            ManaCostShard::Red,
+                            ManaCostShard::Green,
+                        ],
+                        generic: 0,
+                    }
                 }
             );
         }
@@ -486,6 +704,66 @@ fn alt_cost_fist_of_suns_any_spell_wubrg() {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
         other => panic!("expected Typed(any spell you cast), got {other:?}"),
+    }
+}
+
+/// CR 118.9 + CR 107.14 + CR 702.8a: Primal Prayers grants {E} as an
+/// alternative cost for creature spells with MV ≤ 3, with flash tied to that
+/// alternative-cost path.
+#[test]
+fn alt_cost_primal_prayers_energy_creature_mv_leq_3() {
+    use crate::parser::oracle_static::cost_mod::parse_cast_spells_alternative_cost_multi;
+    use crate::types::ability::{CastTimingPermission, Comparator, QuantityExpr};
+
+    let text = "You may cast creature spells with mana value 3 or less by paying {E} \
+                rather than paying their mana costs. If you cast a spell this way, \
+                you may cast it as though it had flash.";
+    let defs = parse_cast_spells_alternative_cost_multi(text);
+    assert_eq!(
+        defs.len(),
+        1,
+        "expected one alt-cost static with timing permission, got {defs:?}"
+    );
+
+    match &defs[0].mode {
+        StaticMode::CastWithAlternativeCost {
+            cost,
+            timing_permission,
+        } => {
+            assert_eq!(
+                *cost,
+                AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 1 }
+                }
+            );
+            assert_eq!(
+                *timing_permission,
+                Some(CastTimingPermission::AsThoughHadFlash)
+            );
+        }
+        other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+    }
+    match &defs[0].affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature filter, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 3 }
+                    }
+                )),
+                "expected Cmc LE 3, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(creature MV<=3 you cast), got {other:?}"),
     }
 }
 
@@ -4442,9 +4720,104 @@ fn static_players_cant_gain_life() {
 
 #[test]
 fn static_cast_as_though_flash() {
-    // CR 702.8a: Flash-granting static
+    // CR 601.3b + CR 702.8a: "You may cast [type] spells as though they had
+    // flash" must emit a `CastWithKeyword { Flash }` static — the only mode the
+    // flash-timing path (granted_spell_keywords) reads — with the spell-type
+    // filter preserved. Issue #1957: Vivien, Champion of the Wilds restricts the
+    // grant to CREATURE spells, and the dead `CastWithFlash` mode dropped both
+    // the timing grant and the type restriction.
     let def = parse_static_line("You may cast creature spells as though they had flash.").unwrap();
-    assert_eq!(def.mode, StaticMode::CastWithFlash);
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!(
+            "affected must be a Typed creature filter, got {:?}",
+            def.affected
+        );
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "filter must constrain to creature spells, got {:?}",
+        tf.type_filters
+    );
+    assert_eq!(
+        tf.controller,
+        Some(ControllerRef::You),
+        "grant must scope to spells you cast"
+    );
+    assert_eq!(def.active_zones, vec![Zone::Battlefield]);
+}
+
+#[test]
+fn static_cast_as_though_flash_all_spells() {
+    // CR 601.3b: the bare "spells" form (Leyline of Anticipation, Vedalken
+    // Orrery) grants flash to every spell the controller casts.
+    let def = parse_static_line("You may cast spells as though they had flash.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You)
+        ))
+    );
+}
+
+#[test]
+fn static_cast_as_though_flash_compound_spell_types_scope_each_leg_to_you() {
+    let def = parse_static_line(
+        "You may cast legendary spells and artifact spells as though they had flash.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash
+        }
+    );
+    let Some(TargetFilter::Or { filters }) = &def.affected else {
+        panic!("expected Or affected filter, got {:?}", def.affected);
+    };
+    assert!(
+        filters.iter().all(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            })
+        )),
+        "each disjunct must be scoped to spells you cast, got {filters:?}"
+    );
+}
+
+#[test]
+fn static_cast_as_though_flash_players_may_forms_are_unscoped() {
+    for text in [
+        "Players may cast enchantment spells as though they had flash.",
+        "Any player may cast Sliver spells as though they had flash.",
+    ] {
+        let def = parse_static_line(text).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, None, "{text}: must apply to every player");
+            }
+            other => panic!("{text}: expected Typed affected filter, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -8195,9 +8568,24 @@ fn static_cant_cast_players_during_combat() {
 
 #[test]
 fn static_cant_cast_from_still_works() {
-    // Regression: CantCastFrom (zone-based) must not be affected
+    // Regression: CantCastFrom (zone-based) must not be affected. "Players" → AllPlayers.
     let def = parse_static_line("Players can't cast spells from graveyards or libraries.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantCastFrom);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    // The prohibited zones ride the affected filter via InAnyZone.
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(ref tf))
+            if tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InAnyZone { zones }
+                    if zones.contains(&Zone::Graveyard) && zones.contains(&Zone::Library)
+            ))
+    ));
 }
 
 #[test]
@@ -8506,7 +8894,46 @@ fn per_turn_cast_limit_does_not_affect_cant_cast_during() {
 fn per_turn_cast_limit_does_not_affect_cant_cast_from() {
     // Regression: CantCastFrom must still parse correctly
     let def = parse_static_line("Players can't cast spells from graveyards or libraries.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantCastFrom);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+}
+
+#[test]
+fn static_cant_cast_from_anywhere_other_than_hand_drannith_magistrate() {
+    // CR 601.3 + CR 109.5: Drannith Magistrate — "Your opponents can't cast spells
+    // from anywhere other than their hands." Subject → Opponents scope; the inverse
+    // "anywhere other than [hand]" clause expands to every cast-capable zone except
+    // the hand (graveyard, library, exile, command) on the affected filter.
+    let def =
+        parse_static_line("Your opponents can't cast spells from anywhere other than their hands.")
+            .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCastFrom {
+            who: ProhibitionScope::Opponents,
+        }
+    );
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected typed affected filter, got {:?}", def.affected);
+    };
+    let zones = tf
+        .properties
+        .iter()
+        .find_map(|p| match p {
+            FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            _ => None,
+        })
+        .expect("expected InAnyZone prohibited-zone list");
+    // Hand is the only allowed zone; every other cast-capable zone is prohibited.
+    assert!(!zones.contains(&Zone::Hand));
+    assert!(zones.contains(&Zone::Graveyard));
+    assert!(zones.contains(&Zone::Library));
+    assert!(zones.contains(&Zone::Exile));
+    assert!(zones.contains(&Zone::Command));
 }
 
 // --- MustAttack / MustBlock additional combat requirement tests ---

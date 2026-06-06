@@ -366,6 +366,22 @@ fn handle_triggered_mode_choice(
                 &target_slots,
                 &target_constraints,
             )?;
+            // CR 601.2c + CR 603.3d + CR 109.5: a targeted "of their choice" trigger
+            // routes target selection to the scoped (upkeep) player, not the source's
+            // controller. Magus is non-modal so this is defensive class-consistency
+            // with the non-modal path in `begin_pending_trigger_target_selection`.
+            let player = pending_trigger
+                .ability
+                .target_chooser
+                .as_ref()
+                .and_then(|f| {
+                    crate::game::targeting::resolve_effect_player_ref(
+                        state,
+                        &pending_trigger.ability,
+                        f,
+                    )
+                })
+                .unwrap_or(player);
             return Ok(WaitingFor::TriggerTargetSelection {
                 player,
                 target_slots,

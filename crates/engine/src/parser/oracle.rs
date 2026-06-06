@@ -32,15 +32,16 @@ use super::oracle_nom::primitives::scan_contains;
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
+    split_additional_cost_trailing_spell_reduction,
 };
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_cant_win_lose_compound, is_compound_turn_limit, is_defiler_cost_pattern,
-    is_enters_tapped_cant_untap_compound, is_flashback_equal_mana_cost, is_granted_static_line,
-    is_instead_replacement_line, is_opening_hand_begin_game, is_replacement_pattern,
-    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect,
+    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern, is_compound_turn_limit,
+    is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound, is_enters_with_counter_trigger,
+    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
+    is_opening_hand_begin_game, is_replacement_pattern, is_spells_alternative_cost_pattern,
+    is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -62,7 +63,9 @@ use super::oracle_modal::{
     extract_ability_word_reminder_body, lower_oracle_block, parse_oracle_block, strip_ability_word,
     strip_ability_word_with_name,
 };
-use super::oracle_replacement::{lower_replacement_ir, parse_replacement_line};
+use super::oracle_replacement::{
+    find_copy_verb_present, lower_replacement_ir, parse_replacement_line,
+};
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
@@ -71,9 +74,10 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    lower_static_ir, parse_chosen_creature_type_static_prefix,
-    parse_every_creature_type_static_prefix, parse_spells_alternative_cost,
-    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    lower_static_ir, parse_cast_spells_alternative_cost_multi,
+    parse_chosen_creature_type_static_prefix, parse_every_creature_type_static_prefix,
+    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
+    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -1812,6 +1816,35 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
+        let lower = line.to_lowercase();
+
+        // Priority 8b (early): "As an additional cost to cast this spell" — must
+        // precede static-pattern classifiers (Priority 7) that match embedded
+        // "This spell costs {N} less..." tails on combined lines (Rottenmouth
+        // Viper class). Defiler cycle lines share the prefix but route at
+        // Priority 6c-defiler instead.
+        if lower_starts_with(&lower, "as an additional cost") && !is_defiler_cost_pattern(&lower) {
+            let (cost_line, trailing_reduction) =
+                split_additional_cost_trailing_spell_reduction(&line, &lower);
+            let cost_lower = cost_line.to_lowercase();
+            result.additional_cost = parse_additional_cost_line(&cost_lower, cost_line);
+            if let Some(reduction_text) = trailing_reduction {
+                if let Some(mut def) = parse_static_line(reduction_text) {
+                    // CR 702.166a analogue: reduction only applies when the optional
+                    // additional cost is declared, not when the player declines it.
+                    def.condition = Some(match def.condition {
+                        Some(existing) => StaticCondition::And {
+                            conditions: vec![existing, StaticCondition::AdditionalCostPaid],
+                        },
+                        None => StaticCondition::AdditionalCostPaid,
+                    });
+                    result.statics.push(def);
+                }
+            }
+            i += 1;
+            continue;
+        }
+
         // Priority 0: Semicolon-separated keyword lines (e.g., "Defender; reach").
         // Oracle text uses semicolons exclusively to separate keywords on a single line.
         // The colon guard prevents splitting activated ability lines like "{T}: Draw a card".
@@ -1850,8 +1883,6 @@ pub(crate) fn parse_oracle_ir(
             i = next_i;
             continue;
         }
-
-        let lower = line.to_lowercase();
 
         // Pre-keyword activated ability: "Equip {cost}" / "Equip — {cost}"
         // (but not "Equipped ...").
@@ -2214,14 +2245,25 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 5-pre: "Whenever you cast [spell], that [subject] enters with
-        // [counters] on it" is a replacement effect per CR 614.1c, not a
-        // triggered ability — despite the "whenever" framing. Intercept before
-        // the generic trigger dispatch routes it through the SpellCast matcher.
+        // Priority 5-pre: trigger-framed "… enters with [counters] on it" lines
+        // are CR 614.1c replacement effects, not triggered abilities — despite
+        // the "whenever"/"when" framing. Intercept before the generic trigger
+        // dispatch routes them through the SpellCast / ChangesZone matcher.
         // Applies to Wildgrowth Archaic and cousin cards (Runadi, Boreal
-        // Outrider, Torgal, …). `parse_replacement_line` handles all the
-        // compositional variants (fixed / X / "where X is …").
-        if has_trigger_prefix(&lower) && scan_contains(&lower, "enters with") {
+        // Outrider, Torgal, Dragon Broodmother, …). `parse_replacement_line`
+        // handles all the compositional variants (fixed / X / "where X is …").
+        //
+        // CR 603.2 exclusion: an ETB-with-counter TRIGGER ("… enters with a
+        // counter on it, <consequence>") watches for ANY (untyped) counter and
+        // is a real triggered ability (Murderous Redcap Avatar class). The
+        // typed/counted enters-with forms ("a +1/+1 counter", "X +1/+1
+        // counters", "an additional loyalty counter") are CR 614.1c
+        // replacements. `is_enters_with_counter_trigger` recognizes the untyped
+        // trigger and excludes it from this replacement interceptor.
+        if has_trigger_prefix(&lower)
+            && !is_enters_with_counter_trigger(&lower)
+            && scan_contains(&lower, "enters with")
+        {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                 result.replacements.push(rep_def);
                 i += 1;
@@ -2424,7 +2466,7 @@ pub(crate) fn parse_oracle_ir(
         }
 
         // Priority 6c-altcost: CR 118.9 — "You may pay X rather than pay the mana
-        // cost for [filter] spells you cast." Mana-cost-alternative-grant static
+        // cost for [filter] spells you cast." Alternative-cost-grant static
         // (Rooftop Storm, Fist of Suns, Jodah). Must run before Priority 7
         // because `is_static_pattern` does not classify this shape, so the line
         // would otherwise fall through to the imperative parser as
@@ -2432,6 +2474,18 @@ pub(crate) fn parse_oracle_ir(
         if is_spells_alternative_cost_pattern(&lower) {
             if let Some(static_def) = parse_spells_alternative_cost(&line) {
                 result.statics.push(static_def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-b: CR 118.9 — "You may cast [filter] by paying {X}
+        // rather than paying their mana costs." (Primal Prayers). May also carry a
+        // flash rider on the same line.
+        if is_cast_spells_alternative_cost_pattern(&lower) {
+            let defs = parse_cast_spells_alternative_cost_multi(&line);
+            if !defs.is_empty() {
+                result.statics.extend(defs);
                 i += 1;
                 continue;
             }
@@ -2476,7 +2530,26 @@ pub(crate) fn parse_oracle_ir(
         // effect parser at Priority 9. Damage-verb lines are also deferred because
         // parse_effect_chain handles embedded statics via split_clause_sequence.
         if is_static_pattern(&lower) {
-            if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
+            // CR 614.1c / CR 707.9: Lines that are both static-shaped (e.g.
+            // trailing "doesn't untap during…" from a reflexive "When you do"
+            // clause) and a copy-replacement ("enter as a copy of") must route
+            // to the replacement parser first — Wall of Stolen Identity class.
+            // The copy-verb gate keeps static / prevent lines (Anthem of Rakdos,
+            // Pollen Lullaby, Subdue, Mikey & Don Party Planners) out of the
+            // replacement parsers; the legacy `as long as` precondition still
+            // routes the duration-gated replacement fallback.
+            if find_copy_verb_present(&lower) {
+                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
+                    result.replacements.extend(rep_defs);
+                    i += 1;
+                    continue;
+                }
+                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
+                    result.replacements.push(rep_def);
+                    i += 1;
+                    continue;
+                }
+            } else if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
                 if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                     result.replacements.push(rep_def);
                     i += 1;
@@ -2677,13 +2750,6 @@ pub(crate) fn parse_oracle_ir(
         // [effect]" dependent sub-ability.
         if let Some(def) = parse_begin_game_clause(&line, &lower) {
             result.abilities.push(def);
-            i += 1;
-            continue;
-        }
-
-        // Priority 8b: "As an additional cost to cast this spell"
-        if lower_starts_with(&lower, "as an additional cost") {
-            result.additional_cost = parse_additional_cost_line(&lower, &line);
             i += 1;
             continue;
         }
@@ -4625,6 +4691,77 @@ mod tests {
         ));
     }
 
+    /// CR 601.2c + CR 603.3d: a TARGETED "of their choice" whose filter is
+    /// controlled by the phase-trigger active player ("destroy target X that
+    /// player controls of their choice") routes target selection to that scoped
+    /// player. The parser stamps `target_chooser = Some(ScopedPlayer)` so the
+    /// trigger target-selection site can override the chooser away from the
+    /// source's controller (Magus of the Abyss / The Abyss deadlock). Tests the
+    /// `controller == ScopedPlayer` discriminator (the building block), not the
+    /// card name — any phase-trigger "that player controls of their choice"
+    /// target qualifies.
+    #[test]
+    fn scoped_player_of_their_choice_marks_target_chooser() {
+        use crate::types::ability::TargetFilter;
+        let r = parse(
+            "At the beginning of each player's upkeep, destroy target nonartifact creature that player controls of their choice. It can't be regenerated.",
+            "Magus of the Abyss",
+            &[],
+            &["Creature"],
+            &["Human", "Wizard"],
+        );
+        // The phase trigger's effect lives in `trigger.execute`; the parser
+        // stamps the chooser onto that lowered `AbilityDefinition`.
+        assert!(
+            r.triggers.iter().any(|t| t
+                .execute
+                .as_ref()
+                .and_then(|e| e.target_chooser.as_ref())
+                == Some(&TargetFilter::ScopedPlayer)),
+            "expected a trigger whose execute.target_chooser == Some(ScopedPlayer); triggers: {:#?}",
+            r.triggers
+                .iter()
+                .map(|t| t.execute.as_ref().map(|e| &e.target_chooser))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// CR 601.2c: an ordinary "destroy target creature" has no scoped-player
+    /// chooser — controller chooses (default `None`). Negative guard so a
+    /// regression that always stamps the chooser cannot pass silently.
+    #[test]
+    fn ordinary_destroy_target_creature_leaves_chooser_none() {
+        let r = parse(
+            "Destroy target creature.",
+            "Test Card",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].target_chooser, None);
+    }
+
+    /// CR 608.2d: a resolution-time "of their choice" sacrifice (not a targeted
+    /// stack-placement choice) must NOT set `target_chooser` — the chooser
+    /// override is reserved for `ControllerRef::ScopedPlayer`-controlled target
+    /// filters. "each player sacrifices a creature of their choice" iterates a
+    /// player scope and chooses at resolution, so the chooser stays `None`.
+    #[test]
+    fn resolution_time_of_their_choice_sacrifice_leaves_chooser_none() {
+        let r = parse(
+            "Each player sacrifices a creature of their choice.",
+            "Test Card",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            r.abilities.iter().all(|a| a.target_chooser.is_none()),
+            "resolution-time sacrifice must not set target_chooser",
+        );
+    }
+
     #[test]
     fn leadership_vacuum_returns_target_players_commanders_to_command_zone() {
         let r = parse(
@@ -4898,6 +5035,43 @@ mod tests {
             }
             other => panic!("expected non-mana Kicker, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rottenmouth_viper_parses_optional_sacrifice_and_cost_reduction() {
+        let oracle = concat!(
+            "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents. ",
+            "This spell costs {1} less to cast for each permanent sacrificed this way.\n",
+            "Whenever this creature enters or attacks, put a blight counter on it."
+        );
+        let r = parse(oracle, "Rottenmouth Viper", &[], &["Creature"], &[]);
+        match r.additional_cost {
+            Some(AdditionalCost::Optional {
+                cost:
+                    AbilityCost::Sacrifice {
+                        count: u32::MAX, ..
+                    },
+                repeatable: false,
+            }) => {}
+            other => panic!("expected optional any-number sacrifice, got {other:?}"),
+        }
+        assert!(
+            r.statics.iter().any(|s| {
+                matches!(
+                    s.mode,
+                    crate::types::statics::StaticMode::ModifyCost {
+                        mode: crate::types::statics::CostModifyMode::Reduce,
+                        dynamic_count: Some(
+                            QuantityRef::TrackedSetSize
+                                | QuantityRef::FilteredTrackedSetSize { .. }
+                        ),
+                        ..
+                    }
+                ) && s.condition == Some(StaticCondition::AdditionalCostPaid)
+            }),
+            "expected sacrificed-this-way reduction static, got statics: {:?}",
+            r.statics
+        );
     }
 
     #[test]
@@ -11680,6 +11854,23 @@ mod tests {
             result.map(|(r, _)| r),
             Some(ManaSpendRestriction::SpellType(
                 "Instant or Sorcery".to_string()
+            ))
+        );
+    }
+
+    // CR 106.6: Tablet of Discovery (issue #1975) phrases its restricted mana as
+    // "instant and sorcery spells". This must parse to the same two-type union
+    // the " or " phrasing yields so the runtime matcher accepts either type.
+    #[test]
+    fn mana_spend_restriction_instant_and_sorcery() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::ManaSpendRestriction;
+        let result =
+            parse_mana_spend_restriction("spend this mana only to cast instant and sorcery spells");
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellType(
+                "Instant and Sorcery".to_string()
             ))
         );
     }

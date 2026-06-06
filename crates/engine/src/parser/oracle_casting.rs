@@ -1,16 +1,34 @@
+use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, map, value};
+use nom::combinator::{all_consuming, map, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_util::{parse_mana_symbols, TextPair};
+use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, CastingRestriction, ParsedCondition, SpellCastingOption,
+    AbilityCost, AdditionalCost, CastingRestriction, Comparator, ParsedCondition, QuantityExpr,
+    QuantityRef, SpellCastingOption,
 };
+
+/// Split a combined additional-cost line from its trailing self-spell cost
+/// reduction (Rottenmouth Viper class: "...sacrifice N. This spell costs {1}
+/// less to cast for each permanent sacrificed this way.").
+pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
+    line: &'a str,
+    lower: &'a str,
+) -> (&'a str, Option<&'a str>) {
+    let Some(((), reduction_text)) = nom_on_lower(line, lower, |input| {
+        value((), (take_until(". this spell costs "), tag(". "))).parse(input)
+    }) else {
+        return (line, None);
+    };
+    let activation_len = line.len() - ". ".len() - reduction_text.len();
+    (line[..activation_len].trim(), Some(reduction_text))
+}
 
 /// Parse "As an additional cost to cast this spell, ..." into an `AdditionalCost`.
 ///
@@ -308,6 +326,13 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     if let Some(restriction) = parse_negative_self_casting_restriction(&trimmed_lower) {
         return Some(vec![restriction]);
     }
+    // Also try after stripping an ability word prefix (e.g., "From the Future — You can't cast ~...").
+    if let Some(after_word) = super::oracle_modal::strip_ability_word(trimmed) {
+        let after_word_lower = after_word.to_lowercase();
+        if let Some(restriction) = parse_negative_self_casting_restriction(&after_word_lower) {
+            return Some(vec![restriction]);
+        }
+    }
     let effective = if tag::<_, _, OracleError<'_>>("cast this spell only ")
         .parse(trimmed_lower.as_str())
         .is_ok()
@@ -343,23 +368,44 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
 }
 
 fn parse_negative_self_casting_restriction(text: &str) -> Option<CastingRestriction> {
-    let (condition_text, (subject, negated)) = preceded(
+    // Strip the "you can't cast" prefix first.
+    let after_prefix: &str = preceded(
         alt((
             tag::<_, _, OracleError<'_>>("you can't cast "),
             tag("you cannot cast "),
             tag("you can\u{2019}t cast "),
         )),
-        alt((
-            map(terminated(take_until(" if "), tag(" if ")), |subject| {
-                (subject, true)
-            }),
-            map(
-                terminated(take_until(" unless "), tag(" unless ")),
-                |subject| (subject, false),
-            ),
-        )),
+        nom::combinator::rest,
     )
     .parse(text)
+    .map(|(_, rest)| rest)
+    .ok()?;
+
+    // "you can't cast ~ during your first[, second, ...] turn[s] of the game"
+    // CR 601.3a: The prohibition window is the caster's own first N turns.
+    // Uses TurnsTaken (per-player, CR 500) — NOT turn_number (global), which
+    // would incorrectly count opponent turns toward the threshold.
+    if let Some(condition) = parse_during_your_nth_turns_of_game_condition(after_prefix) {
+        return Some(CastingRestriction::RequiresCondition {
+            condition: Some(condition),
+        });
+    }
+
+    // "you can't cast ~ if/unless [condition]"
+    let (condition_text, (subject, negated)) = alt((
+        map(
+            terminated(take_until::<_, _, OracleError<'_>>(" if "), tag(" if ")),
+            |subject| (subject, true),
+        ),
+        map(
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" unless "),
+                tag(" unless "),
+            ),
+            |subject| (subject, false),
+        ),
+    ))
+    .parse(after_prefix)
     .ok()?;
     let subject = subject.trim();
     if all_consuming(alt((
@@ -381,6 +427,75 @@ fn parse_negative_self_casting_restriction(text: &str) -> Option<CastingRestrict
     };
     Some(CastingRestriction::RequiresCondition {
         condition: Some(condition),
+    })
+}
+
+/// Parse `"[~|this spell] during your first[, second, or third] turn[s] of the game"`
+/// (where `text` is everything after `"you can't cast "`) and return a condition that
+/// is **false** (i.e., blocks casting) while the caster's `turns_taken` ≤ max ordinal.
+///
+/// CR 500 + CR 601.3a: uses `TurnsTaken` (per-player) — NOT `turn_number` (global),
+/// which would incorrectly count opponent turns toward the threshold.
+///
+/// Returns `None` if the phrase doesn't match so the caller falls through to
+/// the `if`/`unless` branch.
+fn parse_during_your_nth_turns_of_game_condition(text: &str) -> Option<ParsedCondition> {
+    // Consume "~" or "this spell", then " during your ".
+    let after_subject: &str = alt((tag::<_, _, OracleError<'_>>("~"), tag("this spell")))
+        .parse(text)
+        .map(|(rest, _)| rest)
+        .ok()?;
+    let after_during: &str = tag::<_, _, OracleError<'_>>(" during your ")
+        .parse(after_subject)
+        .map(|(rest, _)| rest)
+        .ok()?;
+
+    // Parse a comma/or-separated ordinal list: "first", "first or second",
+    // "first, second, or third", etc. Take the maximum ordinal as the threshold.
+    let mut max_ordinal: u32 = 0;
+    let mut remaining = after_during;
+    loop {
+        remaining = alt((
+            tag::<_, _, OracleError<'_>>(", or "),
+            tag(", "),
+            tag(" or "),
+            tag("or "),
+        ))
+        .parse(remaining)
+        .map_or(remaining, |(rest, _)| rest);
+        if let Some((val, rest)) = parse_ordinal(remaining) {
+            max_ordinal = max_ordinal.max(val);
+            remaining = rest;
+        } else {
+            break;
+        }
+    }
+    if max_ordinal == 0 {
+        return None;
+    }
+
+    // Expect "turns" or "turn" (optionally followed by " of the game") and
+    // reject trailing conjuncts so they do not become swallowed restrictions.
+    all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("turns"), tag("turn"))),
+        opt(tag(" of the game")),
+    ))
+    .parse(remaining.trim_start())
+    .ok()?;
+
+    // Casting is allowed only when turns_taken > max_ordinal.
+    // Represented as Not(turns_taken <= max_ordinal) so RequiresCondition
+    // blocks casting while the condition evaluates to false.
+    Some(ParsedCondition::Not {
+        condition: Box::new(ParsedCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::TurnsTaken,
+            },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed {
+                value: max_ordinal as i32,
+            },
+        }),
     })
 }
 
@@ -531,8 +646,8 @@ fn scan_timing_restrictions(text: &str) -> Vec<CastingRestriction> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        BeholdCostAction, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr,
-        QuantityRef, TargetFilter, TypeFilter,
+        BeholdCostAction, Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
     };
     use crate::types::mana::ManaCost;
     use crate::types::zones::Zone;
@@ -1025,6 +1140,41 @@ mod tests {
         }
     }
 
+    /// Issue #2415: Rottenmouth Viper — optional sacrifice any number + trailing reduction.
+    #[test]
+    fn parse_additional_cost_optional_sacrifice_any_number_nonland() {
+        let lower = "as an additional cost to cast this spell, you may sacrifice any number of nonland permanents.";
+        let raw =
+            "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Optional {
+                cost:
+                    AbilityCost::Sacrifice {
+                        count: u32::MAX, ..
+                    },
+                repeatable: false,
+            }) => {}
+            other => panic!("Expected Optional(Sacrifice any number), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn split_rottenmouth_additional_cost_trailing_reduction() {
+        let raw = "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents. This spell costs {1} less to cast for each permanent sacrificed this way.";
+        let lower = raw.to_lowercase();
+        let (cost_line, trailing) = split_additional_cost_trailing_spell_reduction(raw, &lower);
+        let trailing = trailing.expect("trailing cost-reduction sentence");
+        assert_eq!(
+            cost_line,
+            "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents"
+        );
+        assert_eq!(
+            trailing,
+            "This spell costs {1} less to cast for each permanent sacrificed this way."
+        );
+    }
+
     #[test]
     fn parse_additional_cost_reveal_type_or_pay() {
         let lower =
@@ -1251,6 +1401,46 @@ mod tests {
     }
 
     #[test]
+    fn alt_cost_nourishing_shoal_exile_green_card_with_mana_value_x() {
+        use crate::types::ability::{
+            Comparator, FilterProp, QuantityExpr, QuantityRef, TargetFilter,
+        };
+
+        let option = parse_spell_casting_option_line(
+            "You may exile a green card with mana value X from your hand rather than pay this spell's mana cost.",
+            "Nourishing Shoal",
+        )
+        .expect("Nourishing Shoal alt-cost should parse (#2372)");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                cost:
+                    Some(AbilityCost::Exile {
+                        filter: Some(filter),
+                        zone,
+                        ..
+                    }),
+                condition: None,
+            } => {
+                assert_eq!(zone, Some(crate::types::zones::Zone::Hand));
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("expected typed exile filter, got {filter:?}");
+                };
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name },
+                        },
+                    } if name == "X"
+                )));
+            }
+            other => panic!("expected AlternativeCost(Exile), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn alt_cost_pay_mana_composite_regression_unchanged() {
         // Force of Will shape — composite cost via " and " split.
         let option = parse_spell_casting_option_line(
@@ -1389,6 +1579,92 @@ mod tests {
         assert!(
             option.is_none(),
             "unrecognized if-clause must drop the flash option, got: {option:?}"
+        );
+    }
+
+    // CR 500 + CR 601.3a: "You can't cast ~ during your first[, second, or third] turn[s] of
+    // the game" must use per-player TurnsTaken, NOT the global turn_number.
+    // Regression for issue #2002: Spider-Man 2099 was castable on the player's 3rd turn
+    // because the global turn counter counts both players' turns (my turn 3 = global turn 5).
+    #[test]
+    fn spell_cast_restriction_parses_first_n_turns_of_game_per_player() {
+        // Spider-Man 2099 exact oracle text (with ability-word prefix and curly apostrophe,
+        // after card-name normalization to "~").
+        let restrictions = parse_casting_restriction_line(
+            "From the Future \u{2014} You can\u{2019}t cast ~ during your first, second, or third turns of the game.",
+        )
+        .expect("Spider-Man 2099 restriction should parse");
+        assert_eq!(
+            restrictions,
+            vec![CastingRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not {
+                    condition: Box::new(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::TurnsTaken,
+                        },
+                        comparator: Comparator::LE,
+                        rhs: QuantityExpr::Fixed { value: 3 },
+                    }),
+                }),
+            }],
+            "must block casting on turns 1–3 using per-player TurnsTaken, not global turn_number"
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_first_two_turns_of_game() {
+        // "first or second" variant — max_ordinal = 2.
+        let restrictions = parse_casting_restriction_line(
+            "You can't cast ~ during your first or second turns of the game.",
+        )
+        .expect("two-turn restriction should parse");
+        assert_eq!(
+            restrictions,
+            vec![CastingRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not {
+                    condition: Box::new(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::TurnsTaken,
+                        },
+                        comparator: Comparator::LE,
+                        rhs: QuantityExpr::Fixed { value: 2 },
+                    }),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_parses_first_turn_of_game() {
+        // Singular "turn" variant — max_ordinal = 1.
+        let restrictions = parse_casting_restriction_line(
+            "You can't cast this spell during your first turn of the game.",
+        )
+        .expect("single-turn restriction should parse");
+        assert_eq!(
+            restrictions,
+            vec![CastingRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not {
+                    condition: Box::new(ParsedCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::TurnsTaken,
+                        },
+                        comparator: Comparator::LE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn spell_cast_restriction_rejects_trailing_turn_clause_text() {
+        let restrictions = parse_casting_restriction_line(
+            "You can't cast ~ during your first turn of the game and only if you control a Forest.",
+        );
+        assert_eq!(
+            restrictions, None,
+            "trailing conjunct must not be swallowed into an unconditional turn restriction"
         );
     }
 }

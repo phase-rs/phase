@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AdditionalCost, BeholdCostAction, CastTimingPermission,
     CostPaidObjectSnapshot, Effect, KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility,
-    SpellCastingOptionKind, TargetFilter, TypedFilter,
+    SpellCastingOptionKind, StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -15,6 +15,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
+use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::casting::emit_targeting_events;
@@ -254,6 +255,20 @@ pub(crate) fn payable_spell_alternative_cost(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<AbilityCost> {
+    payable_spell_alternative_cost_details(state, player, object_id).map(|details| details.cost)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PayableSpellAlternativeCost {
+    pub(crate) cost: AbilityCost,
+    pub(crate) timing_permission: Option<CastTimingPermission>,
+}
+
+pub(crate) fn payable_spell_alternative_cost_details(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
     if obj.zone != Zone::Hand || obj.controller != player {
         return None;
@@ -289,7 +304,10 @@ pub(crate) fn payable_spell_alternative_cost(
             }
         };
         if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
-            Some(cost)
+            Some(PayableSpellAlternativeCost {
+                cost,
+                timing_permission: None,
+            })
         } else {
             None
         }
@@ -301,7 +319,35 @@ pub(crate) fn payable_spell_alternative_cost(
     // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop
     // Storm, Fist of Suns, Jodah) applies when no self-referential option does.
     let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
-    spell_alternative_cost_is_payable(state, player, object_id, &granted).then_some(granted)
+    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
+        PayableSpellAlternativeCost {
+            cost: granted.cost,
+            timing_permission: granted.timing_permission,
+        },
+    )
+}
+
+pub(crate) fn payable_spell_alternative_cost_for_timing(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    timing_permission: CastTimingPermission,
+) -> Option<PayableSpellAlternativeCost> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Hand || obj.controller != player || obj.additional_cost.is_some() {
+        return None;
+    }
+
+    let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
+    if granted.timing_permission != Some(timing_permission) {
+        return None;
+    }
+    spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
+        PayableSpellAlternativeCost {
+            cost: granted.cost,
+            timing_permission: granted.timing_permission,
+        },
+    )
 }
 
 fn spell_alternative_cost_is_payable(
@@ -1054,6 +1100,21 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // CR 601.2f: "for each [object] sacrificed this way" reductions depend on
+    // the actual cost-payment selection. Count the chosen objects while they are
+    // still permanents on the battlefield (CR 403.3), before sacrifice moves them.
+    if pending.activation_ability_index.is_none()
+        && pending.ability.context.additional_cost_paid
+        && !chosen.is_empty()
+    {
+        apply_sacrificed_this_way_cost_reduction(
+            state,
+            pending.object_id,
+            chosen,
+            &mut pending.cost,
+        );
+    }
+
     // Boundary of the cost-payment events THIS handler produces — captured
     // before the sacrifice so the death/leaves-the-battlefield `ZoneChanged`
     // records (and their producer co-departed stamp, below) can be scanned for
@@ -1493,6 +1554,17 @@ fn finish_exile_selection_for_cost(
     // `TargetFilter::CostPaidObject` resolves during ability resolution.
     if let Some(&first) = chosen.first() {
         if let Some(obj) = state.objects.get(&first) {
+            // CR 107.3a + CR 118.9: Shoal-style alternative costs ("exile a
+            // [color] card with mana value X") define X from the pitched card's
+            // mana value rather than a prior announcement.
+            if pending.ability.chosen_x.is_none()
+                && pending.cost == crate::types::mana::ManaCost::NoCost
+                && pending.base_cost.as_ref().is_some_and(cost_has_x)
+            {
+                pending
+                    .ability
+                    .set_chosen_x_recursive(obj.mana_cost.mana_value());
+            }
             pending
                 .ability
                 .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
@@ -2112,7 +2184,12 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // the pending spell mana cost `NoCost`: accepting pays the alternative cost,
     // declining pays the printed mana cost as the fallback branch.
     if casting_variant == CastingVariant::Normal {
-        if let Some(alt_cost) = payable_spell_alternative_cost(state, player, object_id) {
+        let alt_cost = cast_timing_permission
+            .and_then(|permission| {
+                payable_spell_alternative_cost_for_timing(state, player, object_id, permission)
+            })
+            .or_else(|| payable_spell_alternative_cost_details(state, player, object_id));
+        if let Some(alt_cost) = alt_cost {
             let mut pending = PendingCast::new(object_id, card_id, ability, ManaCost::NoCost);
             pending.base_cost = base_cost.clone();
             pending.casting_variant = casting_variant;
@@ -2120,9 +2197,27 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             pending.distribute = distribute.clone();
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
+            let alt_cost_required_for_timing = cast_timing_permission.is_some()
+                && alt_cost.timing_permission == cast_timing_permission;
+            if alt_cost_required_for_timing {
+                if matches!(alt_cost.cost, AbilityCost::Mana { .. }) {
+                    pending.ability.context.alternative_mana_cost_paid = true;
+                }
+                return pay_additional_cost_with_source(
+                    state,
+                    player,
+                    alt_cost.cost,
+                    SpellCostSource::Other,
+                    pending,
+                    events,
+                );
+            }
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
-                cost: AdditionalCost::Choice(alt_cost, AbilityCost::Mana { cost: cost.clone() }),
+                cost: AdditionalCost::Choice(
+                    alt_cost.cost,
+                    AbilityCost::Mana { cost: cost.clone() },
+                ),
                 times_kicked: 0,
                 pending_cast: Box::new(pending),
             });
@@ -2367,6 +2462,25 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         pending.origin_zone = origin_zone;
         pending.payment_mode = payment_mode;
         return pay_additional_cost(state, player, retrace_discard_land_cost(), pending, events);
+    }
+
+    // CR 702.133a: Jump-start requires discarding a card (any card) as an
+    // additional cost, then paying the card's normal mana cost.
+    if casting_variant == CastingVariant::JumpStart {
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.base_cost = base_cost.clone();
+        pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        pending.payment_mode = payment_mode;
+        return pay_additional_cost(
+            state,
+            player,
+            jumpstart_discard_card_cost(),
+            pending,
+            events,
+        );
     }
 
     // CR 702.34a + CR 118.8: Flashback with a non-mana additional cost (Battle
@@ -3288,6 +3402,116 @@ pub(super) fn apply_offering_cost_reduction(
     *spell_generic = spell_generic.saturating_sub(sac_generic);
 }
 
+fn apply_sacrificed_this_way_cost_reduction(
+    state: &GameState,
+    spell_id: ObjectId,
+    sacrificed: &[ObjectId],
+    spell_cost: &mut ManaCost,
+) {
+    let Some(spell_obj) = state.objects.get(&spell_id) else {
+        return;
+    };
+    let ManaCost::Cost {
+        generic: ref mut spell_generic,
+        ..
+    } = spell_cost
+    else {
+        return;
+    };
+
+    for def in spell_obj.static_definitions.iter_all() {
+        let StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount,
+            dynamic_count: Some(dynamic_count),
+            ..
+        } = &def.mode
+        else {
+            continue;
+        };
+        if !matches!(def.affected, Some(TargetFilter::SelfRef)) {
+            continue;
+        }
+        let Some(condition) = def.condition.as_ref() else {
+            continue;
+        };
+        if !sacrificed_this_way_condition_matches(state, condition, spell_obj.controller, spell_id)
+        {
+            continue;
+        }
+        let ManaCost::Cost { generic: per, .. } = amount else {
+            continue;
+        };
+        let Some(sacrifice_count) =
+            sacrificed_this_way_count(state, spell_id, sacrificed, dynamic_count)
+        else {
+            continue;
+        };
+        *spell_generic = spell_generic.saturating_sub(per.saturating_mul(sacrifice_count));
+    }
+}
+
+fn sacrificed_this_way_count(
+    state: &GameState,
+    spell_id: ObjectId,
+    sacrificed: &[ObjectId],
+    dynamic_count: &QuantityRef,
+) -> Option<u32> {
+    match dynamic_count {
+        QuantityRef::TrackedSetSize => Some(sacrificed.len().try_into().unwrap_or(u32::MAX)),
+        QuantityRef::FilteredTrackedSetSize { filter } => {
+            let ctx = super::filter::FilterContext::from_source(state, spell_id);
+            Some(
+                sacrificed
+                    .iter()
+                    .filter(|&&id| super::filter::matches_target_filter(state, id, filter, &ctx))
+                    .count()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn sacrificed_this_way_condition_matches(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    spell_id: ObjectId,
+) -> bool {
+    condition_requires_additional_cost_paid(condition)
+        && condition_matches_with_additional_cost_paid(state, condition, controller, spell_id)
+}
+
+fn condition_requires_additional_cost_paid(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::AdditionalCostPaid => true,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(condition_requires_additional_cost_paid),
+        _ => false,
+    }
+}
+
+fn condition_matches_with_additional_cost_paid(
+    state: &GameState,
+    condition: &StaticCondition,
+    controller: PlayerId,
+    spell_id: ObjectId,
+) -> bool {
+    match condition {
+        StaticCondition::AdditionalCostPaid => true,
+        StaticCondition::And { conditions } => conditions.iter().all(|condition| {
+            condition_matches_with_additional_cost_paid(state, condition, controller, spell_id)
+        }),
+        StaticCondition::Or { conditions } => conditions.iter().any(|condition| {
+            condition_matches_with_additional_cost_paid(state, condition, controller, spell_id)
+        }),
+        _ => super::layers::evaluate_condition(state, condition, controller, spell_id),
+    }
+}
+
 pub(super) fn retrace_discard_land_cost() -> AbilityCost {
     AbilityCost::Discard {
         count: QuantityExpr::Fixed { value: 1 },
@@ -3305,6 +3529,26 @@ pub(super) fn can_pay_retrace_additional_cost(
     let land_filter = TargetFilter::Typed(TypedFilter::land());
     !super::casting::find_eligible_discard_targets(state, player, object_id, Some(&land_filter))
         .is_empty()
+}
+
+/// CR 702.133a: Jump-start's additional cost is "discard a card" — any card,
+/// unlike Retrace's land restriction.
+pub(super) fn jumpstart_discard_card_cost() -> AbilityCost {
+    AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter: None,
+        random: false,
+        self_ref: false,
+    }
+}
+
+pub(super) fn can_pay_jumpstart_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    // CR 702.133a: any card in hand can be discarded for the jump-start cost.
+    !super::casting::find_eligible_discard_targets(state, player, object_id, None).is_empty()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6480,7 +6724,10 @@ mod tests {
             Zone::Battlefield,
         );
         let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
-            cost: ManaCost::zero(),
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
         })
         .affected(TargetFilter::Typed(
             TypedFilter::creature()
@@ -6551,6 +6798,83 @@ mod tests {
             payable_spell_alternative_cost(&state, PlayerId(1), opp_zombie),
             None,
             "opponent's Zombie must not receive the controller-You grant"
+        );
+    }
+
+    /// CR 118.9 + CR 107.14: Primal Prayers grants {E} as an alternative cost
+    /// for creature spells with MV ≤ 3 that the controller casts.
+    #[test]
+    fn granted_alternative_energy_cost_matches_creature_mv_filter() {
+        use crate::types::ability::{Comparator, QuantityExpr, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        state.players[caster.0 as usize].energy = 2;
+
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            caster,
+            "Primal Prayers".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            timing_permission: None,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }]),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let rampager = create_object(
+            &mut state,
+            CardId(11),
+            caster,
+            "Greenbelt Rampager".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&rampager).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(1);
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, rampager),
+            Some(AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }),
+            "MV 1 creature must receive the {{E}} alternative cost"
+        );
+
+        let expensive = create_object(
+            &mut state,
+            CardId(12),
+            caster,
+            "Big Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&expensive).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(4);
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, expensive),
+            None,
+            "MV 4 creature must not receive the MV≤3 grant"
         );
     }
 
@@ -11329,6 +11653,95 @@ its replicate cost was paid.)\nDraw a card.";
                 generic: 1,
             },
             "{{3}}{{W}} reduced by {{1}}{{G}} must equal {{W}}{{1}}"
+        );
+    }
+
+    /// CR 601.2f: A "for each [filter] sacrificed this way" reduction counts
+    /// only selected cost-payment objects that match the parsed dynamic filter.
+    #[test]
+    fn sacrificed_this_way_reduction_filters_selected_objects() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let spell = create_object(
+            &mut state,
+            CardId(30),
+            caster,
+            "Filtered Sacrifice Spell".to_string(),
+            Zone::Hand,
+        );
+        let static_def = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            },
+            spell_filter: None,
+            dynamic_count: Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            }),
+        })
+        .affected(TargetFilter::SelfRef)
+        .condition(StaticCondition::And {
+            conditions: vec![StaticCondition::None, StaticCondition::AdditionalCostPaid],
+        });
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .static_definitions
+            .push(static_def);
+
+        let creature = create_object(
+            &mut state,
+            CardId(31),
+            caster,
+            "Creature Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let artifact = create_object(
+            &mut state,
+            CardId(32),
+            caster,
+            "Artifact Fodder".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let mut spell_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 5,
+        };
+        apply_sacrificed_this_way_cost_reduction(
+            &state,
+            spell,
+            &[creature, artifact],
+            &mut spell_cost,
+        );
+
+        assert_eq!(
+            spell_cost,
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 4,
+            },
+            "only the sacrificed creature should count for the filtered reduction"
+        );
+        assert!(
+            state.tracked_object_sets.is_empty(),
+            "cost-time sacrificed-this-way reduction must not publish a stale tracked set"
         );
     }
 

@@ -1,11 +1,10 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AttackersDeclaredCountSubject, BounceSelection,
-    ChosenAttribute, CommanderOwnership, Comparator, ControllerRef, CopyRetargetPermission,
-    DelayedTriggerCondition, Effect, ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
+    CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
+    ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -1514,6 +1513,7 @@ fn collect_pending_triggers(
                         Effect::CopySpell {
                             target: TargetFilter::SelfRef,
                             retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            copier: None,
                         },
                         Vec::new(),
                         *cast_obj_id,
@@ -3353,7 +3353,12 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerCon
                 continue;
             }
             // CR 603.2d: Check the cause predicate against the spawning event.
-            if !trigger_cause_matches(cause, trigger.trigger_event.as_ref()) {
+            if !trigger_cause_matches(
+                state,
+                cause,
+                trigger.trigger_event.as_ref(),
+                *doubler_controller,
+            ) {
                 continue;
             }
             // CR 603.2d: If the doubler specifies an affected filter (e.g. "creature you
@@ -3387,7 +3392,14 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerCon
 /// - `TriggerCause::CreatureAttacking` matches `AttackersDeclared` events.
 ///   CR 508.1a: every object declared as an attacker must be a creature,
 ///   so no further type check is required.
-fn trigger_cause_matches(cause: &TriggerCause, event: Option<&GameEvent>) -> bool {
+/// - `TriggerCause::ControlledCreatureDealtDamage` matches `DamageDealt`
+///   events whose target is a creature controlled by `doubler_controller`.
+fn trigger_cause_matches(
+    state: &GameState,
+    cause: &TriggerCause,
+    event: Option<&GameEvent>,
+    doubler_controller: PlayerId,
+) -> bool {
     match cause {
         TriggerCause::Any => true,
         TriggerCause::EntersBattlefield { core_types } => {
@@ -3424,6 +3436,20 @@ fn trigger_cause_matches(cause: &TriggerCause, event: Option<&GameEvent>) -> boo
                 return false;
             };
             record.core_types.contains(&CoreType::Creature)
+        }
+        TriggerCause::ControlledCreatureDealtDamage => {
+            // CR 603.2d: Wayta doubles triggers caused by a creature you control being dealt damage.
+            let Some(GameEvent::DamageDealt { target, .. }) = event else {
+                return false;
+            };
+            let TargetRef::Object(target_id) = target else {
+                return false;
+            };
+            let Some(obj) = state.objects.get(target_id) else {
+                return false;
+            };
+            obj.controller == doubler_controller
+                && obj.card_types.core_types.contains(&CoreType::Creature)
         }
     }
 }
@@ -3938,56 +3964,6 @@ pub(crate) fn check_trigger_condition(
             );
             comparator.evaluate(actual as i32, *count as i32)
         }
-        // Legacy variant for backward compatibility with card-data.json
-        TriggerCondition::AttackersDeclaredMin { minimum } => {
-            let Some(GameEvent::AttackersDeclared {
-                attacker_ids,
-                attacks,
-                ..
-            }) = trigger_event
-            else {
-                return false;
-            };
-            // Legacy variant assumes Controller scope with no filter
-            let subject = AttackersDeclaredCountSubject::Controller {
-                scope: ControllerRef::You,
-                filter: None,
-            };
-            let actual = attackers_declared_count(
-                state,
-                attacker_ids,
-                attacks,
-                controller,
-                source_id,
-                &subject,
-            );
-            Comparator::GE.evaluate(actual as i32, *minimum as i32)
-        }
-        // Legacy variant for backward compatibility with card-data.json
-        TriggerCondition::NoneOfAttackersTargetedYou => {
-            let Some(GameEvent::AttackersDeclared {
-                attacker_ids,
-                attacks,
-                ..
-            }) = trigger_event
-            else {
-                return false;
-            };
-            // Legacy variant: count attackers targeting the controller, check if count is 0
-            let subject = AttackersDeclaredCountSubject::AttackTarget {
-                controller: ControllerRef::You,
-                attacked: AttackTargetFilter::Player,
-            };
-            let actual = attackers_declared_count(
-                state,
-                attacker_ids,
-                attacks,
-                controller,
-                source_id,
-                &subject,
-            );
-            Comparator::EQ.evaluate(actual as i32, 0)
-        }
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
         TriggerCondition::SolveConditionMet => source_id
             .and_then(|id| state.objects.get(&id))
@@ -4449,18 +4425,19 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::ManaColorSpent { color, minimum } => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.colors_spent_to_cast.get(*color) >= *minimum),
-        // CR 601.2h: "if no mana was spent to cast it/them" — check the entering object.
+        // CR 601.2h: "if no mana was spent to cast it/them" — check the cast or
+        // entering object, not the trigger source (Lavinia #2345 / Satoru #2417).
+        // Read `mana_spent_to_cast_amount`, not the transient `mana_spent_to_cast`
+        // boolean: `clear_post_collection_transients` clears the latter after trigger
+        // collection but before CR 603.4 resolution re-checks.
         TriggerCondition::ManaSpentCondition { text } => {
-            let entering_id = trigger_event
-                .and_then(|e| match e {
-                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-                    _ => None,
-                })
+            let cast_object_id = trigger_event
+                .and_then(crate::game::targeting::extract_source_from_event)
                 .or(source_id);
             if text.contains("no mana was spent") {
-                entering_id
+                cast_object_id
                     .and_then(|id| state.objects.get(&id))
-                    .is_some_and(|obj| !obj.mana_spent_to_cast)
+                    .is_some_and(|obj| obj.mana_spent_to_cast_amount == 0)
             } else {
                 // Other mana-spent conditions (e.g., "if mana from a Treasure was spent")
                 // remain unimplemented — default to false.
@@ -11993,6 +11970,51 @@ pub mod tests {
         );
     }
 
+    /// CR 601.2h + CR 603.4: Lavinia, Azorius Renegade — "if no mana was spent
+    /// to cast it" must read the triggering spell from `SpellCast`, not the
+    /// Lavinia object (issue #2345).
+    #[test]
+    fn no_mana_spent_condition_uses_triggering_spell_not_trigger_source() {
+        let mut state = setup();
+        let lavinia = make_creature(&mut state, PlayerId(0), "Lavinia, Azorius Renegade", 2, 2);
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Unearth".to_string(),
+            Zone::Stack,
+        );
+
+        let condition = TriggerCondition::ManaSpentCondition {
+            text: "no mana was spent to cast it".to_string(),
+        };
+        let event = GameEvent::SpellCast {
+            card_id: CardId(2),
+            controller: PlayerId(1),
+            object_id: spell,
+        };
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 1;
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(lavinia), Some(&event)),
+            "paid mana Unearth must not satisfy no-mana-spent intervening-if"
+        );
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 0;
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(lavinia), Some(&event)),
+            "zero-mana cast must satisfy no-mana-spent intervening-if"
+        );
+    }
+
     /// CR 107.3 + CR 202.1 + CR 603.2c: "Whenever you cast your first spell with
     /// {X} in its mana cost each turn" — constraint check must:
     /// - fire on the first qualifying spell in `spells_cast_this_turn_by_player`
@@ -13189,6 +13211,55 @@ pub mod tests {
             Some(light_paws),
             Some(&event),
         ));
+    }
+
+    /// CR 603.4 + CR 601.2h: Satoru's intervening-if must fail at resolution
+    /// re-check when the entering creature was cast for mana, even after
+    /// `clear_post_collection_transients` clears the transient boolean.
+    #[test]
+    fn satoru_intervening_if_blocks_mana_cast_after_transient_clear() {
+        let satoru_trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever ~ and/or one or more other nontoken creatures you control enter, if none of them were cast or no mana was spent to cast them, draw a card.",
+            "Satoru, the Infiltrator",
+        );
+        let condition = satoru_trigger
+            .condition
+            .expect("Satoru trigger must carry an intervening-if");
+
+        let mut state = setup();
+        let satoru = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Satoru, the Infiltrator".to_string(),
+            Zone::Battlefield,
+        );
+        let grizzly = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grizzly).unwrap();
+            obj.cast_from_zone = Some(Zone::Hand);
+            obj.mana_spent_to_cast = true;
+            obj.mana_spent_to_cast_amount = 2;
+        }
+        clear_post_collection_transients(&mut state);
+
+        let event = zone_changed_event(
+            grizzly,
+            Zone::Stack,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(satoru), Some(&event),),
+            "a mana-paid cast must not satisfy Satoru's intervening-if at resolution"
+        );
     }
 
     #[test]
@@ -19272,6 +19343,110 @@ mod dedup_regression_tests {
         );
     }
 
+    /// CR 603.2d: Wayta (ControlledCreatureDealtDamage cause) doubles only
+    /// triggers caused by a creature you control being dealt damage.
+    #[test]
+    fn wayta_doubles_damage_caused_triggers() {
+        use crate::types::statics::TriggerCause;
+
+        let (mut state, observer) = setup_with_observer(TriggerMode::DamageDone);
+        let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
+        let damaged = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Damaged Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&damaged)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let source = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Damage Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let event = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(damaged),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 2,
+            "Wayta must double damage-caused triggers of permanents the controller owns"
+        );
+    }
+
+    /// CR 603.2d: Wayta must not double triggers unrelated to controlled-creature damage.
+    #[test]
+    fn wayta_does_not_double_unrelated_triggers() {
+        use crate::types::statics::TriggerCause;
+
+        let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+        state
+            .objects
+            .get_mut(&observer)
+            .unwrap()
+            .trigger_definitions[0]
+            .destination = Some(Zone::Battlefield);
+        let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
+
+        let new_etb = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(0),
+            "Entering Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&new_etb)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let event = GameEvent::ZoneChanged {
+            object_id: new_etb,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                new_etb,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 1,
+            "Wayta must not double ETB triggers when the cause is damage to your creature"
+        );
+    }
+
     /// CR 603.4 + CR 701.9: Intervening-if "if an opponent discarded a card this
     /// turn" evaluates against the per-turn discard counts. Verifies both the
     /// positive (opponent discarded → condition met) and negative (no opponent
@@ -19318,22 +19493,6 @@ mod dedup_regression_tests {
             check_trigger_condition(&state, &condition, controller, None, None),
             "opponent-discard must satisfy 'an opponent discarded a card this turn'"
         );
-    }
-
-    /// Regression test for GitHub issue #1984: Blood Artist dies trigger
-    /// should fire exactly once per dying creature, not multiple times.
-    /// Blood Artist has a single trigger watching "this creature or another creature"
-    /// dying. This test verifies deduplication works correctly for this pattern.
-    ///
-    /// NOTE: This test is deferred - requires understanding the exact trigger
-    /// definition structure for "self or another creature" patterns. The existing
-    /// test `dies_trigger_fires_after_sacrifice_as_cost` covers basic dies trigger
-    /// behavior. This specific test will be added after investigating the parser
-    /// output for Blood Artist's trigger definition.
-    #[test]
-    #[ignore]
-    fn blood_artist_dies_trigger_fires_once_per_creature() {
-        // TODO: Implement after investigating Blood Artist's trigger definition structure
     }
 
     /// Regression test for GitHub issue #1356: Tinybones, Trinket Thief end step trigger

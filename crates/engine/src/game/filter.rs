@@ -1858,7 +1858,10 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
         subtypes: spell_obj.card_types.subtypes.clone(),
         keywords: spell_obj.keywords.clone(),
         colors: spell_obj.color.clone(),
-        mana_value: spell_obj.mana_cost.mana_value(),
+        // CR 202.3e: While on the stack, X equals the announced value, not 0.
+        mana_value: spell_obj
+            .mana_cost
+            .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
         cast_variant: crate::types::game_state::CastingVariant::Normal,
@@ -2538,8 +2541,9 @@ fn matches_filter_prop(
         // CR 202.3: Mana value threshold comparisons. Dynamic thresholds
         // (`QuantityRef::Variable { "X" }`) resolve against the ability's
         // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
+        // CR 202.3e: For on-stack objects, X equals the announced value, not 0.
         FilterProp::Cmc { comparator, value } => {
-            let cmc = obj.mana_cost.mana_value() as i32;
+            let cmc = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32;
             comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
         }
         // CR 202.1: Compare exact printed mana cost, not mana value (CR 202.3).
@@ -3509,7 +3513,8 @@ fn object_shared_quality_values(
             name: &obj.name,
             power: obj.power,
             toughness: obj.toughness,
-            mana_value: obj.mana_cost.mana_value(),
+            // CR 202.3e: For on-stack objects, X equals the announced value, not 0.
+            mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
             core_types: &obj.card_types.core_types,
             subtypes: &obj.card_types.subtypes,
             colors: &obj.color,
@@ -3912,7 +3917,7 @@ mod tests {
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
         Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
         PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
-        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -3985,6 +3990,41 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    #[test]
+    fn cmc_filter_treats_retained_x_as_zero_off_stack() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let x_creature = add_creature(&mut state, PlayerId(0), "Endless One");
+        {
+            let obj = state.objects.get_mut(&x_creature).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            };
+            // CR 107.3m: X paid survives stack -> battlefield for ETB
+            // replacement/trigger logic, but CR 202.3e still treats X as 0
+            // once the object is no longer on the stack.
+            obj.cost_x_paid = Some(4);
+        }
+
+        let mana_value_four_or_more =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }]));
+
+        assert!(
+            !matches_target_filter(&state, x_creature, &mana_value_four_or_more, source),
+            "battlefield X permanent retains cost_x_paid for ETB logic, but its mana value is 0"
+        );
+
+        state.objects.get_mut(&x_creature).unwrap().zone = Zone::Stack;
+        assert!(
+            matches_target_filter(&state, x_creature, &mana_value_four_or_more, source),
+            "the same X object on the stack must include the announced X value"
+        );
     }
 
     #[test]

@@ -33,8 +33,19 @@ expression: "&ir"
     },
     {
       "PreLoweredStatic": {
-        "mode": "CastWithFlash",
-        "affected": null,
+        "mode": {
+          "CastWithKeyword": {
+            "keyword": "Flash"
+          }
+        },
+        "affected": {
+          "type": "Typed",
+          "type_filters": [
+            "Card"
+          ],
+          "controller": "You",
+          "properties": []
+        },
         "modifications": [],
         "condition": null,
         "affected_zone": null,

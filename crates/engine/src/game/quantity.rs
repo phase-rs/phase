@@ -1300,15 +1300,17 @@ fn resolve_ref(
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             resolve_mana_symbols_in_mana_cost(state, *scope, *color, ctx, targets)
         }
-        // CR 202.3 + CR 118.9: Mana value of the source object. Used by
+        // CR 202.3 + CR 202.3e + CR 118.9: Mana value of the source object. Used by
         // alt-cost cast permissions ("pay life equal to its mana value rather
         // than paying its mana cost") where `source_id` is the spell being
         // cast. Falls back to LKI for objects that have left their zone
-        // mid-resolution.
+        // mid-resolution. CR 202.3e: include X when on the stack.
         QuantityRef::SelfManaValue => state
             .objects
             .get(&source_id)
-            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+            .map(|obj| {
+                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
+            })
             .or_else(|| {
                 state
                     .lki_cache
@@ -1342,11 +1344,11 @@ fn resolve_ref(
                 let live = state.objects.get(&id).and_then(|obj| match property {
                     ObjectProperty::Power => obj.power,
                     ObjectProperty::Toughness => obj.toughness,
-                    // CR 202.3e: mana_value() excludes X. Always live — printed
-                    // value is stable across zones, no LKI fallback needed.
-                    ObjectProperty::ManaValue => {
-                        Some(u32_to_i32_saturating(obj.mana_cost.mana_value()))
-                    }
+                    // CR 202.3e: include X when on the stack (cost_x_paid).
+                    // Printed value is stable across zones, no LKI fallback needed.
+                    ObjectProperty::ManaValue => Some(u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )),
                 });
                 live.or_else(|| {
                     state.lki_cache.get(&id).and_then(|lki| match property {
@@ -1903,9 +1905,24 @@ fn resolve_ref(
             })
         }
         // CR 305.2a + CR 603.4: Lands played this turn by the scoped player.
-        QuantityRef::LandsPlayedThisTurn { player } => {
+        QuantityRef::LandsPlayedThisTurn { player, from_zones } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
-                i32::from(p.lands_played_this_turn)
+                from_zones.as_ref().map_or_else(
+                    || i32::from(p.lands_played_this_turn),
+                    |zones| {
+                        usize_to_i32_saturating(
+                            state.lands_played_this_turn_by_player.get(&p.id).map_or(
+                                0,
+                                |records| {
+                                    records
+                                        .iter()
+                                        .filter(|record| zones.contains(&record.from_zone))
+                                        .count()
+                                },
+                            ),
+                        )
+                    },
+                )
             })
         }
         // CR 400.7 + CR 700.4: Count zone-change snapshots from this turn
@@ -2886,10 +2903,13 @@ fn resolve_object_mana_value(
     ability: Option<&ResolvedAbility>,
 ) -> i32 {
     match scope {
+        // CR 202.3e: include cost_x_paid so on-stack spells report X's chosen value.
         ObjectScope::Source => state
             .objects
             .get(&ctx.source)
-            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+            .map(|obj| {
+                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
+            })
             .or_else(|| {
                 state
                     .lki_cache
@@ -2903,10 +2923,14 @@ fn resolve_object_mana_value(
                 TargetRef::Object(id) => state.objects.get(id),
                 _ => None,
             })
-            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+            .map(|obj| {
+                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
+            })
             .unwrap_or(0),
         ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
-            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+            .map(|obj| {
+                u32_to_i32_saturating(obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid))
+            })
             .unwrap_or(0),
         ObjectScope::EventSource => {
             let Some(object_id) =
@@ -2917,7 +2941,11 @@ fn resolve_object_mana_value(
             state
                 .objects
                 .get(&object_id)
-                .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                .map(|obj| {
+                    u32_to_i32_saturating(
+                        obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                    )
+                })
                 .or_else(|| {
                     state
                         .lki_cache
@@ -2983,6 +3011,7 @@ fn resolve_object_mana_value(
         // instruction-order (608.2c) first, vs. cost referent (608.2k) first.
         // `Demonstrative` ("that spell's mana value", Mana Drain) shares this
         // resolution — same earlier-instruction referent named by a noun phrase.
+        // CR 202.3e: include cost_x_paid for on-stack event sources.
         ObjectScope::Anaphoric | ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
             .map(|s| u32_to_i32_saturating(s.lki.mana_value))
@@ -2991,7 +3020,11 @@ fn resolve_object_mana_value(
                     state
                         .objects
                         .get(&id)
-                        .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                        .map(|obj| {
+                            u32_to_i32_saturating(
+                                obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+                            )
+                        })
                         .or_else(|| {
                             state
                                 .lki_cache
@@ -3527,7 +3560,7 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::zones::Zone;
-    use crate::types::SpellCastRecord;
+    use crate::types::{LandPlayRecord, SpellCastRecord};
 
     fn add_spent_mana_source_snapshot(
         state: &mut GameState,
@@ -7238,6 +7271,50 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    #[test]
+    fn resolve_quantity_lands_played_this_turn_filters_origin_zone() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].lands_played_this_turn = 2;
+        state.lands_played_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                LandPlayRecord {
+                    from_zone: Zone::Hand,
+                },
+                LandPlayRecord {
+                    from_zone: Zone::Exile,
+                },
+            ]),
+        );
+
+        let unrestricted = QuantityExpr::Ref {
+            qty: QuantityRef::LandsPlayedThisTurn {
+                player: PlayerScope::Controller,
+                from_zones: None,
+            },
+        };
+        let outside_hand = QuantityExpr::Ref {
+            qty: QuantityRef::LandsPlayedThisTurn {
+                player: PlayerScope::Controller,
+                from_zones: Some(vec![
+                    Zone::Graveyard,
+                    Zone::Library,
+                    Zone::Exile,
+                    Zone::Command,
+                ]),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &unrestricted, PlayerId(0), ObjectId(1)),
+            2
+        );
+        assert_eq!(
+            resolve_quantity(&state, &outside_hand, PlayerId(0), ObjectId(1)),
+            1
+        );
     }
 
     #[test]

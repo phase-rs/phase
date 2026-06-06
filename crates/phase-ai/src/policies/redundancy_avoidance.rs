@@ -381,6 +381,9 @@ fn redundancy_delta(
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
+        // CR 702.141a: Encore makes per-opponent copy tokens — like Myriad, it is
+        // not a "redundant if already controlled" effect.
+        | Effect::Encore
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::ChooseCard { .. }

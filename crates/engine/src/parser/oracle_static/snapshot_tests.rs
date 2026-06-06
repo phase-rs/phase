@@ -590,6 +590,25 @@ fn parses_teferi_cast_only_at_sorcery_speed_regression() {
     }
 }
 
+/// CR 603.2d: Damage-caused trigger doubler (Wayta, Trainer Prodigy).
+#[test]
+fn parses_wayta_damage_caused_doubler() {
+    let def = parse_static_line(
+        "If a creature you control being dealt damage causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+    )
+    .expect("expected DoubleTriggers static for Wayta");
+    assert_eq!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::ControlledCreatureDealtDamage
+        }
+    );
+    assert!(
+        def.affected.is_none(),
+        "bare 'a permanent you control' must not add a redundant affected filter"
+    );
+}
+
 /// CR 603.2d: Source-restricted trigger doubler (Splinter, Radical Rat).
 /// "If a triggered ability of a Ninja creature you control triggers, that
 /// ability triggers an additional time." The cause is unrestricted (`Any`),

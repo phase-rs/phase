@@ -424,6 +424,7 @@
     "one": "um {{target}}",
     "nounPlayer": "jogador",
     "nounNonlandPermanent": "permanente que não seja terreno",
+    "nounSpell": "feitiço",
     "nounCreature": "criatura",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente alvo",
@@ -1377,6 +1378,14 @@
     "dontShowAgain": "Não mostrar novamente nesta sessão",
     "reportTitle": "Pânico não fatal do motor: {{summary}}",
     "reportWhatHappened": "**O que aconteceu**\n_descreva brevemente o que você estava fazendo_\n\n**Diagnóstico**\n```\n{{diagnostic}}\n```"
+  },
+  "stuckDecision": {
+    "heading": "Game appears stuck",
+    "dismiss": "Dismiss",
+    "body": "phase.rs is waiting on a decision that has no available action, so the game can’t continue. This is a bug. Please <report>report it</report> so we can investigate.",
+    "dontShowAgain": "Don’t show again this session",
+    "reportTitle": "Stuck decision: {{kind}}",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
   },
   "optionalEffect": {
     "sourceFallback": "Efeito",

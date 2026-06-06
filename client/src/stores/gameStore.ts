@@ -11,6 +11,7 @@ import type {
   ManaCost,
   MatchConfig,
   PlayerId,
+  StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
@@ -19,12 +20,13 @@ import { getPlayerId } from "../hooks/usePlayerId";
 import { loadCheckpoints, saveGame } from "../services/gamePersistence";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
-export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "spellCosts" | "legalActionsByObject"> {
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic"> {
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
     spellCosts: result.spellCosts ?? {},
     legalActionsByObject: result.legalActionsByObject ?? {},
+    stuckDiagnostic: result.stuckDiagnostic ?? null,
   };
 }
 
@@ -87,6 +89,13 @@ interface GameStoreState {
    * through this map instead of inferring action availability from objects.
    */
   legalActionsByObject: Record<string, GameAction[]>;
+  /**
+   * Engine-owned non-fatal progress-wedge diagnostic (an engine anomaly, not a
+   * rules outcome) — present only when the current decision is wedged (no legal
+   * action for any authorized submitter). `null` in normal play. Display-only
+   * (drives `StuckDecisionToast`).
+   */
+  stuckDiagnostic: StuckDecisionDiagnostic | null;
   stateHistory: GameState[];
   turnCheckpoints: GameState[];
   /**
@@ -163,6 +172,7 @@ const initialState: GameStoreState = {
   autoPassRecommended: false,
   spellCosts: {},
   legalActionsByObject: {},
+  stuckDiagnostic: null,
   stateHistory: [],
   turnCheckpoints: [],
   lobbyProgress: null,

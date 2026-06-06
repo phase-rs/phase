@@ -328,13 +328,25 @@ impl ManaRestriction {
         qualities: impl IntoIterator<Item = &'a String>,
     ) -> bool {
         let qualities = qualities.into_iter().collect::<Vec<_>>();
-        required.split(" or ").any(|alternative| {
-            alternative.split_whitespace().all(|part| {
-                qualities
-                    .iter()
-                    .any(|quality| quality.eq_ignore_ascii_case(part))
+        // CR 106.6: A restricted-spend type phrase names the *set* of objects the
+        // mana may be spent on. Both connectives — " or " and " and " — enumerate
+        // distinct acceptable types, so each is an alternative the object need
+        // only satisfy one of. Per the Melek, Izzet Paragon example (CR 601.3e),
+        // "instant and sorcery spells" (Tablet of Discovery, issue #1975) lets a
+        // spell that is an instant *or* a sorcery qualify; a single object is
+        // never required to carry both types. Whitespace within an alternative
+        // still ANDs (a compound single quality like "Colorless Eldrazi" must
+        // match every word).
+        required
+            .split(" or ")
+            .flat_map(|clause| clause.split(" and "))
+            .any(|alternative| {
+                alternative.split_whitespace().all(|part| {
+                    qualities
+                        .iter()
+                        .any(|quality| quality.eq_ignore_ascii_case(part))
+                })
             })
-        })
     }
 
     /// Returns `true` if this restriction permits spending mana on the given spell.
@@ -815,6 +827,16 @@ impl ManaCost {
                 shard_total + generic
             }
         }
+    }
+
+    /// CR 202.3e: X in a mana cost equals the announced value only while the
+    /// object is on the stack; in every other zone, X contributes 0.
+    pub fn mana_value_with_x(&self, zone: Zone, cost_x_paid: Option<u32>) -> u32 {
+        self.mana_value()
+            + match zone {
+                Zone::Stack => cost_x_paid.unwrap_or(0),
+                _ => 0,
+            }
     }
 
     /// CR 508.1h + CR 509.1d: Aggregate this cost with another cost, producing a
@@ -1669,6 +1691,47 @@ mod tests {
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
 
+    // CR 106.6 + CR 601.2g: "Spend this mana only to cast instant and sorcery
+    // spells" (Tablet of Discovery, issue #1975) names a union of two distinct
+    // spell types. Per the Melek, Izzet Paragon example (CR 601.3e), an "instant
+    // and sorcery spells" permission lets a player cast a spell that is an
+    // instant OR a sorcery — a single spell never needs to be both. The "and"
+    // conjunction therefore distributes across the set of acceptable spells, the
+    // same way " or " does, rather than requiring one spell to carry both types.
+    #[test]
+    fn restriction_instant_and_sorcery_allows_either_type() {
+        let restriction =
+            ManaRestriction::OnlyForTypeSpellsOrAbilities("Instant and Sorcery".to_string());
+        let instant = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let sorcery = SpellMeta {
+            types: vec!["Sorcery".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        let creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+            mana_value: None,
+            color_count: None,
+        };
+        // Manamorphose is an instant — the {R}{R} restricted mana must pay for it.
+        assert!(restriction.allows_spell(&instant));
+        assert!(restriction.allows_spell(&sorcery));
+        assert!(!restriction.allows_spell(&creature));
+    }
+
     // CR 105.2c + CR 106.6: The activation half uses the same compound-quality
     // predicate as spell casting.
     #[test]
@@ -1967,12 +2030,38 @@ mod tests {
 
     #[test]
     fn mana_value_x_contributes_zero() {
-        // CR 202.3e: {X}{R} → 0 + 1 = 1
+        // CR 202.3e: {X}{R} → 0 + 1 = 1 (off-stack, X=0)
         let cost = ManaCost::Cost {
             shards: vec![ManaCostShard::X, ManaCostShard::Red],
             generic: 0,
         };
         assert_eq!(cost.mana_value(), 1);
+    }
+
+    #[test]
+    fn mana_value_with_x_includes_chosen_value() {
+        // CR 202.3e: {X}{R}{R} cast with X=4 → 4 + 1 + 1 = 6 while on the stack.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Red],
+            generic: 0,
+        };
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(4)), 6);
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, None), 2);
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(0)), 2);
+        assert_eq!(cost.mana_value_with_x(Zone::Battlefield, Some(4)), 2);
+    }
+
+    #[test]
+    fn mana_value_with_x_no_x_shard_adds_x_paid() {
+        // On the stack, cost_x_paid is the announced X value even when the cost
+        // expression has no literal {X} shard.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Blue],
+            generic: 1,
+        };
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(5)), 8); // 1R+1U+1 generic = 3, +5 = 8
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, None), 3);
+        assert_eq!(cost.mana_value_with_x(Zone::Graveyard, Some(5)), 3);
     }
 
     #[test]

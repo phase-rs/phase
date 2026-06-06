@@ -2,6 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::verify;
+use nom::sequence::terminated;
 use nom::Parser;
 
 use super::oracle_nom::primitives as nom_primitives;
@@ -64,6 +65,16 @@ pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
         && scan_contains(lower, "rather than pay")
         && scan_contains(lower, "mana cost for")
         && scan_contains(lower, "spells you cast")
+}
+
+/// CR 118.9: Alternative-cost grant — "You may cast [filter] by paying {cost}
+/// rather than paying their mana costs." Primal Prayers class. Structural
+/// pre-filter; lowering is `parse_cast_spells_alternative_cost_multi`.
+pub(crate) fn is_cast_spells_alternative_cost_pattern(lower: &str) -> bool {
+    lower_starts_with(lower, "you may cast ")
+        && scan_contains(lower, "by paying ")
+        && scan_contains(lower, "rather than paying")
+        && (scan_contains(lower, "their mana costs") || scan_contains(lower, "its mana cost"))
 }
 
 pub(crate) fn is_enters_tapped_cant_untap_compound(lower: &str) -> bool {
@@ -566,6 +577,24 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
     has_as && has_enters && has_choose
 }
 
+/// CR 603.2 vs CR 614.1c: "Whenever <subject> enters with a counter on it, <consequence>"
+/// is an ETB-with-counter triggered ability (it watches for ANY counter, hence the
+/// untyped "a counter"), NOT a CR 614.1c self/granted enters-with replacement (which
+/// always specifies a typed/counted counter: "a +1/+1 counter", "X +1/+1 counters",
+/// "an additional loyalty counter", ...). Recognizing the untyped form lets the
+/// Priority 5-pre replacement interceptor exclude Murderous Redcap Avatar and cousins
+/// while still capturing the typed/counted replacements.
+pub(crate) fn is_enters_with_counter_trigger(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |i| {
+        terminated(
+            tag::<_, _, OracleError<'_>>("enters with a counter on it"),
+            tag(","),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
 const EFFECT_IMPERATIVE_PREFIXES: &[&str] = &[
     "add ",
     "attach ",
@@ -618,6 +647,33 @@ pub(crate) fn is_effect_sentence_candidate(lower: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn classifies_enters_with_counter_trigger() {
+        // CR 603.2: untyped "enters with a counter on it," — ETB trigger.
+        assert!(is_enters_with_counter_trigger(
+            "whenever a creature you control enters with a counter on it, you may have it deal damage"
+        ));
+        assert!(is_enters_with_counter_trigger(
+            "when a permanent you control enters with a counter on it, draw a card"
+        ));
+        // CR 614.1c: typed/counted forms are replacements, NOT triggers.
+        assert!(!is_enters_with_counter_trigger(
+            "this creature enters with x +1/+1 counters on it"
+        ));
+        assert!(!is_enters_with_counter_trigger(
+            "that creature enters with a +1/+1 counter on it."
+        ));
+        assert!(!is_enters_with_counter_trigger(
+            "that planeswalker enters with an additional loyalty counter on it."
+        ));
+        assert!(!is_enters_with_counter_trigger(
+            "the token enters with x +1/+1 counters on it"
+        ));
+        assert!(!is_enters_with_counter_trigger(
+            "it enters with twice that many +1/+1 counters on it"
+        ));
+    }
+
     /// CR 118.9: the mana-cost-alternative-grant classifier must recognize the
     /// Rooftop Storm / Fist of Suns shape and reject flash-permission text.
     #[test]
@@ -630,6 +686,19 @@ mod tests {
         ));
         assert!(!is_spells_alternative_cost_pattern(
             "you may cast this spell as though it had flash."
+        ));
+    }
+
+    /// CR 118.9 + CR 107.14: Primal Prayers "you may cast ... by paying {E}"
+    /// shape must route to the cast-by-paying alt-cost parser.
+    #[test]
+    fn classifies_cast_spells_alternative_cost_pattern() {
+        assert!(is_cast_spells_alternative_cost_pattern(
+            "you may cast creature spells with mana value 3 or less by paying {e} \
+             rather than paying their mana costs."
+        ));
+        assert!(!is_cast_spells_alternative_cost_pattern(
+            "you may pay {0} rather than pay the mana cost for zombie creature spells you cast."
         ));
     }
 }

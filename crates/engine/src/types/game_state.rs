@@ -236,6 +236,15 @@ pub struct SpellCastRecord {
     pub cast_variant: CastingVariant,
 }
 
+/// Snapshot of a land play's cast-capable origin for per-turn history queries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LandPlayRecord {
+    /// CR 305.2a + CR 601.2a: Zone the land was played from, captured at play
+    /// time so end-step conditions can answer "played a land from outside your
+    /// hand" after the land has moved or left the battlefield.
+    pub from_zone: Zone,
+}
+
 /// CR 601.2a: Default origin zone for `SpellCastRecord.from_zone`. Hand is the
 /// overwhelmingly common cast origin, so it's the safe default for snapshots
 /// that pre-date the non-Option migration.
@@ -3287,6 +3296,119 @@ pub enum RetargetScope {
 }
 
 impl WaitingFor {
+    /// Canonical stable variant name (engine-owned labeler).
+    ///
+    /// Exhaustive over every `WaitingFor` variant — no wildcard fallback, so the
+    /// compiler flags any new variant that fails to register a label. Used by the
+    /// stuck-decision diagnostic (`ai_support::stuck_decision_diagnostic`) to
+    /// surface which decision is wedged. Distinct from the test-harness labelers
+    /// in `game/scenario.rs`, which are private and non-exhaustive.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::MulliganDecision { .. } => "MulliganDecision",
+            WaitingFor::MulliganBottomCards { .. } => "MulliganBottomCards",
+            WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
+            WaitingFor::ManaPayment { .. } => "ManaPayment",
+            WaitingFor::ChooseXValue { .. } => "ChooseXValue",
+            WaitingFor::TargetSelection { .. } => "TargetSelection",
+            WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
+            WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
+            WaitingFor::UntapChoice { .. } => "UntapChoice",
+            WaitingFor::ExertChoice { .. } => "ExertChoice",
+            WaitingFor::GameOver { .. } => "GameOver",
+            WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::OrderTriggers { .. } => "OrderTriggers",
+            WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
+            WaitingFor::ExploreChoice { .. } => "ExploreChoice",
+            WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
+            WaitingFor::EquipTarget { .. } => "EquipTarget",
+            WaitingFor::CrewVehicle { .. } => "CrewVehicle",
+            WaitingFor::StationTarget { .. } => "StationTarget",
+            WaitingFor::SaddleMount { .. } => "SaddleMount",
+            WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
+            WaitingFor::DigChoice { .. } => "DigChoice",
+            WaitingFor::SurveilChoice { .. } => "SurveilChoice",
+            WaitingFor::RevealChoice { .. } => "RevealChoice",
+            WaitingFor::SearchChoice { .. } => "SearchChoice",
+            WaitingFor::SearchPartitionChoice { .. } => "SearchPartitionChoice",
+            WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
+            WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
+            WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
+            WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
+            WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
+            WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
+            WaitingFor::LearnChoice { .. } => "LearnChoice",
+            WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
+            WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
+            WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
+            WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
+            WaitingFor::ModeChoice { .. } => "ModeChoice",
+            WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
+            WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::DefilerPayment { .. } => "DefilerPayment",
+            WaitingFor::CastOffer { .. } => "CastOffer",
+            WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
+            WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
+            WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
+            WaitingFor::CipherEncodeChoice { .. } => "CipherEncodeChoice",
+            WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
+            WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
+            WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
+            WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
+            WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
+            WaitingFor::PairChoice { .. } => "PairChoice",
+            WaitingFor::TributeChoice { .. } => "TributeChoice",
+            WaitingFor::MiracleReveal { .. } => "MiracleReveal",
+            WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
+            WaitingFor::UnlessPayment { .. } => "UnlessPayment",
+            WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
+            WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
+            WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
+            WaitingFor::UnlessBounceChoice { .. } => "UnlessBounceChoice",
+            WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
+            WaitingFor::ChooseDungeon { .. } => "ChooseDungeon",
+            WaitingFor::ChooseDungeonRoom { .. } => "ChooseDungeonRoom",
+            WaitingFor::SpecializeColor { .. } => "SpecializeColor",
+            WaitingFor::PayCost { .. } => "PayCost",
+            WaitingFor::ActivationCostOneOfChoice { .. } => "ActivationCostOneOfChoice",
+            WaitingFor::BlightChoice { .. } => "BlightChoice",
+            WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
+            WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
+            WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
+            WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
+            WaitingFor::RevealUntilKeptChoice { .. } => "RevealUntilKeptChoice",
+            WaitingFor::RepeatDecision { .. } => "RepeatDecision",
+            WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
+            WaitingFor::PopulateChoice { .. } => "PopulateChoice",
+            WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
+            WaitingFor::VoteChoice { .. } => "VoteChoice",
+            WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
+            WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
+            WaitingFor::CompanionReveal { .. } => "CompanionReveal",
+            WaitingFor::ChooseLegend { .. } => "ChooseLegend",
+            WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
+            WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
+            WaitingFor::ProliferateChoice { .. } => "ProliferateChoice",
+            WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
+            WaitingFor::CategoryChoice { .. } => "CategoryChoice",
+            WaitingFor::CopyRetarget { .. } => "CopyRetarget",
+            WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
+            WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
+            WaitingFor::DistributeAmong { .. } => "DistributeAmong",
+            WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
+            WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",
+            WaitingFor::RetargetChoice { .. } => "RetargetChoice",
+            WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
+            WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
+        }
+    }
+
     /// Extract the player who must act, if any.
     ///
     /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
@@ -3918,6 +4040,14 @@ pub enum CastingVariant {
     /// matches a normal cast — no on-resolve special behavior — so this is a
     /// casting-context tag, not a resolution-affecting variant.
     Freerunning,
+    /// CR 702.133a: Cast from a graveyard via Jump-start. The card is cast for
+    /// its normal mana cost plus an additional cost of discarding a card
+    /// (CR 601.2b/601.2f–h) — so, like `Retrace`/`Aftermath`, this is an
+    /// additional cost, not an alternative cost, and is absent from
+    /// `uses_alternative_cost`. Like `Flashback`, a spell cast this way is
+    /// exiled instead of going anywhere else any time it would leave the stack
+    /// (see `exiles_when_leaving_stack_for_any_reason`).
+    JumpStart,
 }
 
 impl CastingVariant {
@@ -3958,6 +4088,9 @@ impl CastingVariant {
             | CastingVariant::Omen
             | CastingVariant::Retrace
             | CastingVariant::Aftermath
+            // CR 702.133a: Jump-start discards a card as an *additional* cost on
+            // top of the normal mana cost — not an alternative cost (CR 118.9a).
+            | CastingVariant::JumpStart
             | CastingVariant::GraveyardPermission { .. }
             | CastingVariant::ExilePermission { .. } => false,
         }
@@ -3966,7 +4099,12 @@ impl CastingVariant {
     pub fn exiles_when_leaving_stack_for_any_reason(self) -> bool {
         matches!(
             self,
-            CastingVariant::Flashback | CastingVariant::Aftermath | CastingVariant::Harmonize
+            CastingVariant::Flashback
+                | CastingVariant::Aftermath
+                | CastingVariant::Harmonize
+                // CR 702.133a: "exile this card instead of putting it anywhere
+                // else any time it would leave the stack."
+                | CastingVariant::JumpStart
         )
     }
 
@@ -4600,6 +4738,16 @@ pub struct GameState {
     #[serde(default)]
     pub debug_permitted: BTreeSet<PlayerId>,
 
+    /// Set of players for whom the "infinite mana" debug toggle is active. While
+    /// a player is in this set, their mana pool is topped up after every action
+    /// (`mana_payment::refill_infinite_mana`) and is NOT emptied at end of
+    /// step/phase — CR 500.5 is deliberately suppressed for this player only.
+    /// This is a debug-only departure from the rules, gated behind the same
+    /// debug-action permission as every other `DebugAction`. Toggled via
+    /// `DebugAction::SetInfiniteMana`; empty by default.
+    #[serde(default)]
+    pub debug_infinite_mana: BTreeSet<PlayerId>,
+
     #[serde(default)]
     pub match_config: MatchConfig,
     #[serde(default)]
@@ -4805,6 +4953,11 @@ pub struct GameState {
     /// enabling data-driven filtered counting at resolution.
     #[serde(default)]
     pub spells_cast_this_turn_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
+    /// Per-player land play origin history this turn.
+    /// Mirrors `Player::lands_played_this_turn` when origin-sensitive
+    /// conditions need to distinguish hand plays from exile/graveyard plays.
+    #[serde(default)]
+    pub lands_played_this_turn_by_player: HashMap<PlayerId, im::Vector<LandPlayRecord>>,
     #[serde(default)]
     pub players_who_searched_library_this_turn: HashSet<PlayerId>,
     /// CR 603.4: Typed player-action events performed this turn. This is the
@@ -5067,6 +5220,22 @@ pub struct GameState {
     /// Used by AbilityCondition::RevealedHasCardType and sub_ability target injection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
+
+    /// CR 701.20e: Cards the controller is privately "looking at" during the
+    /// current resolution — the looker-scoped peek window of a bare
+    /// "look at the top card of your library" (Dig with `keep_count == 0`,
+    /// `reveal == false`). Unlike `revealed_cards` (public, all players) and
+    /// `last_revealed_ids` (condition bookkeeping, not viewer-scoped), these ids
+    /// are surfaced by `filter_state_for_viewer` ONLY to `private_look_player`,
+    /// so the looking player can see the card while deciding a subsequent
+    /// "you may reveal that card" optional, without leaking it to opponents.
+    /// Cleared at depth 0 of `resolve_ability_chain` and at action boundaries
+    /// once no optional-effect decision that depends on the peek is pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_look_ids: Vec<ObjectId>,
+    /// CR 701.20e: The player to whom `private_look_ids` is visible (the looker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_look_player: Option<PlayerId>,
 
     /// ObjectIds of objects moved by the most recent zone-change effect.
     /// Used by AbilityCondition::ZoneChangedThisWay to gate sub_abilities on
@@ -5677,6 +5846,7 @@ impl GameState {
             spells_cast_this_game: HashMap::new(),
             spells_cast_this_game_by_player: HashMap::new(),
             spells_cast_this_turn_by_player: HashMap::new(),
+            lands_played_this_turn_by_player: HashMap::new(),
             players_who_searched_library_this_turn: HashSet::new(),
             player_actions_this_turn: Vec::new(),
             players_attacked_this_step: HashSet::new(),
@@ -5728,6 +5898,8 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            private_look_ids: Vec::new(),
+            private_look_player: None,
             last_zone_changed_ids: Vec::new(),
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
@@ -5762,6 +5934,7 @@ impl GameState {
             commander_declined_zone_return: HashSet::new(),
             debug_mode: false,
             debug_permitted: BTreeSet::new(),
+            debug_infinite_mana: BTreeSet::new(),
         }
     }
 
@@ -5868,6 +6041,112 @@ impl GameState {
                 Some(crate::types::ability::PostReplacementContinuation::Template(template));
         }
     }
+
+    /// CR 104.4b: a cheap pre-filter fingerprint of loop-mutable state. It need
+    /// NOT be complete — a confirmation pass (`loop_states_equal`) deep-compares
+    /// before any draw, so a fingerprint collision can never cause a wrongful
+    /// draw; the fingerprint only decides *when to bother confirming*. Includes
+    /// the RNG stream position so a loop that consumes randomness (shuffle, coin
+    /// flip) gets a distinct fingerprint and is never confirmed — CR 104.4b
+    /// excludes loops containing a nondeterministic action.
+    pub(crate) fn loop_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        self.turn_number.hash(&mut h);
+        self.phase.hash(&mut h);
+        self.active_player.hash(&mut h);
+        self.priority_player.hash(&mut h);
+        self.stack.len().hash(&mut h);
+        self.objects.len().hash(&mut h);
+        // im::Vector<ObjectId>: Hash, ordered.
+        self.battlefield.hash(&mut h);
+        for player in &self.players {
+            player.id.hash(&mut h);
+            player.life.hash(&mut h);
+            player.hand.len().hash(&mut h);
+            player.library.len().hash(&mut h);
+            player.graveyard.len().hash(&mut h);
+        }
+        // Per-object tapped/damage rollup cheaply distinguishes tap/untap and
+        // damage-ping states without a full content hash. Folded together with XOR
+        // so the rollup is order-independent (im::HashMap iteration order is not
+        // stable across states) in O(N) with zero allocation — sorting the id set
+        // on every call was the hot-path cost on large boards (~2,936 permanents).
+        // Each per-object hash folds in the unique id, so equal (tapped, damage)
+        // on different objects never cancels.
+        let mut objects_rollup = 0u64;
+        for (id, object) in &self.objects {
+            let mut object_hash = rustc_hash::FxHasher::default();
+            id.0.hash(&mut object_hash);
+            object.tapped.hash(&mut object_hash);
+            object.damage_marked.hash(&mut object_hash);
+            objects_rollup ^= object_hash.finish();
+        }
+        objects_rollup.hash(&mut h);
+        // Any randomness consumed ⇒ different stream position ⇒ no collision.
+        self.rng.get_word_pos().hash(&mut h);
+        h.finish()
+    }
+
+    /// Clone with the volatile, monotonically-advancing fields the `PartialEq`
+    /// impl compares zeroed/canonicalized, so two states reached at different
+    /// times can compare equal on everything a mandatory action could change.
+    pub(crate) fn normalize_for_loop(&self) -> GameState {
+        let mut clone = self.clone();
+        clone.state_revision = 0;
+        clone.next_timestamp = 0;
+        clone.next_object_id = 0;
+        clone.layers_dirty = LayersDirty::full();
+        clone.public_state_dirty = PublicStateDirty::all_dirty();
+        clone
+    }
+}
+
+/// CR 104.4b confirmation between two states that have BOTH already been
+/// `normalize_for_loop`d. Reuses `PartialEq` for the ~95 non-object fields and
+/// supplements its `objects.len()`-only object check with per-object content
+/// equality. Only a true match permits a draw, so the cheap `loop_fingerprint`
+/// can never cause a wrongful draw.
+pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
+    a == b && objects_content_eq(&a.objects, &b.objects)
+}
+
+/// CR 104.4b: per-object mutable-content equality — supplements `GameState`'s
+/// `objects.len()`-only `PartialEq` object check. Card-intrinsic fields
+/// (`base_*`, abilities, definitions) are immutable for a given object id within
+/// a game and so cannot differ between two states; only the fields a mandatory
+/// action could change are compared.
+fn objects_content_eq(
+    a: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
+    b: &im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
+) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(id, x)| {
+            b.get(id).is_some_and(|y| {
+                x.controller == y.controller
+                    && x.zone == y.zone
+                    && x.tapped == y.tapped
+                    && x.face_down == y.face_down
+                    && x.flipped == y.flipped
+                    && x.transformed == y.transformed
+                    // CR 702.26: phasing is mutable per-object status that leaves
+                    // zone and objects.len() unchanged, so two states differing only
+                    // in phased-in/out must not compare equal — else a loop that
+                    // phases a permanent in and out is a wrongful CR 104.4b draw.
+                    && x.phase_status == y.phase_status
+                    && x.damage_marked == y.damage_marked
+                    && x.dealt_deathtouch_damage == y.dealt_deathtouch_damage
+                    && x.attached_to == y.attached_to
+                    && x.attachments == y.attachments
+                    && x.paired_with == y.paired_with
+                    && x.counters == y.counters
+                    && x.power == y.power
+                    && x.toughness == y.toughness
+                    && x.loyalty == y.loyalty
+                    && x.defense == y.defense
+                    && x.name == y.name
+            })
+        })
 }
 
 impl Default for GameState {
@@ -5975,6 +6254,7 @@ impl PartialEq for GameState {
             && self.spells_cast_this_game == other.spells_cast_this_game
             && self.spells_cast_this_game_by_player == other.spells_cast_this_game_by_player
             && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player
+            && self.lands_played_this_turn_by_player == other.lands_played_this_turn_by_player
             && self.players_who_searched_library_this_turn
                 == other.players_who_searched_library_this_turn
             && self.player_actions_this_turn == other.player_actions_this_turn
@@ -6022,6 +6302,8 @@ impl PartialEq for GameState {
             && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
+            && self.private_look_ids == other.private_look_ids
+            && self.private_look_player == other.private_look_player
             && self.last_zone_changed_ids == other.last_zone_changed_ids
             && self.last_vote_ballots == other.last_vote_ballots
             && self.player_actions_this_way == other.player_actions_this_way
@@ -6045,6 +6327,95 @@ mod tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
         ResolvedAbility, TargetFilter,
     };
+
+    /// CR 104.4b: the loop fingerprint must distinguish object tap state — else a
+    /// tap/untap loop's two phases would be indistinguishable. (A false negative
+    /// is safe; this guards detection quality, not correctness.)
+    #[test]
+    fn loop_fingerprint_reflects_object_tap_state() {
+        let mut state = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(500), object);
+        state.battlefield.push_back(ObjectId(500));
+
+        let untapped = state.loop_fingerprint();
+        if let Some(object) = state.objects.get_mut(&ObjectId(500)) {
+            object.tapped = true;
+        }
+        assert_ne!(
+            untapped,
+            state.loop_fingerprint(),
+            "tapping an object must change the loop fingerprint"
+        );
+    }
+
+    /// CR 104.4b: any randomness consumed advances the RNG stream position, which
+    /// the fingerprint includes — so a loop containing a shuffle/coin flip never
+    /// collides and is correctly NOT drawn.
+    #[test]
+    fn loop_fingerprint_reflects_rng_consumption() {
+        let mut state = GameState::new_two_player(7);
+        let before = state.loop_fingerprint();
+        state.rng.set_word_pos(4096);
+        assert_ne!(
+            before,
+            state.loop_fingerprint(),
+            "advancing the RNG stream must change the loop fingerprint"
+        );
+    }
+
+    /// CR 104.4b confirmation: two states reached at different times (advancing
+    /// the volatile counters PartialEq compares) but otherwise identical must
+    /// confirm as equal — else a real loop could never be confirmed and drawn.
+    #[test]
+    fn loop_states_equal_ignores_volatile_counters() {
+        let base = GameState::new_two_player(7);
+        let mut later = base.clone();
+        later.state_revision = 99;
+        later.next_timestamp = 42;
+        later.next_object_id = base.next_object_id + 5;
+
+        assert!(
+            loop_states_equal(&base.normalize_for_loop(), &later.normalize_for_loop()),
+            "states differing only in volatile counters must confirm as a repeat"
+        );
+    }
+
+    /// CR 104.4b confirmation must NOT treat two states as equal when an object's
+    /// mutable content differs — guards the `objects.len()`-only `PartialEq` gap
+    /// that would otherwise permit a wrongful draw.
+    #[test]
+    fn loop_states_equal_detects_object_content_difference() {
+        let mut a = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(500),
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        a.objects.insert(ObjectId(500), object);
+        a.battlefield.push_back(ObjectId(500));
+        let mut b = a.clone();
+        if let Some(object) = b.objects.get_mut(&ObjectId(500)) {
+            object.tapped = true;
+        }
+
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &a.normalize_for_loop()),
+            "identical states must confirm as a repeat"
+        );
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "a tapped-vs-untapped object difference must NOT confirm (no wrongful draw)"
+        );
+    }
 
     #[test]
     fn default_creates_two_player_game() {
