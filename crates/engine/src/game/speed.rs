@@ -116,8 +116,68 @@ pub fn controls_start_your_engines(state: &GameState, player: PlayerId) -> bool 
     })
 }
 
+// Re-entrancy guard for `can_increase_speed_beyond_4`.
+//
+// `can_increase_speed_beyond_4` scans `active_static_definitions`, which
+// evaluates each static's CR 604.1 functioning condition. A
+// `StaticCondition::HasMaxSpeed` condition maps (layers.rs) back to
+// `has_max_speed`, which calls `can_increase_speed_beyond_4` again — an
+// implementation-level recursion loop between two DISTINCT statics (the
+// HasMaxSpeed-gated static being condition-checked, and Gomif's
+// `SpeedCanIncreaseBeyondFour` static being searched for). Without a guard this
+// overflows the stack on any board where the controller has a HasMaxSpeed-gated
+// static (e.g. Racers' Scoreboard).
+//
+// THREAD-LOCAL (not a `GameState` field, not `AtomicBool`): engine layer
+// resolution is synchronous, so production code invoked by a test/AI-search runs
+// on that caller's own thread. A process-global `AtomicBool` races under cargo's
+// parallel test runner and across AI clone-search threads. This mirrors the
+// `Cell<bool>` thread-local idiom in layers.rs (REBUILD_STATIC_INDEX_AT_TOP) and
+// the TLS save/restore pattern in quantity.rs (`with_detection_trigger_event`).
+thread_local! {
+    static SPEED_CAP_GUARD: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// RAII guard for the `can_increase_speed_beyond_4` re-entrancy flag. The outer
+/// call sets the flag to `true`; `Drop` restores the previous value (panic-safe).
+/// A nested (inner) call observes `true` and returns the base cap WITHOUT
+/// touching the flag, so the outer call's `Drop` still restores correctly.
+struct SpeedCapGuard {
+    prev: bool,
+}
+
+impl SpeedCapGuard {
+    fn enter() -> Self {
+        let prev = SPEED_CAP_GUARD.with(|g| g.replace(true));
+        Self { prev }
+    }
+}
+
+impl Drop for SpeedCapGuard {
+    fn drop(&mut self) {
+        SPEED_CAP_GUARD.with(|g| g.set(self.prev));
+    }
+}
+
 /// Card-specific rule modification for effects like Gomif.
 pub fn can_increase_speed_beyond_4(state: &GameState, player: PlayerId) -> bool {
+    // CR 613.8b: when effects form a dependency loop, the loop is broken and
+    // values are taken in timestamp order rather than circularly. Here the loop
+    // is mostly implementation recursion across two distinct statics (the
+    // HasMaxSpeed-gated static's functioning-condition check vs. the search for
+    // Gomif's `SpeedCanIncreaseBeyondFour`), not a literal single-effect CR 613
+    // dependency loop — but 613.8b is the rules basis for returning the BASE cap
+    // (no circular contribution) on re-entry rather than recursing. The inner
+    // answer is never a consumed result: the real layer pass re-evaluates
+    // `HasMaxSpeed` through the UNGUARDED outer `has_max_speed`. Returning `false`
+    // (cap = 4) here only affects the throwaway condition-evaluation of a
+    // HasMaxSpeed-gated static during the scan, which searches for a DIFFERENT
+    // mode (`SpeedCanIncreaseBeyondFour`, whose `condition` is `None` so it is
+    // found regardless of this guard).
+    if SPEED_CAP_GUARD.with(core::cell::Cell::get) {
+        return false;
+    }
+    let _g = SpeedCapGuard::enter();
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     state.battlefield.iter().any(|&id| {
         state.objects.get(&id).is_some_and(|obj| {

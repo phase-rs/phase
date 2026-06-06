@@ -30600,6 +30600,67 @@ mod tests {
         assert_library_change_destination(move_found, Zone::Graveyard);
     }
 
+    /// CR 701.23a: Search for Glory — "a snow permanent card, a legendary card,
+    /// or a Saga card" is a disjunctive series describing ONE card matching any
+    /// of three co-equal filters. It must lower to a single `SearchLibrary` with
+    /// `count: Fixed{1}`, an `Or` of three branches, and `selection_constraint:
+    /// None` (NOT `MatchEachFilter` / three required picks). The destination /
+    /// shuffle / gain-life sub_ability chain stays intact.
+    #[test]
+    fn search_for_glory_disjunctive_series_lowers_to_single_or_choice() {
+        let def = parse_effect_chain(
+            "Search your library for a snow permanent card, a legendary card, or a Saga card, reveal it, put it into your hand, then shuffle. You gain 1 life for each {S} spent to cast this spell.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::SearchLibrary {
+            filter,
+            count,
+            selection_constraint,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected SearchLibrary, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(*selection_constraint, SearchSelectionConstraint::None);
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or search filter, got {filter:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected 3 disjunctive branches: {filters:?}"
+        );
+
+        // sub_ability chain: ChangeZone (Library -> Hand) -> Shuffle -> GainLife.
+        let move_found = def
+            .sub_ability
+            .as_deref()
+            .expect("expected move ChangeZone");
+        assert_library_change_destination(move_found, Zone::Hand);
+
+        let shuffle = move_found
+            .sub_ability
+            .as_deref()
+            .expect("expected Shuffle after move");
+        assert!(
+            matches!(*shuffle.effect, Effect::Shuffle { .. }),
+            "expected Shuffle, got {:?}",
+            shuffle.effect
+        );
+
+        let gain_life = shuffle
+            .sub_ability
+            .as_deref()
+            .expect("expected GainLife after shuffle");
+        assert!(
+            matches!(*gain_life.effect, Effect::GainLife { .. }),
+            "expected GainLife, got {:?}",
+            gain_life.effect
+        );
+    }
+
     fn assert_filter_has_color(filter: &TargetFilter, expected: ManaColor) {
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected typed search filter, got {filter:?}");

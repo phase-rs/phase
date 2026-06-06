@@ -414,6 +414,16 @@ fn parse_search_filter_with_extras(
         return filters;
     }
 
+    // CR 701.23a: A disjunctive series ("a X card, a Y card, or a Z card")
+    // describes ONE card matching any listed property — try the disjunction
+    // split before the conjunction split so it isn't mis-classified as N separate
+    // cards (count + MatchEachFilter). parse_search_filter_disjunction returns
+    // None for <2 disjunction segments, so "and"-lists and single filters fall
+    // through to the conjunction path unchanged.
+    if let Some(or_filter) = parse_search_filter_disjunction(tail, ctx) {
+        return (or_filter, Vec::new());
+    }
+
     // Split on `" and a "` / `" and an "` / `" and basic "` at filter-region
     // boundaries only. The "and basic" branch preserves the supertype prefix so
     // the downstream filter parser sees e.g. `"basic plains card"` intact.
@@ -1093,6 +1103,19 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
         leading: Leading,
     }
 
+    // Leading-article dispatch on a single alt() — also reused by the
+    // comma-member peel below to recover the article-stripped (or supertype)
+    // form of each enumerated member.
+    fn parse_leading_article(i: &str) -> nom::IResult<&str, Leading, OracleError<'_>> {
+        alt((
+            value(Leading::A, tag::<_, _, OracleError<'_>>("a ")),
+            value(Leading::An, tag::<_, _, OracleError<'_>>("an ")),
+            value(Leading::Basic, tag::<_, _, OracleError<'_>>("basic ")),
+            value(Leading::None, tag::<_, _, OracleError<'_>>("")),
+        ))
+        .parse(i)
+    }
+
     // Sub-combinator that dispatches the leading-article axis on a single
     // alt() — shared between the and/or and or scans so future leading
     // variants (e.g., AndOrBasic) require one arm, not one per connector.
@@ -1102,13 +1125,7 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
     ) -> impl Parser<&'a str, Output = Disjunction, Error = OracleError<'a>> {
         move |i: &'a str| {
             let (i, _) = tag::<_, _, OracleError<'a>>(connector_tag).parse(i)?;
-            let (i, leading) = alt((
-                value(Leading::A, tag::<_, _, OracleError<'a>>("a ")),
-                value(Leading::An, tag::<_, _, OracleError<'a>>("an ")),
-                value(Leading::Basic, tag::<_, _, OracleError<'a>>("basic ")),
-                value(Leading::None, tag::<_, _, OracleError<'a>>("")),
-            ))
-            .parse(i)?;
+            let (i, leading) = parse_leading_article(i)?;
             Ok((i, Disjunction { connector, leading }))
         }
     }
@@ -1164,7 +1181,32 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
             break;
         }
 
-        segments.push(before.trim());
+        // CR 701.23a: a disjunctive series "a X, a Y, or a Z" is one choice
+        // among co-equal filters (count 1). The left side may itself enumerate
+        // co-members ("a snow permanent card, a legendary card") that the comma
+        // upstream did not split out — peel each member here so every co-equal
+        // filter becomes its own flat segment.
+        // structural: not dispatch (comma-member enumeration) — mirrors the
+        // structural `as_bytes().contains(&b',')` gate above.
+        for member in before.split(',') {
+            let m = member.trim();
+            if m.is_empty() {
+                continue;
+            }
+            let cleaned = match parse_leading_article(m) {
+                // "basic" is a supertype, not an article — recover the full
+                // "basic <type> card" so the type-phrase parser sees it intact.
+                Ok((rest, Leading::Basic)) => {
+                    let start = m.len() - rest.len() - "basic ".len();
+                    &m[start..]
+                }
+                Ok((rest, _)) => rest,
+                Err(_) => m,
+            };
+            if !cleaned.is_empty() {
+                segments.push(cleaned);
+            }
+        }
         remaining = if disjunction.leading == Leading::Basic {
             // "basic" is a supertype, not an article — recover it into the
             // right segment so the type-phrase parser sees "basic <type>".
@@ -3887,6 +3929,106 @@ mod tests {
         assert_filter_has_color(&details.extra_filters[0], ManaColor::Green);
         assert_filter_has_color(&details.extra_filters[1], ManaColor::Blue);
         assert_eq!(details.multi_destination, Zone::Graveyard);
+    }
+
+    /// CR 701.23a: Search for Glory — "a snow permanent card, a legendary card,
+    /// or a Saga card" is a single choice among three co-equal filters, NOT
+    /// three required picks. Must lower to count 1 + `Or` of three branches with
+    /// no `MatchEachFilter` selection constraint and no extra filters.
+    #[test]
+    fn search_for_glory_disjunctive_series_is_single_choice_or() {
+        let details = parse_search_library_details(
+            "search your library for a snow permanent card, a legendary card, or a saga card, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            details.extra_filters.is_empty(),
+            "disjunctive series must not produce extra (required) filters: {:?}",
+            details.extra_filters
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::None
+        );
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected 3 disjunctive branches: {filters:?}"
+        );
+
+        // Branch 0: snow permanent.
+        let TargetFilter::Typed(snow) = &filters[0] else {
+            panic!("expected typed snow branch, got {:?}", filters[0]);
+        };
+        assert!(
+            snow.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: Supertype::Snow
+                }
+            )),
+            "first branch should carry Snow supertype: {snow:?}"
+        );
+
+        // Branch 1: legendary.
+        let TargetFilter::Typed(legendary) = &filters[1] else {
+            panic!("expected typed legendary branch, got {:?}", filters[1]);
+        };
+        assert!(
+            legendary.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: Supertype::Legendary
+                }
+            )),
+            "second branch should carry Legendary supertype: {legendary:?}"
+        );
+
+        // Branch 2: Saga subtype.
+        let TargetFilter::Typed(saga) = &filters[2] else {
+            panic!("expected typed Saga branch, got {:?}", filters[2]);
+        };
+        assert_eq!(saga.get_subtype(), Some("Saga"));
+    }
+
+    /// CR 701.23a (GAP2 coverage): the comma-member peel must recover the
+    /// `basic` supertype on a non-land mixed series — "a basic land card, a
+    /// plains card, or a saga card" lowers to an `Or` of three branches with the
+    /// first carrying `Basic` + `Land`.
+    #[test]
+    fn search_basic_leading_disjunctive_series_recovers_supertype() {
+        let details = parse_search_library_details(
+            "search your library for a basic land card, a plains card, or a saga card, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(details.extra_filters.is_empty());
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected 3 disjunctive branches: {filters:?}"
+        );
+
+        let TargetFilter::Typed(basic_land) = &filters[0] else {
+            panic!("expected typed basic land branch, got {:?}", filters[0]);
+        };
+        assert!(basic_land.type_filters.contains(&TypeFilter::Land));
+        assert!(
+            basic_land.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: Supertype::Basic
+                }
+            )),
+            "first branch should carry Basic supertype: {basic_land:?}"
+        );
     }
 
     /// CR 701.23a + CR 205.3i: "a land card of each basic land type" is a
