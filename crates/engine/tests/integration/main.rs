@@ -100,6 +100,7 @@ mod kaito_integration;
 mod kodama_anti_recursion_intervening_if;
 mod krark_clan_ironworks_castability;
 mod krark_thumb_coin_flip;
+mod kutzils_flanker_mode_one_counter;
 mod lathiel_end_step_counters_repro;
 mod leyline_taps_for_mana_repro;
 mod liliana_dreadhorde_multi_dies;
