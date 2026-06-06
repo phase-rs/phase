@@ -762,7 +762,7 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
 /// source via `ChosenAttribute::Player` (Skyshroud War Beast, Lost Order of
 /// Jarkeld), distinct from the controller ("you control").
 fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    if let Ok(parsed) = parse_number_of_qualified_controlled_type(input) {
+    if let Ok(parsed) = parse_qualified_controlled_type(input) {
         return Ok(parsed);
     }
 
@@ -795,10 +795,14 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
 }
 
 /// CR 201.2 + CR 109.2: Parse qualified controlled object counts like
-/// "permanents named Food Fight you control". The named/card-quality parser owns
-/// the object description; this quantity parser owns the trailing controller
-/// scope for "the number of ... you control".
-fn parse_number_of_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
+/// "permanents named Food Fight you control" or "other creature named Seven
+/// Dwarves you control". The named/card-quality parser (`parse_type_phrase`)
+/// owns the object description — type word plus any `other`/`named X`
+/// qualifier — and this quantity parser owns the trailing controller scope.
+/// Shared by the "the number of … you control" and "for each … you control"
+/// paths: a `named X` qualifier sits between the type word and the controller
+/// suffix, which the bare-`parse_type_filter_word` arms cannot reach.
+fn parse_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
     let (mut filter, rest) = parse_type_phrase(input);
     if !quantity_filter_has_meaningful_content(&filter) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -1965,6 +1969,12 @@ fn parse_for_each_clause_ref_with_they_controller(
         // token does not commit to it.
         parse_for_each_distinct_counter_kinds_among,
         parse_for_each_controlled_type,
+        // CR 201.2: "for each [other] <type> named <CardName> you control"
+        // (Seven Dwarves). The `named X` qualifier sits between the type word
+        // and " you control", so the bare-type `parse_for_each_controlled_type`
+        // arm above cannot reach the controller suffix. Tried last so it only
+        // catches the qualified case the bare-type arm rejects.
+        parse_qualified_controlled_type,
     )))
     .parse(input)
 }
@@ -3156,6 +3166,39 @@ mod tests {
                 other => panic!("expected ObjectCount, got {other:?}"),
             }
         }
+    }
+
+    /// CR 201.2 + CR 109.4: "for each [other] <type> named <CardName> you
+    /// control" must keep the `named X` qualifier AND the controller scope —
+    /// not drop the whole DynamicQty. Seven Dwarves ("gets +1/+1 for each other
+    /// creature named Seven Dwarves you control") regressed to a swallowed
+    /// clause once the named-X terminator correctly stopped the card name at
+    /// " you control": the bare-type `parse_for_each_controlled_type` arm could
+    /// not reach the controller suffix past the qualifier. Tests the class:
+    /// the `named X`/`other`/controller triple survives for any card name.
+    #[test]
+    fn parse_for_each_other_named_creature_you_control_keeps_dynamic_quantity() {
+        let (rest, q) =
+            parse_for_each_clause_ref("other creature named seven dwarves you control").unwrap();
+        assert_eq!(rest, "");
+        let QuantityRef::ObjectCount {
+            filter:
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }),
+        } = q
+        else {
+            panic!("expected ObjectCount(Typed), got {q:?}");
+        };
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::Another));
+        assert!(properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Named { name } if name == "seven dwarves"
+        )));
     }
 
     #[test]
