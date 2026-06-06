@@ -14,7 +14,9 @@ fn parse_crew_contribution_modifier(input: &str) -> OracleResult<'_, CrewContrib
                 nom_primitives::parse_number,
                 tag(" greater"),
             ),
-            |(_, delta, _)| CrewContributionKind::PowerDelta(delta),
+            |(_, delta, _)| {
+                CrewContributionKind::PowerDelta(i32::try_from(delta).unwrap_or(i32::MAX))
+            },
         ),
         value(
             CrewContributionKind::ToughnessInsteadOfPower,
@@ -52,7 +54,7 @@ fn finish_crew_contribution(
 pub(crate) fn parse_crew_contribution(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     if let Some(rest) = nom_tag_tp(tp, "each creature you control ") {
         let rest_lower = rest.lower;
-        let (kind, affected) = nom_on_lower(rest.original, rest_lower, |i| {
+        let ((kind, affected), _) = nom_on_lower(rest.original, rest_lower, |i| {
             let (i, _) = parse_crew_contribution_actions(i)?;
             let (i, kind) = parse_crew_contribution_modifier(i)?;
             let (i, _) = opt(tag(".")).parse(i)?;
@@ -64,7 +66,7 @@ pub(crate) fn parse_crew_contribution(tp: &TextPair<'_>, text: &str) -> Option<S
         return Some(finish_crew_contribution(text, kind, affected));
     }
 
-    let (kind, affected) = nom_on_lower(tp.original, tp.lower, |i| {
+    let ((kind, affected), _) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, _) = alt((tag("~ "), tag("this creature "))).parse(i)?;
         let (i, _) = parse_crew_contribution_actions(i)?;
         let (i, kind) = parse_crew_contribution_modifier(i)?;

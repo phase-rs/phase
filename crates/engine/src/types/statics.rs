@@ -1389,6 +1389,7 @@ impl Hash for StaticMode {
             // CR 107.4f: Parameterized by ManaColor — hash the color so distinct
             // grants (Black vs Red) don't collide.
             StaticMode::PayLifeAsColoredMana { color } => color.hash(state),
+            StaticMode::CrewContribution { kind } => kind.hash(state),
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
@@ -1404,10 +1405,9 @@ impl Hash for StaticMode {
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
-            | StaticMode::CrewContribution { kind } => kind.hash(state),
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
-            StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::EntersWithAdditionalCounters { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
