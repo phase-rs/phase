@@ -855,7 +855,10 @@ impl GameObject {
             base_power: self.base_power,
             base_toughness: self.base_toughness,
             colors: self.color.clone(),
-            mana_value: self.mana_cost.mana_value(),
+            // CR 202.3e: While on the stack, X equals the announced value, not 0.
+            mana_value: self
+                .mana_cost
+                .mana_value_with_x(self.zone, self.cost_x_paid),
             controller: self.controller,
             owner: self.owner,
             from_zone: from,

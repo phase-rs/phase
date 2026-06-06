@@ -196,7 +196,8 @@ pub fn record_spell_cast_from_zone(
         subtypes: obj.card_types.subtypes.clone(),
         keywords: obj.keywords.clone(),
         colors: obj.color.clone(),
-        mana_value: obj.mana_cost.mana_value(),
+        // CR 202.3e: While on the stack, X equals the announced value, not 0.
+        mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
         // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
         // trigger-filter evaluation (e.g. "your first spell with {X} in its
         // mana cost each turn") does not need to re-examine the spell object.
@@ -1306,9 +1307,20 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
     // entry, and re-running it here would over-strictly reject casts where the
     // game state changed mid-cast (an unusual but possible edge case the rules
     // do not require us to police a second time).
-    obj.casting_options
+    let flash_options: Vec<_> = obj
+        .casting_options
         .iter()
         .filter(|o| o.kind == SpellCastingOptionKind::AsThoughHadFlash)
+        .collect();
+    // CR 118.9 + CR 702.8a: Instant-speed permission from a battlefield
+    // `CastWithAlternativeCost` grant (Primal Prayers class) is not encoded as
+    // a spell `casting_options` entry — only alternative-cost spell options
+    // carry target-dependent flash riders (Timely Ward class).
+    if flash_options.is_empty() {
+        return true;
+    }
+    flash_options
+        .iter()
         .any(|option| match option.condition.as_ref() {
             None => true,
             Some(ParsedCondition::SpellTargetsFilter { filter }) => evaluate_target_filter(filter),

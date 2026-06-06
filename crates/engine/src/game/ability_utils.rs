@@ -101,6 +101,10 @@ pub fn build_resolved_from_def_with_targets(
     // through to the resolved ability so target-selection sites can short-circuit
     // `WaitingFor::TargetSelection` for `Random` abilities.
     resolved.target_selection_mode = def.target_selection_mode;
+    // CR 601.2c + CR 603.3d: Carry the parser-stamped target chooser through so the
+    // trigger target-selection site can route a targeted "of their choice" to the
+    // scoped (upkeep) player instead of the source's controller.
+    resolved.target_chooser = def.target_chooser.clone();
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
@@ -170,6 +174,7 @@ pub(crate) fn apply_instead_swap(
     overridden.unless_pay = sub.unless_pay.clone();
     overridden.distribution = sub.distribution.clone();
     overridden.target_selection_mode = sub.target_selection_mode;
+    overridden.target_chooser = sub.target_chooser.clone();
     overridden
 }
 
@@ -3891,14 +3896,15 @@ fn validate_target_constraints(
                         )
                     }
                 };
-                // CR 202.3: combined mana value of the chosen object targets.
+                // CR 202.3 + CR 202.3e: combined mana value of the chosen object
+                // targets; on-stack spells include the announced X value.
                 let sum: i32 = targets
                     .iter()
                     .filter_map(|t| match t {
                         TargetRef::Object(id) => state
                             .objects
                             .get(id)
-                            .map(|o| o.mana_cost.mana_value() as i32),
+                            .map(|o| o.mana_cost.mana_value_with_x(o.zone, o.cost_x_paid) as i32),
                         TargetRef::Player(_) => None,
                     })
                     .sum();

@@ -69,6 +69,7 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod encore;
 pub mod end_combat_phase;
 pub(super) mod end_phase;
 pub mod end_the_turn;
@@ -1081,6 +1082,13 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
     )
 }
 
+fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::RevealTop { .. } | Effect::Dig { .. } | Effect::RevealUntil { .. } | Effect::Clash
+    )
+}
+
 fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> bool {
     match ability.condition {
         Some(AbilityCondition::Not { ref condition })
@@ -1838,6 +1846,7 @@ pub fn resolve_effect(
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::Myriad => myriad::resolve(state, ability, events),
+        Effect::Encore => encore::resolve(state, ability, events),
         Effect::CopyTokenBlockingAttacker { .. } => {
             copy_token_blocking::resolve(state, ability, events)
         }
@@ -2876,6 +2885,30 @@ fn ability_with_event_context_targets(
     pending
 }
 
+/// CR 603.2: When an ability's `targets` are still empty at resolution but its
+/// effect carries an event-context recipient (`TriggeringPlayer`, etc.), bind
+/// that referent into `targets` before payer/effect resolution. Shared by the
+/// unless-pay interceptor and the main effect path (issue #2361).
+fn hydrate_event_context_targets<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+) -> Cow<'a, ResolvedAbility> {
+    if !ability.targets.is_empty() {
+        return Cow::Borrowed(ability);
+    }
+    let Some(filter) = extract_event_context_filter(&ability.effect) else {
+        return Cow::Borrowed(ability);
+    };
+    let Some(target_ref) =
+        crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+    else {
+        return Cow::Borrowed(ability);
+    };
+    let mut resolved = ability.clone();
+    resolved.targets = vec![target_ref];
+    Cow::Owned(resolved)
+}
+
 /// CR 603.2: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
@@ -3739,11 +3772,17 @@ fn resolve_chain_body(
     // intercepted here for both tax triggers and counter-target-spell unless
     // costs. Post-fold, the cost is the unified `AbilityCost` taxonomy.
     if let Some(ref unless_pay) = ability.unless_pay {
+        // CR 603.2 + CR 118.12a: Hydrate event-context targets before payer
+        // resolution so trigger unless-costs ("that player ... unless they pay")
+        // do not silently fall through when `ability.targets` is still empty
+        // (issue #2361).
+        let ability_for_unless = hydrate_event_context_targets(state, ability);
         // CR 118.12a: `resolve_unless_payers` yields the APNAP-ordered poll
         // list — one player for ordinary unless-costs, every player for
         // "unless any player pays ...". The first entry is prompted now; the
         // rest ride along in `WaitingFor::UnlessPayment.remaining`.
-        let unless_payers = resolve_unless_payers(state, ability, &unless_pay.payer);
+        let unless_payers =
+            resolve_unless_payers(state, ability_for_unless.as_ref(), &unless_pay.payer);
         if let Some((&payer, remaining_payers)) = unless_payers.split_first() {
             // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
@@ -3893,29 +3932,8 @@ fn resolve_chain_body(
         ability.effect,
         Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }
     ) {
-        // CR 603.2: If the ability has empty targets but its effect uses an event-context
-        // target filter (TriggeringSpellController, TriggeringSource, etc.), resolve the
-        // filter into an actual TargetRef using the current trigger event context.
-        let resolved_ability = if ability.targets.is_empty() {
-            if let Some(filter) = extract_event_context_filter(&ability.effect) {
-                if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
-                    state,
-                    filter,
-                    ability.source_id,
-                ) {
-                    let mut resolved = ability.clone();
-                    resolved.targets = vec![target_ref];
-                    Some(resolved)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let effective = resolved_ability.as_ref().unwrap_or(ability);
+        let hydrated = hydrate_event_context_targets(state, ability);
+        let effective = hydrated.as_ref();
 
         // CR 608.2b: Validate SharesQuality group constraints before applying effects.
         // If targets don't share the required quality, skip the effect.
@@ -4437,21 +4455,12 @@ fn resolve_chain_body(
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {
                     let mut else_resolved = else_branch.as_ref().clone();
-                    // Inject revealed card IDs as targets for else branches following RevealTop
-                    // or a pure-peek Dig (reveal: false, keep_count: 0), so "Otherwise, put
-                    // that card on the bottom of your library" knows which card to move.
+                    // Inject revealed card IDs as targets for else branches following
+                    // effects that write last_revealed_ids, so "Otherwise, put that
+                    // card on the bottom of your library" knows which card to move.
                     if else_resolved.targets.is_empty()
                         && !state.last_revealed_ids.is_empty()
-                        && matches!(
-                            ability.effect,
-                            Effect::RevealTop { .. }
-                                | Effect::Dig { reveal: true, .. }
-                                | Effect::Dig {
-                                    reveal: false,
-                                    keep_count: Some(0),
-                                    ..
-                                }
-                        )
+                        && effect_writes_last_revealed_ids(&ability.effect)
                     {
                         else_resolved.targets = state
                             .last_revealed_ids
@@ -4719,13 +4728,11 @@ fn resolve_chain_body(
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
-            && matches!(
-                ability.effect,
-                Effect::RevealTop { .. } | Effect::Dig { reveal: true, .. }
-            )
+            && effect_writes_last_revealed_ids(&ability.effect)
         {
-            // Inject revealed card IDs as targets for sub_abilities following RevealTop/Dig(reveal).
-            // Parallel to how continuations inject chosen cards as targets.
+            // Inject revealed card IDs as targets for sub_abilities following
+            // effects that write last_revealed_ids. Parallel to how
+            // continuations inject chosen cards as targets.
             let mut sub_with_targets = sub.as_ref().clone();
             sub_with_targets.targets = state
                 .last_revealed_ids
@@ -5555,7 +5562,7 @@ mod tests {
         ControllerRef, DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission,
         ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
         QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter, UntilCondition, ZoneOwner,
+        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -6537,6 +6544,110 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 2 }
             }
         ));
+    }
+
+    /// CR 118.12a + CR 603.2: Triggered unless-costs on event-context player
+    /// refs must hydrate targets before payer resolution (issue #2361).
+    #[test]
+    fn unless_pay_triggering_player_hydrates_before_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Esper Sentinel".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            payer: TargetFilter::TriggeringPlayer,
+        });
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(99),
+            controller: PlayerId(1),
+            object_id: ObjectId(99),
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("unless-pay interceptor should arm a payment prompt");
+
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, .. } => {
+                assert_eq!(*player, PlayerId(1));
+            }
+            other => panic!("expected UnlessPayment for triggering player, got {other:?}"),
+        }
+    }
+
+    /// CR 118.12a + CR 701.9: Wrench Mind — "unless they discard an artifact
+    /// card" must surface `UnlessPayment` before the two-card discard (issue
+    /// #2361).
+    #[test]
+    fn unless_pay_wrench_mind_discard_artifact_prompts_payment() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wrench Mind".to_string(),
+            Zone::Stack,
+        );
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                format!("Hand{i}"),
+                Zone::Hand,
+            );
+        }
+        let artifact_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            ..Default::default()
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Player,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(artifact_filter),
+                random: false,
+                self_ref: false,
+            },
+            payer: TargetFilter::Player,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("unless-pay interceptor should arm a payment prompt");
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }),
+            "expected UnlessPayment prompt, got {:?}",
+            state.waiting_for
+        );
     }
 
     /// CR 107.3a: a bare `{X}` unless-cost (`ManaDynamic` with `Variable("X")`)

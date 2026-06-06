@@ -1559,7 +1559,7 @@ fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
     }
 }
 
-fn parse_search_name_reference_suffix(
+pub(crate) fn parse_search_name_reference_suffix(
     input: &str,
 ) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
     let (rest, relation) = alt((

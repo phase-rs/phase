@@ -1923,6 +1923,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_subtype_died_this_turn,
         parse_for_each_creature_died_this_turn,
+        // CR 400.7 + CR 603.10a: "creature that left the battlefield under your
+        // control this turn" — destination-agnostic zone-change count, distinct
+        // from the graveyard-only "died" arm above.
+        parse_for_each_creature_left_battlefield_this_turn,
         parse_entered_this_turn_ref,
     ))
     .or(alt((
@@ -2469,6 +2473,37 @@ fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, Quant
     ))
     .parse(input)?;
     Ok((rest, creatures_died_this_turn_ref()))
+}
+
+/// CR 400.7 + CR 603.10a: Parse "creature that left the battlefield under your
+/// control [this turn]" -> filtered zone-change count where the destination is
+/// unconstrained ("left the battlefield" = battlefield -> *any* zone, unlike
+/// "died" which is battlefield -> graveyard). CR 603.10a classes
+/// leaves-the-battlefield as a look-back zone-change event, so the count is
+/// taken over `zone_changes_this_turn` records using each object's last-known
+/// characteristics.
+///
+/// "under your control" scopes the count to creatures controlled by the
+/// source's controller at the time they left (`ControllerRef::You`). The
+/// trailing "this turn" qualifier is engine-redundant (tracking is per-turn)
+/// and is stripped upstream by `strip_trailing_duration`, mirroring
+/// `parse_for_each_creature_died_this_turn`.
+fn parse_for_each_creature_left_battlefield_this_turn(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((
+        tag("creature that left the battlefield under your control this turn"),
+        tag("creature that left the battlefield under your control"),
+    ))
+    .parse(input)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: None,
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+    ))
 }
 
 fn parse_for_each_subtype_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -4629,6 +4664,42 @@ mod tests {
                 }),
             } if type_filters.contains(&TypeFilter::Creature)
                 && type_filters.contains(&TypeFilter::Subtype("Zubera".to_string()))
+        ));
+    }
+
+    /// CR 400.7 + CR 603.10a: "creature that left the battlefield under your
+    /// control this turn" must parse to a destination-agnostic zone-change
+    /// count (to: None) scoped to creatures you control — distinct from the
+    /// graveyard-only "died" arm. Kutzil's Flanker mode 1.
+    #[test]
+    fn parse_for_each_creature_left_battlefield_under_your_control() {
+        for phrase in [
+            "creature that left the battlefield under your control this turn",
+            "creature that left the battlefield under your control",
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(phrase)
+                .unwrap_or_else(|_| panic!("expected {phrase:?} to parse"));
+            assert_eq!(rest, "", "{phrase:?} left unconsumed");
+            let QuantityRef::ZoneChangeCountThisTurn { from, to, filter } = q else {
+                panic!("expected ZoneChangeCountThisTurn for {phrase:?}, got {q:?}");
+            };
+            assert_eq!(from, Some(Zone::Battlefield));
+            // "left the battlefield" is destination-agnostic (NOT graveyard-only).
+            assert_eq!(to, None, "destination must be unconstrained");
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed creature filter, got {filter:?}");
+            };
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        // The graveyard-only "died" phrasing must NOT be captured by this arm.
+        let (_, died) = parse_for_each_clause_ref("creature that died this turn").unwrap();
+        assert!(matches!(
+            died,
+            QuantityRef::ZoneChangeCountThisTurn {
+                to: Some(Zone::Graveyard),
+                ..
+            }
         ));
     }
 

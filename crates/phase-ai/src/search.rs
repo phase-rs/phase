@@ -14,6 +14,7 @@ use crate::planner::{
     apply_candidate, build_continuation_planner, PlannerServices, RankedCandidate, SearchBudget,
 };
 use crate::policies::context::PolicyContext;
+use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
 use crate::tactical_gate::gate_candidates;
@@ -684,9 +685,14 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             choice_text.map(|choice| GameAction::ChooseOption { choice })
         }
 
-        // Legend choice: pick the first candidate.
+        // CR 704.5j: keep the commander / original over ephemeral copy tokens.
         WaitingFor::ChooseLegend { candidates, .. } => candidates
-            .first()
+            .iter()
+            .max_by(|&&left, &&right| {
+                score_legend_rule_keep(state, left)
+                    .partial_cmp(&score_legend_rule_keep(state, right))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|&keep| GameAction::ChooseLegend { keep }),
 
         // Battle protector: pick the first candidate.

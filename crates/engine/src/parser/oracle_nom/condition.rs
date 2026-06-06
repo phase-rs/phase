@@ -1214,9 +1214,27 @@ fn parse_subject_has_property(input: &str) -> OracleResult<'_, QuantityRef> {
 /// axis that varies is the `PlayerScope` of the resulting `HandSize` ref, so
 /// the suffixes themselves compose cleanly with any subject. Also accepts
 /// the canonical "their hand" form for plural-friendly readings.
+fn consume_cards_in_hand_suffix(input: &str) -> Option<&str> {
+    tag::<_, _, OracleError<'_>>(" cards in hand")
+        .parse(input)
+        .ok()
+        .map(|(rest, _)| rest)
+        .or_else(|| {
+            tag::<_, _, OracleError<'_>>(" cards in your hand")
+                .parse(input)
+                .ok()
+                .map(|(rest, _)| rest)
+        })
+}
+
 fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, StaticCondition)> {
     // "no cards in hand" → HandSize EQ 0
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no cards in hand").parse(rest) {
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("no cards in hand"),
+        tag::<_, _, OracleError<'_>>("no cards in your hand"),
+    ))
+    .parse(rest)
+    {
         return Some((
             rest,
             StaticCondition::QuantityComparison {
@@ -1236,11 +1254,23 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
         nom::sequence::preceded(tag::<_, _, OracleError<'_>>("fewer than "), parse_number)
             .parse(rest)
     {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" cards in hand").parse(after_n) {
+        if let Some(rest) = consume_cards_in_hand_suffix(after_n) {
             return Some((
                 rest,
                 make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::LT, n),
             ));
+        }
+    }
+
+    // "exactly N cards in hand" → HandSize EQ N (Triskaidekaphile).
+    if let Ok((after_exactly, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(rest) {
+        if let Ok((after_n, n)) = parse_number(after_exactly) {
+            if let Some(rest) = consume_cards_in_hand_suffix(after_n) {
+                return Some((
+                    rest,
+                    make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::EQ, n),
+                ));
+            }
         }
     }
 
@@ -1266,11 +1296,21 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
 
     // "N or more cards in hand" → HandSize GE N
     let (after_n, n) = parse_number(rest).ok()?;
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more cards in hand").parse(after_n) {
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>(" or more cards in hand"),
+        tag::<_, _, OracleError<'_>>(" or more cards in your hand"),
+    ))
+    .parse(after_n)
+    {
         return Some((rest, make_quantity_ge(QuantityRef::HandSize { player }, n)));
     }
     // "N or fewer cards in hand" → HandSize LE N
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or fewer cards in hand").parse(after_n) {
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>(" or fewer cards in hand"),
+        tag::<_, _, OracleError<'_>>(" or fewer cards in your hand"),
+    ))
+    .parse(after_n)
+    {
         return Some((
             rest,
             make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::LE, n),
@@ -6976,6 +7016,31 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1000 },
             } => {}
             other => panic!("expected LifeTotal GE 1000, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_have_exactly_cards_in_hand() {
+        for text in [
+            "you have exactly thirteen cards in hand",
+            "you have exactly thirteen cards in your hand",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "");
+            match c {
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::HandSize {
+                                    player: PlayerScope::Controller,
+                                },
+                        },
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 13 },
+                } => {}
+                other => panic!("expected HandSize EQ 13 for {text:?}, got {other:?}"),
+            }
         }
     }
 

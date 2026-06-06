@@ -369,6 +369,64 @@ fn cant_be_attached_static_splits_both_prohibitions() {
     );
 }
 
+/// CR 602.5: Viper's Kiss — "Enchanted creature gets -1/-1, and its activated
+/// abilities can't be activated." must decompose into BOTH the -1/-1 grant AND a
+/// `CantBeActivated` static. Previously the activation prohibition was dropped,
+/// so the enchanted creature's activated abilities still worked.
+#[test]
+fn cant_activate_abilities_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::CantBeActivated { .. })),
+        "expected a CantBeActivated static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the -1/-1 grant must be preserved"
+    );
+}
+
+/// CR 602.5 + CR 603.2a: The split `CantBeActivated` prohibits every player from
+/// activating the ENCHANTED creature's abilities. Because the static lives on the
+/// Aura and `is_blocked_by_cant_be_activated` matches `source_filter` from the
+/// Aura source (ignoring `affected`, and with no re-homing for this static mode),
+/// the companion's `source_filter` must be the host filter (`EnchantedBy`) — NOT
+/// `SelfRef`, which would resolve to the Aura itself (a silent runtime no-op).
+#[test]
+fn cant_activate_abilities_static_targets_enchanted_creature() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+    );
+    let prohibition = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::CantBeActivated { .. }))
+        .expect("expected a CantBeActivated static");
+    let StaticMode::CantBeActivated {
+        who, source_filter, ..
+    } = &prohibition.mode
+    else {
+        unreachable!("matched CantBeActivated above");
+    };
+    assert_eq!(
+        *who,
+        ProhibitionScope::AllPlayers,
+        "every player is prohibited"
+    );
+    assert!(
+        matches!(
+            source_filter,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::EnchantedBy)
+        ),
+        "source_filter must be the host (EnchantedBy) filter so it resolves to the \
+         enchanted creature from the Aura source, got {source_filter:?}"
+    );
+}
+
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
 /// blocked by more than one creature." must decompose into BOTH the P/T grant
 /// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
@@ -494,8 +552,13 @@ fn alt_cost_rooftop_storm_zombie_creature_zero() {
     )
     .expect("Rooftop Storm must parse to a CastWithAlternativeCost static");
     match &def.mode {
-        StaticMode::CastWithAlternativeCost { cost } => {
-            assert_eq!(*cost, crate::types::mana::ManaCost::zero());
+        StaticMode::CastWithAlternativeCost { cost, .. } => {
+            assert_eq!(
+                *cost,
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::zero()
+                }
+            );
         }
         other => panic!("expected CastWithAlternativeCost, got {other:?}"),
     }
@@ -529,19 +592,21 @@ fn alt_cost_fist_of_suns_any_spell_wubrg() {
     )
     .expect("Fist of Suns must parse to a CastWithAlternativeCost static");
     match &def.mode {
-        StaticMode::CastWithAlternativeCost { cost } => {
+        StaticMode::CastWithAlternativeCost { cost, .. } => {
             use crate::types::mana::{ManaCost, ManaCostShard};
             assert_eq!(
                 *cost,
-                ManaCost::Cost {
-                    shards: vec![
-                        ManaCostShard::White,
-                        ManaCostShard::Blue,
-                        ManaCostShard::Black,
-                        ManaCostShard::Red,
-                        ManaCostShard::Green,
-                    ],
-                    generic: 0,
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![
+                            ManaCostShard::White,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Black,
+                            ManaCostShard::Red,
+                            ManaCostShard::Green,
+                        ],
+                        generic: 0,
+                    }
                 }
             );
         }
@@ -552,6 +617,66 @@ fn alt_cost_fist_of_suns_any_spell_wubrg() {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
         other => panic!("expected Typed(any spell you cast), got {other:?}"),
+    }
+}
+
+/// CR 118.9 + CR 107.14 + CR 702.8a: Primal Prayers grants {E} as an
+/// alternative cost for creature spells with MV ≤ 3, with flash tied to that
+/// alternative-cost path.
+#[test]
+fn alt_cost_primal_prayers_energy_creature_mv_leq_3() {
+    use crate::parser::oracle_static::cost_mod::parse_cast_spells_alternative_cost_multi;
+    use crate::types::ability::{CastTimingPermission, Comparator, QuantityExpr};
+
+    let text = "You may cast creature spells with mana value 3 or less by paying {E} \
+                rather than paying their mana costs. If you cast a spell this way, \
+                you may cast it as though it had flash.";
+    let defs = parse_cast_spells_alternative_cost_multi(text);
+    assert_eq!(
+        defs.len(),
+        1,
+        "expected one alt-cost static with timing permission, got {defs:?}"
+    );
+
+    match &defs[0].mode {
+        StaticMode::CastWithAlternativeCost {
+            cost,
+            timing_permission,
+        } => {
+            assert_eq!(
+                *cost,
+                AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 1 }
+                }
+            );
+            assert_eq!(
+                *timing_permission,
+                Some(CastTimingPermission::AsThoughHadFlash)
+            );
+        }
+        other => panic!("expected CastWithAlternativeCost, got {other:?}"),
+    }
+    match &defs[0].affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "expected Creature filter, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 3 }
+                    }
+                )),
+                "expected Cmc LE 3, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected Typed(creature MV<=3 you cast), got {other:?}"),
     }
 }
 

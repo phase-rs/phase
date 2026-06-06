@@ -41,7 +41,12 @@ export function MobileHandDrawer() {
   });
 
   useEffect(() => {
-    if (waitingForType === "TargetSelection" || waitingForType === "TriggerTargetSelection") {
+    if (
+      waitingForType === "TargetSelection"
+      || waitingForType === "TriggerTargetSelection"
+      || waitingForType === "ChooseXValue"
+      || waitingForType === "PayAmountChoice"
+    ) {
       setOpen(false);
     }
   }, [waitingForType, setOpen]);
