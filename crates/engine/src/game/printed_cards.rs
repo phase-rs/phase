@@ -982,11 +982,18 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
             if let Some(back_face) = obj.back_face.as_mut() {
                 if let Some(back_ref) = back_face.printed_ref.clone() {
                     if let Some(back_card_face) = db.get_face_by_printed_ref(&back_ref) {
-                        apply_card_face_to_back_face(back_face, back_card_face);
-                    } else if is_face_down_battlefield {
+                        if obj.is_token {
+                            // CR 111.1 + CR 707.2: token back-face
+                            // characteristics are serialized copiable values,
+                            // not values to re-derive from the printed card.
+                            back_face.printed_ref = printed_ref_from_face(back_card_face);
+                        } else {
+                            apply_card_face_to_back_face(back_face, back_card_face);
+                        }
+                    } else if is_face_down_battlefield && !obj.is_token {
                         apply_card_face_to_back_face(back_face, &card_face);
                     }
-                } else if is_face_down_battlefield {
+                } else if is_face_down_battlefield && !obj.is_token {
                     apply_card_face_to_back_face(back_face, &card_face);
                 }
                 // CR 712.12: Restore layout_kind if it was cleared (e.g. after MDFC
@@ -1372,6 +1379,83 @@ mod tests {
             ),
             "non-legendary token copies must not trigger the legend rule on load"
         );
+    }
+
+    /// CR 111.1 + CR 707.2: The same token-copy rehydration rule applies to a
+    /// serialized back face. Rehydration may refresh the display pointer, but it
+    /// must not re-apply the printed back face's Legendary supertype to the
+    /// token's persisted back-face characteristics.
+    #[test]
+    fn rehydrate_preserves_token_copy_back_face_characteristics() {
+        let oracle_id = "token-copy-dfc-oracle-id";
+        let mut front = test_face(
+            "Legendary Front",
+            oracle_id,
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        front.card_type.supertypes = vec![crate::types::card_type::Supertype::Legendary];
+        let mut back = test_face(
+            "Legendary Back",
+            oracle_id,
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        back.card_type.supertypes = vec![crate::types::card_type::Supertype::Legendary];
+        let export = serde_json::json!({
+            "legendary front": serde_json::to_value(&front).unwrap(),
+            "legendary back": serde_json::to_value(&back).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let front_ref = printed_ref_from_face(&front).unwrap();
+        let back_ref = printed_ref_from_face(&back).unwrap();
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Legendary Front".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_token = true;
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Dragon".to_string()],
+        };
+        obj.base_card_types = obj.card_types.clone();
+        obj.base_characteristics_initialized = true;
+        obj.printed_ref = Some(front_ref.clone());
+        obj.base_printed_ref = Some(front_ref);
+
+        let mut token_back = snapshot_object_face(obj);
+        token_back.name = "Legendary Back".to_string();
+        token_back.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Dragon".to_string()],
+        };
+        token_back.printed_ref = Some(back_ref.clone());
+        obj.back_face = Some(token_back);
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let back_face = state.objects[&id]
+            .back_face
+            .as_ref()
+            .expect("token back face should remain present");
+        assert!(
+            !back_face
+                .card_types
+                .supertypes
+                .contains(&crate::types::card_type::Supertype::Legendary),
+            "rehydration must not make a token back face legendary"
+        );
+        assert_eq!(back_face.printed_ref.as_ref(), Some(&back_ref));
     }
 
     #[test]
