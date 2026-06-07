@@ -490,6 +490,40 @@ pub fn synthesize_equip(face: &mut CardFace) {
     face.abilities.extend(equip_abilities);
 }
 
+/// CR 702.67a: Fortify — "[Cost]: Attach this Fortification to target land you
+/// control. Activate only as a sorcery." Mirrors `synthesize_equip` exactly,
+/// except the attach target is a land you control (CR 702.67a) rather than a
+/// creature. Without this, a Fortification (e.g. Darksteel Garrison) parses its
+/// `Keyword::Fortify(cost)` but synthesizes no ability, so it can never attach.
+pub fn synthesize_fortify(face: &mut CardFace) {
+    let fortify_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            if let Keyword::Fortify(cost) = kw {
+                Some(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Attach {
+                            attachment: TargetFilter::SelfRef,
+                            target: TargetFilter::Typed(
+                                TypedFilter::land().controller(ControllerRef::You),
+                            ),
+                        },
+                    )
+                    .cost(AbilityCost::Mana { cost: cost.clone() })
+                    // CR 702.67a: "Activate only as a sorcery."
+                    .sorcery_speed(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    face.abilities.extend(fortify_abilities);
+}
+
 /// CR 702.151a: Reconfigure represents two activated abilities —
 /// "[Cost]: Attach this permanent to another target creature you control.
 /// Activate only as a sorcery." and "[Cost]: Unattach this permanent. Activate
@@ -8063,6 +8097,8 @@ pub fn synthesize_plot(face: &mut CardFace) {
 pub fn synthesize_all(face: &mut CardFace) {
     synthesize_basic_land_mana(face);
     synthesize_equip(face);
+    // CR 702.67a: Fortify — attach-to-land activated ability.
+    synthesize_fortify(face);
     // CR 702.151a: Reconfigure — attach/unattach activated abilities.
     synthesize_reconfigure(face);
     // CR 702.167a/b: Craft — sorcery-speed activated ability that exiles the
@@ -16064,6 +16100,44 @@ mod sorcery_speed_invariant_tests {
                 .contains(&ActivationRestriction::AsSorcery),
             "AsSorcery restriction pushed for runtime enforcement (CR 702.6a)"
         );
+    }
+
+    /// CR 702.67a: Darksteel Garrison — "Fortify {3}" must synthesize a
+    /// sorcery-speed activated ability that attaches the Fortification to a LAND
+    /// you control. Regression test for the confirmed gap where `Keyword::Fortify`
+    /// parsed but no synthesizer ran, leaving the card with no way to attach.
+    /// The land target (not creature) is the Fortify-vs-Equip discriminator.
+    #[test]
+    fn synthesize_fortify_pushes_attach_to_land_as_sorcery() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Fortify(ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        }));
+        synthesize_fortify(&mut face);
+
+        assert_eq!(face.abilities.len(), 1, "one fortify ability");
+        let def = &face.abilities[0];
+        assert!(def.sorcery_speed, "sorcery_speed display flag set");
+        assert!(
+            def.activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "AsSorcery restriction pushed for runtime enforcement (CR 702.67a)"
+        );
+        // CR 702.67a: attaches to a land you control (not a creature).
+        match def.effect.as_ref() {
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(
+                    *tf,
+                    TypedFilter::land().controller(ControllerRef::You),
+                    "Fortify attaches to a land you control (not a creature)"
+                );
+            }
+            other => panic!("expected Effect::Attach to a land, got {other:?}"),
+        }
     }
 
     /// CR 702.151a (issue #1559): Reconfigure synthesizes two sorcery-speed
