@@ -2179,6 +2179,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         .clone()
         .or_else(|| replicate_additional.clone());
     let offering_additional = effective_offering_additional_cost(state, player, object_id);
+    let conspire_additional = effective_conspire_additional_cost(state, player, object_id);
 
     let (additional, deferred_required, additional_cost_source) =
         if let Some(AdditionalCost::Required(ref req)) = obj_additional {
@@ -2208,6 +2209,12 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             // case is handled in the casting dispatch which routes to
             // `begin_required_cost_before_targets` before this function is reached).
             (Some(offering), None, SpellCostSource::Offering)
+        } else if let Some(conspire) = conspire_additional {
+            // CR 702.78a: statics-granted Conspire (Wort, the Raidmother /
+            // Rassilon, the War President). Printed Conspire sets
+            // `obj.additional_cost` and is caught by the `obj_additional.is_some()`
+            // arm above, so this arm fires only for the granted path.
+            (Some(conspire), None, SpellCostSource::Other)
         } else {
             (None, None, SpellCostSource::Other)
         };
@@ -3348,6 +3355,27 @@ pub(super) fn effective_casualty_additional_cost(
         },
         repeatable: false,
     })
+}
+
+/// CR 702.78a: Optional "tap two color-sharing creatures" additional cost from a
+/// spell's effective Conspire keyword, including statics-granted Conspire (Wort,
+/// the Raidmother / Rassilon, the War President). Mirrors
+/// `effective_casualty_additional_cost`.
+pub(super) fn effective_conspire_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AdditionalCost> {
+    super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .any(|keyword| matches!(keyword, Keyword::Conspire))
+        .then(|| AdditionalCost::Optional {
+            cost: AbilityCost::TapCreatures {
+                count: 2,
+                filter: crate::database::synthesis::conspire_tap_filter(),
+            },
+            repeatable: false,
+        })
 }
 
 /// CR 702.56a: Return the repeatable optional additional cost from a spell's
@@ -6820,6 +6848,122 @@ mod tests {
                     }
                 }
                 other => panic!("expected optional casualty sacrifice cost, got {other:?}"),
+            },
+            other => panic!("expected OptionalCostChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 702.78a: Conspire granted by a `CastWithKeyword` static (Wort, the
+    /// Raidmother / Rassilon) must surface the optional "tap two color-sharing
+    /// creatures" additional cost (`TapCreatures { count: 2 }`) on a matching
+    /// spell — exactly the printed-Conspire offer, but driven by
+    /// `effective_conspire_additional_cost`. Discriminates CHANGE 2: without the
+    /// conspire ladder arm, no `OptionalCostChoice` is offered.
+    #[test]
+    fn granted_conspire_additional_cost_prompts_for_matching_spell() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Conspire Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = crate::types::ability::StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Conspire,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Test Instant".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            // CR 702.78a: the spell must be colored so candidate creatures can
+            // "share a color with it"; red here.
+            obj.color = vec![ManaColor::Red];
+        }
+
+        // Two untapped red creatures the caster controls — eligible conspire tap
+        // targets. The optional offer is gated on payability
+        // (`AbilityCost::is_payable`), so the cost only surfaces when at least
+        // two color-sharing creatures exist.
+        for card in [CardId(3), CardId(4)] {
+            let creature = create_object(
+                &mut state,
+                card,
+                caster,
+                "Red Creature".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color = vec![ManaColor::Red];
+        }
+
+        let mut events = Vec::new();
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(2),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            None,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("granted conspire should be castable");
+
+        match waiting {
+            WaitingFor::OptionalCostChoice { cost, .. } => match cost {
+                AdditionalCost::Optional {
+                    cost: AbilityCost::TapCreatures { count, filter },
+                    repeatable: false,
+                } => {
+                    assert_eq!(count, 2, "conspire taps exactly two creatures");
+                    match filter {
+                        TargetFilter::Typed(tf) => {
+                            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                            assert!(tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::SharesQuality {
+                                    quality: crate::types::ability::SharedQuality::Color,
+                                    ..
+                                }
+                            )));
+                        }
+                        other => panic!("expected typed conspire tap filter, got {other:?}"),
+                    }
+                }
+                other => panic!("expected optional conspire TapCreatures cost, got {other:?}"),
             },
             other => panic!("expected OptionalCostChoice, got {other:?}"),
         }

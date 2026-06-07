@@ -2333,7 +2333,7 @@ pub fn synthesize_conspire(face: &mut CardFace) {
 /// `SharesQuality`'s `reference` resolves `SelfRef` to the cost's source — the
 /// cast spell — so each candidate must share a color with the spell being cast
 /// (the color-comparison the engine already performs for Intimidate).
-fn conspire_tap_filter() -> TargetFilter {
+pub fn conspire_tap_filter() -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::creature()
             .controller(ControllerRef::You)
@@ -2348,7 +2348,7 @@ fn conspire_tap_filter() -> TargetFilter {
 /// CR 702.78a: "copy it" — once, with optional new targets, gated on the conspire
 /// cost having been paid. No `repeat_for`: Conspire copies exactly once, unlike
 /// Replicate (which copies per payment).
-fn conspire_copy_ability_definition() -> AbilityDefinition {
+pub fn conspire_copy_ability_definition() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::CopySpell {
