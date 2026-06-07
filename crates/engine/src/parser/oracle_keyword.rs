@@ -1022,6 +1022,18 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return Some(Keyword::Renown(n));
     }
 
+    // CR 702.68a: Frenzy N — parameterized keyword from Oracle/reminder/grant text.
+    // MTGJSON's keyword list carries only "Frenzy"; the Oracle line supplies N.
+    if let Ok((_, (_, _, n))) = all_consuming((
+        tag::<_, _, OracleError<'_>>("frenzy"),
+        space1,
+        nom_primitives::parse_number,
+    ))
+    .parse(text)
+    {
+        return Some(Keyword::Frenzy(n));
+    }
+
     // CR 702.167a/b: Craft with [materials] [cost] — the Oracle line carries the
     // materials class and activation cost that the bare "Craft" keyword lacks.
     if let Some(kw) = parse_craft_keyword_line(text) {
@@ -1434,6 +1446,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Fabricate(_) => "fabricate".to_string(),
         Keyword::Annihilator(_) => "annihilator".to_string(),
         Keyword::Bushido(_) => "bushido".to_string(),
+        Keyword::Frenzy(_) => "frenzy".to_string(),
         Keyword::Tribute(_) => "tribute".to_string(),
         Keyword::Afterlife(_) => "afterlife".to_string(),
         Keyword::Fading(_) => "fading".to_string(),
@@ -2042,6 +2055,17 @@ mod tests {
         // CR 702.112a: Renown N — parameterized keyword from Oracle text.
         let kw = parse_keyword_from_oracle("renown 2").unwrap();
         assert_eq!(kw, Keyword::Renown(2));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_frenzy() {
+        // CR 702.68a: Frenzy N — parameterized keyword from Oracle/grant text.
+        let kw = parse_keyword_from_oracle("frenzy 2").unwrap();
+        assert_eq!(kw, Keyword::Frenzy(2));
+        // CR 702.68a: the Frenzy Sliver grant line "frenzy 1" must resolve to
+        // Frenzy(1), not fall to Unknown/Unimplemented.
+        let kw1 = parse_keyword_from_oracle("frenzy 1").unwrap();
+        assert_eq!(kw1, Keyword::Frenzy(1));
     }
 
     #[test]

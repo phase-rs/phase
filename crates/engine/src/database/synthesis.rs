@@ -253,6 +253,10 @@ impl KeywordTriggerInstaller {
                 build_bushido_trigger(TriggerMode::Blocks, *n),
                 build_bushido_trigger(TriggerMode::BecomesBlocked, *n),
             ],
+            // CR 702.68a: Frenzy N — whenever this creature attacks and isn't
+            // blocked, it gets +N/+0 until end of turn. CR 702.68b: each instance
+            // triggers separately; one trigger per `Frenzy`.
+            Keyword::Frenzy(n) => vec![build_frenzy_trigger(*n)],
             // CR 702.91a: Battle cry — whenever this creature attacks, each
             // other attacking creature gets +1/+0 until end of turn. CR 702.91b:
             // each instance triggers separately; one trigger per `Battlecry`.
@@ -354,6 +358,7 @@ impl KeywordTriggerInstaller {
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
             Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
+            Keyword::Frenzy(n) => is_frenzy_trigger(trigger, *n),
             Keyword::Battlecry => is_battlecry_trigger(trigger),
             Keyword::Rampage(n) => is_rampage_trigger(trigger, *n),
             Keyword::Melee => is_melee_trigger(trigger),
@@ -3877,6 +3882,14 @@ pub fn synthesize_bushido(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Bushido(_)));
 }
 
+/// CR 702.68a: Frenzy N — "Whenever this creature attacks and isn't blocked, it
+/// gets +N/+0 until end of turn." One self-trigger per instance. CR 702.68b: each
+/// instance triggers separately, so one trigger is synthesized per
+/// `Keyword::Frenzy`.
+pub fn synthesize_frenzy(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Frenzy(_)));
+}
+
 /// CR 702.91a: Battle cry — "whenever this creature attacks, each other
 /// attacking creature gets +1/+0 until end of turn." CR 702.91b: each instance
 /// triggers separately, so one trigger is synthesized per `Keyword::Battlecry`.
@@ -4742,6 +4755,51 @@ fn is_bushido_trigger(t: &TriggerDefinition, n: u32) -> bool {
                 toughness: PtValue::Fixed(tough),
                 target: TargetFilter::SelfRef,
             }) if *p == n as i32 && *tough == n as i32
+        )
+}
+
+/// CR 702.68a: Frenzy N self-trigger — "whenever this creature attacks and isn't
+/// blocked, it gets +N/+0 until end of turn." Scoped via `valid_card` SelfRef, pumps
+/// SelfRef. No duration override — `Effect::Pump` defaults to `UntilEndOfTurn`
+/// (CR 702.68a). Mirrors the single-trigger Battle cry builder (Frenzy is one
+/// trigger, unlike Bushido's two block events). The `AttackerUnblocked` mode fires
+/// on `BlockersDeclared` when the source attacked and is unblocked — the exact
+/// "attacks and isn't blocked" timing.
+fn build_frenzy_trigger(n: u32) -> TriggerDefinition {
+    let pump = Effect::Pump {
+        power: PtValue::Fixed(n as i32),
+        // CR 702.68a: +N/+0 — toughness is unchanged.
+        toughness: PtValue::Fixed(0),
+        target: TargetFilter::SelfRef,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(format!(
+        "CR 702.68a: Frenzy {n} — +{n}/+0 until end of turn"
+    ));
+    TriggerDefinition::new(TriggerMode::AttackerUnblocked)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.68a: Frenzy {n} — whenever this creature attacks and isn't \
+             blocked, it gets +{n}/+0 until end of turn."
+        ))
+}
+
+/// CR 702.68a: A Frenzy `n` trigger — a self-scoped (`valid_card: SelfRef`)
+/// attacker-unblocked trigger that pumps the source creature +n/+0. Used by
+/// `RemoveKeyword` symmetric removal so a granted-then-removed `Frenzy(n)` strips
+/// exactly its own trigger — parameterized by `n` (and asserting `valid_card`) so
+/// it never matches a different Frenzy level or a coincidental printed
+/// attacker-unblocked pump on the same face.
+fn is_frenzy_trigger(t: &TriggerDefinition, n: u32) -> bool {
+    matches!(t.mode, TriggerMode::AttackerUnblocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Fixed(p),
+                toughness: PtValue::Fixed(tough),
+                target: TargetFilter::SelfRef,
+            }) if *p == n as i32 && *tough == 0
         )
 }
 
@@ -8377,6 +8435,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.45a: Bushido N — self blocks / becomes-blocked triggers that pump
     // the creature +N/+N until end of turn.
     synthesize_bushido(face);
+    // CR 702.68a: Frenzy N — attacks-and-isn't-blocked self pump of +N/+0 until
+    // end of turn.
+    synthesize_frenzy(face);
     // CR 702.91a: Battle cry — attack trigger pumping each other attacking
     // creature +1/+0 until end of turn.
     synthesize_battlecry(face);
@@ -12840,6 +12901,65 @@ mod bushido_synthesis_tests {
         let mut bare = CardFace::default();
         synthesize_bushido(&mut bare);
         assert!(bare.triggers.iter().all(|t| !is_bushido_trigger(t, 1)));
+    }
+
+    #[test]
+    fn synthesize_frenzy_adds_single_attacker_unblocked_pump_trigger() {
+        // CR 702.68a: Frenzy N installs ONE self-trigger (attacks and isn't
+        // blocked) pumping the source +N/+0 until end of turn. CR 702.68b would
+        // synthesize one per instance, but a single Frenzy(2) yields exactly one.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Frenzy(2));
+        synthesize_frenzy(&mut face);
+
+        let frenzy: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| is_frenzy_trigger(t, 2))
+            .collect();
+        assert_eq!(frenzy.len(), 1, "exactly one attacker-unblocked trigger");
+        let t = frenzy[0];
+        assert!(matches!(t.mode, TriggerMode::AttackerUnblocked));
+        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+        let Some(Effect::Pump {
+            power,
+            toughness,
+            target,
+        }) = t.execute.as_deref().map(|a| &*a.effect)
+        else {
+            panic!("frenzy execute must be Effect::Pump");
+        };
+        assert!(matches!(power, PtValue::Fixed(2)));
+        // CR 702.68a: +N/+0 — toughness unchanged.
+        assert!(matches!(toughness, PtValue::Fixed(0)));
+        assert!(matches!(target, TargetFilter::SelfRef));
+        // CR 702.68a: until end of turn — Effect::Pump defaults the duration, so
+        // the execute carries no explicit duration override.
+        assert!(t
+            .execute
+            .as_deref()
+            .and_then(|a| a.duration.as_ref())
+            .is_none());
+    }
+
+    #[test]
+    fn synthesize_frenzy_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Frenzy(1));
+        synthesize_frenzy(&mut face);
+        synthesize_frenzy(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_frenzy_trigger(t, 1))
+                .count(),
+            1,
+            "one trigger, deduped across passes"
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_frenzy(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_frenzy_trigger(t, 1)));
     }
 }
 

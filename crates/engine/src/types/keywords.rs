@@ -125,6 +125,7 @@ pub enum KeywordKind {
     Graft,
     Annihilator,
     Bushido,
+    Frenzy,
     Tribute,
     Soulbond,
     Unearth,
@@ -473,6 +474,8 @@ pub enum Keyword {
     Fabricate(u32),
     Annihilator(u32),
     Bushido(u32),
+    /// CR 702.68a: Frenzy N — "Whenever this creature attacks and isn't blocked, it gets +N/+0 until end of turn." CR 702.68b: each instance triggers separately.
+    Frenzy(u32),
     Tribute(u32),
     Soulbond,
     Unearth(ManaCost),
@@ -985,6 +988,7 @@ impl Keyword {
             Keyword::Fabricate(_) => KeywordKind::Fabricate,
             Keyword::Annihilator(_) => KeywordKind::Annihilator,
             Keyword::Bushido(_) => KeywordKind::Bushido,
+            Keyword::Frenzy(_) => KeywordKind::Frenzy,
             Keyword::Tribute(_) => KeywordKind::Tribute,
             Keyword::Soulbond => KeywordKind::Soulbond,
             Keyword::Unearth(_) => KeywordKind::Unearth,
@@ -1651,6 +1655,7 @@ impl FromStr for Keyword {
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
                 "rampage" => return Ok(Keyword::Rampage(p.parse().unwrap_or(1))),
                 "bushido" => return Ok(Keyword::Bushido(p.parse().unwrap_or(1))),
+                "frenzy" => return Ok(Keyword::Frenzy(p.parse().unwrap_or(1))),
                 "absorb" => return Ok(Keyword::Absorb(p.parse().unwrap_or(1))),
                 "fading" => return Ok(Keyword::Fading(p.parse().unwrap_or(0))),
                 "vanishing" => return Ok(Keyword::Vanishing(p.parse().unwrap_or(0))),
@@ -1948,6 +1953,7 @@ impl FromStr for Keyword {
             "wither" => Ok(Keyword::Wither),
             "infect" => Ok(Keyword::Infect),
             "afflict" => Ok(Keyword::Afflict(1)),
+            "frenzy" => Ok(Keyword::Frenzy(1)),
             "prowess" => Ok(Keyword::Prowess),
             "undying" => Ok(Keyword::Undying),
             "persist" => Ok(Keyword::Persist),
@@ -2564,6 +2570,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Fabricate" => Ok(Keyword::Fabricate(uint(data))),
         "Annihilator" => Ok(Keyword::Annihilator(uint(data))),
         "Bushido" => Ok(Keyword::Bushido(uint(data))),
+        "Frenzy" => Ok(Keyword::Frenzy(uint(data))),
         "Tribute" => Ok(Keyword::Tribute(uint(data))),
         "Afterlife" => Ok(Keyword::Afterlife(uint(data))),
         "Fading" => Ok(Keyword::Fading(uint(data))),
@@ -2897,6 +2904,16 @@ mod tests {
             }
         );
         assert_eq!(Keyword::from_str("Rampage:2").unwrap(), Keyword::Rampage(2));
+    }
+
+    #[test]
+    fn parse_frenzy_colon_and_bare() {
+        // CR 702.68a: colon-form carries N.
+        assert_eq!(Keyword::from_str("Frenzy:2").unwrap(), Keyword::Frenzy(2));
+        // CR 702.68a: bare MTGJSON keyword-list form defaults to Frenzy(1),
+        // mirroring the bare `afflict` arm — must NOT fall to Unknown.
+        assert_eq!(Keyword::from_str("frenzy").unwrap(), Keyword::Frenzy(1));
+        assert_eq!(Keyword::from_str("Frenzy").unwrap(), Keyword::Frenzy(1));
     }
 
     #[test]
