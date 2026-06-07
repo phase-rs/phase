@@ -3984,6 +3984,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .get(&object_id)
         .map(|obj| obj.mana_cost.mana_value() + ability.chosen_x.unwrap_or(0));
     let mut cascade_cast_transformed = false;
+    let mut resolution_success_waiting_for: Option<WaitingFor> = None;
     if let Some(resulting_mv) = cascade_resulting_mv {
         let cascade_check = match evaluate_cascade_constraint_with_resulting_mv(
             state,
@@ -3993,7 +3994,13 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             events,
         ) {
             CascadeCheck::NotApplicable => None,
-            CascadeCheck::Accepted { cast_transformed } => Some(cast_transformed),
+            CascadeCheck::Accepted {
+                cast_transformed,
+                waiting_for,
+            } => {
+                resolution_success_waiting_for = waiting_for.map(|wf| *wf);
+                Some(cast_transformed)
+            }
             CascadeCheck::Rejected {
                 exiled_misses,
                 reject_action,
@@ -4397,19 +4404,24 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         });
     }
 
-    Ok(WaitingFor::Priority { player })
+    Ok(resolution_success_waiting_for.unwrap_or(WaitingFor::Priority { player }))
 }
 
 /// CR 608.2g: Outcome of evaluating a cast-during-resolution constraint
 /// (Cascade CR 702.85a / Discover CR 701.57a).
+#[derive(Debug)]
 enum CascadeCheck {
     /// No cast-during-resolution permission on this object — the cast proceeds
     /// normally (or via a plain standing `ManaValue` permission).
     NotApplicable,
     /// The constraint passed (Cascade: resulting MV < source MV; Discover:
     /// resulting MV <= N). The cast proceeds; the misses have already been
-    /// bottom-shuffled as a side effect.
-    Accepted { cast_transformed: bool },
+    /// bottom-shuffled as a side effect, unless a follow-up resolution choice
+    /// remains for the same resolving ability.
+    Accepted {
+        cast_transformed: bool,
+        waiting_for: Option<Box<WaitingFor>>,
+    },
     /// The constraint failed. The cast must be aborted; the caller should
     /// unwind the announcement stack entry and route through
     /// `handle_resolution_cast_rejection`, which sends the hit to its
@@ -4474,18 +4486,13 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         .expect("object present above")
         .casting_permissions
         .remove(index);
-    let (constraint, cast_transformed, exiled_misses, reject_action) = match permission {
+    let (constraint, cast_transformed, cleanup) = match permission {
         CastingPermission::ExileWithAltCost {
             constraint,
             cast_transformed,
             resolution_cleanup: Some(cleanup),
             ..
-        } => (
-            constraint,
-            cast_transformed,
-            cleanup.exiled_misses,
-            cleanup.reject_action,
-        ),
+        } => (constraint, cast_transformed, cleanup),
         _ => unreachable!("position() already filtered to this variant"),
     };
 
@@ -4500,14 +4507,58 @@ fn evaluate_cascade_constraint_with_resulting_mv(
     );
 
     if accepted {
-        // CR 702.85a: "cards exiled this way that weren't cast" — the hit is
-        // being cast, so only the misses bottom-shuffle.
-        crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
-        CascadeCheck::Accepted { cast_transformed }
+        let waiting_for = handle_resolution_cast_success(
+            state,
+            player,
+            cleanup.exiled_misses,
+            cleanup.success_action,
+            events,
+        );
+        CascadeCheck::Accepted {
+            cast_transformed,
+            waiting_for,
+        }
     } else {
         CascadeCheck::Rejected {
-            exiled_misses,
-            reject_action,
+            exiled_misses: cleanup.exiled_misses,
+            reject_action: cleanup.reject_action,
+        }
+    }
+}
+
+fn handle_resolution_cast_success(
+    state: &mut GameState,
+    player: PlayerId,
+    exiled_misses: Vec<ObjectId>,
+    success_action: crate::types::ability::ResolutionCastSuccessAction,
+    events: &mut Vec<GameEvent>,
+) -> Option<Box<WaitingFor>> {
+    use crate::types::ability::ResolutionCastSuccessAction;
+
+    match success_action {
+        // CR 702.85a / CR 701.57a: the hit is being cast, so only the misses
+        // bottom-shuffle.
+        ResolutionCastSuccessAction::BottomMisses => {
+            crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
+            None
+        }
+        ResolutionCastSuccessAction::RippleOfferRemaining { mut remaining_hits } => {
+            if remaining_hits.is_empty() {
+                // CR 702.60a: after the last accepted hit, put the revealed
+                // cards not cast this way on the library bottom.
+                crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
+                None
+            } else {
+                let hit_card = remaining_hits.remove(0);
+                Some(Box::new(WaitingFor::CastOffer {
+                    player,
+                    kind: crate::types::game_state::CastOfferKind::Ripple {
+                        hit_card,
+                        remaining_hits,
+                        revealed_misses: exiled_misses,
+                    },
+                }))
+            }
         }
     }
 }
@@ -9314,7 +9365,7 @@ mod tests {
         use super::*;
         use crate::types::ability::{
             CastPermissionConstraint, CastingPermission, Comparator, QuantityExpr,
-            ResolutionCastCleanup, ResolutionMvRejectAction,
+            ResolutionCastCleanup, ResolutionCastSuccessAction, ResolutionMvRejectAction,
         };
         use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
 
@@ -9349,6 +9400,7 @@ mod tests {
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         exiled_misses: vec![miss_a, miss_b],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                        success_action: ResolutionCastSuccessAction::BottomMisses,
                     }),
                     duration: None,
                 });
@@ -9401,7 +9453,8 @@ mod tests {
             assert!(matches!(
                 outcome,
                 CascadeCheck::Accepted {
-                    cast_transformed: false
+                    cast_transformed: false,
+                    waiting_for: None
                 }
             ));
 
@@ -9422,6 +9475,116 @@ mod tests {
                 state.objects.get(&hit).map(|o| o.zone),
                 Some(Zone::Exile),
                 "hit card continues through normal cast flow — not bottom-shuffled"
+            );
+        }
+
+        #[test]
+        fn ripple_success_offers_remaining_hit_before_bottoming_misses() {
+            let mut state = GameState::new_two_player(42);
+            let miss = exile_card(&mut state, PlayerId(0), "Mountain");
+            let next_hit = exile_card(&mut state, PlayerId(0), "Surging Flame");
+            let hit = exile_card(&mut state, PlayerId(0), "Surging Flame");
+            state
+                .objects
+                .get_mut(&hit)
+                .unwrap()
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: Some(ResolutionCastCleanup {
+                        exiled_misses: vec![miss],
+                        reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                        success_action: ResolutionCastSuccessAction::RippleOfferRemaining {
+                            remaining_hits: vec![next_hit],
+                        },
+                    }),
+                    duration: None,
+                });
+
+            let outcome = evaluate_cascade_constraint_with_resulting_mv(
+                &mut state,
+                hit,
+                PlayerId(0),
+                2,
+                &mut Vec::new(),
+            );
+
+            match outcome {
+                CascadeCheck::Accepted {
+                    waiting_for: Some(waiting_for),
+                    ..
+                } => match *waiting_for {
+                    WaitingFor::CastOffer {
+                        player,
+                        kind:
+                            crate::types::game_state::CastOfferKind::Ripple {
+                                hit_card,
+                                remaining_hits,
+                                revealed_misses,
+                            },
+                    } => {
+                        assert_eq!(player, PlayerId(0));
+                        assert_eq!(hit_card, next_hit);
+                        assert!(remaining_hits.is_empty());
+                        assert_eq!(revealed_misses, vec![miss]);
+                    }
+                    other => panic!("expected follow-up Ripple offer, got {other:?}"),
+                },
+                other => panic!("expected accepted Ripple cleanup, got {other:?}"),
+            }
+            assert_eq!(state.objects.get(&miss).map(|o| o.zone), Some(Zone::Exile));
+            assert_eq!(
+                state.objects.get(&next_hit).map(|o| o.zone),
+                Some(Zone::Exile)
+            );
+        }
+
+        #[test]
+        fn ripple_success_bottoms_misses_after_last_hit() {
+            let mut state = GameState::new_two_player(42);
+            let miss = exile_card(&mut state, PlayerId(0), "Mountain");
+            let hit = exile_card(&mut state, PlayerId(0), "Surging Flame");
+            state
+                .objects
+                .get_mut(&hit)
+                .unwrap()
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: Some(ResolutionCastCleanup {
+                        exiled_misses: vec![miss],
+                        reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                        success_action: ResolutionCastSuccessAction::RippleOfferRemaining {
+                            remaining_hits: vec![],
+                        },
+                    }),
+                    duration: None,
+                });
+
+            let outcome = evaluate_cascade_constraint_with_resulting_mv(
+                &mut state,
+                hit,
+                PlayerId(0),
+                2,
+                &mut Vec::new(),
+            );
+
+            assert!(matches!(
+                outcome,
+                CascadeCheck::Accepted {
+                    waiting_for: None,
+                    ..
+                }
+            ));
+            assert_eq!(
+                state.objects.get(&miss).map(|o| o.zone),
+                Some(Zone::Library)
             );
         }
 
@@ -9626,6 +9789,7 @@ mod tests {
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                        success_action: ResolutionCastSuccessAction::BottomMisses,
                     }),
                     duration: None,
                 });
@@ -9677,6 +9841,7 @@ mod tests {
                     resolution_cleanup: Some(ResolutionCastCleanup {
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                        success_action: ResolutionCastSuccessAction::BottomMisses,
                     }),
                     duration: None,
                 });

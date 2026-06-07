@@ -498,6 +498,35 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 vec![decline, cast]
             }
         }
+        // CR 702.60a: Ripple — offer casting the revealed same-named card for free
+        // or declining (mirrors the Cascade offer above).
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Ripple { hit_card, .. },
+        } => {
+            let cast_first = state.objects.get(hit_card).is_some_and(|obj| {
+                crate::game::casting::spell_has_legal_targets(state, obj, *player)
+            });
+            let cast = candidate(
+                GameAction::RippleChoice {
+                    choice: CastChoice::Cast,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            );
+            let decline = candidate(
+                GameAction::RippleChoice {
+                    choice: CastChoice::Decline,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            );
+            if cast_first {
+                vec![cast, decline]
+            } else {
+                vec![decline, cast]
+            }
+        }
         WaitingFor::LearnChoice { player, hand_cards } => {
             let mut actions: Vec<_> = hand_cards
                 .iter()
@@ -2305,6 +2334,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         }
         | WaitingFor::CastOffer {
             kind: CastOfferKind::Cascade { .. },
+            ..
+        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { .. },
             ..
         }
         | WaitingFor::RevealUntilKeptChoice { .. }

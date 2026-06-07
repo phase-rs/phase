@@ -89,6 +89,10 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
                 kind: CastOfferKind::Cascade { .. },
                 ..
             }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Ripple { .. },
+                ..
+            }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
@@ -403,6 +407,8 @@ pub(super) fn handle_resolution_choice(
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     exiled_misses,
                     reject_action: crate::types::ability::ResolutionMvRejectAction::ToHand,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 };
                 let result = casting::initiate_cast_during_resolution(
                     state,
@@ -536,6 +542,8 @@ pub(super) fn handle_resolution_choice(
                     exiled_misses,
                     reject_action:
                         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 };
                 let result = casting::initiate_cast_during_resolution(
                     state,
@@ -556,6 +564,47 @@ pub(super) fn handle_resolution_choice(
                 // CR 702.85a: Caster declines — hit and misses all go to the
                 // bottom of the library in a random order together.
                 let mut all_to_bottom = exiled_misses;
+                all_to_bottom.push(hit_card);
+                crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
+
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
+        }
+        (
+            WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::Ripple {
+                        hit_card,
+                        remaining_hits,
+                        revealed_misses,
+                    },
+            },
+            GameAction::RippleChoice { choice },
+        ) => {
+            let cast = matches!(choice, crate::types::actions::CastChoice::Cast);
+            if cast {
+                // CR 702.60a + CR 608.2g: cast the same-named revealed card for
+                // free during resolution. No mana-value gate (unlike Cascade); on
+                // decline/rollback the hit joins the rest on the library bottom.
+                let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    exiled_misses: revealed_misses,
+                    reject_action:
+                        crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining {
+                            remaining_hits,
+                        },
+                };
+                let result = casting::initiate_cast_during_resolution(
+                    state, player, hit_card, None, false, cleanup, events,
+                )?;
+                ResolutionChoiceOutcome::WaitingFor(result)
+            } else {
+                // CR 702.60a: declined — the hit and the rest all go to the bottom
+                // of the library together.
+                let mut all_to_bottom = revealed_misses;
+                all_to_bottom.extend(remaining_hits);
                 all_to_bottom.push(hit_card);
                 crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
 

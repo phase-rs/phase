@@ -29907,6 +29907,7 @@ mod tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Land,
                 additional_filter: None,
+                subtype_filter: None,
             })
         );
         assert!(matches!(
@@ -30099,6 +30100,7 @@ mod tests {
                 assert!(sub.condition == Some(AbilityCondition::RevealedHasCardType {
                     card_type: CoreType::Land,
                     additional_filter: None,
+                    subtype_filter: None,
                 }));
                 assert!(matches!(
                     *sub.effect,
@@ -30207,6 +30209,7 @@ mod tests {
                 condition: Box::new(AbilityCondition::RevealedHasCardType {
                     card_type: CoreType::Land,
                     additional_filter: None,
+                    subtype_filter: None,
                 }),
             })
         );
@@ -35231,6 +35234,7 @@ mod tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Creature,
                 additional_filter: Some(FilterProp::IsChosenCreatureType),
+                subtype_filter: None,
             }),
             "condition should check creature type + chosen type"
         );
@@ -35255,6 +35259,65 @@ mod tests {
         assert!(
             found_change_zone,
             "should have ChangeZone to Hand in sub-ability chain"
+        );
+    }
+
+    #[test]
+    fn kenessos_activated_subtype_or_condition() {
+        let chain = parse_effect_chain(
+            "Look at the top card of your library. If it's a Kraken, Leviathan, Octopus, or Serpent creature card, you may put it onto the battlefield. If you don't put the card onto the battlefield, you may put it on the bottom of your library.",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(*chain.effect, Effect::Dig { .. }));
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("conditional sub after Dig");
+        let Some(AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Creature,
+            subtype_filter: Some(subtype_filter),
+            ..
+        }) = &sub.condition
+        else {
+            panic!(
+                "expected creature subtype Or condition, got {:?}",
+                sub.condition
+            );
+        };
+        let TargetFilter::Or { filters } = subtype_filter.as_ref() else {
+            panic!("expected subtype Or filter, got {subtype_filter:?}");
+        };
+        assert_eq!(filters.len(), 4);
+        let subtypes: Vec<_> = filters
+            .iter()
+            .filter_map(|f| match f {
+                TargetFilter::Typed(tf) => tf.type_filters.iter().find_map(|t| match t {
+                    TypeFilter::Subtype(s) => Some(s.as_str()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        for expected in ["Kraken", "Leviathan", "Octopus", "Serpent"] {
+            assert!(
+                subtypes.iter().any(|s| s.eq_ignore_ascii_case(expected)),
+                "missing subtype {expected} in {subtypes:?}"
+            );
+        }
+        fn has_unimplemented(def: &AbilityDefinition) -> bool {
+            matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+                || def
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|sub| has_unimplemented(sub))
+                || def
+                    .else_ability
+                    .as_ref()
+                    .is_some_and(|sub| has_unimplemented(sub))
+        }
+        assert!(
+            !has_unimplemented(&chain),
+            "chain must not contain Unimplemented fragments"
         );
     }
 
@@ -42596,6 +42659,7 @@ mod snapshot_tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Land,
                 additional_filter: None,
+                subtype_filter: None,
             })
         );
         match &*put_land.effect {

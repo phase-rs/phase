@@ -298,7 +298,7 @@ pub(crate) fn extract_keyword_line(
             // Prefix match: Oracle text has more detail (e.g. "protection from red").
             // Extract the full parameterized keyword.
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                if matches!(kw, Keyword::Ripple)
+                if matches!(kw, Keyword::Ripple(_))
                     && mtgjson_keyword_names.contains(&keyword_display_name(&kw))
                 {
                     continue;
@@ -1276,16 +1276,15 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.60a: Ripple N — when you cast this spell, you may reveal the top N cards
     // of your library and cast any with the same name without paying their mana cost.
-    // Keyword::Ripple is currently a unit variant (N is not yet tracked by the engine).
-    // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels.
-    if all_consuming(preceded(
+    // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels;
+    // Thrumming Stone grants Ripple 4.
+    if let Ok((_, n)) = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("ripple "),
         nom_primitives::parse_number,
     ))
     .parse(text)
-    .is_ok()
     {
-        return Some(Keyword::Ripple);
+        return Some(Keyword::Ripple(n));
     }
 
     // CR 702.89a/b: "umbra armor" — and the obsolete "totem armor" the Oracle text
@@ -1415,7 +1414,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Provoke => "provoke".to_string(),
         Keyword::Rebound => "rebound".to_string(),
         Keyword::Retrace => "retrace".to_string(),
-        Keyword::Ripple => "ripple".to_string(),
+        Keyword::Ripple(_) => "ripple".to_string(),
         Keyword::SplitSecond => "split second".to_string(),
         Keyword::Storm => "storm".to_string(),
         Keyword::Suspend { .. } => "suspend".to_string(),
@@ -1955,20 +1954,19 @@ mod tests {
         );
     }
 
-    /// CR 702.60a: Ripple N triggers when the spell is cast. The engine
-    /// currently stores `Keyword::Ripple` as a unit variant, so supported
-    /// numeric suffixes map to that variant while trailing text is rejected.
+    /// CR 702.60a: Ripple N triggers when the spell is cast. N is captured into
+    /// the parameterized `Keyword::Ripple(u32)`; trailing text is rejected.
     #[test]
     fn parse_keyword_from_oracle_ripple() {
         assert_eq!(
             parse_keyword_from_oracle("ripple 4"),
-            Some(Keyword::Ripple),
-            "ripple 4 (Surging Aether oracle text)"
+            Some(Keyword::Ripple(4)),
+            "ripple 4 (Thrumming Stone grant)"
         );
         assert_eq!(
             parse_keyword_from_oracle("ripple 2"),
-            Some(Keyword::Ripple),
-            "ripple 2 — numeric variant still maps to unit Ripple"
+            Some(Keyword::Ripple(2)),
+            "ripple 2 — N is captured"
         );
         assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
     }
