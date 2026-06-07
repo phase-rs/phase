@@ -15654,6 +15654,137 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
     }
 
     #[test]
+    fn rakdos_headliner_non_mana_echo_reaches_discard_payment() {
+        // CR 702.30a: "Echo—Discard a card." is a *non-mana* echo cost. On
+        // origin/main the parser drops the Echo keyword entirely for the em-dash
+        // (non-mana) form, so synthesis never installs the upkeep trigger and the
+        // permanent is never on the hook for a discard. This drives the real
+        // pipeline (parse -> synthesize_echo -> battlefield with echo due ->
+        // controller upkeep) and asserts the engine reaches the discard payment.
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let headliner = create_object(
+            &mut state,
+            CardId(1982),
+            PlayerId(0),
+            "Rakdos Headliner".to_string(),
+            Zone::Battlefield,
+        );
+
+        // A spare card in P0's hand so the discard cost has an eligible target
+        // (the engine surfaces the choice rather than auto-failing the payment).
+        let _spare = create_object(
+            &mut state,
+            CardId(1983),
+            PlayerId(0),
+            "Spare Card".to_string(),
+            Zone::Hand,
+        );
+
+        let oracle = "Haste\n\
+Echo—Discard a card. (At the beginning of your upkeep, if this came under your control since the beginning of your last upkeep, sacrifice it unless you pay its echo cost.)";
+        let parsed = parse_oracle_text(
+            oracle,
+            "Rakdos Headliner",
+            &[],
+            &["Creature".to_string()],
+            &["Devil".to_string()],
+        );
+
+        // Discriminating assertion: on origin/main the non-mana echo keyword is
+        // dropped, so this `Echo(NonMana(Discard))` is absent.
+        assert!(
+            parsed.extracted_keywords.iter().any(|kw| matches!(
+                kw,
+                Keyword::Echo(crate::types::keywords::EchoCost::NonMana(
+                    AbilityCost::Discard { .. }
+                ))
+            )),
+            "Rakdos Headliner must parse Echo(NonMana(Discard)) — got {:?}",
+            parsed.extracted_keywords
+        );
+
+        let mut face = CardFace {
+            keywords: parsed.extracted_keywords.clone(),
+            triggers: parsed.triggers.clone(),
+            ..CardFace::default()
+        };
+        crate::database::synthesis::synthesize_echo(&mut face);
+
+        {
+            let obj = state.objects.get_mut(&headliner).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Devil".to_string());
+            obj.power = Some(3);
+            obj.toughness = Some(1);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(1);
+            obj.keywords = face.keywords.clone();
+            obj.base_keywords = obj.keywords.clone();
+            for trigger in face.triggers.clone() {
+                obj.trigger_definitions.push(trigger);
+            }
+            obj.base_trigger_definitions =
+                Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+            // CR 702.30a: the next controller-upkeep echo payment is due.
+            obj.echo_due = true;
+        }
+
+        let mut events = Vec::new();
+        crate::game::turns::auto_advance(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(
+            !state.stack.is_empty(),
+            "echo trigger must be on the stack at the beginning of upkeep"
+        );
+
+        events.clear();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // CR 702.30a: the echo trigger resolves to an unless-payment carrying the
+        // *non-mana* discard cost (not mana). On origin/main the Echo keyword is
+        // dropped for the em-dash form, so no echo trigger exists and this
+        // UnlessPayment-with-Discard never appears — the discriminating proof
+        // that the non-mana echo cost flowed through synthesis into the payment
+        // pipeline.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::UnlessPayment {
+                    player: PlayerId(0),
+                    cost: AbilityCost::Discard { .. },
+                    ..
+                }
+            ),
+            "non-mana echo must surface an UnlessPayment carrying a Discard cost — got {:?}",
+            state.waiting_for
+        );
+
+        // CR 701.9: choosing to pay routes the discard cost through
+        // `handle_unless_payment`, which surfaces the discard-card choice — a
+        // discard cost, not a mana payment.
+        apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::WardDiscardChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "paying the non-mana echo must reach the discard-choice payment — got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
     fn attack_trigger_resolves_before_combat_damage_and_only_once() {
         let mut state = new_game(42);
         state.turn_number = 5;

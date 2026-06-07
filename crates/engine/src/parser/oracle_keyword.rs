@@ -670,6 +670,31 @@ fn parse_evoke_cost(cost_text: &str) -> Option<crate::types::keywords::EvokeCost
     }
 }
 
+/// CR 702.30a: Parse an echo cost following the em-dash separator
+/// (e.g., "echo—discard a card" on Rakdos Headliner / Deepcavern Imp).
+/// Mirrors `parse_evoke_cost`: delegates to `parse_oracle_cost` so
+/// comma-separated parts compose into `AbilityCost::Composite`, and wraps the
+/// result in `EchoCost::Mana` when it's a pure mana cost or `EchoCost::NonMana`
+/// otherwise.
+fn parse_echo_cost(cost_text: &str) -> Option<crate::types::keywords::EchoCost> {
+    use crate::types::keywords::EchoCost;
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(EchoCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(EchoCost::NonMana(other)),
+    }
+}
+
 fn parse_cycling_cost(cost_text: &str) -> Option<CyclingCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     // Strip reminder text in parentheses: take everything before the first " (".
@@ -1092,6 +1117,16 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("evoke\u{2014}").parse(text) {
         if let Some(ev_cost) = parse_evoke_cost(rest) {
             return Some(Keyword::Evoke(ev_cost));
+        }
+    }
+
+    // CR 702.30a: Echo with em-dash cost — non-mana echo ("echo—discard a card"
+    // on Rakdos Headliner / Deepcavern Imp). Pure-mana echo ("Echo {R}") arrives
+    // via the space-mana fallback below. Placed before that fallback because the
+    // generic space-split mangles "echo—discard a card".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("echo\u{2014}").parse(text) {
+        if let Some(echo_cost) = parse_echo_cost(rest) {
+            return Some(Keyword::Echo(echo_cost));
         }
     }
 

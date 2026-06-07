@@ -65,6 +65,18 @@ pub enum EvokeCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.30a: Echo cost — either a mana cost (Urza-block / errata cards, e.g.
+/// Orcish Hellraiser "Echo {R}") or a non-mana cost ("Echo—Discard a card" on
+/// Rakdos Headliner, Deepcavern Imp). Mirrors `EvokeCost`/`BuybackCost`/
+/// `CyclingCost`/`FlashbackCost` so non-mana costs compose through the existing
+/// `AbilityCost` unless-pay pipeline in `build_echo_trigger`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EchoCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -588,7 +600,11 @@ pub enum Keyword {
     /// CR 702.153a: Casualty N — as an additional cost, you may sacrifice a creature
     /// with power N or greater. When you do, copy this spell.
     Casualty(u32),
-    Echo(ManaCost),
+    /// CR 702.30a: see `EchoCost` for the mana / non-mana split. Urza-block /
+    /// errata cards (e.g. Orcish Hellraiser "Echo {R}") use `EchoCost::Mana`;
+    /// "Echo—Discard a card" cards (Rakdos Headliner, Deepcavern Imp) carry
+    /// `EchoCost::NonMana(AbilityCost::Discard { .. })`.
+    Echo(EchoCost),
     /// CR 702.42a: Entwine — pay additional cost to choose all modes of a modal spell.
     Entwine(ManaCost),
     Outlast(ManaCost),
@@ -1708,7 +1724,7 @@ impl FromStr for Keyword {
                     }
                     // Fall through to Unknown for unrecognized affinity types
                 }
-                "echo" => return Ok(Keyword::Echo(parse_keyword_mana_cost(p))),
+                "echo" => return Ok(Keyword::Echo(EchoCost::Mana(parse_keyword_mana_cost(p)))),
                 "outlast" => return Ok(Keyword::Outlast(parse_keyword_mana_cost(p))),
                 "scavenge" => return Ok(Keyword::Scavenge(parse_keyword_mana_cost(p))),
                 "reinforce" => {
@@ -2423,7 +2439,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
                 serde_json::from_value(data.clone()).map_err(|e| format!("Affinity: {e}"))?;
             Ok(Keyword::Affinity(tf))
         }
-        "Echo" => Ok(Keyword::Echo(mana(data)?)),
+        // CR 702.30a: accept both legacy ManaCost format and new EchoCost tagged format.
+        "Echo" => {
+            if let Ok(echo_cost) = serde_json::from_value::<EchoCost>(data.clone()) {
+                Ok(Keyword::Echo(echo_cost))
+            } else {
+                Ok(Keyword::Echo(EchoCost::Mana(mana(data)?)))
+            }
+        }
         "Outlast" => Ok(Keyword::Outlast(mana(data)?)),
         "Scavenge" => Ok(Keyword::Scavenge(mana(data)?)),
         // CR 702.77a: Reinforce N—[cost]. Data is { "count": N, "cost": "..." }.

@@ -25,7 +25,9 @@ use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::format::DeckCopyLimit;
-use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
+use crate::types::keywords::{
+    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, Keyword, PartnerType,
+};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerCounterKind;
@@ -4229,7 +4231,7 @@ fn build_double_team_trigger() -> TriggerDefinition {
         )
 }
 
-fn build_echo_trigger(cost: ManaCost) -> TriggerDefinition {
+fn build_echo_trigger(cost: EchoCost) -> TriggerDefinition {
     let sac = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Sacrifice {
@@ -4248,7 +4250,13 @@ fn build_echo_trigger(cost: ManaCost) -> TriggerDefinition {
                 .to_string(),
         );
     trigger.unless_pay = Some(UnlessPayModifier {
-        cost: AbilityCost::Mana { cost },
+        // CR 702.30a: echo cost may be mana (errata/Urza-block) or non-mana
+        // ("Echo—Discard a card"). Map both to the general AbilityCost the
+        // unless-pay interceptor + handle_unless_payment already understand.
+        cost: match cost {
+            EchoCost::Mana(c) => AbilityCost::Mana { cost: c },
+            EchoCost::NonMana(c) => c,
+        },
         payer: TargetFilter::Controller,
     });
     trigger
@@ -14377,10 +14385,11 @@ mod echo_synthesis_tests {
 
     fn echo_face() -> CardFace {
         let mut face = CardFace::default();
-        face.keywords.push(Keyword::Echo(ManaCost::Cost {
-            shards: vec![ManaCostShard::White, ManaCostShard::White],
-            generic: 3,
-        }));
+        face.keywords
+            .push(Keyword::Echo(EchoCost::Mana(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 3,
+            })));
         face
     }
 
@@ -15876,10 +15885,10 @@ mod suspend_synthesis_tests {
             &suspend,
         ));
         // An unrelated trigger (echo) is not a suspend trigger.
-        let echo = build_echo_trigger(ManaCost::Cost {
+        let echo = build_echo_trigger(EchoCost::Mana(ManaCost::Cost {
             shards: vec![],
             generic: 1,
-        });
+        }));
         assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
             &echo, &suspend,
         ));
