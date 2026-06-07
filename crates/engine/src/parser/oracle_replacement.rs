@@ -5068,10 +5068,7 @@ fn parse_damage_prevention_replacement(
         || nom_primitives::scan_contains(working_lower, "deal to you")
     {
         Some(damage_target_controller())
-    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature")
-        || nom_primitives::scan_contains(working_lower, "dealt to ~")
-        || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
-    {
+    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature") {
         Some(DamageTargetFilter::CreatureOnly)
     } else {
         // "prevent all combat damage" with no target → any target
@@ -5090,17 +5087,25 @@ fn parse_damage_prevention_replacement(
     // any target, which was the Multiclass Baldric / Inviolability / Artifact Ward
     // class of bug.
     let valid_card_filter: Option<TargetFilter> =
-        nom_primitives::scan_at_word_boundaries(working_lower, |input| {
-            preceded(
-                tag::<_, _, OracleError<'_>>("dealt to "),
-                terminated(
-                    parse_attached_subject_target_filter,
-                    alt((value((), eof), value((), multispace1), value((), tag(".")))),
-                ),
-            )
-            .parse(input)
-        })
-        .or_else(|| parse_damage_recipient_valid_card_filter(working_lower));
+        if nom_primitives::scan_contains(working_lower, "dealt to ~")
+            || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
+        {
+            // CR 614.1a: Self-scoped prevention ("If damage would be dealt to ~")
+            // must gate on `valid_card: SelfRef`, not a broad creature damage filter.
+            Some(TargetFilter::SelfRef)
+        } else {
+            nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+                preceded(
+                    tag::<_, _, OracleError<'_>>("dealt to "),
+                    terminated(
+                        parse_attached_subject_target_filter,
+                        alt((value((), eof), value((), multispace1), value((), tag(".")))),
+                    ),
+                )
+                .parse(input)
+            })
+            .or_else(|| parse_damage_recipient_valid_card_filter(working_lower))
+        };
 
     // --- 4. Extract damage source filter ---
     let damage_source_filter = parse_damage_source_filter(working_lower);
@@ -6223,6 +6228,28 @@ mod tests {
     /// 3. The rider count resolves to `QuantityRef::EventContextAmount` (the
     ///    prevented amount), via the existing `for each 1 damage prevented
     ///    this way` post-target suffix path.
+
+    /// CR 614.1a: Anti-Venom — self-scoped prevention must use `valid_card:
+    /// SelfRef`, not a broad `damage_target_filter: CreatureOnly` that would
+    /// prevent all creature damage.
+    #[test]
+    fn anti_venom_self_prevention_uses_valid_card_self_ref() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to ~, prevent that damage and put that many +1/+1 counters on him.",
+            "Anti-Venom, Horrifying Healer",
+        )
+        .expect("Anti-Venom prevention should parse");
+
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "self-scoped prevention must gate on SelfRef"
+        );
+        assert!(
+            def.damage_target_filter.is_none(),
+            "must not use broad CreatureOnly damage_target_filter"
+        );
+    }
 
     #[test]
     fn vigor_event_recipient_filter_and_counter_target_rewrite() {
