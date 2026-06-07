@@ -171,6 +171,19 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         obj.class_level = Some(1);
     }
 
+    // CR 306.5c + CR 310.4c: Rehydration must not clobber live counter-tracked
+    // loyalty/defense. `rehydrate_game_from_card_db` re-applies printed faces
+    // mid-game (multiplayer sync); the counter map is authoritative on the
+    // battlefield, mirroring the Class-level preservation gate above.
+    if was_initialized && obj.zone == Zone::Battlefield {
+        if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
+            obj.loyalty = Some(loyalty_counters);
+        }
+        if let Some(&defense_counters) = obj.counters.get(&CounterType::Defense) {
+            obj.defense = Some(defense_counters);
+        }
+    }
+
     // CR 719.1: Initialize Case solve state from the card face.
     if card_face.card_type.subtypes.iter().any(|s| s == "Case") {
         if let Some(ref sc) = card_face.solve_condition {
@@ -316,15 +329,53 @@ pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
 }
 
 pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
+    // CR 707.2: Tokens created by `Effect::Token` seed live characteristics
+    // (`name`, `power`, …) but often leave the parallel `base_*` fields empty.
+    // Copy-token resolution reads copiable values through this helper, so fall
+    // back to the live fields when the base snapshot was never initialized
+    // (Hazel of the Rootbloom — copy target token you control).
+    let use_live = obj.is_token && !obj.base_characteristics_initialized;
     CopiableValues {
-        name: obj.base_name.clone(),
-        mana_cost: obj.base_mana_cost.clone(),
-        color: obj.base_color.clone(),
-        card_types: obj.base_card_types.clone(),
-        power: obj.base_power,
-        toughness: obj.base_toughness,
-        loyalty: obj.base_loyalty,
-        keywords: obj.base_keywords.clone(),
+        name: if use_live {
+            obj.name.clone()
+        } else {
+            obj.base_name.clone()
+        },
+        mana_cost: if use_live {
+            obj.mana_cost.clone()
+        } else {
+            obj.base_mana_cost.clone()
+        },
+        color: if use_live {
+            obj.color.clone()
+        } else {
+            obj.base_color.clone()
+        },
+        card_types: if use_live {
+            obj.card_types.clone()
+        } else {
+            obj.base_card_types.clone()
+        },
+        power: if use_live {
+            obj.power
+        } else {
+            obj.base_power
+        },
+        toughness: if use_live {
+            obj.toughness
+        } else {
+            obj.base_toughness
+        },
+        loyalty: if use_live {
+            obj.loyalty
+        } else {
+            obj.base_loyalty
+        },
+        keywords: if use_live {
+            obj.keywords.clone()
+        } else {
+            obj.base_keywords.clone()
+        },
         // CopiableValues now shares `Arc<Vec<_>>` with the source object —
         // a copy-effect never mutates the ability set, so refcount sharing
         // is both correct and zero-allocation.
@@ -1916,6 +1967,60 @@ mod tests {
             state.objects.get(&object_id).unwrap().class_level,
             Some(3),
             "CR 716.2b: rehydration must preserve the advanced level"
+        );
+    }
+
+    /// CR 306.5c: Rehydration must preserve live loyalty counters on battlefield
+    /// planeswalkers (Daretti, Scrap Savant regression).
+    #[test]
+    fn rehydrate_preserves_planeswalker_loyalty_counters() {
+        let mut face = test_face(
+            "Daretti, Scrap Savant",
+            "daretti-scrap-savant-oracle-id",
+            vec![CoreType::Planeswalker],
+            ManaCost::default(),
+        );
+        face.loyalty = Some("3".to_string());
+        let export = serde_json::json!({
+            "daretti, scrap savant": serde_json::to_value(&face).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Daretti, Scrap Savant".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pw_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_loyalty = Some(3);
+            obj.loyalty = Some(1);
+            obj.counters.insert(CounterType::Loyalty, 1);
+            obj.base_characteristics_initialized = true;
+            obj.printed_ref = printed_ref_from_face(&face);
+            obj.base_printed_ref = obj.printed_ref.clone();
+        }
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert_eq!(
+            state.objects.get(&pw_id).unwrap().loyalty,
+            Some(1),
+            "rehydration must not reset loyalty to printed base when counters differ"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&pw_id)
+                .unwrap()
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&1)
         );
     }
 
