@@ -47,6 +47,16 @@ pub(crate) fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter
         value(TypeFilter::Subtype("Island".to_string()), tag("island")),
         value(TypeFilter::Subtype("Swamp".to_string()), tag("swamp")),
         value(TypeFilter::Subtype("Mountain".to_string()), tag("mountain")),
+        // CR 205.3g + CR 702.5a: Named artifact token subtypes that appear as
+        // Aura target legs ("Enchant creature or Food" — Sugar Coat, BLB).
+        // Each maps to TypeFilter::Subtype so the filter system checks the
+        // object's subtype list (food artifacts, treasure artifacts, etc.).
+        value(TypeFilter::Subtype("Food".to_string()), tag("food")),
+        value(TypeFilter::Subtype("Treasure".to_string()), tag("treasure")),
+        value(TypeFilter::Subtype("Clue".to_string()), tag("clue")),
+        value(TypeFilter::Subtype("Blood".to_string()), tag("blood")),
+        value(TypeFilter::Subtype("Map".to_string()), tag("map")),
+        value(TypeFilter::Subtype("Gold".to_string()), tag("gold")),
     ))
     .parse(input)
 }
