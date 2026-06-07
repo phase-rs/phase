@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ObjectId } from "../../adapter/types.ts";
+import { HIDDEN_CARD_NAME, type ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -44,11 +44,6 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
   const count = useGameStore(
     (s) => s.gameState?.players[playerId]?.library?.length ?? 0,
   );
-  const canPeek = useGameStore(
-    (s) =>
-      playerId === myId &&
-      (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false),
-  );
   const topObjectId = useGameStore((s) => {
     const lib = s.gameState?.players[playerId]?.library;
     if (!lib || lib.length === 0) return null;
@@ -65,8 +60,13 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
       playerId === myId &&
       (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false);
     const revealed = s.gameState?.revealed_cards?.includes(topObjectId) ?? false;
-    if (!peek && !revealed) return null;
-    return s.gameState?.objects[topObjectId]?.name ?? null;
+    const name = s.gameState?.objects[topObjectId]?.name ?? null;
+    // Engine viewer filtering exposes opponent library tops for private looks
+    // (CR 701.20e) and other visibility windows; masked tops stay hidden.
+    const opponentVisibleTop =
+      playerId !== myId && name != null && name !== HIDDEN_CARD_NAME;
+    if (!peek && !revealed && !opponentVisibleTop) return null;
+    return name;
   });
 
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
@@ -116,7 +116,7 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
   if (count === 0) return null;
 
   const stackDepth = Math.min(count - 1, 4);
-  const isPeeking = (canPeek || isRevealed) && topCardName;
+  const isPeeking = topCardName != null;
   const libraryLabel = t("zone.libraryCount", { count });
   const playLabel = t("zone.playFromTop", { name: topCardName ?? t("zone.topOfLibrary") });
   const w = size?.width ?? "var(--card-w)";

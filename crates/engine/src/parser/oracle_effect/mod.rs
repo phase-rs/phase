@@ -21608,6 +21608,38 @@ mod tests {
         }
     }
 
+    /// Desynchronization (#2410): "that's not historic" must negate CR 700.6
+    /// historic, not degrade to `Non(Subtype("Historic"))` which matches every
+    /// permanent.
+    #[test]
+    fn effect_bounce_all_nonhistoric_nonland_permanents_desynchronization() {
+        let e =
+            parse_effect("Return each nonland permanent that's not historic to its owner's hand.");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert!(
+                    filter.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land)
+                    )),
+                    "nonland exclusion present, got {:?}",
+                    filter.type_filters
+                );
+                assert!(
+                    filter.properties.contains(&FilterProp::NotHistoric),
+                    "nonhistoric filter must be NotHistoric, got {:?}",
+                    filter.properties
+                );
+            }
+            other => {
+                panic!("expected BounceAll {{ Permanent, Non(Land), NotHistoric }}, got {other:?}")
+            }
+        }
+    }
+
     /// Plural "all nonland permanents" filter from Devastation Tide / Coastal
     /// Breach / Crush of Tentacles / Worldpurge. The `Non(Land)` property must
     /// thread through the parser unchanged.

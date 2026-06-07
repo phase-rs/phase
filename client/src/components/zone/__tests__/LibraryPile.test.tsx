@@ -1,7 +1,12 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameAction, GameObject, GameState } from "../../../adapter/types.ts";
+import {
+  HIDDEN_CARD_NAME,
+  type GameAction,
+  type GameObject,
+  type GameState,
+} from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import { LibraryPile } from "../LibraryPile.tsx";
@@ -133,6 +138,58 @@ function playLandAction(objectId: number): GameAction {
   } as unknown as GameAction;
 }
 
+function setOpponentLibraryTop(topCardName: string) {
+  const topCardId = 77;
+  const top = makeObject(topCardId, topCardName);
+  const gameState = {
+    active_player: 0,
+    objects: { [topCardId]: top },
+    players: [
+      {
+        id: 0,
+        life: 20,
+        poison_counters: 0,
+        mana_pool: { mana: [] },
+        library: [],
+        hand: [],
+        graveyard: [],
+        has_drawn_this_turn: false,
+        lands_played_this_turn: 0,
+        turns_taken: 0,
+        can_look_at_top_of_library: false,
+      },
+      {
+        id: 1,
+        life: 20,
+        poison_counters: 0,
+        mana_pool: { mana: [] },
+        library: [topCardId],
+        hand: [],
+        graveyard: [],
+        has_drawn_this_turn: false,
+        lands_played_this_turn: 0,
+        turns_taken: 0,
+        can_look_at_top_of_library: false,
+      },
+    ],
+    battlefield: [],
+    exile: [],
+    stack: [],
+    combat: null,
+    revealed_cards: [],
+    waiting_for: { type: "Priority", data: { player: 0 } },
+  } as unknown as GameState;
+
+  useGameStore.setState({
+    gameState,
+    waitingFor: gameState.waiting_for,
+    legalActions: [],
+    legalActionsByObject: {},
+    spellCosts: {},
+    gameMode: "ai",
+  });
+}
+
 describe("LibraryPile play/cast surfacing (#297)", () => {
   beforeEach(() => {
     dispatchMock.mockClear();
@@ -185,6 +242,24 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
       objectId: 42,
       actions,
     });
+  });
+
+  it("shows opponent library top after a private look peek (Mishra's Bauble)", () => {
+    setOpponentLibraryTop("Lightning Bolt");
+    render(<LibraryPile playerId={1} />);
+    const button = screen.getByRole("button", { name: /library \(1 card\)/i });
+    expect(button).toBeInTheDocument();
+    // Peeked tops use the cyan border; card-back alt text is hidden.
+    expect(button.className).toContain("border-cyan-600");
+    expect(screen.queryByAltText("Library")).not.toBeInTheDocument();
+  });
+
+  it("keeps a masked opponent library top hidden", () => {
+    setOpponentLibraryTop(HIDDEN_CARD_NAME);
+    render(<LibraryPile playerId={1} />);
+    const button = screen.getByRole("button", { name: /library \(1 card\)/i });
+    expect(button.className).toContain("border-gray-600");
+    expect(screen.getByAltText("Library")).toBeInTheDocument();
   });
 
   it("does not dispatch when there is no play action", () => {

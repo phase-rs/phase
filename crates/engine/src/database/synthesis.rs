@@ -1007,6 +1007,28 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
     }
 }
 
+/// CR 702.114a + CR 604.3: Devoid is a characteristic-defining ability —
+/// "This object is colorless." Synthesize a SelfRef color-overriding CDA
+/// (`SetColor { colors: [] }`, Layer 5 / CR 613.1e), mirroring
+/// `synthesize_changeling_cda`. This drives the on-battlefield color computation;
+/// a later "becomes [color]" effect (higher timestamp) can still override it.
+///
+/// CR 604.3 also requires Devoid to function in **all** zones, even outside the
+/// game. Off-battlefield color is read from the object's stored `color` /
+/// `base_color` rather than recomputed through layers, so the all-zones half is
+/// handled where those base characteristics are derived (`printed_cards.rs`
+/// builds a devoid face colorless), not here.
+pub fn synthesize_devoid_cda(face: &mut CardFace) {
+    if face.keywords.iter().any(|k| matches!(k, Keyword::Devoid)) {
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetColor { colors: vec![] }])
+                .cda(),
+        );
+    }
+}
+
 /// CR 702.161a: Living metal — "During your turn, this permanent is an artifact
 /// creature in addition to its other types." Synthesize a SelfRef static that
 /// adds the Creature type (Layer 4, CR 613.1d) while it is the controller's turn,
@@ -8367,6 +8389,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     // The Keyword::Crew(N) on the card provides display information.
     synthesize_ninjutsu_family(face);
     synthesize_changeling_cda(face);
+    // CR 702.114a: Devoid — colorless CDA.
+    synthesize_devoid_cda(face);
     synthesize_kicker(face);
     synthesize_buyback(face);
     synthesize_bargain(face);
@@ -9108,15 +9132,25 @@ pub(crate) fn strip_level_gated_keywords(face: &mut CardFace) {
                     )
             )
         })
-        .flat_map(|stat| {
-            stat.modifications.iter().filter_map(|m| match m {
-                ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
-                _ => None,
-            })
-        })
+        .flat_map(keyword_granted_by_level_gated_static)
         .collect();
 
     face.keywords.retain(|kw| !gated.contains(kw));
+}
+
+fn keyword_granted_by_level_gated_static(stat: &StaticDefinition) -> Vec<Keyword> {
+    let mut gated = stat
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(kw) = stat.mode.as_keyword() {
+        gated.push(kw);
+    }
+    gated
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.
@@ -9647,6 +9681,65 @@ mod buyback_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_buyback(&mut face);
         assert!(face.additional_cost.is_none());
+    }
+}
+
+#[cfg(test)]
+mod devoid_synthesis_tests {
+    use super::*;
+
+    fn devoid_cda(face: &CardFace) -> Option<&StaticDefinition> {
+        face.static_abilities.iter().find(|s| {
+            s.characteristic_defining
+                && s.affected == Some(TargetFilter::SelfRef)
+                && s.modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::SetColor { colors } if colors.is_empty()))
+        })
+    }
+
+    /// CR 702.114a: Devoid synthesizes a SelfRef colorless CDA (SetColor {[]}).
+    #[test]
+    fn synthesize_devoid_cda_pushes_colorless_cda() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Devoid],
+            ..CardFace::default()
+        };
+        synthesize_devoid_cda(&mut face);
+        assert!(
+            devoid_cda(&face).is_some(),
+            "devoid must push a SelfRef SetColor {{[]}} CDA; got {:?}",
+            face.static_abilities
+        );
+    }
+
+    /// No-op when the card has no Devoid keyword.
+    #[test]
+    fn synthesize_devoid_cda_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_devoid_cda(&mut face);
+        assert!(devoid_cda(&face).is_none());
+    }
+
+    /// A single synthesis pass for one Devoid keyword yields one colorless CDA.
+    #[test]
+    fn synthesize_devoid_cda_single_pass_pushes_one_cda() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Devoid],
+            ..CardFace::default()
+        };
+        synthesize_devoid_cda(&mut face);
+        let count = face
+            .static_abilities
+            .iter()
+            .filter(|s| {
+                s.characteristic_defining
+                    && s.modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::SetColor { colors } if colors.is_empty())
+                    })
+            })
+            .count();
+        assert_eq!(count, 1, "exactly one colorless CDA");
     }
 }
 
@@ -16841,6 +16934,32 @@ mod sorcery_speed_invariant_tests {
 
         // Both gated keywords stripped; the LevelUp keyword survives.
         assert_eq!(face.keywords, vec![level_up]);
+    }
+
+    /// CR 711.4: Level-block standalone keyword static modes (Hada Spy Patrol's
+    /// "Shroud" line) must strip the matching base keyword.
+    #[test]
+    fn strip_level_gated_keywords_strips_static_mode_keyword_grants() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Shroud],
+            static_abilities: vec![StaticDefinition::new(StaticMode::Shroud)
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
+                .condition(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Generic("level".to_string())),
+                    minimum: 3,
+                    maximum: None,
+                })],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        assert!(
+            face.keywords.is_empty(),
+            "Shroud must strip from base keywords"
+        );
     }
 
     /// Negative case: a `HasCounters` static on a NON-"level" generic counter

@@ -6,6 +6,9 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
+// Engine masking sentinel emitted at the client boundary for hidden card faces.
+export const HIDDEN_CARD_NAME = "Hidden Card";
+
 // ── Attachment Target ────────────────────────────────────────────────────
 // Mirrors `engine::game::game_object::AttachTarget`. Auras may attach to a
 // permanent (`Object`) or to a player (`Player`, e.g. Curse cycle); Equipment

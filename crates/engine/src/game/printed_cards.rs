@@ -68,6 +68,24 @@ pub fn printed_ref_from_face(card_face: &CardFace) -> Option<PrintedCardRef> {
         })
 }
 
+fn printed_colors_from_face(card_face: &CardFace) -> Vec<ManaColor> {
+    if let Some(colors) = &card_face.color_override {
+        return colors.clone();
+    }
+    // CR 702.114a + CR 604.3: Devoid is a characteristic-defining ability
+    // ("this object is colorless") that functions in all zones. MTGJSON normally
+    // supplies `color_override: Some([])` for devoid cards, so this branch is only
+    // a missing-data backstop; explicit color overrides remain authoritative.
+    if card_face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Devoid))
+    {
+        return Vec::new();
+    }
+    derive_colors_from_mana_cost(&card_face.mana_cost)
+}
+
 pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // CR 716.2b: capture the pre-call init flag so we can distinguish
     // first-time face application from re-application by
@@ -86,10 +104,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         .as_ref()
         .and_then(|value| value.parse::<u32>().ok());
     let keywords = card_face.keywords.clone();
-    let color = card_face
-        .color_override
-        .clone()
-        .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost));
+    let color = printed_colors_from_face(card_face);
 
     obj.name = card_face.name.clone();
     obj.power = power;
@@ -194,10 +209,7 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
         .defense
         .as_ref()
         .and_then(|value| value.parse::<u32>().ok());
-    let color = card_face
-        .color_override
-        .clone()
-        .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost));
+    let color = printed_colors_from_face(card_face);
 
     back_face.name = card_face.name.clone();
     back_face.power = power;
@@ -1296,6 +1308,77 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    /// CR 604.3: explicit all-zone color data is authoritative even when a face
+    /// also has Devoid. Production devoid cards normally enter through this path
+    /// with `color_override: Some([])`.
+    #[test]
+    fn color_override_wins_for_devoid_face() {
+        let mut face = test_face(
+            "Touch of the Void",
+            "touch-of-the-void-oracle-id",
+            vec![CoreType::Instant],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+        );
+        // Without Devoid, the {1}{R} cost would make it red.
+        assert_eq!(
+            derive_colors_from_mana_cost(&face.mana_cost),
+            vec![ManaColor::Red]
+        );
+        face.color_override = Some(vec![ManaColor::Red]);
+        face.keywords.push(Keyword::Devoid);
+
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(0),
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Hand,
+        );
+        apply_card_face_to_object(&mut obj, &face);
+
+        assert_eq!(obj.color, vec![ManaColor::Red]);
+        assert_eq!(obj.base_color, vec![ManaColor::Red]);
+    }
+
+    /// CR 702.114a + CR 604.3: if all-zone color data is missing, Devoid is a
+    /// backstop that builds the face colorless outside the battlefield too.
+    #[test]
+    fn devoid_face_without_color_override_falls_back_to_colorless() {
+        let mut face = test_face(
+            "Muraganda Eldrazi",
+            "muraganda-eldrazi-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 3,
+            },
+        );
+        face.keywords.push(Keyword::Devoid);
+
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(0),
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Hand,
+        );
+        apply_card_face_to_object(&mut obj, &face);
+
+        assert!(
+            obj.color.is_empty(),
+            "devoid object must be colorless; got {:?}",
+            obj.color
+        );
+        assert!(
+            obj.base_color.is_empty(),
+            "devoid base color must be colorless; got {:?}",
+            obj.base_color
+        );
     }
 
     /// CR 111.1 + CR 707.2 + CR 704.5j: A non-legendary token that's a copy of
