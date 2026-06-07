@@ -14719,22 +14719,11 @@ mod cumulative_upkeep_synthesis_tests {
     /// silent-no-op state until per-shape support lands.
     #[test]
     fn cumulative_upkeep_synthesizer_skips_unsupported_base_shapes() {
-        // Discard base — no current cumulative-upkeep card resolves through
-        // `AbilityCost::Discard` because the unless-payment pipeline can't pay
-        // it. Synthesizer must refuse to install.
-        let discard_kw = Keyword::CumulativeUpkeep(AbilityCost::Discard {
-            count: QuantityExpr::Fixed { value: 1 },
-            filter: None,
-            random: false,
-            self_ref: false,
-        });
-        assert_eq!(
-            KeywordTriggerInstaller::triggers_for(&discard_kw).len(),
-            0,
-            "Discard base must not install a cumulative-upkeep trigger"
-        );
-
-        // Exile base — same reasoning as Discard.
+        // Exile base — no current cumulative-upkeep card resolves through
+        // `AbilityCost::Exile` because the unless-payment pipeline can't pay
+        // it. Synthesizer must refuse to install. (Discard became supported
+        // once the per-counter discard payment chain landed — CR 702.24a — so
+        // Exile is now the canonical still-unsupported non-mana base shape.)
         let exile_kw = Keyword::CumulativeUpkeep(AbilityCost::Exile {
             count: 1,
             zone: None,
@@ -14747,17 +14736,16 @@ mod cumulative_upkeep_synthesis_tests {
         );
 
         // Composite of mixed shapes — Composite-of-Mana is supported, but
-        // Composite containing Discard/Exile is not.
+        // Composite containing an unsupported shape (Exile) is not.
         let mixed_composite_kw = Keyword::CumulativeUpkeep(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
                     cost: ManaCost::generic(1),
                 },
-                AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: None,
                     filter: None,
-                    random: false,
-                    self_ref: false,
                 },
             ],
         });
@@ -14771,16 +14759,15 @@ mod cumulative_upkeep_synthesis_tests {
         // PayCumulativeUpkeep trigger after synthesis runs.
         let mut face = CardFace::default();
         face.keywords
-            .push(Keyword::CumulativeUpkeep(AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
+                count: 1,
+                zone: None,
                 filter: None,
-                random: false,
-                self_ref: false,
             }));
         synthesize_cumulative_upkeep(&mut face);
         assert!(
             face.triggers.is_empty(),
-            "synthesize_cumulative_upkeep on a Discard base must install no triggers"
+            "synthesize_cumulative_upkeep on an Exile base must install no triggers"
         );
     }
 
@@ -14816,6 +14803,21 @@ mod cumulative_upkeep_synthesis_tests {
             KeywordTriggerInstaller::triggers_for(&sacrifice_kw).len(),
             1,
             "Sacrifice base must install exactly one cumulative-upkeep trigger"
+        );
+
+        // CR 702.24a: Discard base — Vexing Sphinx-shape. Supported once the
+        // per-counter discard payment chain (scaled_by + remaining re-prompt)
+        // landed; must install exactly one trigger.
+        let discard_kw = Keyword::CumulativeUpkeep(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            random: false,
+            self_ref: false,
+        });
+        assert_eq!(
+            KeywordTriggerInstaller::triggers_for(&discard_kw).len(),
+            1,
+            "Discard base must install exactly one cumulative-upkeep trigger"
         );
 
         // OneOf-of-Mana — Jötun Owl Keeper-shape disjunction of mana costs.

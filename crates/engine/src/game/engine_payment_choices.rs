@@ -433,32 +433,42 @@ pub(super) fn handle_unless_payment(
                     });
                 }
             }
-            // CR 118.12 + CR 701.9: Unless-discard. Defers to the unified
-            // `WardDiscardChoice` waiting state (the name predates the fold
-            // and now covers both ward and counter unless-discard cases).
-            // `count`/`random`/`self_ref` axes from the unified `Discard`
-            // shape are not yet consumed at this site — extending them is
-            // future work tracked alongside the `Balduvian Horde` random-
-            // discard fidelity gap.
+            // CR 118.12a + CR 701.9 + CR 702.24a: Unless-discard. Resolve the
+            // per-counter-scaled count, gate on eligible hand size, and seed the
+            // `remaining` re-prompt loop (one card per round-trip). Defers to the
+            // unified `WardDiscardChoice` waiting state (the name predates the
+            // fold and now covers both ward and counter unless-discard cases).
             AbilityCost::Discard {
-                count: _,
+                count,
                 filter,
                 random: _,
                 self_ref: _,
             } => {
+                let resolved = crate::game::quantity::resolve_quantity_with_targets(
+                    state,
+                    &count,
+                    pending_effect.as_ref(),
+                );
+                let count = u32::try_from(resolved.max(0)).unwrap_or(0);
+
                 let hand_cards = crate::game::casting::find_eligible_discard_targets(
                     state,
                     player,
                     pending_effect.source_id,
                     filter.as_ref(),
                 );
-                if hand_cards.is_empty() {
+                // CR 702.24a: partial payments aren't allowed — if the controller
+                // can't produce the full count, the unless cost is unpayable and
+                // the effect happens.
+                if (hand_cards.len() as u32) < count {
                     payment_failed = true;
                 } else {
                     state.waiting_for = WaitingFor::WardDiscardChoice {
                         player,
                         cards: hand_cards,
                         pending_effect: pending_effect.clone(),
+                        remaining: count,
+                        filter: filter.clone(),
                     };
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
@@ -908,6 +918,8 @@ pub(super) fn handle_ward_discard_choice(
         player,
         cards: legal_cards,
         pending_effect,
+        remaining,
+        filter,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -922,6 +934,27 @@ pub(super) fn handle_ward_discard_choice(
     }
 
     effects::discard::complete_discard_to_graveyard(state, chosen[0], player, events);
+
+    // CR 702.24a: more discards remain — re-derive hand eligibility (the
+    // just-discarded card still keys `state.objects` in the graveyard, so
+    // re-derive from hand rather than filtering by `contains_key`).
+    if remaining > 1 {
+        let hand_cards = crate::game::casting::find_eligible_discard_targets(
+            state,
+            player,
+            pending_effect.source_id,
+            filter.as_ref(),
+        );
+        state.waiting_for = WaitingFor::WardDiscardChoice {
+            player,
+            cards: hand_cards,
+            pending_effect,
+            remaining: remaining - 1,
+            filter,
+        };
+        return Ok(state.waiting_for.clone());
+    }
+
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,

@@ -5528,6 +5528,21 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
         AbilityCost::Composite { costs } => AbilityCost::Composite {
             costs: costs.iter().map(|c| expand_per_counter(c, n)).collect(),
         },
+        // CR 702.24a: "If [cost] has choices … each choice is made separately for
+        // each age counter." Scale the discard count by the age-counter multiplier
+        // so N age counters demand N discards; filter/random/self_ref are unchanged
+        // per-counter axes.
+        AbilityCost::Discard {
+            count,
+            filter,
+            random,
+            self_ref,
+        } => AbilityCost::Discard {
+            count: count.scaled_by(n),
+            filter: filter.clone(),
+            random: *random,
+            self_ref: *self_ref,
+        },
         // YAGNI fallback: no current cumulative-upkeep card uses these
         // base variants. If a future mechanic does, the
         // Composite-of-N-copies expansion is semantically correct for
@@ -6698,6 +6713,32 @@ mod tests {
             panic!("expected Sacrifice");
         };
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn expand_per_counter_discard_scales_count() {
+        // CR 702.24a: N age counters demand N discards; filter/random/self_ref
+        // are unchanged per-counter axes.
+        let base = AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: Some(TargetFilter::SelfRef),
+            random: false,
+            self_ref: true,
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::Discard {
+            count,
+            filter,
+            random,
+            self_ref,
+        } = expanded
+        else {
+            panic!("expected Discard");
+        };
+        assert_eq!(count, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(filter, Some(TargetFilter::SelfRef));
+        assert!(!random);
+        assert!(self_ref);
     }
 
     #[test]
