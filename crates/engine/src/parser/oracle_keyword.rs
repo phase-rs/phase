@@ -708,6 +708,26 @@ fn parse_bloodthirst_keyword_line(line: &str) -> Option<Keyword> {
     }
 }
 
+/// CR 702.48a: Offering — "<Subtype> offering (reminder text)". The leading word
+/// is the creature/permanent type a player may sacrifice to cast this spell for
+/// its alternative cost (e.g. "Goblin offering", "Artifact offering"). MTGJSON
+/// sends only the bare "Offering" keyword name with no quality, so without this
+/// the line carrying the quality is never turned into `Keyword::Offering(quality)`
+/// and the cast path (which keys on that quality) is unreachable.
+fn parse_offering_keyword_line(line: &str) -> Option<Keyword> {
+    let stripped = strip_reminder_text(line);
+    let text = stripped.trim().trim_end_matches('.').trim();
+    // Input is lowercased; the whole line must be "<single word> offering".
+    let (_, (quality, _)) = all_consuming((alpha1, tag::<_, _, OracleError<'_>>(" offering")))
+        .parse(text)
+        .ok()?;
+    // Canonicalize to subtype casing ("goblin" -> "Goblin") so the runtime cost
+    // path (`effective_offering_quality`) matches the printed subtype.
+    let mut chars = quality.chars();
+    let capitalized = chars.next()?.to_ascii_uppercase().to_string() + chars.as_str();
+    Some(Keyword::Offering(capitalized))
+}
+
 /// CR 702.167b: Build the typed materials filter for a Craft ability. A bare
 /// type/subtype in the materials clause matches *either* a permanent on the
 /// battlefield you control *or* a card in your graveyard you own (an exception
@@ -956,6 +976,12 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     }
 
     if let Some(kw) = parse_firebending_keyword_line(text) {
+        return Some(kw);
+    }
+
+    // CR 702.48a: "<Subtype> offering" — the Oracle line carries the quality the
+    // bare "Offering" keyword name lacks.
+    if let Some(kw) = parse_offering_keyword_line(text) {
         return Some(kw);
     }
 
@@ -1896,6 +1922,29 @@ mod tests {
             "ripple 2 — numeric variant still maps to unit Ripple"
         );
         assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
+    }
+
+    /// CR 702.48a: Offering — the Oracle line "<Subtype> offering (...)" carries
+    /// the quality that the bare MTGJSON "Offering" keyword name lacks. Previously
+    /// no arm matched, so Keyword::Offering was never produced and the cast path
+    /// was unreachable. Quality is canonicalized to subtype casing.
+    #[test]
+    fn parse_keyword_from_oracle_offering() {
+        assert_eq!(
+            parse_keyword_from_oracle(
+                "goblin offering (you may cast this spell any time you could cast an instant \
+                 by sacrificing a goblin and paying the difference in mana costs.)"
+            ),
+            Some(Keyword::Offering("Goblin".to_string())),
+            "Patron of the Akki — Goblin offering"
+        );
+        assert_eq!(
+            parse_keyword_from_oracle("artifact offering (...)"),
+            Some(Keyword::Offering("Artifact".to_string())),
+            "Blast-Furnace Hellkite — Artifact offering"
+        );
+        // Not a keyword line: a prose sentence merely ending in "offering".
+        assert_eq!(parse_keyword_from_oracle("make a generous offering"), None);
     }
 
     #[test]
