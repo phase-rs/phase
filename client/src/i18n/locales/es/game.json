@@ -1276,6 +1276,7 @@
     "variantForetell": "Lanzar desde Predecir",
     "variantOverload": "Lanzar con Sobrecargar",
     "variantBestow": "Lanzar con Otorgar",
+    "variantFuse": "Lanzar con Fusión",
     "variantFallback": "Lanzar con {{type}}"
   },
   "categoryChoice": {

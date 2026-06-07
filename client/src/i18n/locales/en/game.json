@@ -1281,6 +1281,7 @@
     "variantForetell": "Cast from Foretell",
     "variantOverload": "Cast with Overload",
     "variantBestow": "Cast with Bestow",
+    "variantFuse": "Cast with Fuse",
     "variantFallback": "Cast with {{type}}"
   },
   "categoryChoice": {

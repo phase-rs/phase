@@ -1276,6 +1276,7 @@
     "variantForetell": "Rzuć z Foretell",
     "variantOverload": "Rzuć z Overload",
     "variantBestow": "Rzuć z Bestow",
+    "variantFuse": "Rzuć z Fuse",
     "variantFallback": "Rzuć z {{type}}"
   },
   "categoryChoice": {

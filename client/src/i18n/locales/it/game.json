@@ -1276,6 +1276,7 @@
     "variantForetell": "Lancia da Predire",
     "variantOverload": "Lancia con Sovraccarico",
     "variantBestow": "Lancia con Conferire",
+    "variantFuse": "Lancia con Fusione",
     "variantFallback": "Lancia con {{type}}"
   },
   "categoryChoice": {

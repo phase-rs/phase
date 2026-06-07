@@ -35,6 +35,7 @@ const VARIANT_KEYS: Partial<Record<CastingVariant["type"], string>> = {
   Foretell: "variantForetell",
   Overload: "variantOverload",
   Bestow: "variantBestow",
+  Fuse: "variantFuse",
 };
 
 export function CastingVariantModal() {

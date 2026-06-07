@@ -4358,6 +4358,12 @@ pub enum CastingVariant {
     /// exiled instead of going anywhere else any time it would leave the stack
     /// (see `exiles_when_leaving_stack_for_any_reason`).
     JumpStart,
+    /// CR 702.102a-d: Both halves of a split card cast from hand as a fused
+    /// split spell. The mana cost is the combined cost of both halves
+    /// (CR 702.102c). On resolution, the left half's instructions are followed
+    /// first, then the right half's (CR 702.102d). Not an alternative cost
+    /// (CR 118.9a) — the player pays the full combined printed mana cost.
+    Fuse,
     /// CR 702.117a: Cast from hand for the surge alternative cost, legal only if
     /// the caster has cast another spell this turn. Resolution is normal (no
     /// exile/restore), so it appears only in `uses_alternative_cost`.
@@ -4413,6 +4419,9 @@ impl CastingVariant {
             // CR 702.133a: Jump-start discards a card as an *additional* cost on
             // top of the normal mana cost — not an alternative cost (CR 118.9a).
             | CastingVariant::JumpStart
+            // CR 702.102c + CR 118.9a: Fuse pays the full combined printed mana
+            // cost of both halves — not an alternative cost.
+            | CastingVariant::Fuse
             | CastingVariant::GraveyardPermission { .. }
             | CastingVariant::ExilePermission { .. } => false,
         }

@@ -443,7 +443,8 @@ export type CastingVariant =
   | { type: "Bestow" }
   | { type: "Awaken" }
   | { type: "Cleave" }
-  | { type: "MoreThanMeetsTheEye" };
+  | { type: "MoreThanMeetsTheEye" }
+  | { type: "Fuse" };
 
 export interface CastingVariantChoiceOption {
   variant: CastingVariant;

@@ -25,7 +25,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOfferKind, ConvokeMode, GameState, PendingCast, WaitingFor,
+    ActionResult, CastOfferKind, CastingVariant, CastingVariantChoiceOption, ConvokeMode,
+    GameState, PendingCast, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -1636,6 +1637,7 @@ impl GameRunner {
 pub struct SpellCast<'a> {
     runner: &'a mut GameRunner,
     spell: ObjectId,
+    casting_variant: Option<CastingVariant>,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
     target_players: Vec<PlayerId>,
@@ -1648,6 +1650,7 @@ impl<'a> SpellCast<'a> {
         SpellCast {
             runner,
             spell,
+            casting_variant: None,
             modes: None,
             x: None,
             target_players: Vec::new(),
@@ -1666,6 +1669,14 @@ impl<'a> SpellCast<'a> {
     /// Announce the value of X (CR 107.3a / CR 601.2b). Omit for non-X spells.
     pub fn x(mut self, value: u32) -> Self {
         self.x = Some(value);
+        self
+    }
+
+    /// Choose a cast variant when the engine offers a `CastingVariantChoice`
+    /// (CR 601.2b). Omit for ordinary casts; the driver panics if a spell
+    /// surfaces a variant choice without an explicit test intent.
+    pub fn casting_variant(mut self, variant: CastingVariant) -> Self {
+        self.casting_variant = Some(variant);
         self
     }
 
@@ -1704,16 +1715,14 @@ impl<'a> SpellCast<'a> {
         self
     }
 
-    /// Drive the full cast pipeline to its conclusion and return the outcome.
-    ///
-    /// Panics with a clear, extend-me message on any pipeline state the driver
-    /// is not yet taught to handle, or when a declared intent cannot be matched
-    /// to a required slot. A panic here is a *test-harness* signal: extend the
-    /// driver or drive the case manually — never assert around a silent skip.
-    pub fn resolve(self) -> CastOutcome {
+    /// Drive the cast pipeline until the spell is committed to the stack and a
+    /// priority window opens (CR 601.2i). Use this when a test must inspect the
+    /// live stack object before resolution.
+    pub fn commit(self) -> CastCommit<'a> {
         let SpellCast {
             runner,
             spell,
+            casting_variant,
             modes,
             x,
             target_players,
@@ -1749,9 +1758,32 @@ impl<'a> SpellCast<'a> {
         // CR 601.2a: the spell leaves hand only at stack commit. Captured when
         // the driver reaches the post-cast `Priority` window.
         let mut hand_at_commit: Option<Vec<(PlayerId, usize)>> = None;
+        let mut selected_casting_variant: Option<CastingVariantChoiceOption> = None;
 
         for _ in 0..64 {
             match &runner.state.waiting_for {
+                // CR 601.2b: choose a legal cast variant the engine authored.
+                WaitingFor::CastingVariantChoice { options, .. } => {
+                    let variant = casting_variant.unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::CastingVariantChoice but no \
+                             .casting_variant(..) was declared — declare the intended cast variant"
+                        )
+                    });
+                    let index = options
+                        .iter()
+                        .position(|option| option.variant == variant)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "SpellCast could not find requested cast variant {:?} in options {:?}",
+                                variant, options
+                            )
+                        });
+                    selected_casting_variant = Some(options[index].clone());
+                    runner
+                        .act(GameAction::ChooseCastingVariant { index })
+                        .expect("ChooseCastingVariant must be accepted");
+                }
                 // CR 601.2b: modal spell announces its mode choice.
                 WaitingFor::ModeChoice { .. } => {
                     let indices = modes.clone().unwrap_or_else(|| {
@@ -1853,6 +1885,60 @@ impl<'a> SpellCast<'a> {
                  (loop cap exceeded) — the spell did not commit to the stack"
             )
         });
+
+        CastCommit {
+            runner,
+            hand_baseline,
+            life_before,
+            remaining_objects,
+            declared_players,
+            selected_casting_variant,
+        }
+    }
+
+    /// Drive the full cast pipeline to its conclusion and return the outcome.
+    ///
+    /// Panics with a clear, extend-me message on any pipeline state the driver
+    /// is not yet taught to handle, or when a declared intent cannot be matched
+    /// to a required slot. A panic here is a *test-harness* signal: extend the
+    /// driver or drive the case manually — never assert around a silent skip.
+    pub fn resolve(self) -> CastOutcome {
+        self.commit().resolve()
+    }
+}
+
+/// A spell committed to the stack, before resolution starts.
+pub struct CastCommit<'a> {
+    runner: &'a mut GameRunner,
+    hand_baseline: Vec<(PlayerId, usize)>,
+    life_before: Vec<(PlayerId, i32)>,
+    remaining_objects: Vec<ObjectId>,
+    declared_players: Vec<PlayerId>,
+    selected_casting_variant: Option<CastingVariantChoiceOption>,
+}
+
+impl<'a> CastCommit<'a> {
+    /// Read the current pre-resolution state.
+    pub fn state(&self) -> &GameState {
+        &self.runner.state
+    }
+
+    /// The cast variant option selected during `CastingVariantChoice`, if the
+    /// cast surfaced that prompt.
+    pub fn selected_casting_variant(&self) -> Option<&CastingVariantChoiceOption> {
+        self.selected_casting_variant.as_ref()
+    }
+
+    /// Resolve the committed spell and return the usual behavior delta.
+    pub fn resolve(self) -> CastOutcome {
+        let CastCommit {
+            runner,
+            hand_baseline,
+            life_before,
+            remaining_objects,
+            declared_players,
+            ..
+        } = self;
 
         // Resolution. The shared driver auto-answers ordering/scry/trigger-
         // target/multi-target/optional prompts from the declared intent and
@@ -2282,6 +2368,25 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
                 runner
                     .act(GameAction::ChooseTarget { target: choice })
                     .expect("ChooseTarget (trigger) must be accepted");
+            }
+            // CR 608.2c: Some resolving spell abilities choose targets during
+            // resolution. Reuse the same slot-matching policy as cast-time
+            // targeting so tests can declare the intended object/player once.
+            WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                let choice = pick_slot_target(
+                    slot,
+                    &mut remaining_objects,
+                    declared_players,
+                    selection.current_slot,
+                );
+                runner
+                    .act(GameAction::ChooseTarget { target: choice })
+                    .expect("ChooseTarget (resolution) must be accepted");
             }
             // CR 601.2c: a variable-count multi-target set is submitted as one
             // SelectCards of the declared object targets that are legal here.

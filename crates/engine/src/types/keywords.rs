@@ -232,6 +232,8 @@ pub enum KeywordKind {
     Escalate,
     /// CR 702.59: Recover — see `Keyword::Recover`.
     Recover,
+    /// CR 702.102: Fuse — see `Keyword::Fuse`.
+    Fuse,
     Unknown,
 }
 
@@ -1081,6 +1083,9 @@ impl Keyword {
             Keyword::Offering(_) => KeywordKind::Offering,
             Keyword::Escalate(_) => KeywordKind::Escalate,
             Keyword::Recover(_) => KeywordKind::Recover,
+            // CR 702.102: Fuse — the runtime cast layer reads this kind to offer
+            // the fuse casting variant for split cards in hand.
+            Keyword::Fuse => KeywordKind::Fuse,
             Keyword::Unknown(_) => KeywordKind::Unknown,
             // Variants whose KeywordKind axis is currently the catch-all `Unknown`
             // because the AI/coverage layer that consumes `KeywordKind` does not
@@ -1113,7 +1118,6 @@ impl Keyword {
             | Keyword::Epic
             | Keyword::Evoke(_)
             | Keyword::Fortify(_)
-            | Keyword::Fuse
             | Keyword::Gravestorm
             | Keyword::Haunt
             | Keyword::Hideaway(_)
