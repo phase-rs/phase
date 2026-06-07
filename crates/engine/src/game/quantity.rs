@@ -1819,7 +1819,11 @@ fn resolve_ref(
                             triggering_event_player(state).is_some_and(|pid| pid == obj.controller)
                         }
                     };
-                    if controller_matches && obj.card_types.core_types.contains(&CoreType::Land) {
+                    // CR 702.26b: phased-out permanents are treated as though they do not exist.
+                    if controller_matches
+                        && obj.is_phased_in()
+                        && obj.card_types.core_types.contains(&CoreType::Land)
+                    {
                         for subtype in &basic_subtypes {
                             if obj.card_types.subtypes.iter().any(|s| s == subtype) {
                                 found.insert(*subtype);
@@ -9488,5 +9492,73 @@ mod tests {
 
         // 3 + 5 = 8 from LKI; pre-fix this returned 0 because obj.power was None.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 8);
+    }
+
+    fn add_basic_land(state: &mut GameState, controller: PlayerId, subtype: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.objects.len() as u64 + 100),
+            controller,
+            subtype.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push(subtype.to_string());
+        id
+    }
+
+    fn domain_expr() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::BasicLandTypeCount {
+                controller: ControllerRef::You,
+            },
+        }
+    }
+
+    #[test]
+    fn domain_counts_distinct_basic_land_types() {
+        // CR 305.6: domain counts distinct basic land types, not land count.
+        let mut state = GameState::new_two_player(42);
+        add_basic_land(&mut state, PlayerId(0), "Forest");
+        add_basic_land(&mut state, PlayerId(0), "Forest"); // duplicate — still counts as 1
+        add_basic_land(&mut state, PlayerId(0), "Island");
+        let expr = domain_expr();
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+    }
+
+    #[test]
+    fn domain_phased_out_land_does_not_count() {
+        // CR 702.26b: a phased-out permanent is treated as though it does not
+        // exist — its land type must not contribute to domain.
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = GameState::new_two_player(42);
+        let plains = add_basic_land(&mut state, PlayerId(0), "Plains");
+        let island = add_basic_land(&mut state, PlayerId(0), "Island");
+        let mountain = add_basic_land(&mut state, PlayerId(0), "Mountain");
+        let expr = domain_expr();
+
+        // Three distinct types phased in → domain 3.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
+
+        // Phase out Mountain — domain must drop to 2.
+        state.objects.get_mut(&mountain).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+
+        // Also phase out Island — domain drops to 1 (only Plains remains).
+        state.objects.get_mut(&island).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+
+        // Opponent's phased-out land does not affect caster's domain.
+        let _ = plains; // silence unused-variable warning
+        let opp_swamp = add_basic_land(&mut state, PlayerId(1), "Swamp");
+        state.objects.get_mut(&opp_swamp).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
     }
 }
