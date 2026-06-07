@@ -143,9 +143,14 @@ grant execute on function public.upsert_backup(jsonb, bigint) to authenticated;
 -- a user_backups row without a projection row is inside this single SQL-editor
 -- apply, and any such row self-heals on that account's next push (the
 -- visibility/pullMeta fallback keeps sync correct meanwhile).
+-- `do update` (not `do nothing`) makes re-runs self-healing: the projection is
+-- always derived from user_backups (same transaction in the RPC), so it can
+-- only ever equal or lag the source — overwriting with the source's current
+-- (revision, updated_at) repairs any stale row and is a no-op when already equal.
 insert into public.user_backup_revisions (user_id, revision, updated_at)
 select user_id, revision, updated_at from public.user_backups
-on conflict (user_id) do nothing;
+on conflict (user_id) do update
+  set revision = excluded.revision, updated_at = excluded.updated_at;
 
 -- Realtime: peer devices receive Postgres CDC notifications via the lightweight
 -- user_backup_revisions projection, NOT user_backups — so the heavy `payload`

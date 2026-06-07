@@ -135,6 +135,10 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
       throw error;
     }
     const row = Array.isArray(data) ? data[0] : data;
+    // upsert_backup always returns one row or raises, but this is a network/DB
+    // boundary — guard so a malformed empty response throws a clear error
+    // instead of a cryptic `Cannot read properties of undefined`.
+    if (!row) throw new Error("upsert_backup returned no row");
     return {
       revision: Number(row.revision), // bigint-as-string guard (see pullMeta)
       updatedAt: row.updated_at as string,
