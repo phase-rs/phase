@@ -637,14 +637,23 @@ pub fn route_debug_create_to_battlefield(
     let mut waiting_for = state.waiting_for.clone();
     match replacement::replace_event(state, proposed, &mut events) {
         ReplacementResult::Execute(event) => {
-            super::effects::change_zone::deliver_replaced_zone_change(
+            // CR 614.12a: a Devour as-enters sacrifice may surface its own
+            // `EffectZoneChoice`; park on it so the debug-place flow keeps the
+            // pending sacrifice prompt instead of overwriting it.
+            match super::effects::change_zone::deliver_replaced_zone_change(
                 state,
                 event,
                 None,
                 None,
                 false,
                 &mut events,
-            );
+            ) {
+                super::effects::change_zone::ZoneDeliveryResult::Done => {}
+                super::effects::change_zone::ZoneDeliveryResult::NeedsChoice(player) => {
+                    replacement::park_waiting_for(state, player);
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
             super::triggers::process_triggers(state, &events); // CR 603: Process triggers
             super::sba::check_state_based_actions(state, &mut events); // CR 704: Check SBAs
         }

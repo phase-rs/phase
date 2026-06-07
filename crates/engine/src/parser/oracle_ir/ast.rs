@@ -1006,6 +1006,9 @@ pub(crate) enum PutImperativeAst {
     NthFromTop {
         n: u32,
     },
+    /// CR 121.5: "put that many cards from the top of your library into your
+    /// hand" moves library cards without drawing them (Scroll Rack).
+    PutTopCardsIntoHandMatchingExileCount,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

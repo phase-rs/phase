@@ -4772,9 +4772,18 @@ pub(super) fn apply_where_x_effect_expression(
             *power = apply_where_x_expression(power.clone(), where_x_expression);
             *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
         }
-        Effect::PreventDamage { amount_dynamic, .. } => {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            ..
+        } => {
+            // CR 615.7: "prevent all …" must not inherit a sibling clause's
+            // where-X binding (Arachnogenesis: token count uses where-X;
+            // prevention is blanket).
             if let Some(expr) = where_x_expression {
-                *amount_dynamic = parse_where_x_quantity_expression(expr);
+                if !matches!(amount, crate::types::ability::PreventionAmount::All) {
+                    *amount_dynamic = parse_where_x_quantity_expression(expr);
+                }
             }
         }
         // CR 107.3i + CR 118.1: Resolution-time cost amounts (Life / Speed /

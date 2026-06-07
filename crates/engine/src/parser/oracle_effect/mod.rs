@@ -7076,6 +7076,19 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                     *count = QuantityExpr::Fixed { value: 0 };
                     return clause;
                 }
+                let lower_put = text.to_lowercase();
+                if matches!(*target, TargetFilter::Any | TargetFilter::ParentTarget)
+                    && (nom_primitives::scan_contains(&lower_put, "put them on top")
+                        || nom_primitives::scan_contains(&lower_put, "put the exiled cards on top")
+                        || nom_primitives::scan_contains(&lower_put, "cards exiled this way"))
+                {
+                    *target = TargetFilter::ExiledBySource;
+                    if matches!(*count, QuantityExpr::Fixed { value: 1 }) {
+                        *count = QuantityExpr::Ref {
+                            qty: QuantityRef::CardsExiledBySource,
+                        };
+                    }
+                }
                 let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
                     let lower = text.to_lowercase();
                     let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
@@ -17295,9 +17308,10 @@ mod tests {
         ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode,
         Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation, PtStat,
-        PtValue, PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
-        TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
+        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation,
+        PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -35260,6 +35274,98 @@ mod tests {
             found_change_zone,
             "should have ChangeZone to Hand in sub-ability chain"
         );
+    }
+
+    #[test]
+    fn scroll_rack_activated_effect_chain() {
+        let chain = parse_effect_chain(
+            "Exile any number of cards from your hand face down. Put that many cards from the top of your library into your hand. Then look at the exiled cards and put them on top of your library in any order.",
+            AbilityKind::Activated,
+        );
+        let mut current = Some(&chain);
+        let mut effects = Vec::new();
+        while let Some(def) = current {
+            effects.push(def.effect.as_ref().clone());
+            current = def.sub_ability.as_deref();
+        }
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Mill {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::CardsExiledBySource,
+                        },
+                        destination: Zone::Hand,
+                        ..
+                    }
+                )
+            }),
+            "expected top-library move to hand tied to CardsExiledBySource, got {effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+            "CR 121.5: Scroll Rack puts cards into hand without drawing them"
+        );
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::PutAtLibraryPosition {
+                        target: TargetFilter::ExiledBySource,
+                        ..
+                    }
+                )
+            }),
+            "expected exiled cards put on library top, got {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::RevealHand {
+                        target: TargetFilter::ExiledBySource,
+                        ..
+                    }
+                )
+            }),
+            "expected private look at exiled cards, got {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "chain must not contain Unimplemented effects"
+        );
+    }
+
+    #[test]
+    fn arachnogenesis_prevent_all_non_spider() {
+        let chain = parse_effect_chain(
+            "Create X 1/2 green Spider creature tokens with reach, where X is the number of creatures attacking you. Prevent all combat damage that would be dealt this turn by non-Spider creatures.",
+            AbilityKind::Spell,
+        );
+        let prevent = chain
+            .sub_ability
+            .as_ref()
+            .map(|s| s.effect.as_ref())
+            .expect("prevent clause sub-ability");
+        match prevent {
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: Some(TargetFilter::Typed(tf)),
+                ..
+            } => {
+                assert!(amount_dynamic.is_none());
+                assert!(tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Subtype(s) if s == "Spider")
+                )));
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
     }
 
     #[test]

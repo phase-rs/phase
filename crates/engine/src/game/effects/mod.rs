@@ -586,8 +586,10 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             effect_kind,
                         });
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
+                    // may already have surfaced its own `EffectZoneChoice` during the
+                    // resumed member's entry.
+                    crate::game::replacement::park_waiting_for(state, player);
                     paused = true;
                     break;
                 }
@@ -620,6 +622,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             state,
             &mut events[events_before_drain..],
         );
+        // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
+        // the whole ChangeZone entry event is complete, so clear the pre-entry
+        // Devour snapshot. NOT cleared on the `paused` break above (a further
+        // devourer's sacrifice and the remaining members still need it).
+        let _ = state.devour_eligible_snapshot.take();
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
