@@ -57,6 +57,20 @@ function meta(revision: number): RemoteMeta {
   return { revision, updatedAt: "2026-05-26T01:00:00.000Z" };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function flushAsync() {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
 let provider: {
   identity: ReturnType<typeof vi.fn>;
   pullMeta: ReturnType<typeof vi.fn>;
@@ -161,6 +175,42 @@ describe("cloudSyncStore.syncNow reconciliation", () => {
     expect(provider.pull).not.toHaveBeenCalled();
     expect(provider.push).not.toHaveBeenCalled();
     expect(useCloudSyncStore.getState().status).toBe("synced");
+  });
+
+  it("coalesced callers wait for the trailing sync they requested", async () => {
+    useCloudSyncStore.setState({ lastSyncedRevision: 5, dirty: false });
+    const firstMeta = deferred<RemoteMeta>();
+    const secondMeta = deferred<RemoteMeta>();
+    provider.pullMeta
+      .mockReturnValueOnce(firstMeta.promise)
+      .mockReturnValueOnce(secondMeta.promise);
+    provider.pull.mockResolvedValue(remote(6));
+    buildBackupMock.mockReturnValue(fakeBackup());
+
+    const firstSync = useCloudSyncStore.getState().syncNow();
+    expect(provider.pullMeta).toHaveBeenCalledTimes(1);
+
+    let secondResolved = false;
+    const secondSync = useCloudSyncStore
+      .getState()
+      .syncNow()
+      .then(() => {
+        secondResolved = true;
+      });
+
+    firstMeta.resolve(meta(5));
+    await firstSync;
+    await flushAsync();
+
+    expect(provider.pullMeta).toHaveBeenCalledTimes(2);
+    expect(secondResolved).toBe(false);
+    secondMeta.resolve(meta(6));
+    await secondSync;
+
+    expect(provider.pullMeta).toHaveBeenCalledTimes(2);
+    expect(provider.pull).toHaveBeenCalledTimes(1);
+    expect(useCloudSyncStore.getState().lastSyncedRevision).toBe(6);
+    expect(secondResolved).toBe(true);
   });
 
   it("surfaces a lost write race as a conflict, pulling the body only in the catch", async () => {

@@ -1344,9 +1344,13 @@ fn sum_power(state: &GameState, ids: &[ObjectId]) -> i32 {
 /// bail) only cost CPU; false positives (bailing when a save existed) cannot
 /// happen because the bound dominates any real assignment's absorption.
 ///
-/// Optimal greedy under the relaxation: chump the N highest-power non-trample
-/// non-unblockable attackers (each absorbs full attacker_power), then apply
-/// remaining blocker toughness to tramplers (each absorbs blocker_toughness).
+/// Optimal allocation under the relaxation: a blocker spent chumping absorbs the
+/// attacker's full power (toughness-independent); a blocker spent on trample
+/// absorbs its own toughness. Chumping the most attackers is NOT always optimal —
+/// chumping a low-power attacker can waste a high-toughness blocker that would
+/// soak more trample. So maximize over every chump count `k` in `0..=min(chumps,
+/// blockers)`: chump the `k` highest-power attackers (using the `k` smallest
+/// blockers) and reserve the `blockers - k` largest-toughness blockers for trample.
 fn block_is_futile(
     state: &GameState,
     player: PlayerId,
@@ -1387,33 +1391,39 @@ fn block_is_futile(
         .collect();
     blocker_toughnesses.sort_unstable_by(|a, b| b.cmp(a));
 
-    let chump_count = chumpable_powers.len().min(blocker_toughnesses.len());
-    let chump_absorption: i32 = chumpable_powers.iter().take(chump_count).sum();
     // CR 510.1c: Chumping a non-trample attacker absorbs its full power regardless
     // of the blocker's toughness, so chump with the SMALLEST blockers and reserve
     // the LARGEST-toughness ones to soak trample. `blocker_toughnesses` is sorted
-    // descending, so the trample blockers are the leading `len - chump_count`
-    // entries. (Skipping them — using the smallest for trample — under-counted
-    // absorption and wrongly reported survivable boards as futile.)
-    let trample_blocker_count = blocker_toughnesses.len() - chump_count;
-    let remaining_blocker_toughness: i32 =
-        blocker_toughnesses.iter().take(trample_blocker_count).sum();
-    let trample_absorption = trample_power.min(remaining_blocker_toughness);
+    // descending, so `toughness_prefix[m]` is the absorption of the m largest.
+    let total_blockers = blocker_toughnesses.len();
+    let mut toughness_prefix = vec![0i32; total_blockers + 1];
+    for (i, &t) in blocker_toughnesses.iter().enumerate() {
+        toughness_prefix[i + 1] = toughness_prefix[i] + t;
+    }
 
-    let max_absorption = chump_absorption + trample_absorption;
+    // Maximize absorption over every chump count `k`: chumping the `k` biggest
+    // attackers frees the `total_blockers - k` largest blockers for trample.
+    // Forcing the maximum `k` under-counted absorption (a small chump can cost a
+    // big trample blocker) and wrongly reported survivable boards as futile.
+    let max_chump = chumpable_powers.len().min(total_blockers);
+    let mut max_absorption = 0;
+    let mut chump_absorption = 0;
+    for k in 0..=max_chump {
+        if k > 0 {
+            chump_absorption += chumpable_powers[k - 1];
+        }
+        let trample_absorption = trample_power.min(toughness_prefix[total_blockers - k]);
+        max_absorption = max_absorption.max(chump_absorption + trample_absorption);
+    }
     let min_residual = total_attacker_power - max_absorption;
 
-    // Residual is unblockable_power + uncovered chumpables + uncovered trample.
-    // Equivalently: total - max_absorption (which already accounts for unblockable
-    // contributing zero absorption). Bail iff that residual STRICTLY EXCEEDS life
-    // — at exact lethal we still chump per the existing "minimize damage even when
-    // dying" semantics (theoretical opponent miscounts / instant-speed lifegain).
-    debug_assert_eq!(
-        min_residual,
-        unblockable_power
-            + (chumpable_powers.iter().sum::<i32>() - chump_absorption)
-            + (trample_power - trample_absorption)
-    );
+    // Residual = unblockable_power + uncovered chumpables + uncovered trample.
+    // Absorption only ever neutralizes chumpable/trample power, never unblockable,
+    // so the residual can never drop below the unblockable total. Bail iff residual
+    // STRICTLY EXCEEDS life — at exact lethal we still chump per the existing
+    // "minimize damage even when dying" semantics (opponent miscounts / lifegain).
+    debug_assert!(min_residual >= unblockable_power);
+    debug_assert!(max_absorption <= chumpable_powers.iter().sum::<i32>() + trample_power);
     min_residual > life
 }
 
@@ -3031,6 +3041,36 @@ mod tests {
         assert!(
             !block_is_futile(&state, PlayerId(1), &[trampler, bear], &[wall, small]),
             "Wall absorbs the trampler and Small chumps the Bear (residual 0 < life 2); not futile"
+        );
+    }
+
+    /// CR 509.1 + CR 510.1c: `block_is_futile` must not assume chumping every
+    /// possible attacker maximizes absorption. Chumping a low-power attacker
+    /// consumes a blocker that could have soaked more trample damage. Here the
+    /// optimum is to gang-block the 6/6 trampler with BOTH 0/3 walls (absorb 6 →
+    /// 0 tramples through) and take 1 from the unblocked 1/1: residual 1 == life,
+    /// not > life, so the board is survivable and must NOT be reported futile.
+    /// The bug forced `chump_count = min(chumpables, blockers)` (always chump the
+    /// 1/1), leaving only one wall (toughness 3) for trample → 3 tramples through,
+    /// wrongly conceding the game.
+    #[test]
+    fn block_is_futile_skips_chump_to_soak_more_trample() {
+        let mut state = setup();
+        state.players[1].life = 1;
+        let wall_a = add_creature(&mut state, PlayerId(1), "WallA", 0, 3, vec![]);
+        let wall_b = add_creature(&mut state, PlayerId(1), "WallB", 0, 3, vec![]);
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Trampler",
+            6,
+            6,
+            vec![Keyword::Trample],
+        );
+        let goblin = add_creature(&mut state, PlayerId(0), "Goblin", 1, 1, vec![]);
+        assert!(
+            !block_is_futile(&state, PlayerId(1), &[trampler, goblin], &[wall_a, wall_b]),
+            "both walls should soak the trampler (residual 1 == life) instead of chumping the 1/1"
         );
     }
 

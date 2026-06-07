@@ -83,14 +83,12 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;
  */
 let syncInFlight: Promise<void> | null = null;
 /**
- * Set when a sync is requested while one is already in flight. The in-flight
- * sync may have already taken its `pullMeta` snapshot before the newer remote
- * revision landed, so coalescing onto it would leave this device silently
- * behind (e.g. a realtime tick for rev 6 arrives mid-flight while the running
- * sync reconciles rev 5). The trailing-edge re-trigger below runs one more sync
- * after the current one drains so the latest revision is always reconciled.
+ * Latest trailing-edge sync requested by a caller that arrived while another
+ * sync was in flight. Each coalesced caller gets back a promise that resolves
+ * after its follow-up sync, not merely after the older snapshot drains.
  */
-let syncNeededAfter = false;
+let nextSyncInFlight: Promise<void> | null = null;
+let nextSyncBase: Promise<void> | null = null;
 /**
  * Active realtime CDC channel for the current session. Held at module scope
  * so signIn/signOut can re-arm or tear down without going through `init()`.
@@ -266,12 +264,26 @@ export const useCloudSyncStore = create<CloudSyncState>()(
 
       syncNow: async () => {
         // Coalesce concurrent callers onto the in-flight promise so the
-        // pull→push window can't be straddled by a stale snapshot. Record that a
-        // sync was requested mid-flight so the finally block re-runs once — the
-        // running sync may have snapshotted an older revision than this caller saw.
+        // pull→push window can't be straddled by a stale snapshot. A caller that
+        // arrives mid-flight may have observed a newer remote revision than the
+        // running sync snapshotted, so chain a trailing sync and return that
+        // promise to the caller.
         if (syncInFlight) {
-          syncNeededAfter = true;
-          return syncInFlight;
+          if (nextSyncInFlight && nextSyncBase === syncInFlight) {
+            return nextSyncInFlight;
+          }
+          const base = syncInFlight;
+          const followUp = base
+            .then(() => get().syncNow())
+            .finally(() => {
+              if (nextSyncInFlight === followUp) {
+                nextSyncInFlight = null;
+                nextSyncBase = null;
+              }
+            });
+          nextSyncBase = base;
+          nextSyncInFlight = followUp;
+          return followUp;
         }
         const provider = getCloudSyncProvider();
         const identity = provider?.identity() ?? null;
@@ -415,16 +427,6 @@ export const useCloudSyncStore = create<CloudSyncState>()(
           await syncInFlight;
         } finally {
           syncInFlight = null;
-          // A sync requested while this one ran may have seen a newer revision
-          // than we reconciled. Re-run once (a cheap pullMeta confirms in-sync
-          // and no-ops when nothing actually changed). Deferred to a microtask
-          // so the mutex is fully cleared before the follow-up acquires it.
-          if (syncNeededAfter) {
-            syncNeededAfter = false;
-            queueMicrotask(() => {
-              void get().syncNow();
-            });
-          }
         }
       },
 
