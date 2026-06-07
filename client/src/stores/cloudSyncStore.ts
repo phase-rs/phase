@@ -265,23 +265,27 @@ export const useCloudSyncStore = create<CloudSyncState>()(
         set({ status: "syncing", error: null, identity });
         syncInFlight = (async () => {
           try {
-            const remote = await provider.pull();
+            // Cheap metadata-only read first. The full payload is fetched only
+            // in the two branches below that actually reconcile remote data, so
+            // the common "nothing changed" tab-focus/realtime sync transfers a
+            // few bytes instead of the entire backup envelope.
+            const meta = await provider.pullMeta();
             const local = buildBackup();
             const { lastSyncedRevision, dirty } = get();
 
-            if (!remote) {
+            if (!meta) {
               // Account is empty — seed it with this device's data.
-              const meta = await provider.push(local, null);
+              const seeded = await provider.push(local, null);
               set({
                 status: "synced",
                 dirty: false,
-                lastSyncedRevision: meta.revision,
+                lastSyncedRevision: seeded.revision,
                 lastSyncedAt: new Date().toISOString(),
               });
               return;
             }
 
-            const remoteAhead = remote.meta.revision !== lastSyncedRevision;
+            const remoteAhead = meta.revision !== lastSyncedRevision;
             // On first sign-in (no revision history here) treat any existing
             // local profile data — decks, prefs, or feeds — as unsynced changes
             // so we never silently discard them to a remote pull.
@@ -290,6 +294,19 @@ export const useCloudSyncStore = create<CloudSyncState>()(
               (lastSyncedRevision === null && backupHasUserData(local));
 
             if (remoteAhead && localChanged) {
+              // Diverged: need the remote body for the digest + conflict diff.
+              const remote = await provider.pull();
+              if (!remote) {
+                // Row deleted between pullMeta and pull — reseed as empty.
+                const seeded = await provider.push(local, null);
+                set({
+                  status: "synced",
+                  dirty: false,
+                  lastSyncedRevision: seeded.revision,
+                  lastSyncedAt: new Date().toISOString(),
+                });
+                return;
+              }
               // Suppress false conflicts: if local and remote payloads are
               // byte-identical (after excluding the volatile exportedAt
               // timestamp), there's nothing to reconcile — just adopt the
@@ -315,20 +332,35 @@ export const useCloudSyncStore = create<CloudSyncState>()(
               return;
             }
             if (remoteAhead && !localChanged) {
+              // Remote moved, nothing local to preserve: fetch the body and
+              // adopt it wholesale.
+              const remote = await provider.pull();
+              if (!remote) {
+                const seeded = await provider.push(local, null);
+                set({
+                  status: "synced",
+                  dirty: false,
+                  lastSyncedRevision: seeded.revision,
+                  lastSyncedAt: new Date().toISOString(),
+                });
+                return;
+              }
               applyRemote(set, remote);
               return;
             }
             if (!remoteAhead && localChanged) {
-              const meta = await provider.push(local, remote.meta.revision);
+              // Local-only changes: push with the meta revision as the CAS
+              // guard — no remote body needed.
+              const pushed = await provider.push(local, meta.revision);
               set({
                 status: "synced",
                 dirty: false,
-                lastSyncedRevision: meta.revision,
+                lastSyncedRevision: pushed.revision,
                 lastSyncedAt: new Date().toISOString(),
               });
               return;
             }
-            // Already in sync: nothing moved over the wire, but the pull
+            // Already in sync: nothing moved over the wire, but the meta read
             // confirmed both sides agree on the current revision. That IS a
             // successful reconciliation — stamp lastSyncedAt so the user
             // pressing "Sync now" gets visible confirmation.
@@ -346,6 +378,21 @@ export const useCloudSyncStore = create<CloudSyncState>()(
                 });
                 return;
               }
+              // The row is gone (deleted, or a delete+reinsert race that turned
+              // our null-revision reseed into P0001). Reseed this device's data
+              // as the new account state rather than dead-ending at an error.
+              try {
+                const seeded = await provider.push(buildBackup(), null);
+                set({
+                  status: "synced",
+                  dirty: false,
+                  lastSyncedRevision: seeded.revision,
+                  lastSyncedAt: new Date().toISOString(),
+                });
+              } catch (reseedErr) {
+                set({ status: "error", error: errorMessage(reseedErr) });
+              }
+              return;
             }
             set({ status: "error", error: errorMessage(e) });
           }
