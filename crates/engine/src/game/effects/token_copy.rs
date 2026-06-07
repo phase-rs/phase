@@ -557,6 +557,8 @@ struct CopyTokenFinalization {
     controller: crate::types::player::PlayerId,
 }
 
+/// CR 707.2 / CR 707.9: Complete copy-token entry and apply remaining copy
+/// modifications after resuming from a counter-placement replacement pause.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     state: &mut GameState,

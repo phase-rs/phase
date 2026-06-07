@@ -150,13 +150,6 @@ pub(crate) fn stash_pending_counter_additions(
     remaining: Vec<PendingCounterAddition>,
     completion: PendingEffectResolved,
 ) {
-    if remaining.is_empty() {
-        state.pending_counter_additions = Some(PendingCounterAdditionQueue {
-            remaining,
-            completion: Some(completion),
-        });
-        return;
-    }
     state.pending_counter_additions = Some(PendingCounterAdditionQueue {
         remaining,
         completion: Some(completion),
@@ -1472,6 +1465,9 @@ pub fn resolve_move(
         .map(|value| value.max(0) as u32);
 
     if mode != CounterTransferMode::Move {
+        // CR 122.1 / CR 122.5: Non-move counter transfers copy counters by
+        // placing new counters, so each addition goes through the replacement
+        // pipeline rather than the atomic move-counter path.
         let mut additions = Vec::new();
         for source_id in source_ids {
             let source_counters =
