@@ -26,6 +26,43 @@ use super::engine::EngineError;
 use super::sacrifice::apply_sacrifice_after_replacement;
 use super::zones;
 
+/// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
+/// sacrifice replacement — a `Moved` (ETB-style) event whose post-effect is a
+/// `Sacrifice` over a `Typed`/`Any` scope filter (the chooser-driven "sacrifice
+/// any number of creatures/permanents" pool). This is a structural shape match,
+/// NOT a Devour-specific one: other `Moved + Sacrifice{Typed|Any}` replacements
+/// share it. Used both to suppress the source-as-pre-selected target injection
+/// and as the capture gate for the pre-entry eligible snapshot.
+/// (`ReplacementEvent` is Clone-not-Copy, so we borrow it.)
+pub(crate) fn is_as_enters_sacrifice_scope_replacement(
+    event: Option<&ReplacementEvent>,
+    effect: &Effect,
+) -> bool {
+    matches!(event, Some(ReplacementEvent::Moved))
+        && matches!(
+            effect,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(_) | TargetFilter::Any,
+                ..
+            }
+        )
+}
+
+/// CR 614.13a + CR 702.82a/c: true if `id`'s self-referential replacement
+/// definitions carry an as-enters Devour-shape sacrifice (see
+/// [`is_as_enters_sacrifice_scope_replacement`]). Capture gate for the
+/// pre-entry eligible snapshot in `deliver_replaced_zone_change`.
+pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.replacement_definitions.iter_all().any(|def| {
+            def.valid_card == Some(TargetFilter::SelfRef)
+                && def.execute.as_ref().is_some_and(|e| {
+                    is_as_enters_sacrifice_scope_replacement(Some(&def.event), &e.effect)
+                })
+        })
+    })
+}
+
 pub(super) fn handle_replacement_choice(
     state: &mut GameState,
     index: usize,
@@ -708,14 +745,7 @@ pub(super) fn apply_post_replacement_effect(
     // "sacrifice that many permanents") and Outfitted Jouster (DamageDone:
     // "sacrifice an Equipment") — keep the pre-Devour injection path so their
     // target-as-pre-selected resolution is unchanged.
-    let sacrifice_typed_scope = matches!(event, Some(ReplacementEvent::Moved))
-        && matches!(
-            &*real_work.effect,
-            Effect::Sacrifice {
-                target: TargetFilter::Typed(_) | TargetFilter::Any,
-                ..
-            }
-        );
+    let sacrifice_typed_scope = is_as_enters_sacrifice_scope_replacement(event, &real_work.effect);
     let targets = if sacrifice_typed_scope {
         Vec::new()
     } else {

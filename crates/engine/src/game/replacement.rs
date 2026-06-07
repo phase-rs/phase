@@ -366,6 +366,16 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
     }
 }
 
+/// CR 614.12a: Park on the replacement choice for `player`, unless a downstream
+/// effect (a Devour as-enters Sacrifice `EffectZoneChoice`) already surfaced its
+/// own interactive prompt — then leave it so the pending choice isn't clobbered.
+pub fn park_waiting_for(state: &mut GameState, player: PlayerId) {
+    if matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }) {
+        return;
+    }
+    state.waiting_for = replacement_choice_waiting_for(player, state);
+}
+
 /// CR 614.12a: Human-readable accept-label for a `MayCost` replacement prompt.
 /// Returns a complete imperative phrase (the caller no longer prepends "Pay ")
 /// so non-mana costs read naturally. Exhaustive — a new `AbilityCost` variant

@@ -5538,6 +5538,25 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
 
+    /// CR 614.12a + CR 614.13a/b: Battlefield objects eligible to be chosen by an
+    /// as-enters Devour sacrifice (CR 702.82a/c), captured the instant BEFORE the
+    /// FIRST co-entering devourer enters and PERSISTED for the whole simultaneous
+    /// entry. Because CR 614.12a makes every co-entering permanent's as-enters
+    /// choice happen before ANY of them enter, the engine (which serializes entry)
+    /// reuses this one pre-entry snapshot for every co-entering devourer — so a
+    /// second devourer cannot devour the first (it entered "at the same time",
+    /// CR 614.13a), and the eligible pool (live battlefield ∩ snapshot) also
+    /// excludes anything an earlier devourer already sacrificed (it left the
+    /// battlefield) and the devourers themselves (absent from the pre-entry set).
+    /// `None` outside a Devour co-entry; cleared when the whole ChangeZone entry
+    /// event completes (all co-entering members resolved), NOT per-sacrifice.
+    ///
+    /// WARNING — save/resume: the serde attr MUST stay `skip_serializing_if =
+    /// "Option::is_none"` (skips only `None`; a live `Some` is serialized so a
+    /// mid-prompt save keeps the constraint). Never broaden to skip `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devour_eligible_snapshot: Option<HashSet<ObjectId>>,
+
     /// CR 707.2 + CR 614.1a + CR 616.1: Pending `CopyTokenOf` source loop
     /// paused by an interactive token-creation replacement. Drained by
     /// `token_copy::drain_pending_copy_token_resolution` after the current
@@ -6324,6 +6343,7 @@ impl GameState {
             pending_continuation: None,
             pending_repeat_iteration: None,
             pending_change_zone_iteration: None,
+            devour_eligible_snapshot: None,
             pending_copy_token_resolution: None,
             pending_coin_flip: None,
             pending_repeat_until: None,
@@ -6740,6 +6760,21 @@ impl PartialEq for GameState {
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
+            // `devour_eligible_snapshot` is INTENTIONALLY excluded from PartialEq.
+            // It is a TRANSIENT mid-resolution carrier (CR 614.12a/13a): `Some`
+            // only while a Devour co-entry is in flight, `None` everywhere else.
+            // It is NOT necessarily recoverable from the other compared fields
+            // during its Some-window — at the as-enters sacrifice prompt the
+            // Devour PutCounter sub-ability has not run, so for a vanilla devourer
+            // `pending_etb_counters` does not contain the entering ObjectId; the
+            // snapshot can be live across this boundary. Exclusion is safe anyway:
+            // PartialEq is used for AI-search position dedup, and the only effect
+            // of ignoring this field is that two otherwise-identical transient
+            // mid-resolution states may dedup together — an AI-search collapse,
+            // never a game-rule error (the rule-bearing constraint is the live
+            // snapshot itself, which IS preserved on serde round-trip: the field
+            // is serialized whenever `Some` — see `skip_serializing_if` above —
+            // so a mid-prompt save/resume keeps the constraint intact).
             && self.pending_copy_token_resolution == other.pending_copy_token_resolution
             && self.pending_coin_flip == other.pending_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
