@@ -36903,6 +36903,113 @@ mod tests {
         );
     }
 
+    /// CR 702.71a: Transfigure sacrifices the source permanent, then searches
+    /// the library for a *creature* card with the same mana value as that
+    /// permanent and puts it onto the battlefield. This exercises the full
+    /// runtime path: the Sacrifice cost moves the source to the graveyard, and
+    /// the search filter resolves `QuantityRef::ObjectManaValue { Source }`
+    /// against the sacrificed permanent (LKI), excluding wrong-mana-value
+    /// creatures and same-mana-value non-creatures alike. The found card lands
+    /// on the battlefield (not hand) — the key discriminator from Transmute.
+    #[test]
+    fn transfigure_searches_battlefield_source_mana_value_for_creature() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // CR 702.71a: Fleshwrither — MV4 creature with "Transfigure {1}{B}{B}".
+        let source = scenario
+            .add_creature(P0, "Fleshwrither", 2, 2)
+            .with_mana_cost(ManaCost::generic(4))
+            .from_oracle_text("Transfigure {1}{B}{B}")
+            .id();
+        // Legal target: MV4 creature in library.
+        let mv4_creature = scenario
+            .add_spell_to_library_top(P0, "MV4 Creature", false)
+            .as_creature()
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        // Illegal: wrong-MV creature.
+        scenario
+            .add_spell_to_library_top(P0, "MV2 Creature", false)
+            .as_creature()
+            .with_mana_cost(ManaCost::generic(2));
+        // Illegal: same-MV non-creature (stays Sorcery).
+        scenario
+            .add_spell_to_library_top(P0, "MV4 Sorcery", false)
+            .with_mana_cost(ManaCost::generic(4));
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(9_990), false, vec![]),
+                ManaUnit::new(ManaType::Black, ObjectId(9_991), false, vec![]),
+                ManaUnit::new(ManaType::Black, ObjectId(9_992), false, vec![]),
+            ],
+        );
+
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let transfigure_idx = state
+            .objects
+            .get(&source)
+            .unwrap()
+            .abilities
+            .iter()
+            .position(|ability| matches!(ability.kind, AbilityKind::Activated))
+            .expect("synthesized transfigure activated ability");
+        assert!(
+            can_activate_ability_now(state, PlayerId(0), source, transfigure_idx),
+            "transfigure ability should be activatable from battlefield at sorcery speed"
+        );
+
+        let mut events = Vec::new();
+        handle_activate_ability(state, PlayerId(0), source, transfigure_idx, &mut events).unwrap();
+
+        // CR 702.71a: "Sacrifice this permanent" — source moves to graveyard.
+        assert_eq!(
+            state.objects[&source].zone,
+            Zone::Graveyard,
+            "transfigure sacrifices the source permanent as an activation cost"
+        );
+
+        crate::game::stack::resolve_top(state, &mut events);
+        let search_cards = match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => cards.clone(),
+            other => {
+                panic!("expected Transfigure to ask for a same-mana-value creature search, got {other:?}")
+            }
+        };
+        assert_eq!(
+            search_cards,
+            vec![mv4_creature],
+            "Transfigure must offer only same-mana-value CREATURE cards \
+             (excludes wrong-MV creature and same-MV non-creature)"
+        );
+
+        crate::game::engine::apply_as_current(
+            state,
+            GameAction::SelectCards {
+                cards: vec![mv4_creature],
+            },
+        )
+        .unwrap();
+        // CR 702.71a: "put it onto the battlefield" — NOT hand (key discriminator
+        // from Transmute).
+        assert_eq!(
+            state.objects[&mv4_creature].zone,
+            Zone::Battlefield,
+            "Transfigure should put the selected same-mana-value creature onto the battlefield"
+        );
+        assert!(
+            !state.players[0].library.contains(&mv4_creature),
+            "the found creature must have left the library"
+        );
+    }
+
     // ------------------------------------------------------------------
     // CR 702.103: Bestow alt-cost cast lane
     // ------------------------------------------------------------------

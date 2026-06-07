@@ -1768,6 +1768,98 @@ pub fn synthesize_transmute(face: &mut CardFace) {
     face.abilities.extend(transmute_abilities);
 }
 
+/// CR 702.71a: Synthesize Transfigure into an activated ability on the card.
+///
+/// "Transfigure [cost]" means "[Cost], Sacrifice this permanent: Search your
+/// library for a creature card with the same mana value as this permanent and
+/// put it onto the battlefield. Then shuffle your library. Activate only as a
+/// sorcery." Mirrors `synthesize_transmute`, but (1) the cost sacrifices the
+/// source permanent instead of discarding it, (2) the same-mana-value filter
+/// reads the *source* permanent's mana value (`ObjectScope::Source`, not
+/// `CostPaidObject` — a Sacrifice cost never stamps `cost_paid_object`), (3) the
+/// found card is a creature and goes to the battlefield (not hand), and (4) the
+/// ability functions on the battlefield (default `activation_zone`, unlike
+/// Transmute's hand-only).
+pub fn synthesize_transfigure(face: &mut CardFace) {
+    let transfigure_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Transfigure(cost) = kw else {
+                return None;
+            };
+            // CR 702.71a: Composite cost — pay mana, then sacrifice this permanent.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    },
+                ],
+            };
+            // CR 702.71a: "a creature card with the same mana value as this
+            // permanent." ObjectScope::Source reads the (sacrificed) source's
+            // printed mana value (zone-stable, LKI-backed) — NOT CostPaidObject.
+            let filter =
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                ]));
+            // CR 702.71a: "Then shuffle your library."
+            let shuffle_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            );
+            // CR 702.71a: "put it onto the battlefield" — Library→Battlefield.
+            let mut put_on_battlefield_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            );
+            put_on_battlefield_def.sub_ability = Some(Box::new(shuffle_def));
+            // CR 702.71a: "Search your library ... Activate only as a sorcery."
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::SearchLibrary {
+                    filter,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
+                },
+            )
+            .cost(composite_cost)
+            .sorcery_speed();
+            def.sub_ability = Some(Box::new(put_on_battlefield_def));
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(transfigure_abilities);
+}
+
 /// CR 702.53a: "a card with the same mana value as the discarded card." The
 /// discarded card is the transmute card itself, paid as the discard cost, so the
 /// filter compares a library card's mana value to the cost-paid object's mana
@@ -8302,6 +8394,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // a card with the same mana value, reveal it, put it in hand, then shuffle.
     // Activate only as a sorcery."
     synthesize_transmute(face);
+    // CR 702.71a: Transfigure — "[Cost], Sacrifice this permanent: search your
+    // library for a creature with the same mana value, put it onto the
+    // battlefield, then shuffle. Activate only as a sorcery."
+    synthesize_transfigure(face);
     synthesize_scavenge(face);
     // CR 702.128a / CR 702.129a: Embalm / Eternalize graveyard-activated
     // token-copy abilities (self-contained building block in its own module).
@@ -9744,6 +9840,121 @@ mod transmute_synthesis_tests {
     fn synthesize_transmute_is_noop_without_keyword() {
         let mut face = CardFace::default();
         synthesize_transmute(&mut face);
+        assert!(face.abilities.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod transfigure_synthesis_tests {
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+
+    fn transfigure_face() -> CardFace {
+        CardFace {
+            keywords: vec![Keyword::Transfigure(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            })],
+            ..CardFace::default()
+        }
+    }
+
+    /// CR 702.71a: `synthesize_transfigure` installs one battlefield, sorcery-speed
+    /// activated ability whose cost is "{cost}, Sacrifice this permanent", whose
+    /// effect searches the library for a same-mana-value creature, and whose
+    /// sub-ability chain puts the found card onto the battlefield then shuffles.
+    #[test]
+    fn synthesize_transfigure_builds_same_mana_value_creature_tutor() {
+        let mut face = transfigure_face();
+        synthesize_transfigure(&mut face);
+
+        assert_eq!(
+            face.abilities.len(),
+            1,
+            "one transfigure ability per keyword"
+        );
+        let ability = face.abilities.first().expect("transfigure ability");
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        // CR 702.71a: functions on the battlefield (default activation_zone), unlike
+        // Transmute's Some(Hand).
+        assert_eq!(ability.activation_zone, None);
+        // CR 702.71a: "Activate only as a sorcery."
+        assert!(ability.sorcery_speed);
+        assert!(ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // Cost: Composite[Mana, Sacrifice this permanent (SelfRef, count 1)].
+        match &ability.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
+                assert!(costs.iter().any(|c| matches!(
+                    c,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    }
+                )));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+
+        // Effect: SearchLibrary with a same-mana-value-as-source creature filter.
+        let Effect::SearchLibrary { filter, reveal, .. } = &*ability.effect else {
+            panic!("expected SearchLibrary, got {:?}", ability.effect);
+        };
+        assert!(!*reveal, "CR 702.71a: no reveal in transfigure");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "CR 702.71a: filter restricted to creature cards, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            // CR 702.71a: same mana value as THIS PERMANENT — Source,
+                            // never CostPaidObject (Sacrifice stamps no cost_paid_object).
+                            scope: ObjectScope::Source
+                        }
+                    }
+                }
+            )),
+            "filter must match a creature with the same mana value as the source, got {:?}",
+            tf.properties
+        );
+
+        // Sub-ability chain: put found card to battlefield (Library→Battlefield),
+        // then shuffle.
+        let put_on_battlefield = ability
+            .sub_ability
+            .as_ref()
+            .expect("put-on-battlefield sub-ability");
+        assert!(matches!(
+            &*put_on_battlefield.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+        let shuffle = put_on_battlefield
+            .sub_ability
+            .as_ref()
+            .expect("shuffle sub-ability");
+        assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+
+    #[test]
+    fn synthesize_transfigure_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_transfigure(&mut face);
         assert!(face.abilities.is_empty());
     }
 }

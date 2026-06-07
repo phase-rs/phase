@@ -1541,6 +1541,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::JumpStart => "jump-start".to_string(),
         Keyword::Cipher => "cipher".to_string(),
         Keyword::Transmute(_) => "transmute".to_string(),
+        Keyword::Transfigure(_) => "transfigure".to_string(),
         Keyword::Cleave(_) => "cleave".to_string(),
         Keyword::Undaunted => "undaunted".to_string(),
         Keyword::Station => "station".to_string(),

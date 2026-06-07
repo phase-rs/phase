@@ -202,6 +202,8 @@ pub enum KeywordKind {
     JumpStart,
     Cipher,
     Transmute,
+    /// CR 702.71: Transfigure — see `Keyword::Transfigure`.
+    Transfigure,
     Cleave,
     Undaunted,
     Station,
@@ -813,6 +815,11 @@ pub enum Keyword {
     /// it, put it into your hand, then shuffle. Activate only as a sorcery."
     /// Runtime: `synthesize_transmute` (database/synthesis.rs).
     Transmute(ManaCost),
+    /// CR 702.71a: Transfigure {cost} — "[Cost], Sacrifice this permanent: Search
+    /// your library for a creature card with the same mana value as this permanent
+    /// and put it onto the battlefield. Then shuffle your library. Activate only as
+    /// a sorcery." Runtime: `synthesize_transfigure` (database/synthesis.rs).
+    Transfigure(ManaCost),
     /// CR 702.120a: Escalate [cost] — additional cost for each mode chosen beyond the first
     /// on a modal spell.
     Escalate(AbilityCost),
@@ -1068,6 +1075,7 @@ impl Keyword {
             Keyword::JumpStart => KeywordKind::JumpStart,
             Keyword::Cipher => KeywordKind::Cipher,
             Keyword::Transmute(_) => KeywordKind::Transmute,
+            Keyword::Transfigure(_) => KeywordKind::Transfigure,
             Keyword::Cleave(_) => KeywordKind::Cleave,
             Keyword::Undaunted => KeywordKind::Undaunted,
             Keyword::Station => KeywordKind::Station,
@@ -1899,6 +1907,8 @@ impl FromStr for Keyword {
                 }
                 // CR 702.53a: Transmute {cost}
                 "transmute" => return Ok(Keyword::Transmute(parse_keyword_mana_cost(p))),
+                // CR 702.71a: Transfigure {cost}
+                "transfigure" => return Ok(Keyword::Transfigure(parse_keyword_mana_cost(p))),
                 // CR 702.120a: Escalate [cost]
                 "escalate" => {
                     return Ok(Keyword::Escalate(AbilityCost::Mana {
@@ -2725,6 +2735,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "JumpStart" => Ok(Keyword::JumpStart),
         "Cipher" => Ok(Keyword::Cipher),
         "Transmute" => Ok(Keyword::Transmute(mana(data)?)),
+        // CR 702.71a: Transfigure {cost}
+        "Transfigure" => Ok(Keyword::Transfigure(mana(data)?)),
         "Cleave" => Ok(Keyword::Cleave(mana(data)?)),
         "Undaunted" => Ok(Keyword::Undaunted),
         // CR 702.184a: Station — fixed activated ability keyword.
