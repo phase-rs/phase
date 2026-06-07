@@ -301,19 +301,24 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                             ReplacementMode::MayCost { cost, .. } => {
                                 (replacement_cost_description(cost), "Decline".to_string())
                             }
-                            // CR 702.136a (Riot): an Optional replacement's decline
-                            // branch is itself a distinct outcome (e.g. "It gains
-                            // haste"), not a no-op. Label each option by its own
-                            // effect description — accept from `execute`, decline
-                            // from the `decline` ability — so the prompt reads
-                            // "+1/+1 counter" vs "gains haste" instead of the card's
-                            // rules text vs a bare "Decline".
+                            // CR 702.136a (Riot) / CR 702.98a (Unleash): label an
+                            // Optional replacement's accept branch by the
+                            // replacement's own `description` (which names its source
+                            // keyword, e.g. "Riot — ..." / "Unleash — ..."), falling
+                            // back to the `execute` effect text when there is none.
+                            // The decline branch, when it is a distinct outcome
+                            // (e.g. Riot's "It gains haste"), is labeled by that
+                            // outcome rather than a bare "Decline" — the reported
+                            // bug was that declining silently granted haste with no
+                            // indication; a decline-less Optional (Unleash) keeps a
+                            // plain "Decline".
                             ReplacementMode::Optional { decline } => {
                                 let accept = repl
-                                    .execute
-                                    .as_ref()
-                                    .and_then(|e| e.description.clone())
-                                    .or_else(|| repl.description.clone())
+                                    .description
+                                    .clone()
+                                    .or_else(|| {
+                                        repl.execute.as_ref().and_then(|e| e.description.clone())
+                                    })
                                     .unwrap_or_else(|| "Accept".to_string());
                                 let decline_label = decline
                                     .as_ref()
@@ -5914,15 +5919,20 @@ mod tests {
             panic!("expected ReplacementChoice waiting_for");
         };
         assert_eq!(candidate_count, 2);
-        // Index 0 = accept (execute), index 1 = decline. Both must be the branch's
-        // own outcome description — NOT the card rules text / bare "Decline".
+        // Index 0 = accept: the replacement's own `description`, which names its
+        // source keyword ("Riot — ...") so the prompt is identifiable (the
+        // issue_709 granted-keyword contract). Index 1 = decline: the distinct
+        // outcome ("It gains haste") rather than a bare "Decline" — the reported
+        // bug was that declining silently granted haste with no indication.
         assert_eq!(
             candidate_descriptions,
             vec![
-                "This permanent enters with an additional +1/+1 counter on it".to_string(),
+                "CR 702.136a: Riot — this permanent may enter with an additional +1/+1 \
+                 counter; otherwise it gains haste."
+                    .to_string(),
                 "It gains haste".to_string(),
             ],
-            "each Riot option must be labeled by its own outcome"
+            "accept identifies the source (Riot); decline shows its outcome (haste), not a bare \"Decline\""
         );
     }
 
