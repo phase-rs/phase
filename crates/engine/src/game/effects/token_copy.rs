@@ -1724,6 +1724,65 @@ mod tests {
         assert!(token.is_token);
     }
 
+    /// Issue #2402: Hazel of the Rootbloom — copy a token target whose live
+    /// characteristics were never mirrored into `base_*` fields.
+    #[test]
+    fn issue_2402_copy_token_of_token_target_creates_copy() {
+        let mut state = GameState::new_two_player(42);
+
+        let squirrel = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Squirrel".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let token = state.objects.get_mut(&squirrel).unwrap();
+            token.is_token = true;
+            token.power = Some(1);
+            token.toughness = Some(1);
+            token.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Squirrel".to_string()],
+            };
+        }
+
+        let source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hazel".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![TargetRef::Object(squirrel)],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let copy_id = ObjectId(state.next_object_id - 1);
+        let copy = state.objects.get(&copy_id).unwrap();
+        assert!(copy.is_token);
+        assert_eq!(copy.name, "Squirrel");
+        assert_eq!(copy.power, Some(1));
+        assert_eq!(copy.toughness, Some(1));
+    }
+
     /// CR 109.4 + CR 111.2: "target opponent creates a token that's a copy of
     /// it" — the copy token must enter under the chosen opponent's control,
     /// not the trigger controller's. Pins the new `owner` channel at the
