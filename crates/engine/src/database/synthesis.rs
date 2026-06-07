@@ -13,10 +13,10 @@ use crate::types::ability::{
     AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter,
-    DamageModification, Duration, Effect, FilterProp, KickerVariant, ManaContribution,
-    ManaProduction, ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant,
-    ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
     RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
     TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier,
@@ -684,7 +684,8 @@ pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
 // - `stack.rs::resolve_top` creates a delayed exile trigger on resolution
 
 /// Synthesize Mobilize N trigger: when this creature attacks, create N 1/1 red
-/// Warrior creature tokens tapped and attacking. Sacrifice them at end of combat.
+/// Warrior creature tokens tapped and attacking. Sacrifice them at the beginning
+/// of the next end step (CR 702.181a).
 pub fn synthesize_mobilize(face: &mut CardFace) {
     use crate::types::ability::PtValue;
     use crate::types::triggers::TriggerMode;
@@ -720,11 +721,27 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
                 enter_with_counters: vec![],
             };
 
+            let sacrifice_at_end_step = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Sacrifice {
+                            target: TargetFilter::LastCreated,
+                            count: qty.clone(),
+                            min_count: 0,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+            );
+
             face.triggers.push(
                 TriggerDefinition::new(TriggerMode::Attacks)
                     .execute(
                         AbilityDefinition::new(AbilityKind::Spell, token_effect)
-                            .duration(Duration::UntilEndOfCombat),
+                            .sub_ability(sacrifice_at_end_step),
                     )
                     .description(
                         "Mobilize — create Warrior tokens tapped and attacking".to_string(),
@@ -16545,6 +16562,44 @@ mod idempotency_tests {
             face.triggers.len(),
             1,
             "mobilize trigger should only register once"
+        );
+    }
+
+    #[test]
+    fn synthesize_mobilize_schedules_sacrifice_at_next_end_step() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
+
+        synthesize_mobilize(&mut face);
+
+        let trigger = face.triggers.first().expect("mobilize trigger");
+        let execute = trigger.execute.as_ref().expect("execute body");
+        let delayed = execute
+            .sub_ability
+            .as_ref()
+            .expect("mobilize must chain end-step sacrifice");
+        match &*delayed.effect {
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase },
+                effect,
+                ..
+            } => {
+                assert_eq!(*phase, Phase::End);
+                match &*effect.effect {
+                    Effect::Sacrifice {
+                        target: TargetFilter::LastCreated,
+                        count: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    } => {}
+                    other => panic!("expected LastCreated Sacrifice, got {other:?}"),
+                }
+            }
+            other => panic!("expected CreateDelayedTrigger sacrifice rider, got {other:?}"),
+        }
+        assert!(
+            execute.duration.is_none(),
+            "token must not use UntilEndOfCombat duration"
         );
     }
 
