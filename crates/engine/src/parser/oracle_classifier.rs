@@ -503,17 +503,13 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     // `parse_replacement_line` even when its suffix carries a static keyword
     // pattern like "has haste" that would otherwise classify it as static.
     "become a copy of",
-    // CR 614.6 + CR 614.7 + CR 122.1: Self-targeted counter-prohibition
-    // replacements ("~ can't have counters put on it." — Melira's Keepers
-    // class). The line lacks "would"/"instead" so it does not match the
-    // damage/destroy/draw replacement surface phrases, and the static
-    // classifier's `can't have ` pattern (if any) would otherwise miscategorize
-    // it as a static. Routing it as a replacement keeps it in the CR 614
-    // pipeline where `add_counter_applier` short-circuits the proposed event.
-    "can't have counters put on",
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
+    if is_counter_prohibition_replacement_pattern(lower) {
+        return true;
+    }
+
     if REPLACEMENT_CONTAINS_PATTERNS
         .iter()
         .any(|pattern| scan_contains(lower, pattern))
@@ -556,6 +552,20 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
         return true;
     }
     false
+}
+
+fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {
+    // CR 614.17 + CR 122.1: Counter-prohibition effects lack "would" or
+    // "instead" but still route through the replacement pipeline.
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        alt((
+            tag::<_, _, OracleError>("can't have counters put on"),
+            tag("players can't get counters"),
+            tag("counters can't be put on"),
+        ))
+        .parse(input)
+    })
+    .is_some()
 }
 
 fn is_as_enters_choose_pattern(lower: &str) -> bool {

@@ -1,8 +1,82 @@
-use crate::game::quantity;
+use std::collections::HashSet;
+
+use crate::game::{quantity, replacement};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 use crate::types::player::{PlayerCounterKind, PlayerId};
+use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+
+pub fn add_player_counter_with_replacement(
+    state: &mut GameState,
+    actor: PlayerId,
+    player_id: PlayerId,
+    counter_kind: PlayerCounterKind,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if count == 0 {
+        return true;
+    }
+
+    // CR 122.1 + CR 614.17: Player-counter additions pass through the
+    // replacement pipeline so "players can't get counters" effects can prevent
+    // the event before any player state is mutated.
+    let proposed = ProposedEvent::AddCounter {
+        placement: CounterPlacement::Player {
+            actor,
+            player_id,
+            counter_kind,
+        },
+        count,
+        applied: HashSet::new(),
+    };
+
+    match replacement::replace_event(state, proposed, events) {
+        replacement::ReplacementResult::Execute(event) => {
+            if let ProposedEvent::AddCounter {
+                placement:
+                    CounterPlacement::Player {
+                        player_id,
+                        counter_kind,
+                        ..
+                    },
+                count,
+                ..
+            } = event
+            {
+                apply_player_counter_addition(state, player_id, counter_kind, count, events);
+            }
+            true
+        }
+        replacement::ReplacementResult::Prevented => true,
+        replacement::ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            false
+        }
+    }
+}
+
+pub fn apply_player_counter_addition(
+    state: &mut GameState,
+    player_id: PlayerId,
+    counter_kind: PlayerCounterKind,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    if amount == 0 {
+        return;
+    }
+    let player = &mut state.players[player_id.0 as usize];
+    player.add_player_counters(&counter_kind, amount);
+
+    // CR 122.1: Emit event for counter change.
+    events.push(GameEvent::PlayerCounterChanged {
+        player: player_id,
+        counter_kind,
+        delta: amount as i32,
+    });
+}
 
 /// CR 122.1: Give player counters of a named type.
 /// Poison counters dispatch to the dedicated field (CR 104.3d SBA).
@@ -56,16 +130,41 @@ pub fn resolve(
         targeted
     };
 
-    for player_id in &players {
-        let player = &mut state.players[player_id.0 as usize];
-        player.add_player_counters(counter_kind, amount);
-
-        // CR 122.1: Emit event for counter change.
-        events.push(GameEvent::PlayerCounterChanged {
-            player: *player_id,
+    let additions: Vec<_> = players
+        .iter()
+        .map(|player_id| PendingCounterAddition::Player {
+            actor: ability.controller,
+            player_id: *player_id,
             counter_kind: *counter_kind,
-            delta: amount as i32,
-        });
+            count: amount,
+        })
+        .collect();
+    let completion = PendingEffectResolved::new(EffectKind::GivePlayerCounter, ability.source_id);
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        let PendingCounterAddition::Player {
+            actor,
+            player_id,
+            counter_kind,
+            count,
+        } = addition
+        else {
+            continue;
+        };
+        if !add_player_counter_with_replacement(
+            state,
+            actor,
+            player_id,
+            counter_kind,
+            count,
+            events,
+        ) {
+            super::counters::stash_pending_counter_additions(
+                state,
+                additions[index + 1..].to_vec(),
+                completion,
+            );
+            return Ok(());
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -171,9 +270,15 @@ fn clear_all_player_counters(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::GameObject;
     use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetFilter};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::ability::{
+        QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
+    };
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::{PlayerCounterKind, PlayerId};
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::zones::Zone;
 
     fn make_ability(
         counter_kind: PlayerCounterKind,
@@ -266,6 +371,43 @@ mod tests {
         assert_eq!(
             state.players[0].player_counter(&PlayerCounterKind::Experience),
             2
+        );
+    }
+
+    #[test]
+    fn player_counter_addition_is_prevented_by_global_replacement() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        let solemnity_id = ObjectId(99);
+        let mut solemnity = GameObject::new(
+            solemnity_id,
+            CardId(99),
+            PlayerId(0),
+            "Solemnity".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        replacement.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        solemnity.replacement_definitions = vec![replacement].into();
+        state.objects.insert(solemnity_id, solemnity);
+        state.battlefield.push_back(solemnity_id);
+
+        let ability = make_ability(
+            PlayerCounterKind::Poison,
+            QuantityExpr::Fixed { value: 1 },
+            TargetFilter::Controller,
+            PlayerId(1),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].poison_counters, 0);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::PlayerCounterChanged { .. })),
+            "prevented player-counter additions must not emit counter-change events"
         );
     }
 

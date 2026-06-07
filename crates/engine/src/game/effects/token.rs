@@ -17,7 +17,9 @@ use crate::types::ability::{
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DelayedTrigger, GameState};
+use crate::types::game_state::{
+    DelayedTrigger, GameState, PendingCounterPostAction, PendingEffectResolutionEvent,
+};
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
@@ -450,7 +452,9 @@ pub fn resolve(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            apply_create_token_after_replacement(state, event, events);
+            if !apply_create_token_after_replacement(state, event, events) {
+                return Ok(());
+            }
         }
         ReplacementResult::Prevented => {
             // Token creation was prevented entirely
@@ -578,7 +582,23 @@ pub fn apply_create_token_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) {
+) -> bool {
+    apply_create_token_after_replacement_with_created_ids(
+        state,
+        event,
+        Vec::new(),
+        PendingEffectResolutionEvent::Emit,
+        events,
+    )
+}
+
+pub(crate) fn apply_create_token_after_replacement_with_created_ids(
+    state: &mut GameState,
+    event: ProposedEvent,
+    initial_created_ids: Vec<ObjectId>,
+    pause_completion_event: PendingEffectResolutionEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
     let ProposedEvent::CreateToken {
         owner,
         spec,
@@ -588,11 +608,11 @@ pub fn apply_create_token_after_replacement(
         ..
     } = event
     else {
-        return;
+        return true;
     };
 
     if let Some(copy) = copy {
-        let created = super::token_copy::apply_copy_token_after_replacement(
+        let status = super::token_copy::apply_copy_token_after_replacement(
             state,
             owner,
             *copy,
@@ -602,16 +622,20 @@ pub fn apply_create_token_after_replacement(
             events,
         );
         if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
-            pending.created_ids.extend(created);
+            pending.created_ids.extend(status.created_ids);
         } else {
-            state.last_created_token_ids = created;
+            state.last_created_token_ids = status.created_ids;
         }
-        return;
+        return match status.completion {
+            super::token_copy::CopyTokenApplyCompletion::Completed => true,
+            super::token_copy::CopyTokenApplyCompletion::Paused => false,
+        };
     }
 
-    let mut created_ids = Vec::with_capacity(final_count as usize);
+    let mut created_ids = initial_created_ids;
+    created_ids.reserve(final_count as usize);
 
-    for _ in 0..final_count {
+    for index in 0..final_count {
         let ch = &spec.characteristics;
         let token_image_ref =
             crate::game::token_presets::find_exact_token_ref(state, spec.source_id, ch);
@@ -680,20 +704,73 @@ pub fn apply_create_token_after_replacement(
         }
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
-        for (counter_type, counter_count) in &spec.enter_with_counters {
-            if *counter_count > 0 {
-                super::counters::add_counter_with_replacement(
+        for (counter_index, (counter_type, counter_count)) in
+            spec.enter_with_counters.iter().enumerate()
+        {
+            if *counter_count > 0
+                && !super::counters::add_counter_with_replacement(
                     state,
                     owner,
                     obj_id,
                     counter_type.clone(),
                     *counter_count,
                     events,
+                )
+            {
+                state.last_created_token_ids = created_ids.clone();
+                let remaining_counters = spec.enter_with_counters[counter_index + 1..]
+                    .iter()
+                    .filter(|(_, count)| *count > 0)
+                    .map(|(counter_type, count)| {
+                        crate::types::game_state::PendingCounterAddition::Object {
+                            actor: owner,
+                            object_id: obj_id,
+                            counter_type: counter_type.clone(),
+                            count: *count,
+                        }
+                    })
+                    .collect();
+                let remaining_count = final_count.saturating_sub(index + 1);
+                let post_actions = vec![
+                    PendingCounterPostAction::FinalizeTokenEntry {
+                        object_id: obj_id,
+                        name: spec.characteristics.display_name.clone(),
+                        attach_to: spec.attach_to,
+                        sacrifice_at: spec.sacrifice_at.clone(),
+                        source_id: spec.source_id,
+                        controller: spec.controller,
+                    },
+                    PendingCounterPostAction::ContinueTokenCreation {
+                        owner,
+                        spec: spec.clone(),
+                        enter_tapped,
+                        remaining_count,
+                    },
+                ];
+                let completion = match pause_completion_event {
+                    PendingEffectResolutionEvent::Emit => {
+                        crate::types::game_state::PendingEffectResolved::with_post_actions(
+                            EffectKind::Token,
+                            spec.source_id,
+                            post_actions,
+                        )
+                    }
+                    PendingEffectResolutionEvent::Suppress => crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                        EffectKind::Token,
+                        spec.source_id,
+                        post_actions,
+                    ),
+                };
+                super::counters::stash_pending_counter_additions(
+                    state,
+                    remaining_counters,
+                    completion,
                 );
+                return false;
             }
         }
 
-        // CR 111.10a–v: Inject predefined abilities for known token subtypes.
+        // CR 111.10: Inject predefined abilities for known token subtypes.
         inject_predefined_token_abilities(state, obj_id);
         // Battlefield entry: request an incremental layer re-derive for just this
         // token. `flush_layers` escalates to a full pass if the token sources a
@@ -776,6 +853,7 @@ pub fn apply_create_token_after_replacement(
     // CR 603.7: Record created token IDs for sub-abilities that reference
     // TargetFilter::LastCreated (e.g., Job select, suspect).
     state.last_created_token_ids = created_ids;
+    true
 }
 
 // ── Layer B: token-handler batch purity gate (Tier 3) ────────────────────
@@ -1530,7 +1608,7 @@ fn resolve_pt_value(
     }
 }
 
-// ── Predefined token abilities (CR 111.10a–v) ─────────────────────────
+// ── Predefined token abilities (CR 111.10) ────────────────────────────
 // Data-driven lookup: subtype → ability constructors.
 
 /// CR 111.10a: Treasure — "{T}, Sacrifice this artifact: Add one mana of any color."
@@ -1964,7 +2042,7 @@ fn shard_ability() -> AbilityDefinition {
     })
 }
 
-/// CR 111.10a–v: Predefined token abilities keyed by subtype.
+/// CR 111.10: Predefined token abilities keyed by subtype.
 /// Returns ability definitions to inject for the given subtype, or empty if none.
 pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
     match subtype {
@@ -1985,7 +2063,7 @@ pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
     }
 }
 
-/// CR 111.10a–v: human-readable rules text for predefined tokens, keyed by
+/// CR 111.10: human-readable rules text for predefined tokens, keyed by
 /// subtype. Mirrors `predefined_token_abilities` arm-for-arm — keep the two
 /// `match` blocks edited together (single source of truth). Returns `None`
 /// for subtypes whose printed text has not been backfilled; the frontend
@@ -2262,7 +2340,7 @@ fn wicked_role_spec() -> RoleSpec {
     }
 }
 
-/// CR 111.10j–r: Return the predefined Role token spec by display name, or
+/// CR 111.10: Return the predefined Role token spec by display name, or
 /// `None` if `name` is not an implemented Role.
 ///
 /// All Role tokens share the `Role` subtype, so dispatch must be by display
@@ -2283,10 +2361,10 @@ fn predefined_role_token_spec(name: &str) -> Option<RoleSpec> {
 /// Inject predefined token abilities based on the token's subtypes and name.
 ///
 /// Two dispatch paths:
-/// - **Subtype** (CR 111.10a–i, s–v): Treasure, Food, Clue, Blood, Powerstone,
+/// - **Subtype** (CR 111.10): Treasure, Food, Clue, Blood, Powerstone,
 ///   Map, Spawn — each subtype contributes a single activated ability
 ///   (`predefined_token_abilities`).
-/// - **Name** (CR 111.10j–r): Role tokens. All seven Roles share the `Role`
+/// - **Name** (CR 111.10): Role tokens. All seven Roles share the `Role`
 ///   subtype, so dispatch is by display name via `predefined_role_token_spec`.
 ///   Roles contribute static abilities that modify the enchanted creature
 ///   (Cursed/Monster/Royal/Sorcerer/Virtuous/Young Hero) and may also
@@ -3479,7 +3557,7 @@ mod tests {
         assert!(abilities.is_empty());
     }
 
-    // ── Role token predefined statics (CR 111.10j–r) ────────────────────
+    // ── Role token predefined statics (CR 111.10) ───────────────────────
 
     /// Test helper — most Role tests only need the statics half of the spec.
     /// Wraps the typical "fetch spec, drop triggers, assert statics" idiom
@@ -3771,7 +3849,7 @@ mod tests {
 
     #[test]
     fn all_seven_role_token_variants_are_implemented() {
-        // CR 111.10j–r: every named Role token must have a spec. Unknown
+        // CR 111.10: every named Role token must have a spec. Unknown
         // names still return None (the dispatch is exhaustive over Roles,
         // not a catch-all).
         for name in [
@@ -3785,7 +3863,7 @@ mod tests {
         ] {
             assert!(
                 predefined_role_token_spec(name).is_some(),
-                "{name} Role must be implemented (CR 111.10j–r)"
+                "{name} Role must be implemented (CR 111.10)"
             );
         }
         assert!(predefined_role_token_spec("Not A Role").is_none());
@@ -4089,6 +4167,92 @@ mod tests {
         );
         // The created token should be on the battlefield
         assert!(state.objects.contains_key(&state.last_created_token_ids[0]));
+    }
+
+    #[test]
+    fn paused_token_etb_counters_preserve_batch_ledger_and_effect_resolution() {
+        use std::sync::Arc;
+
+        use crate::types::ability::{QuantityModification, ReplacementDefinition, ReplacementMode};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Choice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent);
+            def.mode = ReplacementMode::Optional { decline: None };
+            let obj = state.objects.get_mut(&replacement_source).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![def.clone()]);
+            obj.replacement_definitions = vec![def].into();
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "soldier".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string(), "Soldier".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![(
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Fixed { value: 1 },
+                )],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+
+        let mut choice_events = Vec::new();
+        for _ in 0..2 {
+            let result =
+                apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+            choice_events.extend(result.events);
+        }
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.last_created_token_ids.len(),
+            2,
+            "paused ETB-counter choices must preserve every token created by the batch"
+        );
+        assert_eq!(
+            choice_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::Token,
+                        source_id: ObjectId(100),
+                    }
+                ))
+                .count(),
+            1,
+            "the token effect should resolve once after the paused batch finishes"
+        );
     }
 
     // CR 111.1 + CR 616.1: The Brass's Bounty fix, end to end. A folded

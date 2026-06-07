@@ -1350,17 +1350,6 @@ pub(crate) fn handle_blight_choice(
     // on N > 0 for exact parity with the #497 effect-form handler
     // (engine_resolution_choices.rs `EffectKind::BlightEffect`); the parser
     // does not structurally exclude a degenerate `Blight 0`.
-    if counters > 0 {
-        add_counter_with_replacement(
-            state,
-            player,
-            chosen[0],
-            crate::types::counter::CounterType::Minus1Minus1,
-            counters,
-            events,
-        );
-    }
-
     // CR 117.1 + CR 608.2k: snapshot the blighted creature as this ability's
     // cost-paid object so later `CostPaidObject` target filters / quantity
     // refs ("the creature you blighted") resolve to it. This writes the
@@ -1376,6 +1365,20 @@ pub(crate) fn handle_blight_choice(
                 object_id: chosen[0],
                 lki: obj.snapshot_for_mana_spent(),
             });
+    }
+
+    if counters > 0
+        && !add_counter_with_replacement(
+            state,
+            player,
+            chosen[0],
+            crate::types::counter::CounterType::Minus1Minus1,
+            counters,
+            events,
+        )
+    {
+        state.pending_cast = Some(Box::new(pending));
+        return Ok(state.waiting_for.clone());
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)

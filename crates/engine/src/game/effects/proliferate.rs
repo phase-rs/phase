@@ -3,7 +3,9 @@ use crate::types::counter::{
     has_positive_counters, positive_counter_types, prune_zero_counters, CounterType,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingCounterAddition, PendingEffectResolved, WaitingFor,
+};
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,14 +116,45 @@ pub fn apply_proliferate(
     actor: PlayerId,
     selected: &[TargetRef],
     events: &mut Vec<GameEvent>,
-) {
+) -> bool {
+    for target in selected {
+        if let TargetRef::Object(obj_id) = target {
+            if let Some(obj) = state.objects.get_mut(obj_id) {
+                prune_zero_counters(&mut obj.counters);
+            }
+        }
+    }
+
+    let additions = proliferate_addition_plan(state, actor, selected);
+    let completion = PendingEffectResolved::with_player_action(
+        EffectKind::Proliferate,
+        crate::types::identifiers::ObjectId(0),
+        actor,
+        PlayerActionKind::Proliferate,
+    );
+
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        if !apply_counter_addition_plan_item(state, addition, events) {
+            super::counters::stash_pending_counter_additions(
+                state,
+                additions[index + 1..].to_vec(),
+                completion,
+            );
+            return false;
+        }
+    }
+    true
+}
+
+fn proliferate_addition_plan(
+    state: &GameState,
+    actor: PlayerId,
+    selected: &[TargetRef],
+) -> Vec<PendingCounterAddition> {
+    let mut additions = Vec::new();
     for target in selected {
         match target {
             TargetRef::Object(obj_id) => {
-                if let Some(obj) = state.objects.get_mut(obj_id) {
-                    prune_zero_counters(&mut obj.counters);
-                }
-
                 let counter_types: Vec<CounterType> = state
                     .objects
                     .get(obj_id)
@@ -129,7 +162,12 @@ pub fn apply_proliferate(
                     .unwrap_or_default();
 
                 for ct in counter_types {
-                    super::counters::apply_counter_addition(state, actor, *obj_id, ct, 1, events);
+                    additions.push(PendingCounterAddition::Object {
+                        actor,
+                        object_id: *obj_id,
+                        counter_type: ct,
+                        count: 1,
+                    });
                 }
             }
             TargetRef::Player(pid) => {
@@ -141,28 +179,67 @@ pub fn apply_proliferate(
                     .unwrap_or_default();
 
                 for counter in counters {
-                    if let Some(player) = state.players.iter_mut().find(|p| p.id == *pid) {
-                        match counter {
-                            PlayerCounterSource::Kind(kind) => {
-                                player.add_player_counters(&kind, 1);
-                                events.push(GameEvent::PlayerCounterChanged {
-                                    player: *pid,
-                                    counter_kind: kind,
-                                    delta: 1,
-                                });
-                            }
-                            PlayerCounterSource::Energy => {
-                                player.energy += 1;
-                                events.push(GameEvent::EnergyChanged {
-                                    player: *pid,
-                                    delta: 1,
-                                });
-                            }
+                    match counter {
+                        PlayerCounterSource::Kind(kind) => {
+                            additions.push(PendingCounterAddition::Player {
+                                actor,
+                                player_id: *pid,
+                                counter_kind: kind,
+                                count: 1,
+                            });
+                        }
+                        PlayerCounterSource::Energy => {
+                            additions.push(PendingCounterAddition::Energy {
+                                actor,
+                                player_id: *pid,
+                                count: 1,
+                            });
                         }
                     }
                 }
             }
         }
+    }
+    additions
+}
+
+fn apply_counter_addition_plan_item(
+    state: &mut GameState,
+    addition: PendingCounterAddition,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    match addition {
+        PendingCounterAddition::Object {
+            actor,
+            object_id,
+            counter_type,
+            count,
+        } => super::counters::add_counter_with_replacement(
+            state,
+            actor,
+            object_id,
+            counter_type,
+            count,
+            events,
+        ),
+        PendingCounterAddition::Player {
+            actor,
+            player_id,
+            counter_kind,
+            count,
+        } => super::player_counter::add_player_counter_with_replacement(
+            state,
+            actor,
+            player_id,
+            counter_kind,
+            count,
+            events,
+        ),
+        PendingCounterAddition::Energy {
+            actor,
+            player_id,
+            count,
+        } => super::energy::add_energy_with_replacement(state, actor, player_id, count, events),
     }
 }
 
@@ -170,9 +247,13 @@ pub fn apply_proliferate(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::Effect;
+    use crate::types::ability::{
+        Effect, QuantityModification, ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
+        TypedFilter,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
 
     fn make_proliferate_ability() -> ResolvedAbility {
@@ -447,6 +528,198 @@ mod tests {
                 delta: 1,
             }
         )));
+    }
+
+    #[test]
+    fn apply_proliferate_replacement_choice_stashes_remaining_counter_additions() {
+        let mut state = GameState::new_two_player(42);
+        for (id, modification) in [
+            (ObjectId(90), QuantityModification::Double),
+            (ObjectId(91), QuantityModification::Plus { value: 1 }),
+        ] {
+            let source = create_object(
+                &mut state,
+                CardId(id.0),
+                PlayerId(0),
+                "Counter Modifier".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions =
+                vec![ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                    .quantity_modification(modification)]
+                .into();
+        }
+
+        let obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&obj).unwrap();
+        object
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        object.counters.insert(CounterType::Plus1Plus1, 1);
+        object.counters.insert(CounterType::Stun, 1);
+
+        let mut events = Vec::new();
+        assert!(!apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Object(obj)],
+            &mut events,
+        ));
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let pending = state
+            .pending_counter_additions
+            .as_ref()
+            .expect("remaining proliferate additions should be queued");
+        assert_eq!(pending.remaining.len(), 1);
+        assert!(matches!(
+            pending.completion,
+            Some(PendingEffectResolved {
+                kind: EffectKind::Proliferate,
+                source_id: ObjectId(0),
+                player_action: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn apply_proliferate_object_counter_is_prevented_by_solemnity() {
+        let mut state = GameState::new_two_player(42);
+        let solemnity = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Solemnity".to_string(),
+            Zone::Battlefield,
+        );
+        let replacement = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+            .quantity_modification(QuantityModification::Prevent);
+        state
+            .objects
+            .get_mut(&solemnity)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+
+        let obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&obj).unwrap();
+        object
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        object.counters.insert(CounterType::Plus1Plus1, 1);
+
+        let mut events = Vec::new();
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Object(obj)],
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&obj].counters[&CounterType::Plus1Plus1], 1);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
+            "Solemnity must prevent proliferate from adding object counters"
+        );
+    }
+
+    #[test]
+    fn apply_proliferate_player_counter_is_prevented_by_solemnity() {
+        let mut state = GameState::new_two_player(42);
+        let solemnity = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Solemnity".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        replacement.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        state
+            .objects
+            .get_mut(&solemnity)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+        state.players[1].poison_counters = 1;
+
+        let mut events = Vec::new();
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Player(PlayerId(1))],
+            &mut events,
+        );
+
+        assert_eq!(state.players[1].poison_counters, 1);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::PlayerCounterChanged { .. })),
+            "Solemnity must prevent proliferate from adding player counters"
+        );
+    }
+
+    #[test]
+    fn apply_proliferate_energy_counter_is_prevented_by_solemnity() {
+        let mut state = GameState::new_two_player(42);
+        let solemnity = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Solemnity".to_string(),
+            Zone::Battlefield,
+        );
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        replacement.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        state
+            .objects
+            .get_mut(&solemnity)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+        state.players[1].energy = 1;
+
+        let mut events = Vec::new();
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Player(PlayerId(1))],
+            &mut events,
+        );
+
+        assert_eq!(state.players[1].energy, 1);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::EnergyChanged { .. })),
+            "Solemnity must prevent proliferate from adding energy counters"
+        );
     }
 
     #[test]

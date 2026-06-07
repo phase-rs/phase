@@ -2142,20 +2142,10 @@ pub(super) fn handle_resolution_choice(
                 // so counter-doubling/modifying replacement effects apply.
                 EffectKind::BlightEffect => {
                     let blighted = chosen[0];
-                    if count_param > 0 {
-                        effects::counters::add_counter_with_replacement(
-                            state,
-                            player,
-                            blighted,
-                            crate::types::counter::CounterType::Minus1Minus1,
-                            count_param,
-                            events,
-                        );
-                    }
-                    // CR 701.68c: Snapshot the chosen creature so spells and
-                    // abilities that refer back to "the creature you blighted"
-                    // resolve to it. The creature stays on the battlefield, so
-                    // the snapshot is taken from its live characteristics.
+                    // CR 701.68c: Snapshot the chosen creature before the
+                    // counter-placement replacement pipeline can pause, so
+                    // "the creature you blighted" remains available when the
+                    // continuation resumes.
                     if let Some(obj) = state.objects.get(&blighted) {
                         let snapshot = crate::types::ability::CostPaidObjectSnapshot {
                             object_id: blighted,
@@ -2164,6 +2154,25 @@ pub(super) fn handle_resolution_choice(
                         if let Some(cont) = state.pending_continuation.as_mut() {
                             cont.chain.set_effect_context_object_recursive(snapshot);
                         }
+                    }
+                    if count_param > 0
+                        && !effects::counters::add_counter_with_replacement(
+                            state,
+                            player,
+                            blighted,
+                            crate::types::counter::CounterType::Minus1Minus1,
+                            count_param,
+                            events,
+                        )
+                    {
+                        effects::counters::stash_pending_counter_completion(
+                            state,
+                            effect_kind,
+                            source_id,
+                        );
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
                     }
                 }
                 other => {

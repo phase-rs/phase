@@ -15,7 +15,7 @@ use super::identifiers::ObjectId;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaType, UnitDecision};
 use super::phase::Phase;
-use super::player::PlayerId;
+use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -28,6 +28,51 @@ pub struct ReplacementId {
 pub enum CounterMoveStage {
     Remove,
     Add,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CounterPlacement {
+    Object {
+        #[serde(default)]
+        actor: PlayerId,
+        object_id: ObjectId,
+        counter_type: CounterType,
+    },
+    Player {
+        actor: PlayerId,
+        player_id: PlayerId,
+        counter_kind: PlayerCounterKind,
+    },
+    Energy {
+        actor: PlayerId,
+        player_id: PlayerId,
+    },
+}
+
+impl CounterPlacement {
+    pub fn object_id(&self) -> Option<ObjectId> {
+        match self {
+            CounterPlacement::Object { object_id, .. } => Some(*object_id),
+            CounterPlacement::Player { .. } | CounterPlacement::Energy { .. } => None,
+        }
+    }
+
+    pub fn player_id(&self) -> Option<PlayerId> {
+        match self {
+            CounterPlacement::Player { player_id, .. }
+            | CounterPlacement::Energy { player_id, .. } => Some(*player_id),
+            CounterPlacement::Object { .. } => None,
+        }
+    }
+
+    pub fn actor(&self) -> PlayerId {
+        match self {
+            CounterPlacement::Object { actor, .. }
+            | CounterPlacement::Player { actor, .. }
+            | CounterPlacement::Energy { actor, .. } => *actor,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -241,10 +286,11 @@ pub enum ProposedEvent {
         applied: HashSet<ReplacementId>,
     },
     AddCounter {
-        #[serde(default)]
-        actor: PlayerId,
-        object_id: ObjectId,
-        counter_type: CounterType,
+        /// CR 122.1 + CR 107.14: Counter placement may affect an object or a
+        /// player. Energy is represented as a dedicated player field at runtime
+        /// but is still a counter-placement event for replacement purposes.
+        #[serde(flatten)]
+        placement: CounterPlacement,
         count: u32,
         applied: HashSet<ReplacementId>,
     },
@@ -545,12 +591,20 @@ impl ProposedEvent {
             ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
-            | ProposedEvent::AddCounter { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. } => state
                 .objects
                 .get(object_id)
                 .map(|o| o.controller)
                 .unwrap_or(PlayerId(0)),
+            ProposedEvent::AddCounter { placement, .. } => match placement {
+                CounterPlacement::Object { object_id, .. } => state
+                    .objects
+                    .get(object_id)
+                    .map(|o| o.controller)
+                    .unwrap_or(PlayerId(0)),
+                CounterPlacement::Player { player_id, .. }
+                | CounterPlacement::Energy { player_id, .. } => *player_id,
+            },
             ProposedEvent::MoveCounter {
                 source_id,
                 destination_id,
@@ -598,10 +652,10 @@ impl ProposedEvent {
             | ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
-            | ProposedEvent::AddCounter { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
             | ProposedEvent::Discard { object_id, .. }
             | ProposedEvent::Sacrifice { object_id, .. } => Some(*object_id),
+            ProposedEvent::AddCounter { placement, .. } => placement.object_id(),
             ProposedEvent::MoveCounter {
                 source_id,
                 destination_id,
@@ -637,8 +691,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proposed_event_has_21_variants() {
-        // Verify all 21 variants compile
+    fn proposed_event_variants_compile() {
+        // Verify all variants compile, including the parameterized counter
+        // placement recipients.
         let events: Vec<ProposedEvent> = vec![
             ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
             ProposedEvent::Damage {
@@ -680,9 +735,28 @@ mod tests {
                 applied: HashSet::new(),
             },
             ProposedEvent::AddCounter {
-                actor: PlayerId(0),
-                object_id: ObjectId(1),
-                counter_type: CounterType::Plus1Plus1,
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(0),
+                    object_id: ObjectId(1),
+                    counter_type: CounterType::Plus1Plus1,
+                },
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::AddCounter {
+                placement: CounterPlacement::Player {
+                    actor: PlayerId(0),
+                    player_id: PlayerId(0),
+                    counter_kind: PlayerCounterKind::Poison,
+                },
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::AddCounter {
+                placement: CounterPlacement::Energy {
+                    actor: PlayerId(0),
+                    player_id: PlayerId(0),
+                },
                 count: 1,
                 applied: HashSet::new(),
             },
@@ -764,7 +838,7 @@ mod tests {
                 applied: HashSet::new(),
             },
         ];
-        assert_eq!(events.len(), 21);
+        assert_eq!(events.len(), 23);
     }
 
     #[test]
@@ -788,6 +862,77 @@ mod tests {
         set.insert(id1);
         assert!(set.contains(&id2));
         assert!(!set.contains(&id3));
+    }
+
+    #[test]
+    fn add_counter_object_serde_keeps_legacy_flat_shape() {
+        let event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let value = serde_json::to_value(&event).unwrap();
+        let add_counter = value
+            .get("AddCounter")
+            .expect("externally tagged AddCounter variant")
+            .as_object()
+            .expect("AddCounter payload object");
+        assert!(add_counter.get("placement").is_none());
+        assert!(add_counter.get("actor").is_some());
+        assert!(add_counter.get("object_id").is_some());
+        assert!(add_counter.get("counter_type").is_some());
+
+        let roundtrip: ProposedEvent = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            roundtrip,
+            ProposedEvent::AddCounter {
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(0),
+                    object_id: ObjectId(1),
+                    counter_type: CounterType::Plus1Plus1,
+                },
+                count: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn add_counter_object_serde_accepts_legacy_missing_actor() {
+        let event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut value = serde_json::to_value(&event).unwrap();
+        value
+            .get_mut("AddCounter")
+            .and_then(|payload| payload.as_object_mut())
+            .expect("AddCounter payload object")
+            .remove("actor");
+
+        let roundtrip: ProposedEvent = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            roundtrip,
+            ProposedEvent::AddCounter {
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(0),
+                    object_id: ObjectId(1),
+                    counter_type: CounterType::Plus1Plus1,
+                },
+                count: 1,
+                ..
+            }
+        ));
     }
 
     #[test]

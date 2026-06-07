@@ -4,7 +4,7 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaType, ManaUnit};
 use crate::types::player::PlayerId;
@@ -44,6 +44,7 @@ fn resolve_double_counters(
     counter_type: Option<&CounterType>,
 ) -> Result<(), EffectError> {
     let obj_ids = resolve_object_targets(ability, target, state);
+    let mut additions = Vec::new();
 
     for obj_id in obj_ids {
         // Snapshot current counters to avoid borrow issues
@@ -77,14 +78,40 @@ fn resolve_double_counters(
         // `MultiplyCounter` path (`counters::resolve_multiply`). The raw
         // `apply_counter_addition` primitive bypassed replacements.
         for (ct, current_count) in counters_snapshot {
-            super::counters::add_counter_with_replacement(
+            additions.push(PendingCounterAddition::Object {
+                actor: ability.controller,
+                object_id: obj_id,
+                counter_type: ct,
+                count: current_count,
+            });
+        }
+    }
+
+    let completion = PendingEffectResolved::new(EffectKind::Double, ability.source_id);
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        let PendingCounterAddition::Object {
+            actor,
+            object_id,
+            counter_type,
+            count,
+        } = addition
+        else {
+            continue;
+        };
+        if !super::counters::add_counter_with_replacement(
+            state,
+            actor,
+            object_id,
+            counter_type,
+            count,
+            events,
+        ) {
+            super::counters::stash_pending_counter_additions(
                 state,
-                ability.controller,
-                obj_id,
-                ct,
-                current_count,
-                events,
+                additions[index + 1..].to_vec(),
+                completion,
             );
+            return Ok(());
         }
     }
 
@@ -262,7 +289,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        AbilityKind, QuantityModification, ReplacementDefinition, SpellContext,
+        AbilityKind, QuantityModification, ReplacementDefinition, SpellContext, TypedFilter,
     };
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -356,6 +383,137 @@ mod tests {
                 .copied()
                 .unwrap_or(0),
             6
+        );
+    }
+
+    #[test]
+    fn double_counters_replacement_choice_stashes_remaining_counter_additions() {
+        let mut state = GameState::default();
+        for (id, modification) in [
+            (ObjectId(90), QuantityModification::Double),
+            (ObjectId(91), QuantityModification::Plus { value: 1 }),
+        ] {
+            let mut source = GameObject::new(
+                id,
+                CardId(id.0),
+                PlayerId(0),
+                "Counter Modifier".into(),
+                Zone::Battlefield,
+            );
+            source.replacement_definitions =
+                vec![ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                    .quantity_modification(modification)]
+                .into();
+            state.objects.insert(id, source);
+            state.battlefield.push_back(id);
+        }
+
+        let obj_id = ObjectId(1);
+        let mut obj = GameObject::new(
+            obj_id,
+            CardId(1),
+            PlayerId(0),
+            "Test Creature".into(),
+            Zone::Battlefield,
+        );
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        obj.counters.insert(CounterType::Plus1Plus1, 1);
+        obj.counters.insert(CounterType::Stun, 1);
+        state.objects.insert(obj_id, obj);
+        state.battlefield.push_back(obj_id);
+
+        let mut events = Vec::new();
+        let ability = make_double_ability(
+            DoubleTarget::Counters { counter_type: None },
+            TargetFilter::Any,
+            PlayerId(0),
+            vec![TargetRef::Object(obj_id)],
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+        ));
+        let pending = state
+            .pending_counter_additions
+            .as_ref()
+            .expect("remaining double-counter additions should be queued");
+        assert_eq!(pending.remaining.len(), 1);
+        assert!(matches!(
+            pending.completion,
+            Some(PendingEffectResolved {
+                kind: EffectKind::Double,
+                source_id: ObjectId(100),
+                player_action: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn double_counters_is_prevented_by_solemnity() {
+        let mut state = GameState::default();
+        let solemnity_id = ObjectId(99);
+        let mut solemnity = GameObject::new(
+            solemnity_id,
+            CardId(99),
+            PlayerId(0),
+            "Solemnity".into(),
+            Zone::Battlefield,
+        );
+        solemnity.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                .quantity_modification(QuantityModification::Prevent)]
+            .into();
+        state.objects.insert(solemnity_id, solemnity);
+        state.battlefield.push_back(solemnity_id);
+
+        let obj_id = ObjectId(1);
+        let mut obj = GameObject::new(
+            obj_id,
+            CardId(0),
+            PlayerId(0),
+            "Test Creature".into(),
+            Zone::Battlefield,
+        );
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        obj.counters.insert(CounterType::Plus1Plus1, 3);
+        state.objects.insert(obj_id, obj);
+        state.battlefield.push_back(obj_id);
+
+        let mut events = Vec::new();
+        let ability = make_double_ability(
+            DoubleTarget::Counters {
+                counter_type: Some(CounterType::Plus1Plus1),
+            },
+            TargetFilter::Any,
+            PlayerId(0),
+            vec![TargetRef::Object(obj_id)],
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&obj_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
+            "Solemnity must prevent doubling counters from adding counters"
         );
     }
 

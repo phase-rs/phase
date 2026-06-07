@@ -9832,14 +9832,18 @@ fn pay_ability_cost_inner(
                     target: TargetFilter::SelfRef,
                 } => {
                     let count = super::quantity::resolve_quantity(state, count, player, source_id);
-                    super::effects::counters::add_counter_with_replacement(
+                    if !super::effects::counters::add_counter_with_replacement(
                         state,
                         player,
                         source_id,
                         counter_type.clone(),
                         count.unsigned_abs(),
                         events,
-                    );
+                    ) {
+                        return Ok(AbilityCostPaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
                 }
                 _ => {
                     return Err(EngineError::ActionNotAllowed(format!(
@@ -9919,14 +9923,18 @@ fn pay_ability_cost_inner(
             let amount = *amount;
             match amount.cmp(&0) {
                 std::cmp::Ordering::Greater => {
-                    super::effects::counters::add_counter_with_replacement(
+                    if !super::effects::counters::add_counter_with_replacement(
                         state,
                         player,
                         source_id,
                         crate::types::counter::CounterType::Loyalty,
                         amount as u32,
                         events,
-                    );
+                    ) {
+                        return Ok(AbilityCostPaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
                 }
                 std::cmp::Ordering::Less => {
                     super::effects::counters::remove_counter_with_replacement(

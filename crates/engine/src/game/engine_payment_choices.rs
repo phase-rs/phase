@@ -222,9 +222,9 @@ pub(super) fn handle_tribute_choice(
         ));
     };
 
-    if accept {
-        effects::tribute::apply_paid(state, player, source_id, count, events);
-    } else {
+    if accept && !effects::tribute::apply_paid(state, player, source_id, count, events) {
+        return Ok(action_result(events, state.waiting_for.clone()));
+    } else if !accept {
         effects::tribute::apply_declined(state, source_id);
     }
 

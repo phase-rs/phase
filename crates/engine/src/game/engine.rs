@@ -4092,7 +4092,13 @@ fn apply_action(
                     ));
                 }
             }
-            effects::proliferate::apply_proliferate(state, p, &targets, &mut events);
+            if !effects::proliferate::apply_proliferate(state, p, &targets, &mut events) {
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                });
+            }
             events.push(GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::Proliferate,
                 source_id: ObjectId(0), // Source not tracked through choice state
@@ -5086,12 +5092,14 @@ fn handle_play_land(
                     }
                 }
                 // CR 614.1c: Apply counters from replacement pipeline.
-                engine_replacement::apply_etb_counters(
+                if !engine_replacement::apply_etb_counters(
                     state,
                     object_id,
                     &enter_with_counters,
                     events,
-                );
+                ) {
+                    return Ok(state.waiting_for.clone());
+                }
                 // CR 614.1c: Apply pending ETB counters from delayed triggers
                 // (e.g., "that creature enters with an additional +1/+1 counter").
                 let pending: Vec<_> = state
@@ -5101,7 +5109,9 @@ fn handle_play_land(
                     .map(|(_, ct, n)| (ct.clone(), *n))
                     .collect();
                 if !pending.is_empty() {
-                    engine_replacement::apply_etb_counters(state, object_id, &pending, events);
+                    if !engine_replacement::apply_etb_counters(state, object_id, &pending, events) {
+                        return Ok(state.waiting_for.clone());
+                    }
                     state
                         .pending_etb_counters
                         .retain(|(oid, _, _)| *oid != object_id);

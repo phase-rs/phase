@@ -19,7 +19,9 @@ use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterMoveStage, EtbTapState, ProposedEvent, ReplacementId};
+use crate::types::proposed_event::{
+    CounterMoveStage, CounterPlacement, EtbTapState, ProposedEvent, ReplacementId,
+};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -191,9 +193,12 @@ fn apply_compleated_replacement(
     };
     match event {
         ProposedEvent::AddCounter {
-            actor,
-            object_id,
-            counter_type: CounterType::Loyalty,
+            placement:
+                CounterPlacement::Object {
+                    actor,
+                    object_id,
+                    counter_type: CounterType::Loyalty,
+                },
             count,
             mut applied,
         } if object_id == rid.source => {
@@ -206,9 +211,11 @@ fn apply_compleated_replacement(
                 event_type: ReplacementEvent::AddCounter.to_string(),
             });
             ProposedEvent::AddCounter {
-                actor,
-                object_id,
-                counter_type: CounterType::Loyalty,
+                placement: CounterPlacement::Object {
+                    actor,
+                    object_id,
+                    counter_type: CounterType::Loyalty,
+                },
                 count: count.saturating_sub(life_paid.saturating_mul(2)),
                 applied,
             }
@@ -1769,15 +1776,11 @@ fn add_counter_applier(
 
     match event {
         ProposedEvent::AddCounter {
-            actor,
-            object_id,
-            counter_type,
+            placement,
             count,
             applied,
         } => ApplyResult::Modified(ProposedEvent::AddCounter {
-            actor,
-            object_id,
-            counter_type,
+            placement,
             count: new_count(count),
             applied,
         }),
@@ -3226,8 +3229,12 @@ pub fn find_applicable_replacements(
     // is exposed as a virtual AddCounter candidate there. This lets it order
     // correctly with Doubling Season-class count modifiers (CR 616.1).
     if let ProposedEvent::AddCounter {
-        object_id,
-        counter_type: CounterType::Loyalty,
+        placement:
+            CounterPlacement::Object {
+                object_id,
+                counter_type: CounterType::Loyalty,
+                ..
+            },
         count,
         ..
     } = event
@@ -3505,6 +3512,34 @@ pub fn find_applicable_replacements(
                             continue;
                         }
                     }
+                    if let ProposedEvent::AddCounter { placement, .. } = event {
+                        if placement.player_id().is_some() {
+                            let Some(valid_player) = &repl_def.valid_player else {
+                                continue;
+                            };
+                            let affected_player = placement.player_id().expect(
+                                "CounterPlacement::player_id is Some for player counter events",
+                            );
+                            let player_ok = match valid_player {
+                                crate::types::ability::ReplacementPlayerScope::Opponent => {
+                                    affected_player != obj.controller
+                                }
+                                crate::types::ability::ReplacementPlayerScope::You => {
+                                    affected_player == obj.controller
+                                }
+                                crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
+                            };
+                            if !player_ok {
+                                continue;
+                            }
+                        } else if repl_def.valid_player.is_some() {
+                            continue;
+                        }
+                    } else if repl_def.event == ReplacementEvent::AddCounter
+                        && repl_def.valid_player.is_some()
+                    {
+                        continue;
+                    }
                     // CR 614.7: Skip an Optional replacement whose decline branch is a
                     // no-op on the current event. E.g., a shock land whose `enter_tapped`
                     // is already set by an Earthbending return: declining would tap it,
@@ -3532,7 +3567,11 @@ pub fn find_applicable_replacements(
                         (
                             ReplacementEvent::AddCounter,
                             ProposedEvent::AddCounter {
-                                counter_type: ev_ct,
+                                placement:
+                                    CounterPlacement::Object {
+                                        counter_type: ev_ct,
+                                        ..
+                                    },
                                 ..
                             },
                         )
@@ -4592,6 +4631,32 @@ fn effect_overrides_controller(effect: &Effect) -> bool {
     )
 }
 
+fn is_counter_placement_event(event: &ProposedEvent) -> bool {
+    matches!(event, ProposedEvent::AddCounter { count, .. } if *count > 0)
+        || matches!(
+            event,
+            ProposedEvent::MoveCounter {
+                stage: CounterMoveStage::Add,
+                add_count,
+                ..
+            } if *add_count > 0
+        )
+}
+
+fn counter_placement_prevention_applies(state: &GameState, candidates: &[ReplacementId]) -> bool {
+    candidates.iter().any(|rid| {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .is_some_and(|def| {
+                def.event == ReplacementEvent::AddCounter
+                    && def.quantity_modification == Some(QuantityModification::Prevent)
+                    && !replacement_mode_is_optional(&def.mode)
+            })
+    })
+}
+
 fn pipeline_loop(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -4608,6 +4673,17 @@ fn pipeline_loop(
 
         if candidates.is_empty() {
             break;
+        }
+
+        // CR 614.17c + CR 122.1: If a matching "can't get/have counters put
+        // on" effect prevents this counter-placement event, non-self
+        // replacement/prevention effects such as Doubling Season or Hardened
+        // Scales cannot modify or replace it. The event simply cannot happen,
+        // so there is no CR 616 ordering prompt.
+        if is_counter_placement_event(&proposed)
+            && counter_placement_prevention_applies(state, &candidates)
+        {
+            return ReplacementResult::Prevented;
         }
 
         if candidates.len() == 1 {
@@ -4906,9 +4982,9 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, QuantityExpr,
-        QuantityModification, ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
-        TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, FilterProp,
+        QuantityExpr, QuantityModification, ReplacementDefinition, ReplacementMode,
+        ReplacementPlayerScope, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::DamageRecord;
@@ -5314,9 +5390,11 @@ mod tests {
         state.battlefield.push_back(doubling_season);
 
         let proposed = ProposedEvent::AddCounter {
-            actor: PlayerId(0),
-            object_id: compleated,
-            counter_type: CounterType::Loyalty,
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: compleated,
+                counter_type: CounterType::Loyalty,
+            },
             count: 5,
             applied: HashSet::new(),
         };
@@ -5432,9 +5510,11 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::AddCounter {
-            actor: PlayerId(0),
-            object_id: ObjectId(30),
-            counter_type: CounterType::Plus1Plus1,
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(30),
+                counter_type: CounterType::Plus1Plus1,
+            },
             count: 1,
             applied: HashSet::new(),
         };
@@ -5443,6 +5523,65 @@ mod tests {
             panic!("expected NeedsChoice for non-commuting count modification, got {result:?}");
         };
         assert_eq!(player, PlayerId(0));
+    }
+
+    /// CR 614.17c + CR 122.1: A matching "can't have counters put on it"
+    /// effect makes the counter-placement event impossible before ordinary
+    /// counter replacement ordering. Count modifiers such as Doubling Season
+    /// therefore cannot create a CR 616 prompt against the prohibition.
+    #[test]
+    fn counter_prohibition_short_circuits_count_modifier_prompt() {
+        let prevent_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        let double_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Double);
+
+        let mut state = GameState::new_two_player(42);
+        let mut solemnity = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Solemnity".to_string(),
+            Zone::Battlefield,
+        );
+        solemnity.replacement_definitions = vec![prevent_repl].into();
+        let mut doubling_season = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        doubling_season.replacement_definitions = vec![double_repl].into();
+        state.objects.insert(ObjectId(10), solemnity);
+        state.objects.insert(ObjectId(20), doubling_season);
+        state.battlefield.push_back(ObjectId(10));
+        state.battlefield.push_back(ObjectId(20));
+
+        let target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(30), target);
+
+        let proposed = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(30),
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        assert_eq!(
+            replace_event(&mut state, proposed, &mut events),
+            ReplacementResult::Prevented
+        );
     }
 
     #[test]
@@ -9859,9 +9998,11 @@ mod tests {
         state.objects.insert(ObjectId(30), target);
 
         let proposed = ProposedEvent::AddCounter {
-            actor: PlayerId(0),
-            object_id: ObjectId(30),
-            counter_type: CounterType::Plus1Plus1,
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(30),
+                counter_type: CounterType::Plus1Plus1,
+            },
             count: 1,
             applied: HashSet::new(),
         };
@@ -10342,9 +10483,11 @@ mod tests {
 
         let registry = build_replacement_registry();
         let proposed = ProposedEvent::AddCounter {
-            actor: PlayerId(0),
-            object_id: target,
-            counter_type: CounterType::Minus1Minus1,
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: target,
+                counter_type: CounterType::Minus1Minus1,
+            },
             count: 1,
             applied: HashSet::new(),
         };
@@ -10355,9 +10498,11 @@ mod tests {
 
         // Sanity: the same replacement DOES fire on a +1/+1 counter event.
         let proposed_p1p1 = ProposedEvent::AddCounter {
-            actor: PlayerId(0),
-            object_id: target,
-            counter_type: CounterType::Plus1Plus1,
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: target,
+                counter_type: CounterType::Plus1Plus1,
+            },
             count: 1,
             applied: HashSet::new(),
         };
@@ -10400,9 +10545,11 @@ mod tests {
         let registry = build_replacement_registry();
 
         let proposed_p1p1 = ProposedEvent::AddCounter {
-            actor: PlayerId(0),
-            object_id: target,
-            counter_type: CounterType::Plus1Plus1,
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: target,
+                counter_type: CounterType::Plus1Plus1,
+            },
             count: 1,
             applied: HashSet::new(),
         };
@@ -10412,9 +10559,11 @@ mod tests {
         );
 
         let proposed_m1m1 = ProposedEvent::AddCounter {
-            actor: PlayerId(0),
-            object_id: target,
-            counter_type: CounterType::Minus1Minus1,
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: target,
+                counter_type: CounterType::Minus1Minus1,
+            },
             count: 1,
             applied: HashSet::new(),
         };
@@ -10461,9 +10610,11 @@ mod tests {
             CounterType::Generic("charge".to_string()),
         ] {
             let proposed = ProposedEvent::AddCounter {
-                actor: PlayerId(0),
-                object_id: target,
-                counter_type: ct.clone(),
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(0),
+                    object_id: target,
+                    counter_type: ct.clone(),
+                },
                 count: 1,
                 applied: HashSet::new(),
             };
@@ -10473,6 +10624,272 @@ mod tests {
                 "counter_match=None must accept any counter type, including {ct:?}"
             );
         }
+    }
+
+    #[test]
+    fn global_object_counter_prohibition_prevents_listed_types_only() {
+        let source = ObjectId(90);
+        let target = ObjectId(91);
+        let unrelated = ObjectId(92);
+        let type_filter = TypeFilter::AnyOf(vec![
+            TypeFilter::Artifact,
+            TypeFilter::Creature,
+            TypeFilter::Enchantment,
+            TypeFilter::Land,
+        ]);
+        let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::new(type_filter).properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+            ))
+            .quantity_modification(QuantityModification::Prevent);
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+
+        let mut artifact = GameObject::new(
+            target,
+            CardId(91),
+            PlayerId(1),
+            "Target Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        artifact.card_types.core_types = vec![CoreType::Artifact];
+        state.objects.insert(target, artifact);
+        state.battlefield.push_back(target);
+
+        let mut planeswalker = GameObject::new(
+            unrelated,
+            CardId(92),
+            PlayerId(1),
+            "Unrelated Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        planeswalker.card_types.core_types = vec![CoreType::Planeswalker];
+        state.objects.insert(unrelated, planeswalker);
+        state.battlefield.push_back(unrelated);
+
+        let exiled_artifact_id = ObjectId(93);
+        let mut exiled_artifact = GameObject::new(
+            exiled_artifact_id,
+            CardId(93),
+            PlayerId(1),
+            "Exiled Artifact".to_string(),
+            Zone::Exile,
+        );
+        exiled_artifact.card_types.core_types = vec![CoreType::Artifact];
+        state.objects.insert(exiled_artifact_id, exiled_artifact);
+        state.exile.push_back(exiled_artifact_id);
+
+        let registry = build_replacement_registry();
+        let listed_type_event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: target,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &listed_type_event, &registry).is_empty(),
+            "artifact counter placement should match Solemnity's listed-type prohibition"
+        );
+        let mut events = Vec::new();
+        assert_eq!(
+            replace_event(&mut state, listed_type_event, &mut events),
+            ReplacementResult::Prevented
+        );
+
+        let unlisted_type_event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: unrelated,
+                counter_type: CounterType::Loyalty,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &unlisted_type_event, &registry).is_empty(),
+            "planeswalker counter placement should not match the artifact/creature/enchantment/land filter"
+        );
+
+        let exiled_artifact_event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: exiled_artifact_id,
+                counter_type: CounterType::Generic("egg".to_string()),
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &exiled_artifact_event, &registry).is_empty(),
+            "unqualified artifact/creature/enchantment/land wording must only match battlefield permanents"
+        );
+    }
+
+    #[test]
+    fn optional_counter_prevention_prompts_instead_of_auto_preventing() {
+        let source = ObjectId(90);
+        let target = ObjectId(91);
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Any)
+            .quantity_modification(QuantityModification::Prevent);
+        repl.mode = ReplacementMode::Optional { decline: None };
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+
+        let mut creature = GameObject::new(
+            target,
+            CardId(91),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        creature.card_types.core_types = vec![CoreType::Creature];
+        state.objects.insert(target, creature);
+        state.battlefield.push_back(target);
+
+        let event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: target,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+
+        assert_eq!(
+            replace_event(&mut state, event, &mut events),
+            ReplacementResult::NeedsChoice(PlayerId(1)),
+            "optional counter prevention must use the normal replacement choice path"
+        );
+        assert!(state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| pending.is_optional));
+    }
+
+    #[test]
+    fn player_counter_prohibition_does_not_match_object_counter_placement() {
+        let source = ObjectId(90);
+        let planeswalker_id = ObjectId(91);
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        repl.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        let mut state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+
+        let mut planeswalker = GameObject::new(
+            planeswalker_id,
+            CardId(91),
+            PlayerId(1),
+            "Target Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        planeswalker.card_types.core_types = vec![CoreType::Planeswalker];
+        state.objects.insert(planeswalker_id, planeswalker);
+        state.battlefield.push_back(planeswalker_id);
+
+        let registry = build_replacement_registry();
+        let event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: planeswalker_id,
+                counter_type: CounterType::Loyalty,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &event, &registry).is_empty(),
+            "player-scoped counter replacements must not match object counter placement"
+        );
+    }
+
+    #[test]
+    fn player_counter_replacement_scope_uses_recipient_not_actor() {
+        let source = ObjectId(90);
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Prevent);
+        repl.valid_player = Some(ReplacementPlayerScope::You);
+        let state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+        let registry = build_replacement_registry();
+
+        let controlled_actor_puts_counter_on_opponent = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(
+                &state,
+                &controlled_actor_puts_counter_on_opponent,
+                &registry
+            )
+            .is_empty(),
+            "controller-scoped player-counter replacement must not match only the actor placing counters"
+        );
+
+        let opponent_actor_puts_counter_on_controller = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Player {
+                actor: PlayerId(1),
+                player_id: PlayerId(0),
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(
+                &state,
+                &opponent_actor_puts_counter_on_controller,
+                &registry
+            )
+            .is_empty(),
+            "controller-scoped player-counter replacement should match the recipient receiving counters"
+        );
+    }
+
+    #[test]
+    fn object_counter_replacement_without_player_scope_ignores_player_counter_events() {
+        let source = ObjectId(90);
+        let repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Double);
+        let state = test_state_with_object(source, Zone::Battlefield, vec![repl]);
+        let registry = build_replacement_registry();
+
+        let poison_event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(0),
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &poison_event, &registry).is_empty(),
+            "object-counter replacement without valid_player must not match player counters"
+        );
+
+        let energy_event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(0),
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &energy_event, &registry).is_empty(),
+            "object-counter replacement without valid_player must not match energy counters"
+        );
     }
 
     /// SHAPE: `empty_mana_pool_matcher` returns true for an EmptyManaPool event

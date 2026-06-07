@@ -4,7 +4,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
 pub fn resolve(
@@ -107,6 +107,7 @@ pub fn resolve(
     crate::game::layers::evaluate_layers(state);
 
     if !resolution_mods.is_empty() {
+        let mut additions = Vec::new();
         for modification in resolution_mods {
             // RemoveManaCost was already consumed into `values`; only the
             // counter-placement exceptions remain to apply here.
@@ -137,14 +138,41 @@ pub fn resolve(
                 if !gate_passes {
                     continue;
                 }
-                super::counters::add_counter_with_replacement(
-                    state,
-                    ability.controller,
-                    ability.source_id,
+                additions.push(PendingCounterAddition::Object {
+                    actor: ability.controller,
+                    object_id: ability.source_id,
                     counter_type,
-                    n,
-                    events,
+                    count: n,
+                });
+            }
+        }
+        for (index, addition) in additions.iter().cloned().enumerate() {
+            let PendingCounterAddition::Object {
+                actor,
+                object_id,
+                counter_type,
+                count,
+            } = addition
+            else {
+                continue;
+            };
+            if !super::counters::add_counter_with_replacement(
+                state,
+                actor,
+                object_id,
+                counter_type,
+                count,
+                events,
+            ) {
+                super::counters::stash_pending_counter_additions(
+                    state,
+                    additions[index + 1..].to_vec(),
+                    PendingEffectResolved::new(
+                        EffectKind::from(&ability.effect),
+                        ability.source_id,
+                    ),
                 );
+                return Ok(());
             }
         }
     }

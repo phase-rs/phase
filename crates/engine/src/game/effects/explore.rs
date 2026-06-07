@@ -11,28 +11,33 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 
 use super::resolve_ability_chain;
 
 /// Add a +1/+1 counter to the exploring creature via the replacement pipeline.
 fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mut Vec<GameEvent>) {
     let proposed = ProposedEvent::AddCounter {
-        actor: state
-            .objects
-            .get(&explorer_id)
-            .map(|obj| obj.controller)
-            .unwrap_or(PlayerId(0)),
-        object_id: explorer_id,
-        counter_type: CounterType::Plus1Plus1,
+        placement: CounterPlacement::Object {
+            actor: state
+                .objects
+                .get(&explorer_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(PlayerId(0)),
+            object_id: explorer_id,
+            counter_type: CounterType::Plus1Plus1,
+        },
         count: 1,
         applied: HashSet::new(),
     };
 
     if let ReplacementResult::Execute(ProposedEvent::AddCounter {
-        actor,
-        object_id,
-        counter_type,
+        placement:
+            CounterPlacement::Object {
+                actor,
+                object_id,
+                counter_type,
+            },
         count,
         ..
     }) = replacement::replace_event(state, proposed, events)

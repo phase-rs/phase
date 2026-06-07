@@ -6,8 +6,8 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastingVariant, ExileLink, ExileLinkKind, GameState, StackEntry, StackEntryKind,
-    StackPaidSnapshot,
+    CastingVariant, ExileLink, ExileLinkKind, GameState, PendingCounterPostAction, StackEntry,
+    StackEntryKind, StackPaidSnapshot,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -703,12 +703,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             // (e.g., saga lore counters per CR 714.3a, planeswalker
                             // intrinsic loyalty per CR 306.5b, battle intrinsic
                             // defense per CR 310.4b).
-                            super::engine_replacement::apply_etb_counters(
+                            if !super::engine_replacement::apply_etb_counters(
                                 state,
                                 object_id,
                                 &enter_with_counters,
                                 events,
-                            );
+                            ) {
+                                return;
+                            }
                             // CR 712.14a + CR 310.11b: Apply transformation if entering
                             // transformed (propagated from ExileWithAltCost permission).
                             if enter_transformed && to == Zone::Battlefield {
@@ -752,9 +754,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 .map(|(_, ct, n)| (ct.clone(), *n))
                                 .collect();
                             if !pending.is_empty() {
-                                super::engine_replacement::apply_etb_counters(
+                                if !super::engine_replacement::apply_etb_counters(
                                     state, object_id, &pending, events,
-                                );
+                                ) {
+                                    return;
+                                }
                                 state
                                     .pending_etb_counters
                                     .retain(|(oid, _, _)| *oid != object_id);
@@ -1279,14 +1283,26 @@ fn resolve_keyword_action(
                 .filter(|sc| sc.zone == Zone::Battlefield)
                 .map(|sc| sc.controller);
             if let (Some(controller), true) = (spacecraft_controller, counters_added > 0) {
-                effects::counters::add_counter_with_replacement(
+                if !effects::counters::add_counter_with_replacement(
                     state,
                     controller,
                     spacecraft_id,
                     CounterType::Generic("charge".to_string()),
                     counters_added,
                     events,
-                );
+                ) {
+                    effects::counters::stash_pending_counter_completion_with_actions(
+                        state,
+                        EffectKind::Station,
+                        spacecraft_id,
+                        vec![PendingCounterPostAction::RecordStationed {
+                            spacecraft_id,
+                            creature_id: paid_creature_id,
+                            counters_added,
+                        }],
+                    );
+                    return;
+                }
             }
             events.push(GameEvent::Stationed {
                 spacecraft_id,
