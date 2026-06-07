@@ -13954,7 +13954,47 @@ pub(crate) fn parse_effect_chain_ir(
     // mode is re-applied to the built chain via `rewrite_rounding_mode`.
     let (text, chain_rounding) = strip_trailing_rounding_annotation(&text);
     let text = text.as_str();
-    let full_text = text; // Bind before `text` is shadowed by strip helpers in the loop
+    // CR 611.2b + CR 611.2a: A leading "For as long as <condition>," prefix that
+    // resolves to UntilHostLeavesPlay (either "you control ~" or "~ remains on the
+    // battlefield") scopes the ENTIRE following comma body, not just its first
+    // clause. When that body is HETEROGENEOUS — its first clause is a distinct effect
+    // (e.g. "gain control of that permanent") the single-clause arm cannot merge with
+    // the trailing static/restriction riders — starts_prefix_clause ("for as long as")
+    // would otherwise glue the body into one chunk and the single-clause arm would drop
+    // every sibling after the first (Opportunistic Dragon: "it loses all abilities" lost).
+    // Strip the prefix here so split_clause_sequence produces the sibling chunks; the
+    // duration is restamped onto every clause after the chunk loop.
+    //
+    // Gate is deliberately narrow (only Opportunistic Dragon fires across the full
+    // dataset): RESTRICTED to UntilHostLeavesPlay (excludes "until end of turn"
+    // animations, which the single-clause arm MERGES into one GenericEffect) AND to
+    // bodies whose first chunk is neither GenericEffect (homogeneous continuous-mod /
+    // animate merge — Kitesail) nor GrantCastingPermission (play/mana permission merge
+    // — Kotose), the two classes the single-clause arm merges across commas.
+    let leading_host_lifetime_split = strip_leading_duration(text).and_then(|(dur, body)| {
+        if !matches!(dur, Duration::UntilHostLeavesPlay) {
+            return None;
+        }
+        let body_chunks = split_clause_sequence(body);
+        if body_chunks.len() <= 1 {
+            return None;
+        }
+        // Parser-as-detector: classify the first chunk's effect; only chain-route a
+        // distinct, non-mergeable lead.
+        let mut probe_ctx = ParseContext::default();
+        let first = parse_effect_clause(body_chunks[0].text.trim(), &mut probe_ctx);
+        if matches!(
+            first.effect,
+            Effect::GenericEffect { .. } | Effect::GrantCastingPermission { .. }
+        ) {
+            return None;
+        }
+        Some((dur, body))
+    });
+    let text = leading_host_lifetime_split
+        .as_ref()
+        .map_or(text, |(_, body)| *body);
+    let full_text = text; // bind AFTER the strip so diagnostics track the parsed chunks
     let chunks = split_clause_sequence(text);
     // CR 107.3i: "Normally, all instances of X on an object have the same value."
     // Build a per-chunk sentence-scoped `where X is <expr>` binding so that when
@@ -16102,6 +16142,16 @@ pub(crate) fn parse_effect_chain_ir(
     // `GenericEffect` whose duration field is `None`; the CR baseline per
     // CR 611.2a is "until end of the game", which is not what we want either).
     try_fold_loses_other_sibling(&mut clauses);
+
+    // CR 611.2b: stamp the stripped leading "for as long as" duration onto every
+    // sibling clause of the heterogeneous body (gain control, "it loses all abilities"
+    // -> RemoveAllAbilities, "can't attack or block"). with_clause_duration patches
+    // both the clause-level duration and any inner GenericEffect.duration.
+    if let Some((dur, _)) = leading_host_lifetime_split {
+        for clause in clauses.iter_mut() {
+            clause.parsed = with_clause_duration(clause.parsed.clone(), dur.clone());
+        }
+    }
 
     EffectChainIr {
         clauses,
@@ -20289,6 +20339,72 @@ mod tests {
         assert!(modifications.contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Trample,
         }));
+    }
+
+    // CR 611.2b: A leading "for as long as <condition>," prefix that resolves to
+    // UntilHostLeavesPlay scopes the ENTIRE comma body. For the heterogeneous
+    // control-theft class (Opportunistic Dragon) the middle sibling "it loses all
+    // abilities" must NOT be dropped: the chain must carry GainControl, a
+    // RemoveAllAbilities GenericEffect, and a can't-attack/can't-block restriction,
+    // every clause stamped with Duration::UntilHostLeavesPlay.
+    #[test]
+    fn opportunistic_dragon_loses_all_abilities_sibling_preserved() {
+        let def = parse_effect_chain(
+            "For as long as ~ remains on the battlefield, gain control of that permanent, it loses all abilities, and it can't attack or block.",
+            AbilityKind::Spell,
+        );
+
+        // Walk the effect + sub_ability chain collecting every effect, every
+        // continuous modification, and every static mode, tracking whether the
+        // RemoveAllAbilities-bearing clause carries the host-lifetime duration.
+        let mut has_gain_control = false;
+        let mut remove_all_abilities_with_host_duration = false;
+        let mut has_cant_attack = false;
+        let mut has_cant_block = false;
+
+        let mut node = Some(&def);
+        while let Some(ability) = node {
+            if matches!(ability.effect.as_ref(), Effect::GainControl { .. }) {
+                has_gain_control = true;
+            }
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = ability.effect.as_ref()
+            {
+                for static_def in static_abilities {
+                    for modification in &static_def.modifications {
+                        match modification {
+                            ContinuousModification::RemoveAllAbilities
+                                if ability.duration == Some(Duration::UntilHostLeavesPlay) =>
+                            {
+                                remove_all_abilities_with_host_duration = true;
+                            }
+                            ContinuousModification::AddStaticMode { mode } => match mode {
+                                StaticMode::CantAttack => has_cant_attack = true,
+                                StaticMode::CantBlock => has_cant_block = true,
+                                StaticMode::CantAttackOrBlock => {
+                                    has_cant_attack = true;
+                                    has_cant_block = true;
+                                }
+                                _ => {}
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            node = ability.sub_ability.as_deref();
+        }
+
+        assert!(has_gain_control, "expected GainControl in chain: {def:#?}");
+        assert!(
+            remove_all_abilities_with_host_duration,
+            "expected RemoveAllAbilities GenericEffect with UntilHostLeavesPlay (middle sibling dropped?): {def:#?}"
+        );
+        assert!(
+            has_cant_attack && has_cant_block,
+            "expected can't-attack and can't-block restriction in chain: {def:#?}"
+        );
     }
 
     #[test]
