@@ -1412,6 +1412,13 @@ fn specialize_discard_filter() -> TargetFilter {
 /// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
 /// on this permanent. Activate only as a sorcery."
 pub fn synthesize_level_up(face: &mut CardFace) {
+    // CR 711.4 / CR 711.5: strip keywords printed inside {LEVEL} striations out of
+    // the base list before reading `face.keywords` — they belong to the level-gated
+    // statics, not the unconditional base abilities. Single call site fixes both the
+    // production and scenario pipelines, which reach here via `synthesize_all` after
+    // `keywords` + `static_abilities` are populated.
+    strip_level_gated_keywords(face);
+
     let level_up_abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
@@ -8888,6 +8895,63 @@ pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<K
         }
     }
     base.extend(extracted);
+}
+
+/// Strip level-gated keywords out of a leveler card's base `keywords` list.
+///
+/// CR 711.4 / CR 711.5: Keywords printed inside a {LEVEL} symbol are level-gated
+/// static abilities, not base abilities — below the lowest level the creature has
+/// only its base characteristics, so these must not be granted unconditionally.
+///
+/// MTGJSON's `keywords` array lists *every* keyword printed anywhere on the card,
+/// including those inside {LEVEL} striations (e.g. First strike on Student of
+/// Warfare, Flying on Coralhelm Commander). Those keywords reach `face.keywords`
+/// (and therefore the runtime object's `base_keywords`) and would be granted at
+/// level 0, before the leveler has any level counters. The level-gated static
+/// abilities the parser produced (`HasCounters` on the "level" generic counter)
+/// are the *only* legitimate source of those keywords; this helper removes the
+/// unconditional copies so the layer system grants them solely through the gated
+/// statics.
+///
+/// This is the leveler analog of `merge_extracted_keywords` / the Craft
+/// MTGJSON-vs-parser carve-out: a single authority so the production pipeline
+/// (`build_oracle_face_inner`) and the scenario test harness
+/// (`build_face_from_oracle`) cannot diverge.
+///
+/// Equality, not `kind()`/discriminant: Hexdrinker grants the parameterized
+/// `Protection { instants }` and a separate `Protection` (everything) in distinct
+/// level blocks, so full `Keyword` equality strips only the exact gated variant
+/// rather than collapsing all Protection. `Keyword::LevelUp` never appears in an
+/// `AddKeyword` modification, so it is structurally preserved — synthesis still
+/// finds it to build the level-up activated ability.
+///
+/// Residual assumption: this presumes a gated keyword is never *also* a
+/// legitimate base-text (level-0) keyword on the same card. True for all 26
+/// current levelers — none print a keyword both outside and inside a {LEVEL}
+/// striation.
+pub(crate) fn strip_level_gated_keywords(face: &mut CardFace) {
+    let gated: Vec<Keyword> = face
+        .static_abilities
+        .iter()
+        .filter(|stat| {
+            matches!(
+                &stat.condition,
+                Some(StaticCondition::HasCounters { counters, .. })
+                    if matches!(
+                        counters,
+                        CounterMatch::OfType(CounterType::Generic(s)) if s == "level"
+                    )
+            )
+        })
+        .flat_map(|stat| {
+            stat.modifications.iter().filter_map(|m| match m {
+                ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+
+    face.keywords.retain(|kw| !gated.contains(kw));
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.
@@ -16393,6 +16457,74 @@ mod sorcery_speed_invariant_tests {
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
+    }
+
+    /// Build a level-gated static carrying `AddKeyword(keyword)` on the "level"
+    /// generic counter — the exact shape `parse_level_blocks` produces for keyword
+    /// lines inside a {LEVEL} striation.
+    fn level_gated_keyword_static(keyword: Keyword, minimum: u32) -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .condition(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("level".to_string())),
+                minimum,
+                maximum: None,
+            })
+            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+    }
+
+    /// CR 711.4 / CR 711.5: `strip_level_gated_keywords` must remove keywords that
+    /// are sourced from a level-gated static (so they are not granted at level 0),
+    /// while structurally preserving `LevelUp` (never an `AddKeyword`).
+    #[test]
+    fn strip_level_gated_keywords_removes_only_gated_keywords() {
+        let level_up = Keyword::LevelUp(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        });
+        let mut face = CardFace {
+            keywords: vec![
+                Keyword::FirstStrike,
+                Keyword::DoubleStrike,
+                level_up.clone(),
+            ],
+            static_abilities: vec![
+                level_gated_keyword_static(Keyword::FirstStrike, 2),
+                level_gated_keyword_static(Keyword::DoubleStrike, 7),
+            ],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        // Both gated keywords stripped; the LevelUp keyword survives.
+        assert_eq!(face.keywords, vec![level_up]);
+    }
+
+    /// Negative case: a `HasCounters` static on a NON-"level" generic counter
+    /// (e.g. "charge") must NOT strip its keyword — only `{LEVEL}`-gated statics
+    /// (CR 711) are level abilities.
+    #[test]
+    fn strip_level_gated_keywords_ignores_non_level_counters() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Flying],
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .condition(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                    minimum: 1,
+                    maximum: None,
+                })
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        // Flying is gated on a charge counter, not a level counter — preserved.
+        assert_eq!(face.keywords, vec![Keyword::Flying]);
     }
 
     /// CR 702.97a: Scavenge synthesis must carry AsSorcery (single `.sorcery_speed()`
