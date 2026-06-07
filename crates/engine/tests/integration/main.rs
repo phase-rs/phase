@@ -129,6 +129,7 @@ mod obliterate_regression;
 mod old_growth_troll_return_as_aura;
 mod omo_queen_of_vesuva;
 mod oracle_parser;
+mod overload_no_legal_target;
 mod oversimplify_per_player_fractal;
 mod peter_parker_modal_back_face_cast;
 mod plaguecrafter_etb_class;

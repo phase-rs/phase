@@ -2592,6 +2592,18 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Evoke);
     }
 
+    // CR 702.96a + CR 118.9: Overload is a static alternative cost. Surface it as
+    // a hand candidate so the gate offers it even when the printed cast has no legal
+    // target (the overload mode requires none — CR 702.96b). effective_spell_keywords
+    // covers printed (obj.keywords) AND granted (CastWithKeyword) overload.
+    if obj.zone == Zone::Hand
+        && effective_spell_keywords(state, player, object_id)
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Overload(_)))
+    {
+        candidates.push(CastingVariant::Overload);
+    }
+
     // CR 702.119a-c + CR 118.9: Emerge is a hand-zone alternative cost that
     // requires sacrificing a creature and reducing the emerge cost by that
     // creature's mana value.
@@ -3032,15 +3044,16 @@ fn prepare_spell_cast_with_variant_override_inner(
             CastingVariant::Normal
         }
     });
-    // CR 702.96a: When the caller explicitly opted into Overload (via
-    // `variant_override = Some(CastingVariant::Overload)`), substitute the
-    // overload mana cost taken from the hand object's `Keyword::Overload(cost)`
-    // payload. Mirrors the Evoke/Warp cost-selection pattern below.
+    // CR 702.96a + CR 604.1: read the overload cost from effective keywords so a
+    // granted Overload (CastWithKeyword) substitutes its cost, mirroring the
+    // Evoke/Emerge effective-keyword cost reads below.
     let overload_cost = if casting_variant == CastingVariant::Overload {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Overload(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Overload(cost) => Some(cost.clone()),
+                _ => None,
+            })
     } else {
         None
     };
@@ -8421,6 +8434,38 @@ fn can_cast_prepared_now(
                 state,
                 player,
                 prepared.object_id,
+                &prepared.mana_cost,
+            );
+    }
+
+    // CR 702.96b: a spell cast with overload "won't require any targets" and "may
+    // affect objects that couldn't be chosen as legal targets". The generic gate
+    // (spell_has_legal_targets) reads the UNMODIFIED printed obj ("... target
+    // creature"); evaluate the TRANSFORMED prepared.ability_def instead, which
+    // overload::transform_ability_def has already rewritten to target-less *All
+    // effects (no TargetRef slots → trivially satisfiable).
+    if prepared.casting_variant == CastingVariant::Overload {
+        let overload_targets_ok = prepared.ability_def.as_ref().is_none_or(|def| {
+            let resolved = build_resolved_from_def(def, prepared.object_id, player);
+            match build_target_slots(state, &resolved) {
+                Ok(slots) => {
+                    slots.is_empty()
+                        || has_legal_target_assignment_for_ability(
+                            state,
+                            &resolved,
+                            &slots,
+                            &def.target_constraints,
+                        )
+                }
+                Err(_) => false,
+            }
+        });
+        return overload_targets_ok
+            && can_feasibly_pay_harmonize_mana_cost(
+                state,
+                player,
+                prepared.object_id,
+                prepared.casting_variant,
                 &prepared.mana_cost,
             );
     }
@@ -21332,6 +21377,96 @@ mod tests {
         assert!(
             !state.battlefield.contains(&spell),
             "sacrificed permanent must not remain on the battlefield; {diag}"
+        );
+    }
+
+    /// CR 702.96a-b (issue: overload misfiltered): a sorcery in hand with
+    /// Overload and a printed effect that targets an opponent's creature must be
+    /// castable even when the opponent controls NO creature (the printed target
+    /// is illegal). The overload mode is target-less (DealDamage → DamageAll),
+    /// so the gate must consult the TRANSFORMED ability_def, not the printed one.
+    ///
+    /// The `can_cast_object_now == true` assertion is LOAD-BEARING: it fails
+    /// without the Step-2 gate fix (the candidate push alone is a no-op, because
+    /// the generic gate still rejects on the printed no-legal-target effect).
+    #[test]
+    fn overload_castable_with_no_legal_printed_target() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup_game_at_main_phase();
+        // Overload cost {3}{R}{R} → give exactly that as a colorless+red pool.
+        // (Generic absorbs any color; the two red shards need red mana.)
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 5);
+
+        // Mizzium-Mortars-like sorcery in hand: printed "deal 4 damage to target
+        // creature you don't control", granted nothing; printed Overload cost.
+        let overload_cost = ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+        };
+        let spell = create_object(
+            &mut state,
+            CardId(8200),
+            PlayerId(0),
+            "Mizzium Mortars".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Red],
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.color.push(ManaColor::Red);
+            obj.base_color = obj.color.clone();
+            obj.keywords.push(Keyword::Overload(overload_cost.clone()));
+            obj.base_keywords.push(Keyword::Overload(overload_cost));
+            let ability = parse_effect_chain(
+                "Mizzium Mortars deals 4 damage to target creature you don't control.",
+                AbilityKind::Spell,
+            );
+            Arc::make_mut(&mut obj.abilities).push(ability.clone());
+            Arc::make_mut(&mut obj.base_abilities).push(ability);
+        }
+
+        // Opponent (PlayerId(1)) controls NO creature: the printed target is
+        // illegal, so the printed cast alone would be filtered out.
+
+        // (1) LOAD-BEARING — castable only because the overload gate consults the
+        // transformed (target-less) ability_def. Fails without the Step-2 fix.
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell),
+            "CR 702.96b: overload spell must be castable with no legal printed target"
+        );
+
+        // (2) The choice set surfaces the Overload variant.
+        let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+        assert!(
+            choices
+                .options
+                .iter()
+                .any(|o| o.variant == CastingVariant::Overload),
+            "choice set must include the Overload option; got {:?}",
+            choices.options
+        );
+
+        // (3) Control: with the overload cost UNaffordable (drain the pool) AND no
+        // legal printed target, the spell must NOT be castable — the overload gate
+        // is not unconditionally true.
+        {
+            let player_data = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            player_data.mana_pool.clear();
+        }
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell),
+            "no affordable cost AND no legal printed target ⇒ not castable"
         );
     }
 
