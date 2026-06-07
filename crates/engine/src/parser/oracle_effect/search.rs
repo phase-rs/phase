@@ -1109,29 +1109,63 @@ fn parse_leading_article(i: &str) -> nom::IResult<&str, Leading, OracleError<'_>
 // CR 701.23a: recover one co-equal disjunctive member into its own segment.
 // Strips a leading article ("a"/"an") but preserves "basic" as a supertype.
 fn push_peeled_member<'a>(member: &'a str, segments: &mut Vec<&'a str>) {
-    let m = member.trim();
+    let m = member.trim().trim_end_matches(',').trim_end();
     if m.is_empty() {
         return;
     }
-    let cleaned = match parse_leading_article(m) {
-        Ok((rest, Leading::Basic)) => {
-            let start = m.len() - rest.len() - "basic ".len();
-            &m[start..]
-        }
-        Ok((rest, _)) => rest,
-        Err(_) => m,
-    };
+    let cleaned = strip_search_member_leading(m);
     if !cleaned.is_empty() {
         segments.push(cleaned);
     }
 }
 
+fn strip_search_member_leading(member: &str) -> &str {
+    match parse_leading_article(member) {
+        Ok((rest, Leading::Basic)) => {
+            let start = member.len() - rest.len() - "basic ".len();
+            &member[start..]
+        }
+        Ok((rest, _)) => rest,
+        Err(_) => member,
+    }
+}
+
+fn parse_search_named_member(member: &str) -> Option<TargetFilter> {
+    parse_search_named_filter(strip_search_member_leading(member.trim()))
+}
+
+fn parse_comma_member_start(input: &str) -> OracleResult<'_, ()> {
+    let input = input.trim_start();
+    let input = strip_search_member_leading(input);
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("card named ")),
+        value((), parse_bare_search_disjunction_right),
+    ))
+    .parse(input)
+}
+
+fn split_next_comma_member(region: &str) -> Option<(&str, &str)> {
+    region.match_indices(',').find_map(|(idx, _)| {
+        let after_comma = &region[idx + 1..];
+        parse_comma_member_start(after_comma)
+            .is_ok()
+            .then(|| (&region[..idx], after_comma.trim_start()))
+    })
+}
+
 // CR 701.23a: a left segment may itself enumerate co-members the upstream comma
-// split did not break out. Peel each on the comma into its own flat segment.
+// split did not break out. Peel each delimiter comma into its own flat segment
+// without shredding comma-bearing card names in "card named X" members.
 fn peel_comma_members<'a>(region: &'a str, segments: &mut Vec<&'a str>) {
-    // structural: not dispatch (comma-member enumeration)
-    for member in region.split(',') {
-        push_peeled_member(member, segments);
+    let mut remaining = region.trim();
+    while !remaining.is_empty() {
+        if let Some((member, rest)) = split_next_comma_member(remaining) {
+            push_peeled_member(member, segments);
+            remaining = rest;
+        } else {
+            push_peeled_member(remaining, segments);
+            break;
+        }
     }
 }
 
@@ -1176,6 +1210,7 @@ fn split_terminal_or(region: &str) -> Option<(&str, &str, Connector)> {
             let before_final = &region[..region.len() - after.len()];
             let final_member = &region[region.len() - after_conn.len()..];
             match last {
+                Some((_, _, Connector::AndOr)) => {}
                 Some((prev_before, _, _)) if prev_before.len() >= before_final.len() => {}
                 _ => last = Some((before_final, final_member, Connector::Or)),
             }
@@ -1202,12 +1237,8 @@ fn detect_comma_series_or(filter_region: &str) -> Option<Vec<&str>> {
     // filter — either "card named X" (anchored, no article) or, after stripping a
     // leading article, a bare "<head> card(s)". "basic" is preserved (supertype).
     // This strip MUST match push_peeled_member's strip so guard and peeler agree.
-    let head = match parse_leading_article(final_member) {
-        Ok((_rest, Leading::Basic)) => final_member,
-        Ok((rest, _)) => rest,
-        Err(_) => final_member,
-    };
-    if parse_search_named_filter(final_member).is_none()
+    let head = strip_search_member_leading(final_member);
+    if parse_search_named_member(final_member).is_none()
         && parse_bare_search_disjunction_right(head).is_err()
     {
         return None;
@@ -1222,8 +1253,8 @@ fn detect_comma_series_or(filter_region: &str) -> Option<Vec<&str>> {
 
     let mut segments = Vec::new();
     // CR 201.2: a named left segment's comma belongs to the card name — keep whole.
-    if parse_search_named_filter(before_final.trim()).is_some() {
-        segments.push(before_final.trim());
+    if parse_search_named_member(before_final).is_some() {
+        push_peeled_member(before_final, &mut segments);
     } else {
         peel_comma_members(before_final, &mut segments);
     }
@@ -1316,8 +1347,8 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
 
         // CR 201.2: a named member's comma belongs to the card name
         // ("Halvar, God of Battle") — never peel it. Otherwise peel co-members.
-        if parse_search_named_filter(before.trim()).is_some() {
-            segments.push(before.trim());
+        if parse_search_named_member(before).is_some() {
+            push_peeled_member(before, &mut segments);
         } else {
             peel_comma_members(before, &mut segments);
         }
@@ -4025,6 +4056,88 @@ mod tests {
         );
     }
 
+    /// CR 201.2 + CR 701.23a: a comma-bearing named card can appear in the middle
+    /// of a comma-series disjunction. Only delimiter commas split the series; the
+    /// comma inside the card name remains part of the `Named` filter.
+    #[test]
+    fn search_middle_named_member_with_comma_in_name_not_shredded() {
+        let details = parse_search_library_details(
+            "search your library for a legendary card, a card named Halvar, God of Battle, or an Equipment card, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            details.extra_filters.is_empty(),
+            "comma-series disjunction must stay one choice, not required extras: {:?}",
+            details.extra_filters
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            3,
+            "expected three co-equal branches without name shredding: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasSupertype { value: Supertype::Legendary }
+                ))
+            )),
+            "expected Legendary branch: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Named { name } if name == "Halvar, God of Battle"
+                ))
+            )),
+            "expected intact named branch: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::Typed(typed) if typed.get_subtype() == Some("Equipment")
+            )),
+            "expected Equipment branch: {filters:?}"
+        );
+    }
+
+    /// CR 201.2 + CR 701.23a: the comma-series front gate must recognize a final
+    /// named member even when it has a leading article.
+    #[test]
+    fn search_final_named_member_with_leading_article_splits_as_disjunction() {
+        let details = parse_search_library_details(
+            "search your library for an Equipment card, or a card named Halvar, God of Battle, reveal it, put it into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(details.extra_filters.is_empty());
+        let TargetFilter::Or { filters } = &details.filter else {
+            panic!("expected Or filter, got {:?}", details.filter);
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "expected Equipment or named card: {filters:?}"
+        );
+        assert!(filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(typed) if typed.get_subtype() == Some("Equipment")
+        )));
+        assert!(filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(typed) if typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Named { name } if name == "Halvar, God of Battle"
+            ))
+        )));
+    }
+
     /// CR 202.3: the "X, Y, and/or Z ... with mana value N or less" form must
     /// DEFER from the comma-series front-gate (an `and/or` enumeration with a
     /// comma in the left side) and the bare " or less" must never terminate the
@@ -4750,6 +4863,41 @@ mod tests {
         // `bare_search_disjunction_allowed` — right must look like a card).
         let segments = split_filter_disjunctions("Mountain or Cave card");
         assert_eq!(segments, vec!["Mountain", "Cave card"]);
+    }
+
+    #[test]
+    fn split_terminal_or_preserves_and_or_precedence() {
+        let (before, final_member, connector) =
+            split_terminal_or("artifact card and/or creature card or enchantment card")
+                .expect("terminal connector");
+        assert_eq!(connector, Connector::AndOr);
+        assert_eq!(before, "artifact card");
+        assert_eq!(final_member, "creature card or enchantment card");
+    }
+
+    #[test]
+    fn split_comma_series_middle_named_member_keeps_name_comma() {
+        let segments = split_filter_disjunctions(
+            "legendary card, a card named Halvar, God of Battle, or Equipment card",
+        );
+        assert_eq!(
+            segments,
+            vec![
+                "legendary card",
+                "card named Halvar, God of Battle",
+                "Equipment card",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_comma_series_final_named_member_strips_article() {
+        let segments =
+            split_filter_disjunctions("Equipment card, or a card named Halvar, God of Battle");
+        assert_eq!(
+            segments,
+            vec!["Equipment card", "card named Halvar, God of Battle"]
+        );
     }
 
     /// M7 backward-compat: a serialized JSON snapshot using the legacy
