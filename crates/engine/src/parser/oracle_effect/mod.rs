@@ -43808,3 +43808,136 @@ mod snapshot_tests {
         ));
     }
 }
+
+// --- Issue #2400–#2406 Discord regression parser tests ---
+
+#[test]
+fn issue_2400_doubling_chant_repeat_for_member_driven_search() {
+    let def = parse_effect_chain(
+        "For each creature you control, you may search your library for a creature card with the same name as that creature. Put those cards onto the battlefield, then shuffle.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(&*def.effect, Effect::SearchLibrary { .. }));
+    assert!(matches!(
+        def.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { .. }
+        })
+    ));
+    let Effect::SearchLibrary { filter, .. } = def.effect.as_ref() else {
+        panic!("expected SearchLibrary");
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected typed search filter, got {filter:?}");
+    };
+    assert!(
+        typed
+            .properties
+            .contains(&FilterProp::SameNameAsParentTarget),
+        "search must bind same name as per-iteration creature"
+    );
+}
+
+#[test]
+fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
+    let def = parse_effect_chain(
+        "The owner of target permanent shuffles it into their library, then reveals the top card of that library. If that permanent is a permanent card with lesser mana value, that player puts it onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        owner_library: true, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected owner-library ChangeZone, got {:?}", def.effect);
+    };
+    let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
+    assert_eq!(
+        shuffle.effect.target_filter(),
+        Some(&TargetFilter::ParentTargetOwner)
+    );
+    let reveal = shuffle.sub_ability.as_ref().expect("reveal sub").effect.as_ref();
+    let Effect::RevealTop { player, count: 1 } = reveal else {
+        panic!("expected RevealTop of owner's library, got {reveal:?}");
+    };
+    assert_eq!(*player, TargetFilter::ParentTargetOwner);
+}
+
+#[test]
+fn issue_2405_broken_bond_optional_land_from_hand() {
+    let def = parse_effect_chain(
+        "Destroy target artifact or enchantment. You may put a land card from your hand onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    let sub = def.sub_ability.as_ref().expect("land put sub");
+    assert!(sub.optional);
+    let Effect::ChangeZone {
+        origin: Some(Zone::Hand),
+        destination: Zone::Battlefield,
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!("expected optional hand->battlefield ChangeZone, got {:?}", sub.effect);
+    };
+}
+
+#[test]
+fn issue_2405_planar_genesis_dig_land_enters_tapped() {
+    let def = parse_effect_chain(
+        "Look at the top four cards of your library. You may put a land card from among them onto the battlefield tapped. If you don't, put those cards into your hand. Put the rest on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::Dig {
+        destination: Some(Zone::Battlefield),
+        enter_tapped: true,
+        filter,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected tapped battlefield Dig, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected land filter");
+    };
+    assert_eq!(typed.type_filters, vec![TypeFilter::Land]);
+}
+
+#[test]
+fn issue_2403_sin_spira_tracked_set_copy_after_random_exile() {
+    let def = parse_effect_chain(
+        "Exile a permanent card from your graveyard at random, then create a tapped token that's a copy of that card.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(def.target_selection_mode, TargetSelectionMode::Random);
+    let copy = def.sub_ability.as_ref().expect("copy sub");
+    let Effect::CopyTokenOf { target, tapped, .. } = copy.effect.as_ref() else {
+        panic!("expected CopyTokenOf, got {:?}", copy.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    );
+    assert!(*tapped);
+}
+
+#[test]
+fn issue_2402_hazel_copy_target_token_trigger_parses() {
+    use crate::parser::oracle_trigger::parse_trigger_line;
+    let def = parse_trigger_line(
+        "At the beginning of your end step, create a token that's a copy of target token you control. If that token is a Squirrel, instead create two tokens that are copies of it.",
+        "Hazel of the Rootbloom",
+    );
+    let execute = def.execute.as_ref().expect("trigger execute");
+    let Effect::CopyTokenOf { target, .. } = execute.effect.as_ref() else {
+        panic!("expected CopyTokenOf trigger effect, got {:?}", execute.effect);
+    };
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected typed target token filter, got {target:?}");
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::Token)));
+}
