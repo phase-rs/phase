@@ -742,6 +742,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Clash
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
@@ -789,6 +790,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::AddPendingETBCounters { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
         | Effect::PreventDamage { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }

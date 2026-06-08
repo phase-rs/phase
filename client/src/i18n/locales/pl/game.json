@@ -1255,6 +1255,16 @@
     "discoverDeclineSuffix": "(połóż resztę na spód)",
     "cascadeDeclineSuffix": "(przetasuj wszystkie wygnane karty na spód)"
   },
+  "freeCastWindow": {
+    "eyebrow": "Darmowe rzucenie",
+    "title": "Rzuć czar za darmo",
+    "subtitle": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}). Pozostała łączna wartość many: {{budget}}.",
+    "subtitleNoBudget": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}).",
+    "castNamed": "Rzuć {{name}}",
+    "castSuffix": "(bez płacenia jego kosztu many)",
+    "done": "Gotowe",
+    "doneSuffix": "(przestań rzucać czary w ten sposób)"
+  },
   "castingVariant": {
     "eyebrow": "Rzuć",
     "title": "Wybierz rzucanie",

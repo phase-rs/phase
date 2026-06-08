@@ -4510,6 +4510,8 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         let waiting_for = handle_resolution_cast_success(
             state,
             player,
+            object_id,
+            resulting_mv,
             cleanup.exiled_misses,
             cleanup.success_action,
             events,
@@ -4529,6 +4531,8 @@ fn evaluate_cascade_constraint_with_resulting_mv(
 fn handle_resolution_cast_success(
     state: &mut GameState,
     player: PlayerId,
+    cast_object: ObjectId,
+    resulting_mv: u32,
     exiled_misses: Vec<ObjectId>,
     success_action: crate::types::ability::ResolutionCastSuccessAction,
     events: &mut Vec<GameEvent>,
@@ -4560,6 +4564,65 @@ fn handle_resolution_cast_success(
                 }))
             }
         }
+        // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity — the spell cast this
+        // way has finished announcement and is on the stack. Apply the exile-
+        // instead rider (CR 614.1a) to the cast spell, then reduce the running
+        // MV budget by this spell's resulting mana value, decrement the cast
+        // count, and re-open the window if any casts remain and candidates fit.
+        ResolutionCastSuccessAction::FreeCastOfferRemaining {
+            controller,
+            remaining_casts,
+            remaining_mv_budget,
+            filter,
+            zones,
+            exile_instead_of_graveyard,
+        } => {
+            if exile_instead_of_graveyard {
+                apply_exile_instead_of_graveyard_rider(state, cast_object);
+            }
+            let casts_left = remaining_casts.saturating_sub(1);
+            // CR 202.3: shrink the shared budget by what was actually spent on
+            // mana value (resulting MV after X, copies, etc.).
+            let budget_left = remaining_mv_budget.map(|b| b.saturating_sub(resulting_mv));
+            if casts_left == 0 {
+                return None;
+            }
+            let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
+                state,
+                controller,
+                &filter,
+                &zones,
+                budget_left,
+            );
+            if candidates.is_empty() {
+                return None;
+            }
+            Some(Box::new(WaitingFor::CastOffer {
+                player: controller,
+                kind: crate::types::game_state::CastOfferKind::FreeCastWindow {
+                    candidates,
+                    remaining_casts: casts_left,
+                    remaining_mv_budget: budget_left,
+                    filter,
+                    zones,
+                    exile_instead_of_graveyard,
+                },
+            }))
+        }
+    }
+}
+
+/// CR 614.1a + CR 608.2n: Stamp the "if this spell would be put into your
+/// graveyard, exile it instead" rider on a spell cast during resolution via
+/// `Effect::FreeCastFromZones` (Invoke Calamity). Sets a per-object marker on
+/// the spell rather than mutating its casting variant — the during-resolution
+/// cast has not yet pushed its resolvable `StackEntry::Spell` (that happens at
+/// finalize, after this cascade-check point), and the rider must apply
+/// regardless of the spell's origin zone or casting variant. The stack-
+/// resolution router reads the marker when the spell leaves the stack.
+fn apply_exile_instead_of_graveyard_rider(state: &mut GameState, cast_object: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&cast_object) {
+        obj.exile_from_stack_instead_of_graveyard = true;
     }
 }
 

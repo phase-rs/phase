@@ -4660,6 +4660,133 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
+    /// Issue #2385 — the free-cast window class must parse its resolution text to a real
+    /// interactive `Effect::FreeCastFromZones` (the free-cast window), NOT get
+    /// swallowed into a `GraveyardCastPermission` static with an empty `abilities`
+    /// list (which resolved to no effect). Verifies the per-clause parser produces
+    /// the count, MV budget, instant/sorcery filter, graveyard+hand zones, and the
+    /// CR 614.1a exile rider — plus the trailing "Exile ~" self-exile as a chained
+    /// sub-ability.
+    #[test]
+    fn free_cast_window_clause_chains_rider_and_self_exile() {
+        let text = "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.";
+        let result = parse(text, "Invoke Calamity", &[], &["Instant"], &[]);
+
+        assert!(
+            result.statics.is_empty(),
+            "must NOT classify as a GraveyardCastPermission static, got {:?}",
+            result.statics
+        );
+        assert_eq!(
+            result.abilities.len(),
+            1,
+            "the spell must have a single resolution ability, got {:?}",
+            result.abilities
+        );
+        let ability = &result.abilities[0];
+        match &*ability.effect {
+            Effect::FreeCastFromZones {
+                count,
+                max_total_mv,
+                filter,
+                zones,
+                exile_instead_of_graveyard,
+            } => {
+                assert_eq!(*count, 2);
+                assert_eq!(*max_total_mv, Some(6));
+                assert!(*exile_instead_of_graveyard);
+                assert_eq!(zones, &vec![Zone::Graveyard, Zone::Hand]);
+                assert_eq!(
+                    *filter,
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    }
+                );
+            }
+            other => panic!("expected FreeCastFromZones, got {other:?}"),
+        }
+        // CR 608.2c: "Exile ~" chains as the sub-ability and runs after the
+        // window closes.
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("Exile ~ self-exile must chain as sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "trailing self-exile must lower to a ChangeZone→Exile, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// CR 608.2g + CR 601.2 + CR 118.9: The free-cast window parser is a class
+    /// parser, not an Invoke Calamity special case. Single-type, single-zone,
+    /// no-budget text lowers through the same per-clause seam.
+    #[test]
+    fn free_cast_window_parses_single_zone_non_invoke_variant() {
+        let text =
+            "You may cast up to one instant spell from your graveyard without paying its mana cost.";
+        let result = parse(text, "Sample Free Cast", &[], &["Sorcery"], &[]);
+
+        assert!(
+            result.statics.is_empty(),
+            "free-cast window must stay out of the static classifier, got {:?}",
+            result.statics
+        );
+        assert_eq!(result.abilities.len(), 1);
+
+        let Effect::FreeCastFromZones {
+            count,
+            max_total_mv,
+            filter,
+            zones,
+            exile_instead_of_graveyard,
+        } = &*result.abilities[0].effect
+        else {
+            panic!(
+                "expected FreeCastFromZones, got {:?}",
+                result.abilities[0].effect
+            );
+        };
+
+        assert_eq!(*count, 1);
+        assert_eq!(*max_total_mv, None);
+        assert_eq!(
+            *filter,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))
+        );
+        assert_eq!(zones, &vec![Zone::Graveyard]);
+        assert!(!*exile_instead_of_graveyard);
+    }
+
+    /// Issue #2385 MED — `Effect::FreeCastFromZones` is a *free* cast. A
+    /// hypothetical "cast up to N ... from your graveyard and/or hand" that omits
+    /// the "without paying their mana cost(s)" clause (the controller still pays)
+    /// must NOT be lowered to the free-cast window (CR 118.9). The recognizer
+    /// requires the without-paying clause before emitting the effect.
+    #[test]
+    fn pay_required_cast_up_to_n_is_not_free_cast() {
+        let text = "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand. Exile this spell.";
+        let result = parse(text, "Pay Required Calamity", &[], &["Instant"], &[]);
+
+        assert!(
+            !result
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::FreeCastFromZones { .. })),
+            "a pay-required cast clause must not lower to a free-cast window, got {:?}",
+            result.abilities
+        );
+    }
+
     /// CR 508.1a + CR 508.6: "During any turn you attacked with <filter>, you
     /// may play that card" must gate the play permission on a (filtered)
     /// AttackedThisTurn condition instead of dropping the clause to
