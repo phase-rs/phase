@@ -3071,15 +3071,76 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
-        FilterProp::TargetsOnly { .. } => true,
-        // CR 115.9b: Permissive at per-object level; validated by trigger matchers against
-        // the stack entry's actual targets.
-        FilterProp::Targets { .. } => true,
+        // CR 115.9c: If the object is a stack entry, ALL of its targets must match
+        // the inner filter. Falls back permissive for non-stack objects so trigger
+        // matchers remain the primary authority (they validate separately).
+        FilterProp::TargetsOnly { filter } => stack_entry_targets_satisfy(
+            state,
+            object_id,
+            source.id,
+            source.controller,
+            filter,
+            true,
+        ),
+        // CR 115.9b: Stack entry has at least one target matching the inner filter.
+        FilterProp::Targets { filter } => stack_entry_targets_satisfy(
+            state,
+            object_id,
+            source.id,
+            source.controller,
+            filter,
+            false,
+        ),
         // CR 903.3d: "If an effect refers to controlling a commander, it refers
         // to a permanent on the battlefield that is a commander." `is_commander`
         // is the deck-construction designation per CR 903.3.
         FilterProp::IsCommander => obj.is_commander,
         FilterProp::Other { .. } => false, // Fail-closed for unrecognized properties
+    }
+}
+
+/// CR 115.9b/115.9c: Check whether a stack entry's targets satisfy a filter.
+///
+/// Used by `FilterProp::Targets` and `FilterProp::TargetsOnly` in
+/// `matches_filter_prop` when the object being evaluated is a stack entry.
+/// If `require_all` is `true` (TargetsOnly / CR 115.9c), every target must
+/// match `filter`; if `false` (Targets / CR 115.9b), at least one must.
+///
+/// Non-stack objects return `true` (permissive fallback) so trigger matchers,
+/// which validate targets through `stack_entry_targets_any`, remain the primary
+/// authority. Stack entries with no ability targets return `false` because
+/// "targets X" cannot be satisfied with an empty target list.
+fn stack_entry_targets_satisfy(
+    state: &GameState,
+    stack_obj_id: ObjectId,
+    source_id: ObjectId,
+    source_controller: Option<PlayerId>,
+    filter: &TargetFilter,
+    require_all: bool,
+) -> bool {
+    let Some(entry) = state.stack.iter().find(|e| e.id == stack_obj_id) else {
+        return true; // Not a stack entry — permissive.
+    };
+    let Some(ability) = entry.ability() else {
+        return true; // KeywordAction entries carry no ability targets — permissive.
+    };
+    if ability.targets.is_empty() {
+        return false; // "targets X" with no targets cannot be satisfied.
+    }
+    let ctx = match source_controller {
+        Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
+        None => FilterContext::from_source(state, source_id),
+    };
+    let check = |t: &TargetRef| match t {
+        TargetRef::Object(id) => matches_target_filter(state, *id, filter, &ctx),
+        TargetRef::Player(pid) => {
+            player_matches_target_filter_in_state(state, filter, *pid, source_controller)
+        }
+    };
+    if require_all {
+        ability.targets.iter().all(check)
+    } else {
+        ability.targets.iter().any(check)
     }
 }
 
