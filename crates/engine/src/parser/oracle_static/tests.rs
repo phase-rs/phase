@@ -14623,3 +14623,55 @@ fn crew_contribution_power_and_toughness_modifiers_parse() {
         defs[0].modifications
     );
 }
+
+#[test]
+fn static_enchanted_equipped_single_has_kw_if_condition() {
+    // CR 613.1f + CR 611.3a: a single "has X if Y" clause (not a list) on an
+    // enchanted/equipped predicate must produce one Continuous def with the
+    // keyword grant gated on the condition. Previously the PATTERN 3a guard
+    // (pairs.len() > 1) dropped this through to an unhandled path.
+    let defs = parse_enchanted_equipped_predicate(
+        "has flying if you control a Goblin",
+        TargetFilter::SelfRef,
+        "has flying if you control a Goblin",
+    );
+    assert_eq!(
+        defs.len(),
+        1,
+        "single if-clause must produce one StaticDefinition, got {defs:?}"
+    );
+    let def = &defs[0];
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }),
+        "must grant Flying, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.condition.is_some(),
+        "condition must be extracted from the 'if' clause"
+    );
+}
+
+#[test]
+fn static_self_ref_has_kw_if_condition() {
+    // CR 611.3a + CR 613.1f: standalone "~ has X if Y" self-referential static.
+    // parse_continuous_gets_has now splits on " if " as well as " as long as ".
+    let def = parse_static_line("~ has deathtouch if you control a Swamp.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Deathtouch,
+            }),
+        "must grant Deathtouch, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.condition.is_some(),
+        "condition must be extracted from the 'if' clause"
+    );
+}

@@ -533,7 +533,7 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     {
         let list_input = nom_tag_lower(&pred_lower, &pred_lower, "has ").unwrap_or(&pred_lower);
         if let Ok((rest, pairs)) = parse_conditional_keyword_list(list_input) {
-            if rest.trim().trim_end_matches('.').is_empty() && pairs.len() > 1 {
+            if rest.trim().trim_end_matches('.').is_empty() && !pairs.is_empty() {
                 return pairs
                     .into_iter()
                     .map(|(kw, cond)| {

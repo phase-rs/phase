@@ -127,7 +127,7 @@ fn find_legal_targets_with_context(
 
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) || is_any_other_target {
-        add_players(state, &mut targets, source_id);
+        add_players(state, &mut targets, source_id, source_controller);
     }
 
     if let TargetFilter::SpecificPlayer { id } = filter {
@@ -184,7 +184,15 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::TriggeringPlayer) => false,
                     None => true,
                 };
-                if include {
+                // CR 801.4: Spells and abilities can only affect players within
+                // the source controller's range of influence.
+                if include
+                    && super::players::within_range_of_influence(
+                        state,
+                        source_controller,
+                        player.id,
+                    )
+                {
                     targets.push(TargetRef::Player(player.id));
                 }
             }
@@ -1251,7 +1259,12 @@ fn filter_targets_stack_abilities(filter: &TargetFilter) -> bool {
     }
 }
 
-fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: ObjectId) {
+fn add_players(
+    state: &GameState,
+    targets: &mut Vec<TargetRef>,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) {
     // Player-phasing exclusion: a phased-out player is treated as though they
     // don't exist for targeting purposes (mirrors CR 702.26b for permanents,
     // applied to players via card Oracle text like "you phase out").
@@ -1269,6 +1282,10 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: Objec
         // CR 702.16b: A player with protection from the spell/ability's source
         // can't be targeted by it.
         if super::static_abilities::player_protection_from(state, player.id, Some(source_id)) {
+            continue;
+        }
+        // CR 801.4: A player can only target players within their range of influence.
+        if !super::players::within_range_of_influence(state, source_controller, player.id) {
             continue;
         }
         targets.push(TargetRef::Player(player.id));

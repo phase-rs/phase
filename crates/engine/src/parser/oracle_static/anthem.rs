@@ -719,6 +719,25 @@ pub(crate) fn parse_continuous_gets_has(
         }
     }
 
+    // CR 611.3a + CR 613.1f: Split "if [condition]" — a game-state condition that
+    // gates the entire grant. Tried after "as long as" (more common) so the two
+    // forms don't compete; "if" is the shorter Oracle phrasing used on auras and
+    // self-ref statics ("has flying if you control a Goblin").
+    if let Some((before_cond, after_cond)) = tp.split_around(" if ") {
+        let continuous_text = before_cond.original;
+        let condition_text = after_cond.original.trim().trim_end_matches('.');
+        if let Some(mut def) =
+            parse_continuous_gets_has(continuous_text, affected.clone(), description)
+        {
+            let condition =
+                parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+                    text: condition_text.to_string(),
+                });
+            def.condition = Some(condition);
+            return Some(def);
+        }
+    }
+
     // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
     if let Some((before_for_each, after_for_each)) = tp.split_around("for each ") {
         let pt_text = before_for_each.original.trim();

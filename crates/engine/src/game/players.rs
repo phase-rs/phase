@@ -282,6 +282,44 @@ fn team_index(player: PlayerId) -> u8 {
     player.0 / 2
 }
 
+/// CR 801.2: Minimum seat distance from `from` to `to` measured in seat
+/// positions around the ring in either direction (i.e., the shorter arc).
+///
+/// Returns 0 when `from == to`. Returns 0 for degenerate rings of ≤ 1 seat.
+pub fn seat_distance(state: &GameState, from: PlayerId, to: PlayerId) -> usize {
+    if from == to {
+        return 0;
+    }
+    let seat_order = &state.seat_order;
+    let n = seat_order.len();
+    if n <= 1 {
+        return 0;
+    }
+    let from_idx = seat_order.iter().position(|&id| id == from).unwrap_or(0);
+    let to_idx = seat_order.iter().position(|&id| id == to).unwrap_or(0);
+    // Forward distance (from → to in seat order)
+    let forward = (to_idx + n - from_idx) % n;
+    // Backward distance (from → to against seat order)
+    let backward = n - forward;
+    forward.min(backward)
+}
+
+/// CR 801.2 + CR 801.4: Returns true when `target` is within the format's
+/// range of influence from `caster`.
+///
+/// When the format has no range limit (`range_of_influence` is `None`), every
+/// living player is always within range.  When a limit is set, `target` must
+/// be within that many seat positions of `caster` (inclusive) in either
+/// direction around the seat ring.
+///
+/// A player is always within their own range (distance 0).
+pub fn within_range_of_influence(state: &GameState, caster: PlayerId, target: PlayerId) -> bool {
+    let Some(roi) = state.format_config.range_of_influence else {
+        return true;
+    };
+    seat_distance(state, caster, target) <= roi as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,5 +643,62 @@ mod tests {
         let mut state = make_state(4, FormatConfig::two_headed_giant());
         eliminate(&mut state, PlayerId(1));
         assert!(teammates(&state, PlayerId(0)).is_empty());
+    }
+
+    // --- seat_distance ---
+
+    #[test]
+    fn seat_distance_same_player_is_zero() {
+        let state = make_state(4, FormatConfig::free_for_all());
+        assert_eq!(seat_distance(&state, PlayerId(0), PlayerId(0)), 0);
+    }
+
+    #[test]
+    fn seat_distance_adjacent_forward() {
+        let state = make_state(4, FormatConfig::free_for_all());
+        // Seat order: 0 1 2 3; P0 → P1 = 1
+        assert_eq!(seat_distance(&state, PlayerId(0), PlayerId(1)), 1);
+    }
+
+    #[test]
+    fn seat_distance_takes_shorter_arc() {
+        let state = make_state(4, FormatConfig::free_for_all());
+        // Seat order: 0 1 2 3; P0 → P3: forward=3, backward=1 → min=1
+        assert_eq!(seat_distance(&state, PlayerId(0), PlayerId(3)), 1);
+    }
+
+    #[test]
+    fn seat_distance_opposite_in_six_player_ring() {
+        // 6 seats; P0 → P3: forward=3, backward=3 → min=3
+        let state = make_state(6, FormatConfig::free_for_all());
+        assert_eq!(seat_distance(&state, PlayerId(0), PlayerId(3)), 3);
+    }
+
+    // --- within_range_of_influence ---
+
+    #[test]
+    fn roi_unlimited_always_in_range() {
+        // FormatConfig without roi (None) → every player is in range
+        let state = make_state(6, FormatConfig::free_for_all());
+        assert!(within_range_of_influence(&state, PlayerId(0), PlayerId(5)));
+    }
+
+    #[test]
+    fn roi_one_allows_adjacent_players() {
+        let mut config = FormatConfig::free_for_all();
+        config.range_of_influence = Some(1);
+        let state = make_state(4, config);
+        // P0's neighbours: P1 (right) and P3 (left via wrap)
+        assert!(within_range_of_influence(&state, PlayerId(0), PlayerId(1)));
+        assert!(within_range_of_influence(&state, PlayerId(0), PlayerId(3)));
+    }
+
+    #[test]
+    fn roi_one_excludes_non_adjacent_player() {
+        let mut config = FormatConfig::free_for_all();
+        config.range_of_influence = Some(1);
+        let state = make_state(4, config);
+        // P0 → P2: distance 2 > roi 1
+        assert!(!within_range_of_influence(&state, PlayerId(0), PlayerId(2)));
     }
 }

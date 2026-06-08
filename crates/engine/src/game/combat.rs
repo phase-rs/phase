@@ -2908,20 +2908,23 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
         super::static_abilities::player_has_protection_from_everything(state, pid)
     };
 
-    // All non-eliminated, phased-in opponents (excluding teammates)
+    // All non-eliminated, phased-in opponents within range of influence
     for player in &state.players {
         if player.id != active
             && !state.eliminated_players.contains(&player.id)
             && !allies.contains(&player.id)
             && player.is_phased_in()
             && !protected(player.id)
+            // CR 801.3c + CR 801.4: In limited-range formats, the active player
+            // can only attack players within their range of influence.
+            && super::players::within_range_of_influence(state, active, player.id)
         {
             targets.push(AttackTarget::Player(player.id));
         }
     }
 
-    // All planeswalkers controlled by opponents (excluding teammates' and
-    // controllers that are phased out)
+    // All planeswalkers controlled by opponents within range (excluding teammates'
+    // and controllers that are phased out)
     for &id in &state.battlefield {
         if let Some(obj) = state.objects.get(&id) {
             if obj.controller != active
@@ -2932,6 +2935,8 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
                     .contains(&crate::types::card_type::CoreType::Planeswalker)
                 && !state.eliminated_players.contains(&obj.controller)
                 && !phased_out(obj.controller)
+                // CR 801.4: Planeswalkers belong to their controller's influence zone.
+                && super::players::within_range_of_influence(state, active, obj.controller)
             {
                 targets.push(AttackTarget::Planeswalker(id));
             }
@@ -2964,6 +2969,10 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
             // If the protector is phased out, the battle itself can't be
             // attacked (the protector "doesn't exist" for combat routing).
             if phased_out(protector) {
+                continue;
+            }
+            // CR 801.4: Battle protector must be within active player's range of influence.
+            if !super::players::within_range_of_influence(state, active, protector) {
                 continue;
             }
             targets.push(AttackTarget::Battle(id));

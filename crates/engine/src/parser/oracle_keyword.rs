@@ -239,6 +239,12 @@ pub(crate) fn extract_keyword_line(
         }
     }
 
+    if mtgjson_keyword_names.iter().any(|n| n == "devour") {
+        if let Some(kw) = parse_devour_keyword_line(line) {
+            return Some(vec![kw]);
+        }
+    }
+
     // CR 303.4a: "Enchant A, B, [and/or] C" — multi-type enchant restriction.
     // The comma-separated list is a single keyword (one TargetFilter::Or), not
     // multiple comma-separated keywords. Detect and handle before the generic
@@ -732,6 +738,23 @@ fn parse_bloodthirst_keyword_line(line: &str) -> Option<Keyword> {
     }
 }
 
+/// CR 702.82a: Devour N — "Devour N (reminder text)". The numeric quality N
+/// determines the +1/+1 counter multiplier applied per sacrificed creature as
+/// the permanent enters. MTGJSON sends only the bare "Devour" keyword name;
+/// the Oracle line supplies the N value.
+fn parse_devour_keyword_line(line: &str) -> Option<Keyword> {
+    let lower = line.to_ascii_lowercase();
+    let stripped = strip_reminder_text(&lower);
+    let text = stripped.trim().trim_end_matches('.');
+    let (rest, _) = tag::<_, _, OracleError<'_>>("devour ").parse(text).ok()?;
+    let (rem, n) = nom_primitives::parse_number.parse(rest.trim()).ok()?;
+    if rem.is_empty() {
+        Some(Keyword::Devour(n as u32))
+    } else {
+        None
+    }
+}
+
 /// CR 702.48a: Offering — "<Subtype> offering (reminder text)". The leading word
 /// is the creature/permanent type a player may sacrifice to cast this spell for
 /// its alternative cost (e.g. "Goblin offering", "Artifact offering"). MTGJSON
@@ -996,6 +1019,10 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     }
 
     if let Some(kw) = parse_bloodthirst_keyword_line(text) {
+        return Some(kw);
+    }
+
+    if let Some(kw) = parse_devour_keyword_line(text) {
         return Some(kw);
     }
 
@@ -2967,6 +2994,34 @@ mod tests {
         assert_eq!(
             parse_keyword_from_oracle("bloodthirst x").unwrap(),
             Keyword::Bloodthirst(BloodthirstValue::X)
+        );
+    }
+
+    #[test]
+    fn extract_keyword_line_devour_from_oracle_line() {
+        // CR 702.82a: "Devour N" Oracle line with MTGJSON keyword name guard
+        let result = extract_keyword_line(
+            "Devour 2 (As this creature enters, you may sacrifice any number of creatures. This creature enters with twice that many +1/+1 counters on it.)",
+            &["devour".to_string()],
+        )
+        .expect("devour 2 line should be recognized");
+        assert_eq!(result, vec![Keyword::Devour(2)]);
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_devour_fixed() {
+        // CR 702.82a: parse_keyword_from_oracle fallback path
+        assert_eq!(
+            parse_keyword_from_oracle("devour 1").unwrap(),
+            Keyword::Devour(1)
+        );
+        assert_eq!(
+            parse_keyword_from_oracle("devour 2").unwrap(),
+            Keyword::Devour(2)
+        );
+        assert_eq!(
+            parse_keyword_from_oracle("devour 3").unwrap(),
+            Keyword::Devour(3)
         );
     }
 

@@ -121,6 +121,15 @@ export function DraftLandingPage() {
                 renderIcon={(cls) => <PodIcon className={cls} />}
                 onClick={() => navigate("/draft-pod")}
               />
+              <MenuActionTile
+                tone="arcane"
+                motif="pack"
+                title="Sealed Deck"
+                description="Open 6 packs and build a 40-card deck"
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <BotIcon className={cls} />}
+                onClick={() => navigate("/sealed")}
+              />
             </div>
           </div>
         </div>

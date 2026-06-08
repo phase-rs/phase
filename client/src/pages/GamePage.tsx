@@ -2400,6 +2400,18 @@ function GameOverScreen({
                 >
                   {t("gamePage.gameOver.rematch")}
                 </button>
+                {gameId && (
+                  <button
+                    onClick={() => navigate(`/replay/${gameId}`)}
+                    className={gameButtonClass({
+                      tone: "slate",
+                      size: "lg",
+                      className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                    })}
+                  >
+                    Watch Replay
+                  </button>
+                )}
               </>
             )}
           </motion.div>
