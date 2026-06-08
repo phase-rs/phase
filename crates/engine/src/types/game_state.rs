@@ -16,7 +16,7 @@ use super::ability::{
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
-use super::counter::{CounterMatch, CounterType};
+use super::counter::{counter_map_serde, CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -196,7 +196,7 @@ pub struct LKISnapshot {
     pub chosen_attributes: Vec<ChosenAttribute>,
     /// CR 400.7: Counters as they last existed on the object.
     /// Used by `TriggerCondition::HadCounters` for "if it had counters on it" patterns.
-    #[serde(default)]
+    #[serde(default, with = "counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
 }
 
@@ -678,7 +678,7 @@ pub struct CounterAddedRecord {
     pub mana_value: u32,
     pub controller: PlayerId,
     pub owner: PlayerId,
-    #[serde(default)]
+    #[serde(default, with = "counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
 }
 
