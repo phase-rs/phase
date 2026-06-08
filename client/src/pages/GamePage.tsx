@@ -53,6 +53,7 @@ import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.t
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
+import { FreeCastWindowModal } from "../components/modal/FreeCastWindowModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { AlternativeCostModal } from "../components/modal/AlternativeCostModal.tsx";
 import { CastingVariantModal } from "../components/modal/CastingVariantModal.tsx";
@@ -1394,6 +1395,7 @@ function GamePageContent({
         <ChooseOneOfBranchModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
+        <FreeCastWindowModal />
         <ModalFaceModal />
         <MiracleRevealModal />
         {waitingFor?.type === "SpliceOffer" &&

@@ -1260,6 +1260,16 @@
     "discoverDeclineSuffix": "(put the rest on the bottom)",
     "cascadeDeclineSuffix": "(shuffle all exiled cards to the bottom)"
   },
+  "freeCastWindow": {
+    "eyebrow": "Free Cast",
+    "title": "Cast a spell for free",
+    "subtitle": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
+    "subtitleNoBudget": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining).",
+    "castNamed": "Cast {{name}}",
+    "castSuffix": "(without paying its mana cost)",
+    "done": "Done",
+    "doneSuffix": "(stop casting spells this way)"
+  },
   "castingVariant": {
     "eyebrow": "Cast",
     "title": "Choose Cast",

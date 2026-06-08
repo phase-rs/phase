@@ -3367,6 +3367,61 @@ mod tests {
         }
     }
 
+    /// CR 702.5a: "Enchant creature or Food" (Sugar Coat, BLB) — Food is an
+    /// artifact subtype, not a core card type, so it requires explicit support
+    /// in `parse_enchant_type_leg`. The result must be a two-leg `Or` filter
+    /// covering both creatures and Food artifacts.
+    #[test]
+    fn extract_enchant_creature_or_food_subtype() {
+        let kw = super::try_parse_multi_type_enchant("Enchant creature or Food")
+            .expect("\"Enchant creature or Food\" should parse");
+        let Keyword::Enchant(TargetFilter::Or { ref filters }) = kw else {
+            panic!("expected Keyword::Enchant(Or), got {kw:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two legs");
+        let types: Vec<_> = filters
+            .iter()
+            .map(|f| match f {
+                TargetFilter::Typed(tf) => tf.type_filters.clone(),
+                other => panic!("expected Typed leg, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                vec![TypeFilter::Creature],
+                vec![TypeFilter::Subtype("Food".to_string())],
+            ]
+        );
+    }
+
+    /// CR 702.5a: Artifact subtypes must parse as enchant target legs through
+    /// the canonical subtype classifier, not a hand-maintained token subset.
+    #[test]
+    fn extract_enchant_artifact_subtypes() {
+        for subtype in crate::types::card_type::ARTIFACT_SUBTYPES {
+            let line = format!("Enchant creature or {subtype}");
+            let kw = super::try_parse_multi_type_enchant(&line)
+                .unwrap_or_else(|| panic!("\"{}\" should parse", line));
+            let Keyword::Enchant(TargetFilter::Or { filters }) = kw else {
+                panic!("expected Or for {subtype}");
+            };
+            assert_eq!(filters.len(), 2);
+            let TargetFilter::Typed(tf) = &filters[1] else {
+                panic!("expected Typed artifact subtype leg for {subtype}");
+            };
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Subtype((*subtype).to_string())]
+            );
+        }
+
+        assert!(
+            super::try_parse_multi_type_enchant("Enchant creature or Goblin").is_none(),
+            "creature subtypes must not be accepted as artifact enchant target legs"
+        );
+    }
+
     // ── Cumulative upkeep display (CR 702.24a) ──
 
     #[test]

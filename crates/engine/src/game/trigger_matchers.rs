@@ -2954,16 +2954,57 @@ pub(super) fn match_excess_damage(
         if *excess > 0 && *src == source_id)
 }
 
-/// CR 120.10: ExcessDamageAll — fires when any source deals excess damage to a permanent.
+/// CR 120.10: ExcessDamageAll — fires when any source deals excess damage to a
+/// permanent or player matching the trigger's `valid_card` / `valid_target` filters.
 ///
 /// See `match_excess_damage` for why `trigger.damage_amount` is not consulted.
 pub(super) fn match_excess_damage_all(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(event, GameEvent::DamageDealt { excess, .. } if *excess > 0)
+    if let GameEvent::DamageDealt {
+        target,
+        is_combat,
+        excess,
+        ..
+    } = event
+    {
+        if *excess == 0 {
+            return false;
+        }
+        match trigger.damage_kind {
+            DamageKindFilter::Any => {}
+            DamageKindFilter::CombatOnly if !is_combat => return false,
+            DamageKindFilter::NoncombatOnly if *is_combat => return false,
+            DamageKindFilter::CombatOnly | DamageKindFilter::NoncombatOnly => {}
+        }
+        match target {
+            TargetRef::Object(target_id) => {
+                if trigger.valid_card.is_none() && trigger.valid_target.is_some() {
+                    return false;
+                }
+                if trigger.valid_card.is_some() {
+                    valid_card_matches(trigger, state, *target_id, source_id)
+                } else {
+                    true
+                }
+            }
+            TargetRef::Player(pid) => {
+                if trigger.valid_card.is_some() {
+                    return false;
+                }
+                if trigger.valid_target.is_some() {
+                    valid_player_matches(trigger, state, *pid, source_id)
+                } else {
+                    true
+                }
+            }
+        }
+    } else {
+        false
+    }
 }
 
 /// YouAttack: fires once when a player declares attackers matching the trigger's
@@ -9854,6 +9895,89 @@ mod tests {
             &event,
             &trigger,
             ObjectId(1),
+            &state
+        ));
+    }
+
+    #[test]
+    fn excess_damage_all_noncombat_only_rejects_combat() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::ExcessDamageAll);
+        trigger.damage_kind = DamageKindFilter::NoncombatOnly;
+
+        let event = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(ObjectId(2)),
+            amount: 5,
+            is_combat: true,
+            excess: 2,
+        };
+        assert!(!match_excess_damage_all(
+            &event,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+    }
+
+    #[test]
+    fn excess_damage_all_valid_card_filters_target_object() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Treasure Maker".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let own_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [opponent_creature, own_creature] {
+            if let Some(obj) = state.objects.get_mut(&id) {
+                obj.card_types.core_types.push(CoreType::Creature);
+            }
+        }
+
+        let mut trigger = make_trigger(TriggerMode::ExcessDamageAll);
+        trigger.damage_kind = DamageKindFilter::NoncombatOnly;
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+
+        let matching = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(opponent_creature),
+            amount: 5,
+            is_combat: false,
+            excess: 2,
+        };
+        let non_matching = GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(own_creature),
+            amount: 5,
+            is_combat: false,
+            excess: 2,
+        };
+
+        assert!(match_excess_damage_all(
+            &matching, &trigger, source_id, &state
+        ));
+        assert!(!match_excess_damage_all(
+            &non_matching,
+            &trigger,
+            source_id,
             &state
         ));
     }

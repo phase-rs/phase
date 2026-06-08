@@ -26,7 +26,7 @@
     "crates/engine/src/types/keywords.rs"
   ],
   "enum_count": 270,
-  "variant_count": 2973,
+  "variant_count": 2977,
   "smell_summary": [
     {
       "enum_name": "AbilityCondition",
@@ -2899,6 +2899,25 @@
           "doc": "CR 701.57a: Discover — cast the discovered card or put it to hand.",
           "cr_refs": [
             "CR 701.57a"
+          ]
+        },
+        {
+          "name": "FreeCastWindow",
+          "line": 2167,
+          "kind": "struct",
+          "field_names": [
+            "candidates",
+            "remaining_casts",
+            "remaining_mv_budget",
+            "filter",
+            "zones",
+            "exile_instead_of_graveyard"
+          ],
+          "doc": "CR 608.2g + CR 601.2 + CR 118.9: Interactive free-cast window opened by `Effect::FreeCastFromZones` (Invoke Calamity). The controller repeatedly chooses one `candidate` to cast for free (or declines to finish), up to `remaining_casts` times, while the chosen spells' running total mana value stays within `remaining_mv_budget`. After each successful cast the window is re-offered with `remaining_casts` decremented, the budget reduced, and `candidates` re-filtered to those still affordable.",
+          "cr_refs": [
+            "CR 118.9",
+            "CR 601.2",
+            "CR 608.2g"
           ]
         }
       ],
@@ -9870,6 +9889,26 @@
           ],
           "doc": "Semantic marker for effects the engine has not yet implemented a handler for. Carries zero HashMap -- architecturally distinct from the removed Effect::Other.",
           "cr_refs": []
+        },
+        {
+          "name": "FreeCastFromZones",
+          "line": 6913,
+          "kind": "struct",
+          "field_names": [
+            "count",
+            "max_total_mv",
+            "filter",
+            "zones",
+            "exile_instead_of_graveyard"
+          ],
+          "doc": "CR 608.2g + CR 601.2 + CR 118.9: Open an interactive \"free-cast window\" during this spell/ability's resolution: the controller may cast up to `count` spells matching `filter` from any of `zones` (their own graveyard and/or hand), each without paying its mana cost, casting them one at a time during resolution (CR 608.2g — \"casting other spells this way\"). When `max_total_mv` is `Some(n)`, the *running total* mana value of the spells cast this way must not exceed `n` (CR 202.3) — a cross-selection budget that shrinks as each spell is cast. \"Up to N\" makes every cast optional (the controller may stop early or cast none).  When `exile_instead_of_graveyard` is true, each spell cast this way carries the rider \"if those spells would be put into your graveyard, exile them instead\" (CR 614.1a) for the rest of the cast — applied as a duration-scoped replacement on the cast spell.  Distinct from `CastFromZone`, which grants a casting *permission* on a targeted object (lingering or a single self-cast). This effect owns the interactive multi-cast selection loop with the shared MV budget — there is no target slot; candidates are gathered by `filter` across `zones` at resolution time. Invoke Calamity is the type specimen.",
+          "cr_refs": [
+            "CR 118.9",
+            "CR 202.3",
+            "CR 601.2",
+            "CR 608.2g",
+            "CR 614.1a"
+          ]
         }
       ],
       "sibling_clusters": [
@@ -11461,6 +11500,14 @@
         {
           "name": "DayTimeChange",
           "line": 8780,
+          "kind": "unit",
+          "field_names": [],
+          "doc": "",
+          "cr_refs": []
+        },
+        {
+          "name": "FreeCastFromZones",
+          "line": 8823,
           "kind": "unit",
           "field_names": [],
           "doc": "",
@@ -13983,6 +14030,19 @@
           "cr_refs": [
             "CR 104.3a",
             "CR 800.4a"
+          ]
+        },
+        {
+          "name": "FreeCastWindowChoice",
+          "line": 533,
+          "kind": "struct",
+          "field_names": [
+            "selection"
+          ],
+          "doc": "CR 608.2g + CR 601.2: Pick one candidate to cast for free from an open `WaitingFor::CastOffer { FreeCastWindow }` (Invoke Calamity), or `None` to finish the window without casting (further) spells. Distinct from the binary `CastChoice` used by Cascade/Discover/Ripple because the player chooses *which* of several offered cards to cast, not merely whether to cast a single pre-selected one.",
+          "cr_refs": [
+            "CR 601.2",
+            "CR 608.2g"
           ]
         }
       ],

@@ -1574,7 +1574,15 @@ fn attackable_player_targets(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
-fn must_attack_players_for_creature(state: &GameState, obj: &GameObject) -> Vec<PlayerId> {
+/// CR 508.1b: The players this creature is required to attack directly via a
+/// `StaticMode::MustAttackPlayer` static ("attacks ~ each combat if able"
+/// directed at a specific player). Single authority for the requirement; the
+/// declare-attackers validator enforces it and the AI candidate generator reuses
+/// it to steer a forced-legal assignment toward the required player.
+pub(crate) fn must_attack_players_for_creature(
+    state: &GameState,
+    obj: &GameObject,
+) -> Vec<PlayerId> {
     super::functioning_abilities::active_static_definitions(state, obj)
         .filter_map(|sd| match sd.mode {
             StaticMode::MustAttackPlayer { player } => Some(player),
@@ -2193,7 +2201,15 @@ pub fn declare_attackers(
     declare_attackers_with_bands(state, attacks, &[], events)
 }
 
-fn goading_players_for_creature(state: &GameState, creature_id: ObjectId) -> HashSet<PlayerId> {
+/// CR 701.15b: The set of players that have goaded `creature_id` — both the
+/// per-object `goaded_by` designations and any active `StaticMode::Goaded`
+/// effects affecting it. This is the single authority for "who goaded this
+/// creature"; the AI candidate generator reuses it to build a legal forced
+/// attack assignment that avoids each goaded creature's goader.
+pub(crate) fn goading_players_for_creature(
+    state: &GameState,
+    creature_id: ObjectId,
+) -> HashSet<PlayerId> {
     let mut players = state
         .objects
         .get(&creature_id)
