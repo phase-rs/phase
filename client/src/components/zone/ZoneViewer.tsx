@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, GameObject } from "../../adapter/types.ts";
+import { HIDDEN_CARD_NAME, type GameAction, type GameObject } from "../../adapter/types.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
 import { ScrollableCardStrip } from "../modal/ChoiceOverlay.tsx";
@@ -16,7 +16,7 @@ import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.t
 import { playOrCastActionsForObject, resolveSingleActionDispatch } from "../../viewmodel/cardActionChoice.ts";
 
 interface ZoneViewerProps {
-  zone: "graveyard" | "exile";
+  zone: "graveyard" | "exile" | "library";
   playerId: number;
   onClose: () => void;
 }
@@ -24,11 +24,13 @@ interface ZoneViewerProps {
 const ZONE_TITLE_KEYS: Record<string, string> = {
   graveyard: "zone.graveyard",
   exile: "zone.exile",
+  library: "zone.library",
 };
 
 const ZONE_TITLE_LOWER_KEYS: Record<string, string> = {
   graveyard: "zone.graveyardLower",
   exile: "zone.exileLower",
+  library: "zone.libraryLower",
 };
 
 export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
@@ -103,11 +105,23 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
             innerClassName="flex items-center gap-2 lg:gap-3"
           >
             {cards.map((obj) => {
+              // CR 701.20b: A library card the engine hasn't revealed to this
+              // viewer arrives redacted (`Hidden Card`, face_down). Render it as
+              // a non-interactive card-back — it has no identity to inspect,
+              // target, or play. Only revealed top cards carry a real name.
+              if (zone === "library" && obj.name === HIDDEN_CARD_NAME) {
+                return <FaceDownCard key={obj.id} />;
+              }
               // CR 702.81a + CR 702.143a + CR 715.3a + CR 702.62a + CR 702.170d + CR 702.185a:
               // Engine surfaces a CastSpell-family action for every legally
               // castable graveyard/exile card (Retrace, Adventure, Foretell,
               // Suspend, Plot, Warp, etc.). The zone viewer surfaces whatever
               // the engine reports — no per-mechanic permission inspection.
+              //
+              // CR 401.5 + CR 118.9: for `library`, the engine only surfaces a
+              // play/cast action on the top card when a TopOfLibraryCastPermission
+              // (Future Sight, Bolas's Citadel, Mystic Forge, …) is active, so
+              // the playable affordance naturally lands on the revealed top.
               //
               // CR 715.3d / CR 400.7i: this includes opponent-OWNED cards in
               // exile the viewer was granted permission to play (Hostage Taker,
@@ -115,7 +129,7 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
               // so castability must NOT be gated on the pile belonging to the
               // viewer — `legalActionsByObject` (engine authority, keyed to the
               // player the permission was granted to) is the sole gate.
-              const castActions = (zone === "graveyard" || zone === "exile") && hasPriority
+              const castActions = hasPriority
                 ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
               const isValidTarget = currentLegalTargets.has(obj.id);
@@ -135,6 +149,17 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
         )}
       </div>
     </ModalPanelShell>
+  );
+}
+
+// A non-revealed library card. Deliberately hook-free (no inspect/long-press
+// subscriptions) so a full-size library of mostly-hidden cards stays cheap to
+// render — only revealed cards pay for the interactive ZoneCard.
+function FaceDownCard() {
+  return (
+    <div className="relative inline-flex shrink-0 rounded-lg">
+      <CardImage cardName="" faceDown size="normal" />
+    </div>
   );
 }
 

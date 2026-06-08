@@ -283,6 +283,8 @@
     "graveyardShort": "FH",
     "graveyardTitle": "Friedhof ({{count}})",
     "libraryAlt": "Bibliothek",
+    "library": "Bibliothek",
+    "libraryLower": "Bibliothek",
     "libraryCount_one": "Bibliothek ({{count}} Karte)",
     "libraryCount_other": "Bibliothek ({{count}} Karten)",
     "playFromTop": "{{name}} von oben aus der Bibliothek spielen",

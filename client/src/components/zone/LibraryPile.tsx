@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { HIDDEN_CARD_NAME, type ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
@@ -15,6 +16,15 @@ import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts"
 interface LibraryPileProps {
   playerId: number;
   size?: { width: string; height: string };
+  /**
+   * Opens the full library viewer (ZoneViewer, zone="library"). When provided
+   * and the top of the library is visible to this viewer (a public reveal or a
+   * private look — CR 701.20b), a pile click opens the modal instead of
+   * casting directly; play-from-top then happens inside the modal, matching the
+   * graveyard/exile click→view→cast flow. Without this prop the pile falls back
+   * to its standalone click-to-play behavior.
+   */
+  onView?: () => void;
 }
 
 function TopCard({ cardName }: { cardName: string }) {
@@ -38,7 +48,7 @@ function TopCard({ cardName }: { cardName: string }) {
   );
 }
 
-export function LibraryPile({ playerId, size }: LibraryPileProps) {
+export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
   const { t } = useTranslation("game");
   const myId = usePlayerId();
   const count = useGameStore(
@@ -75,6 +85,7 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const hoverProps = useInspectHoverProps();
   const dispatchAction = useGameDispatch();
 
   const isMyLibrary = playerId === myId;
@@ -117,6 +128,14 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
 
   const stackDepth = Math.min(count - 1, 4);
   const isPeeking = topCardName != null;
+  // A visible top (public reveal or private look) means there's something to
+  // see in the library viewer; clicking opens it (when the parent wires onView)
+  // rather than casting directly. Cast-from-top then lives inside the modal.
+  const canView = isPeeking && onView != null;
+  // Desktop hover preview for the revealed top card (skipped on mobile by the
+  // hook, where a tap would spuriously open the full-screen preview overlay).
+  const topHoverProps =
+    isPeeking && topObjectId != null ? hoverProps(topObjectId as ObjectId) : undefined;
   const libraryLabel = t("zone.libraryCount", { count });
   const playLabel = t("zone.playFromTop", { name: topCardName ?? t("zone.topOfLibrary") });
   const w = size?.width ?? "var(--card-w)";
@@ -151,19 +170,27 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
             longPressFired.current = false;
             return;
           }
+          // Prefer opening the viewer when the top is visible — the modal is
+          // where play-from-top happens (mirrors graveyard/exile). Fall back to
+          // direct cast only when no viewer is wired.
+          if (canView) {
+            onView();
+            return;
+          }
           if (canPlay) handlePlay();
         }}
-        disabled={!canPlay && topCardName == null}
+        disabled={!canView && !canPlay && topCardName == null}
         aria-label={canPlay ? playLabel : libraryLabel}
         data-library-top-cast={canPlay ? "true" : "false"}
+        {...topHoverProps}
         {...longPressHandlers}
         className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
           canPlay
             ? `border-amber-400 ${CASTABLE_AFFORDANCE_IDLE} cursor-pointer`
             : isRevealed
-              ? "border-amber-500 cursor-default"
+              ? `border-amber-500 ${canView ? "cursor-pointer" : "cursor-default"}`
               : isPeeking
-                ? "border-cyan-600 cursor-default"
+                ? `border-cyan-600 ${canView ? "cursor-pointer" : "cursor-default"}`
                 : "border-gray-600 cursor-default"
         }`}
       >

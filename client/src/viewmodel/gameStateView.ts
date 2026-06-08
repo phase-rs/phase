@@ -46,12 +46,27 @@ export function isOneOnOne(gameState: GameState | null): boolean {
 
 export function getPlayerZoneIds(
   gameState: GameState | null,
-  zone: "graveyard" | "exile",
+  zone: "graveyard" | "exile" | "library",
   playerId: PlayerId,
 ): ObjectId[] {
   if (!gameState) return [];
   if (zone === "graveyard") {
     return gameState.players[playerId]?.graveyard ?? [];
+  }
+  if (zone === "library") {
+    // library[0] = top of library (engine convention from zones.rs). Hidden
+    // cards are still present here as redacted objects (`Hidden Card`), so the
+    // viewer can render card-backs for everything the engine hasn't revealed.
+    //
+    // CR 701.20b: returning the library in its true Vec order is safe even
+    // though that order reaches the viewer. The engine only un-redacts a card's
+    // identity during an active look/reveal (visibility.rs — revealed_cards /
+    // private_look / dig / search), never from the persistent
+    // `public_revealed_cards` memory, so the only cards shown face-up are ones
+    // whose position the viewer is already entitled to know. Card-backs are an
+    // identical image, so their relative order carries no observable
+    // information — the engine's "never surface draw order" stance is preserved.
+    return gameState.players[playerId]?.library ?? [];
   }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
 }

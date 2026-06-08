@@ -315,6 +315,38 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
     expect(useUiStore.getState().previewSticky).toBe(true);
   });
 
+  it("opens the library viewer instead of casting when onView is wired and the top is visible", () => {
+    // With a viewer available, a visible top routes the click to the modal
+    // (where play-from-top lives), mirroring graveyard/exile. canView wins over
+    // the direct-cast fast path.
+    const onView = vi.fn();
+    setStore({ canPeek: true, actions: [castAction(42)] });
+    render(<LibraryPile playerId={0} onView={onView} />);
+    const button = screen.getByRole("button", { name: /play sol ring from top of library/i });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    expect(onView).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("opens the library viewer for a revealed top with no play action", () => {
+    const onView = vi.fn();
+    setStore({ canPeek: true, actions: [] });
+    render(<LibraryPile playerId={0} onView={onView} />);
+    fireEvent.click(screen.getByRole("button", { name: /library \(1 card\)/i }));
+    expect(onView).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not open the viewer when the top is hidden (nothing revealed)", () => {
+    // A masked top (no peek, no reveal) has nothing to show — clicking must not
+    // open the modal even though onView is wired.
+    const onView = vi.fn();
+    setStore({ canPeek: false, actions: [] });
+    render(<LibraryPile playerId={0} onView={onView} />);
+    fireEvent.click(screen.getByRole("button", { name: /library \(1 card\)/i }));
+    expect(onView).not.toHaveBeenCalled();
+  });
+
   it("surfaces engine-reported play action even without peek (engine is authoritative)", () => {
     setStore({ canPeek: false, actions: [castAction(42)] });
     render(<LibraryPile playerId={0} />);
