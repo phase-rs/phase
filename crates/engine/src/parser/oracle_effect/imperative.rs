@@ -97,6 +97,19 @@ fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
         return TargetFilter::ParentTarget;
     }
 
+    // CR 608.2c + CR 400.3: "that library" — anaphoric to a library
+    // identified earlier in the instruction (Chaos Warp: owner's library
+    // after shuffle).
+    if preceded(
+        take_until::<_, _, OracleError<'_>>("that library"),
+        tag::<_, _, OracleError<'_>>("that library"),
+    )
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return TargetFilter::ParentTargetOwner;
+    }
+
     TargetFilter::Controller
 }
 
@@ -4367,10 +4380,20 @@ fn lower_target_referenced_search_library(
 
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
+    // CR 400.3: When the parent `ChangeZone` routes to the target's owner's
+    // library (`owner_library: true`), the implicit shuffle must randomize that
+    // same library — not the spell controller's (Chaos Warp stolen-permanent case).
+    let shuffle_target = match &effect {
+        Effect::ChangeZone {
+            owner_library: true,
+            ..
+        } => TargetFilter::ParentTargetOwner,
+        _ => TargetFilter::Controller,
+    };
     let shuffle = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Shuffle {
-            target: TargetFilter::Controller,
+            target: shuffle_target,
         },
     );
     ParsedEffectClause {
