@@ -429,16 +429,16 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     {
         return true;
     }
-    // CR 608.2g + CR 601.2: Invoke Calamity's one-shot free-cast window —
+    // CR 608.2g + CR 601.2: The one-shot free-cast window class —
     // "you may cast up to N [filter] spells ... from your graveyard and/or hand
     // without paying their mana costs" — is a SPELL-RESOLUTION effect, not a
-    // continuous static permission. The diagnostic combination "up to" + "and/or
-    // hand" never appears on the standing graveyard/exile permission statics
-    // (Muldrotha, Gisa+Geralf, etc.), so route this form to effect parsing
-    // (`try_parse_free_cast_from_zones`) instead of the static classifier.
+    // continuous static permission. The diagnostic combination "up to" +
+    // "without paying" never appears on the standing graveyard/exile permission
+    // statics (Muldrotha, Gisa+Geralf, etc.), so route this form to effect
+    // parsing (`try_parse_free_cast_from_zones`) instead of the static classifier.
     if scan_contains(lower, "you may cast up to")
-        && scan_contains(lower, "and/or")
         && scan_contains(lower, "from your")
+        && scan_contains(lower, "without paying")
     {
         return false;
     }

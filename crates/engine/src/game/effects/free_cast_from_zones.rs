@@ -116,9 +116,10 @@ pub(crate) fn eligible_candidates(
             if !matches_target_filter_in_owner_zone(state, id, filter, &ctx) {
                 continue;
             }
-            // CR 202.3: Respect the running MV budget. The mana value is read
-            // from the card's own mana cost (cards in hand/graveyard have no
-            // chosen X), so an X-cost spell counts X as 0 here.
+            // CR 202.3 + CR 107.3b + CR 601.2b: Respect the running MV budget.
+            // Because this window casts without paying a mana cost, X can only
+            // be announced as 0, so the card's printed mana_value() is the same
+            // value used when the choice is submitted.
             if let Some(budget) = max_total_mv {
                 let mv = state
                     .objects

@@ -11245,25 +11245,29 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
     }))
 }
 
-/// CR 608.2g + CR 601.2 + CR 118.9 + CR 202.3: Parse the Invoke Calamity class —
+/// CR 608.2g + CR 601.2 + CR 118.9 + CR 202.3: Parse the free-cast window class —
 /// "you may cast up to N [instant and/or sorcery] spells [with total mana value
 /// M or less] from your graveyard and/or hand without paying their mana costs".
 ///
 /// Lowers to `Effect::FreeCastFromZones`, the interactive multi-cast window with
-/// a shared running-MV budget. The "If those spells would be put into your
-/// graveyard, exile them instead" rider (CR 614.1a) — when present anywhere in
-/// the same clause text — sets `exile_instead_of_graveyard`.
+/// a shared running-MV budget. The separate "If those spells would be put into
+/// your graveyard, exile them instead" rider (CR 614.1a) is absorbed by
+/// `parse_effect_chain_ir` so this parser stays at the per-clause seam.
 ///
-/// Built from composed nom combinators: a fixed "you may cast up to " prefix,
-/// `parse_number` for the count, an `alt()` over the candidate type phrase, an
-/// optional "with total mana value M or less" budget, and the
+/// Built from composed nom combinators: a fixed "you may cast up to " / "cast up
+/// to " prefix, `parse_number` for the count, an `alt()` over the candidate type
+/// phrase, an optional "with total mana value M or less" budget, and the
 /// graveyard-and/or-hand zone tail. Distinct from `try_parse_cast_effect` (which
 /// grants a `CastFromZone` permission on a single targeted/anaphoric card).
-fn try_parse_free_cast_from_zones(lower: &str, full_lower: &str) -> Option<Effect> {
+fn try_parse_free_cast_from_zones(lower: &str) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
 
-    // CR 601.2: "you may cast up to N " — fixed prefix + count.
-    let (rest, _) = tag::<_, _, E>("you may cast up to ").parse(lower).ok()?;
+    // CR 601.2: "[you may] cast up to N " — fixed prefix + count. The chain
+    // parser strips a leading optional "you may" before imperative dispatch, so
+    // the per-clause parser accepts both the printed and stripped forms here.
+    let (rest, _) = alt((tag::<_, _, E>("you may cast up to "), tag("cast up to ")))
+        .parse(lower)
+        .ok()?;
     let (rest, count) = nom_primitives::parse_number.parse(rest).ok()?;
     let count = count as u8;
     // `parse_number` leaves the trailing word boundary; consume the space
@@ -11317,22 +11321,12 @@ fn try_parse_free_cast_from_zones(lower: &str, full_lower: &str) -> Option<Effec
         return None;
     }
 
-    // CR 614.1a: the "exile them instead" rider lives in a later sentence of the
-    // same card text; detect it across the full lowered text.
-    let exile_instead_of_graveyard = nom_primitives::scan_contains(
-        full_lower,
-        "would be put into your graveyard, exile them instead",
-    ) || nom_primitives::scan_contains(
-        full_lower,
-        "would be put into your graveyard, exile it instead",
-    );
-
     Some(Effect::FreeCastFromZones {
         count,
         max_total_mv,
         filter,
         zones,
-        exile_instead_of_graveyard,
+        exile_instead_of_graveyard: false,
     })
 }
 
@@ -11364,27 +11358,63 @@ fn parse_free_cast_candidate_filter(input: &str) -> Option<(&str, TargetFilter)>
 /// controller-owned zones to draw candidates from. Accepts the graveyard/hand
 /// union in either order plus the single-zone variants.
 fn parse_free_cast_zone_tail(input: &str) -> Option<Vec<Zone>> {
-    let graveyard_and_hand = vec![Zone::Graveyard, Zone::Hand];
-    // Try the union forms first (longest-first) before the single-zone tails.
-    let union_forms = [
-        " from your graveyard and/or hand",
-        " from your graveyard and/or your hand",
-        " from your hand and/or graveyard",
-        " from your hand and/or your graveyard",
-    ];
-    if union_forms
-        .iter()
-        .any(|form| nom_primitives::scan_contains(input, form))
-    {
-        return Some(graveyard_and_hand);
+    type E<'a> = OracleError<'a>;
+
+    let (rest, _) = tag::<_, _, E>(" from your ").parse(input).ok()?;
+    let (rest, first) = parse_free_cast_zone_word(rest).ok()?;
+    let (_, second) = opt(preceded(
+        alt((tag::<_, _, E>(" and/or "), tag(" or "))),
+        preceded(opt(tag("your ")), parse_free_cast_zone_word),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    if matches!(
+        (&first, second.as_ref()),
+        (Zone::Graveyard, Some(Zone::Hand)) | (Zone::Hand, Some(Zone::Graveyard))
+    ) {
+        return Some(vec![Zone::Graveyard, Zone::Hand]);
     }
-    if nom_primitives::scan_contains(input, " from your graveyard") {
-        return Some(vec![Zone::Graveyard]);
+
+    let mut zones = vec![first];
+    if let Some(zone) = second {
+        if !zones.contains(&zone) {
+            zones.push(zone);
+        }
     }
-    if nom_primitives::scan_contains(input, " from your hand") {
-        return Some(vec![Zone::Hand]);
-    }
-    None
+    Some(zones)
+}
+
+fn parse_free_cast_zone_word(input: &str) -> OracleResult<'_, Zone> {
+    alt((
+        value(Zone::Graveyard, tag("graveyard")),
+        value(Zone::Hand, tag("hand")),
+    ))
+    .parse(input)
+}
+
+/// CR 614.1a: "If those spells would be put into your graveyard, exile them
+/// instead" is not a standalone effect. It modifies the preceding free-cast
+/// window so each spell cast through that window receives the replacement rider.
+fn is_free_cast_exile_instead_rider(input: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+
+    all_consuming((
+        tag::<_, _, E>("if "),
+        alt((
+            tag("those spells"),
+            tag("those cards"),
+            tag("that spell"),
+            tag("that card"),
+            tag("it"),
+        )),
+        tag(" would be put into your graveyard, exile "),
+        alt((tag("them"), tag("it"))),
+        tag(" instead"),
+        opt(tag(".")),
+    ))
+    .parse(input)
+    .is_ok()
 }
 
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
@@ -11962,6 +11992,13 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // cast parser so it lowers to `Effect::SearchOutsideGame` instead of a
     // `CastFromZone` that would target an in-game permanent (issue #1976).
     if let Some(effect) = imperative::try_parse_play_from_outside_game(tp.lower, ctx) {
+        return parsed_clause(effect);
+    }
+
+    // CR 608.2g + CR 601.2 + CR 118.9: "you may cast up to N ... without paying"
+    // opens an interactive free-cast window, not a standing CastFromZone permission.
+    // Keep this at the normal per-clause cast seam, before the generic cast parser.
+    if let Some(effect) = try_parse_free_cast_from_zones(tp.lower) {
         return parsed_clause(effect);
     }
 
@@ -13832,9 +13869,6 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
         return def;
     }
-    if let Some(def) = try_parse_invoke_calamity_free_cast(text, kind) {
-        return def;
-    }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
@@ -13859,9 +13893,6 @@ pub(crate) fn parse_effect_chain_with_context(
         return def;
     }
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
-        return def;
-    }
-    if let Some(def) = try_parse_invoke_calamity_free_cast(text, kind) {
         return def;
     }
     let ir = parse_effect_chain_ir(text, kind, ctx);
@@ -13986,56 +14017,6 @@ fn try_parse_for_each_attacker_copy_blocker(
             },
         )));
     }
-    Some(def)
-}
-
-/// CR 608.2g + CR 601.2 + CR 118.9 + CR 614.1a: Whole-card recognizer for the
-/// Invoke Calamity class — "You may cast up to N [instant and/or sorcery] spells
-/// with total mana value M or less from your graveyard and/or hand without
-/// paying their mana costs. If those spells would be put into your graveyard,
-/// exile them instead. Exile ~."
-///
-/// Lowers the first sentence to `Effect::FreeCastFromZones` (the interactive
-/// multi-cast window), folds the "exile them instead" rider (CR 614.1a) into the
-/// effect's `exile_instead_of_graveyard` flag, and delegates any trailing
-/// sentence ("Exile ~") to the generic chain parser as a `sub_ability` so the
-/// resolving spell exiles itself after the window finishes. Runs in
-/// `parse_effect_chain` ahead of the generic pipeline because the per-clause
-/// dispatcher would otherwise mis-route the first sentence to a
-/// `GraveyardCastPermission` static (issue #2385).
-fn try_parse_invoke_calamity_free_cast(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
-    let lower = text.to_ascii_lowercase();
-
-    // CR 608.2c: Split into sentences so the free-cast instruction, the exile
-    // rider, and the trailing self-exile are handled separately.
-    let mut sentences = lower
-        .split(". ")
-        .map(|s| s.trim().trim_end_matches('.').trim())
-        .filter(|s| !s.is_empty());
-    let first = sentences.next()?;
-
-    // CR 601.2: The first sentence must be the free-cast window itself.
-    let effect = try_parse_free_cast_from_zones(first, &lower)?;
-
-    // CR 614.1a + CR 608.2c: Consume the optional "if those spells would be put
-    // into your graveyard, exile them instead" rider sentence (its meaning is
-    // already captured in `exile_instead_of_graveyard` via the full-text scan),
-    // then collect any remaining sentences (the "Exile ~" self-exile).
-    let remaining: Vec<&str> = sentences
-        .filter(|s| !nom_primitives::scan_contains(s, "would be put into your graveyard"))
-        .collect();
-
-    let mut def = AbilityDefinition::new(kind, effect);
-
-    // CR 608.2c: Chain the trailing self-exile (and any other follow-up) through
-    // the generic chain parser so "Exile ~" lowers the same way it does on a
-    // plain spell. The self-reference is already `~`-normalized by the caller.
-    if !remaining.is_empty() {
-        let tail = format!("{}.", remaining.join(". "));
-        let sub = parse_effect_chain(&tail, kind);
-        def.sub_ability = Some(Box::new(sub));
-    }
-
     Some(def)
 }
 
@@ -14751,6 +14732,22 @@ pub(crate) fn parse_effect_chain_ir(
                     target_chooser: None,
                 });
                 continue;
+            }
+        }
+
+        if is_free_cast_exile_instead_rider(rider_lower.trim_end_matches('.').trim()) {
+            if let Some(previous) = clauses.iter_mut().rev().find(|clause| {
+                !clause.absorbed_by_followup
+                    && matches!(&clause.parsed.effect, Effect::FreeCastFromZones { .. })
+            }) {
+                if let Effect::FreeCastFromZones {
+                    exile_instead_of_graveyard,
+                    ..
+                } = &mut previous.parsed.effect
+                {
+                    *exile_instead_of_graveyard = true;
+                    continue;
+                }
             }
         }
 
@@ -15961,6 +15958,16 @@ pub(crate) fn parse_effect_chain_ir(
         {
             rewrite_cost_paid_object_quantities(&mut clause.effect);
         }
+        // CR 608.2g + CR 601.2: The "may" in a free-cast window belongs to the
+        // interactive CastOffer itself ("up to N" includes choosing zero casts),
+        // not to the generic OptionalEffectChoice wrapper around the whole
+        // effect. Keep the actor context derived from the printed "you may", but
+        // lower the effect as mandatory so resolution opens the FreeCastWindow.
+        let is_optional = if matches!(&clause.effect, Effect::FreeCastFromZones { .. }) {
+            false
+        } else {
+            is_optional
+        };
 
         // CR 608.2e: "Instead" overrides — marker for lowering to attach as
         // sub_ability on the previous def.
