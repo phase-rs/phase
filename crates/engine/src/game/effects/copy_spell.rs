@@ -141,43 +141,27 @@ pub fn resolve(
             }
         )
     {
-        // Compute legal alternatives for each slot so the UI can present valid
-        // choices. If build_target_slots fails (no legal targets exist for the
-        // copy), fall back to empty alternatives — the copy still goes on the
-        // stack and will fizzle at resolution per CR 608.2b if all targets remain
-        // illegal.
-        // Use the copy's ability (with copy_id as source_id) so protection and
-        // hexproof checks reflect the copy's identity, not the original's.
-        let selection_slots = top_entry
-            .ability()
-            .map(|a| {
-                let mut copy_ability = a.clone();
-                copy_ability.source_id = copy_id;
-                copy_ability
-            })
-            .and_then(|a| super::super::ability_utils::build_target_slots(state, &a).ok())
-            .unwrap_or_default();
-
-        let target_slots: Vec<CopyTargetSlot> = copy_targets
-            .iter()
-            .enumerate()
-            .map(|(i, t)| CopyTargetSlot {
-                current: Some(t.clone()),
-                legal_alternatives: selection_slots
-                    .get(i)
-                    .map(|s| s.legal_targets.clone())
-                    .unwrap_or_default(),
-            })
-            .collect();
-
-        // CR 707.10c: "its controller may choose new targets for the copy" —
-        // the copy's controller makes the retarget choice.
-        state.waiting_for = WaitingFor::CopyRetarget {
-            player: copy_controller,
-            copy_id,
-            target_slots,
-            current_slot: 0,
+        let Some(copy_ability) = state
+            .stack
+            .back()
+            .and_then(|entry| entry.ability())
+            .cloned()
+        else {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
         };
+        open_copy_retarget_choice(
+            state,
+            copy_controller,
+            copy_id,
+            &copy_targets,
+            &copy_ability,
+            EffectKind::CopySpell,
+            copy_id,
+        );
         // EffectResolved deferred until after retarget choice completes.
         return Ok(());
     }
@@ -188,6 +172,50 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 707.10c: Open the shared "may choose new targets" choice for a copied
+/// spell. The copy is already on the stack; `copy_ability` is the copy's
+/// re-sourced ability, so legal alternatives reflect the copy's identity.
+pub(crate) fn open_copy_retarget_choice(
+    state: &mut GameState,
+    copy_controller: PlayerId,
+    copy_id: ObjectId,
+    copy_targets: &[TargetRef],
+    copy_ability: &ResolvedAbility,
+    effect_kind: EffectKind,
+    effect_source_id: ObjectId,
+) {
+    // Compute legal alternatives for each slot so the UI can present valid
+    // choices. If build_target_slots fails (no legal targets exist for the
+    // copy), fall back to empty alternatives — the copy still goes on the
+    // stack and will fizzle at resolution per CR 608.2b if all targets remain
+    // illegal.
+    let selection_slots =
+        super::super::ability_utils::build_target_slots(state, copy_ability).unwrap_or_default();
+
+    let target_slots: Vec<CopyTargetSlot> = copy_targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| CopyTargetSlot {
+            current: Some(t.clone()),
+            legal_alternatives: selection_slots
+                .get(i)
+                .map(|s| s.legal_targets.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    // CR 707.10c: "its controller may choose new targets for the copy" — the
+    // copy's controller makes the retarget choice.
+    state.waiting_for = WaitingFor::CopyRetarget {
+        player: copy_controller,
+        copy_id,
+        target_slots,
+        effect_kind,
+        effect_source_id: Some(effect_source_id),
+        current_slot: 0,
+    };
 }
 
 /// CR 707.10: "A copy of a spell is controlled by the player under whose
@@ -449,7 +477,7 @@ fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: 
 /// to the copy. Mirrors `set_resolved_controller_recursive`. Without this, the
 /// Chain cycle's nested optional `CopySpell` would keep the original spell's
 /// `source_id` and a second-generation copy could not find its source.
-fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
+pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
     ability.source_id = source_id;
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         set_resolved_source_recursive(sub_ability, source_id);

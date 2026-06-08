@@ -17,6 +17,7 @@ use super::token::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
+use crate::parser::oracle_quantity;
 use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -56,21 +57,44 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         rest = stripped;
     }
 
+    // CR 107.3c: "X/X where X is ~'s power" — X is bound to a dynamic quantity
+    // (source's power), NOT the cost paid. This pattern must be detected BEFORE
+    // the X-cost activation path (parse_cost_x_become_pt_prefix) to avoid the
+    // false match that would emit CostXPaid (which evaluates to 0 for triggers).
+    // Covers Obuun, Mul Daya Ancestor and similar patterns.
+    // allow-noncombinator: case-insensitive phrase scan - nom lacks case-insensitive take_until
+    if let Some(where_x_pos) = rest.to_lowercase().find("where x is ") {
+        let before_where = rest[..where_x_pos].trim_end_matches(',').trim();
+        let after_where = &rest[where_x_pos + "where x is ".len()..];
+        let after_where_lower = after_where.to_lowercase();
+        rest = parse_cost_x_become_pt_prefix(before_where).unwrap_or(before_where);
+
+        let qty = oracle_quantity::parse_quantity_ref(&after_where_lower)?;
+        let dynamic_qty = QuantityExpr::Ref { qty };
+        spec.dynamic_power = Some(dynamic_qty.clone());
+        spec.dynamic_toughness = Some(dynamic_qty);
+    }
+
     if let Some((power, toughness, after_pt)) = parse_fixed_become_pt_prefix(rest) {
         spec.power = Some(power);
         spec.toughness = Some(toughness);
         rest = after_pt;
-    } else if let Some(after_pt) = parse_cost_x_become_pt_prefix(rest) {
-        // CR 107.3 + CR 107.3a: "{X}{G}: ~ becomes an X/X creature" — P/T resolves
-        // to the X paid for the activation cost. Maps Variable("X")/Variable("X") to
-        // CostXPaid so the animate effect reads cost_x_paid at resolution (not Variable
-        // which only resolves while the spell/ability is on the stack).
-        let cost_x = QuantityExpr::Ref {
-            qty: QuantityRef::CostXPaid,
-        };
-        spec.dynamic_power = Some(cost_x.clone());
-        spec.dynamic_toughness = Some(cost_x);
-        rest = after_pt;
+    } else if spec.dynamic_power.is_none() && spec.dynamic_toughness.is_none() {
+        // Only apply X-cost activation path if dynamic P/T wasn't already set by
+        // "where X is" pattern detection above. This prevents CostXPaid from
+        // overwriting SourcePower for patterns like "X/X where X is ~'s power".
+        if let Some(after_pt) = parse_cost_x_become_pt_prefix(rest) {
+            // CR 107.3 + CR 107.3a: "{X}{G}: ~ becomes an X/X creature" — P/T resolves
+            // to the X paid for the activation cost. Maps Variable("X")/Variable("X") to
+            // CostXPaid so the animate effect reads cost_x_paid at resolution (not Variable
+            // which only resolves while the spell/ability is on the stack).
+            let cost_x = QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            };
+            spec.dynamic_power = Some(cost_x.clone());
+            spec.dynamic_toughness = Some(cost_x);
+            rest = after_pt;
+        }
     }
 
     if let Some((descriptor, power, toughness, keywords)) = split_animation_base_pt_clause(rest) {
@@ -80,10 +104,15 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         rest = descriptor;
     }
 
-    if let Some((descriptor, value)) = split_animation_dynamic_pt_clause(rest) {
-        spec.dynamic_power = Some(value.clone());
-        spec.dynamic_toughness = Some(value);
-        rest = descriptor;
+    if spec.dynamic_power.is_none() && spec.dynamic_toughness.is_none() {
+        // Only apply split_animation_dynamic_pt_clause if dynamic P/T wasn't already
+        // set by "where X is" pattern detection above. This prevents overwriting
+        // SourcePower with other quantity references.
+        if let Some((descriptor, value)) = split_animation_dynamic_pt_clause(rest) {
+            spec.dynamic_power = Some(value.clone());
+            spec.dynamic_toughness = Some(value);
+            rest = descriptor;
+        }
     }
 
     let (descriptor, keywords) = split_animation_keyword_clause(rest);
@@ -1254,6 +1283,76 @@ mod test_den_bugbear {
         assert!(
             spec.types.contains(&"Creature".to_string()),
             "must infer Creature"
+        );
+    }
+
+    /// CR 107.3c: "X/X where X is ~'s power" — X is bound to the source's power,
+    /// NOT the cost paid. This pattern must be detected before the X-cost activation
+    /// path to avoid the false match that would emit CostXPaid.
+    /// Covers Obuun, Mul Daya Ancestor and similar patterns.
+    #[test]
+    fn animation_spec_x_x_where_x_is_source_power() {
+        use crate::types::ability::{ContinuousModification, QuantityExpr, QuantityRef};
+
+        let spec = parse_animation_spec(
+            "an X/X Elemental creature, where X is ~'s power",
+            &mut ParseContext::default(),
+        )
+        .expect("X/X where X is ~'s power must parse");
+
+        // Dynamic P/T must be SourcePower (not CostXPaid).
+        let expected_qty = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+        };
+        assert_eq!(
+            spec.dynamic_power,
+            Some(expected_qty.clone()),
+            "dynamic_power must be SourcePower"
+        );
+        assert_eq!(
+            spec.dynamic_toughness,
+            Some(expected_qty),
+            "dynamic_toughness must be SourcePower"
+        );
+        // Fixed P/T must be None (X/X is dynamic, not fixed).
+        assert_eq!(spec.power, None);
+        assert_eq!(spec.toughness, None);
+
+        // Type list must include Creature and Elemental.
+        assert!(
+            spec.types.contains(&"Creature".to_string()),
+            "must include Creature, got: {:?}",
+            spec.types
+        );
+        assert!(
+            spec.types.contains(&"Elemental".to_string()),
+            "must include Elemental, got: {:?}",
+            spec.types
+        );
+
+        // animation_modifications must emit SetPowerDynamic, SetToughnessDynamic with SourcePower.
+        let mods = animation_modifications(&spec);
+        assert!(
+            mods.contains(&ContinuousModification::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    }
+                }
+            }),
+            "must include SetPowerDynamic(SourcePower)"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::SetToughnessDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source,
+                    }
+                }
+            }),
+            "must include SetToughnessDynamic(SourcePower)"
         );
     }
 }

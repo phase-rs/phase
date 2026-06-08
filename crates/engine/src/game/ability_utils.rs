@@ -3,8 +3,8 @@ use crate::types::ability::{
     CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, FilterProp,
     GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     MultiTargetSpec, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionPlayerScope, SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -222,7 +222,14 @@ pub fn build_chained_resolved(
         // CR 700.2d: When chaining multiple modes, append subsequent modes after
         // the current mode's own sub_ability chain (e.g., Cathartic Pyre mode 2's
         // "discard, then draw that many" must preserve the draw sub_ability).
-        if let Some(next_mode) = result {
+        if let Some(mut next_mode) = result {
+            // CR 700.2d + CR 700.2f + CR 608.2c: chained modes are independent
+            // instructions, not continuations. Tag the appended mode root as a
+            // `SequentialSibling` so resolution treats it as its own instruction
+            // (e.g. Dromoka's Command mode 3's `PutCounter` must resolve on its
+            // own target, NOT as a rider of mode 1's prevention shield). Within a
+            // single mode, then/comma sub-steps remain `ContinuationStep`.
+            next_mode.sub_link = SubAbilityLink::SequentialSibling;
             append_to_sub_chain(&mut resolved, next_mode);
         }
         result = Some(resolved);
@@ -1106,6 +1113,14 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 legal.into_iter().next()
             })
             .collect()
+    } else if let Some(src_leaf) = prevent_damage_source_slot_filter(&validated.effect).cloned() {
+        // CR 608.2b + CR 609.7a: A source-scoped `PreventDamage` carries its
+        // chosen source spell in `targets[0]`. `extract_target_filter_from_effect`
+        // returns `None` for its `Any` recipient, so the generic `None` arm below
+        // would fizzle-filter the spell to battlefield presence and drop it
+        // (the spell lives on the STACK). Re-validate against the source leaf
+        // (`InZone Stack`-aware) instead, preserving the spell target.
+        targeting::validate_targets_for_ability(state, &validated.targets, &src_leaf, &validated)
     } else {
         match triggers::extract_target_filter_from_effect(&validated.effect) {
             Some(filter) if matches!(validated.effect, Effect::PairWith { .. }) => {
@@ -1169,6 +1184,41 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
     validated
 }
 
+/// CR 609.7 + CR 601.2c: For a source-scoped `PreventDamage`
+/// ("prevent all damage target instant or sorcery spell would deal this turn"),
+/// surface the choosable source object as a target slot.
+///
+/// The effect's `damage_source_filter` is an `And` pairing a
+/// `ParentTargetSlot { index }` sentinel (which captures the chosen object at
+/// resolution, CR 609.7a) with the choosable `Typed`/stack-spell leaf. The
+/// sentinel cannot be enumerated by `find_legal_targets`, so we return the
+/// SIBLING leaf — the actual "instant or sorcery spell" filter that
+/// `targeting.rs::filter_targets_stack_spells` can enumerate on the stack.
+///
+/// Returns `None` for recipient-scoped or `ChosenDamageSource`/`IsChosenColor`
+/// ("by …" Arachnogenesis) prevents, so those are NOT diverted into a source
+/// target slot.
+fn prevent_damage_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
+    let Effect::PreventDamage {
+        damage_source_filter: Some(TargetFilter::And { filters }),
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    // Only an `And` that carries the `ParentTargetSlot` sentinel is a
+    // source-scoped capture; return the sibling choosable leaf.
+    if !filters
+        .iter()
+        .any(|f| matches!(f, TargetFilter::ParentTargetSlot { .. }))
+    {
+        return None;
+    }
+    filters
+        .iter()
+        .find(|f| !matches!(f, TargetFilter::ParentTargetSlot { .. }))
+}
+
 fn collect_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1183,6 +1233,30 @@ fn collect_target_slots(
         if ability.context.additional_cost_paid {
             collect_target_slots(state, sub_ability, acc)?;
             return Ok(());
+        }
+    }
+
+    // CR 609.7 + CR 601.2c: A source-scoped `PreventDamage` ("prevent all damage
+    // target instant or sorcery spell would deal this turn") surfaces the
+    // choosable source spell as a target slot. Declared FIRST (CR 601.2c
+    // declaration order). The generic path below cannot reach it —
+    // `target_filter()` returns the `Any` recipient and short-circuits to `None`
+    // — so we surface it here, mirroring the `CreateDamageReplacement` arm. We
+    // do NOT `return`: the generic recipient logic still runs, but for the
+    // source-scoped form `target == Any` so it adds nothing.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Some(src_leaf) = prevent_damage_source_slot_filter(&ability.effect) {
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, src_leaf, &acc.slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            acc.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
         }
     }
 
@@ -2072,6 +2146,21 @@ fn collect_target_slot_specs(
         if ability.context.additional_cost_paid {
             collect_target_slot_specs(state, sub_ability, specs, next_instance);
             return;
+        }
+    }
+
+    // CR 609.7 + CR 601.2c: Mirror the source-scoped `PreventDamage` slot from
+    // `collect_target_slots` one-for-one so per-slot specs line up with the
+    // surfaced TargetSelectionSlots (the choosable source spell, declared first).
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Some(src_leaf) = prevent_damage_source_slot_filter(&ability.effect) {
+            let id = TargetInstanceId(*next_instance);
+            *next_instance += 1;
+            specs.push(TargetSlotSpec {
+                filter: src_leaf.clone(),
+                optional: ability.optional_targeting,
+                instance: id,
+            });
         }
     }
 
@@ -3503,6 +3592,24 @@ fn assign_targets_recursive(
         return Ok(());
     }
 
+    // CR 609.7 + CR 601.2c: Mirror the source-scoped `PreventDamage` slot pushed
+    // by `collect_target_slots`. The chosen source spell is consumed into THIS
+    // node's `targets` (the PreventDamage HEAD node) BEFORE descending into the
+    // sub-chain, so the modal sub (mode 3's PutCounter) consumes its own target
+    // next. Slot order matches `collect_target_slots`: source slot first.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && prevent_damage_source_slot_filter(&ability.effect).is_some()
+    {
+        if let Some(target) = targets.get(*next_target) {
+            ability.targets.push(target.clone());
+            *next_target += 1;
+        } else if !ability.optional_targeting {
+            return Err(EngineError::InvalidAction(
+                "Missing required target".to_string(),
+            ));
+        }
+    }
+
     // CR 109.4 + CR 115.1: Mirror the companion-player slot pushed by
     // `collect_target_slots` for effects whose filters reference
     // `ControllerRef::TargetPlayer` (DamageAll, PutCounterAll, etc.). The
@@ -3701,6 +3808,30 @@ fn assign_selected_slots_recursive(
             assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
         }
         return Ok(());
+    }
+
+    // CR 609.7 + CR 601.2c: Mirror the source-scoped `PreventDamage` slot — the
+    // modal cast pipeline drives the slots path, so the chosen source spell must
+    // be consumed into THIS node's `targets` here too, BEFORE descending into the
+    // (modal) sub-chain. Slot order matches `collect_target_slots`: source first.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && prevent_damage_source_slot_filter(&ability.effect).is_some()
+    {
+        let Some(selected_slot) = selected_slots.get(*next_slot) else {
+            return Err(EngineError::InvalidAction(
+                "Missing target selection".to_string(),
+            ));
+        };
+        match selected_slot {
+            Some(target) => ability.targets.push(target.clone()),
+            None if ability.optional_targeting => {}
+            None => {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
+            }
+        }
+        *next_slot += 1;
     }
 
     // CR 109.4 + CR 115.1: Mirror the companion-player slot pushed by
@@ -3996,6 +4127,16 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         {
             return true;
         }
+    }
+
+    // CR 609.7 + CR 601.2c: A source-scoped `PreventDamage` head node consumes
+    // the chosen source spell into its own `targets[0]` — `collect_target_slots`
+    // pushes a source slot for it, and `assign_targets_recursive` consumes one
+    // target into this node BEFORE descending into the (modal) sub-chain.
+    if ability.target_choice_timing == TargetChoiceTiming::Stack
+        && prevent_damage_source_slot_filter(&ability.effect).is_some()
+    {
+        return true;
     }
 
     // CR 109.4 + CR 115.1: A node also acts as a target sink when its filter
@@ -8490,6 +8631,112 @@ mod tests {
             )
             .is_err(),
             "DifferentObjectControllers must still reject two P0-controlled objects"
+        );
+    }
+
+    /// CR 609.7 + CR 601.2c: A source-scoped `PreventDamage` ("prevent all
+    /// damage target instant or sorcery spell would deal this turn") surfaces
+    /// exactly one target slot whose legal targets are the spell(s) on the
+    /// stack. Drives the real targeting pipeline — deleting the
+    /// `prevent_damage_source_slot_filter` arm in `collect_target_slots` makes
+    /// this fail.
+    #[test]
+    fn build_target_slots_surfaces_source_scoped_spell_slot() {
+        use crate::types::ability::{PreventionAmount, PreventionScope};
+        use crate::types::game_state::CastingVariant;
+        let mut state = GameState::new_two_player(42);
+        let dromoka = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dromoka's Command".into(),
+            Zone::Stack,
+        );
+        // An instant spell on the stack — the choosable source.
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Lightning Bolt".into(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.objects.get_mut(&spell).unwrap().card_types.core_types = vec![CoreType::Instant];
+
+        let source_filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ParentTargetSlot { index: 0 },
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Instant)),
+                    ],
+                },
+            ],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(source_filter),
+            },
+            vec![],
+            dromoka,
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("source slot must build");
+        assert_eq!(slots.len(), 1, "exactly one source-scope slot");
+        assert!(
+            slots[0].legal_targets.contains(&TargetRef::Object(spell)),
+            "the stack spell must be a legal source target, got {:?}",
+            slots[0].legal_targets
+        );
+    }
+
+    /// CR 700.2d + CR 608.2c: Chaining two modes via `build_chained_resolved`
+    /// appends the later mode as the earlier mode's `sub_ability` with
+    /// `sub_link == SequentialSibling` — chained modes are independent
+    /// instructions, not continuations.
+    #[test]
+    fn build_chained_resolved_tags_appended_mode_sequential_sibling() {
+        let mode_a = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let mode_b = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let abilities = vec![mode_a, mode_b];
+        let chained =
+            build_chained_resolved(&abilities, &[0, 1], ObjectId(1), PlayerId(0)).unwrap();
+        let sub = chained
+            .sub_ability
+            .as_deref()
+            .expect("second mode appended as sub");
+        assert_eq!(
+            sub.sub_link,
+            SubAbilityLink::SequentialSibling,
+            "appended mode root must be tagged SequentialSibling"
         );
     }
 }

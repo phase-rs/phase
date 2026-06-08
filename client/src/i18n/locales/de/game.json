@@ -1255,6 +1255,16 @@
     "discoverDeclineSuffix": "(den Rest unter die Bibliothek legen)",
     "cascadeDeclineSuffix": "(alle ins Exil geschickten Karten unter die Bibliothek mischen)"
   },
+  "freeCastWindow": {
+    "eyebrow": "Kostenlos wirken",
+    "title": "Wirke einen Zauberspruch kostenlos",
+    "subtitle": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
+    "subtitleNoBudget": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
+    "castNamed": "{{name}} wirken",
+    "castSuffix": "(ohne seine Manakosten zu bezahlen)",
+    "done": "Fertig",
+    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)"
+  },
   "castingVariant": {
     "eyebrow": "Wirken",
     "title": "Wirken wählen",

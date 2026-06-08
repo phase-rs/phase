@@ -524,6 +524,16 @@ pub enum GameAction {
     RippleChoice {
         choice: CastChoice,
     },
+    /// CR 608.2g + CR 601.2: Pick one candidate to cast for free from an open
+    /// `WaitingFor::CastOffer { FreeCastWindow }` (Invoke Calamity), or `None`
+    /// to finish the window without casting (further) spells. Distinct from the
+    /// binary `CastChoice` used by Cascade/Discover/Ripple because the player
+    /// chooses *which* of several offered cards to cast, not merely whether to
+    /// cast a single pre-selected one.
+    FreeCastWindowChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<crate::types::identifiers::ObjectId>,
+    },
     /// CR 401.4: Choose top or bottom of library.
     ChooseTopOrBottom {
         top: bool,
@@ -1293,6 +1303,7 @@ impl GameAction {
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::RippleChoice { .. }
+            | GameAction::FreeCastWindowChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
