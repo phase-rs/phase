@@ -292,7 +292,7 @@ fn detect_optional_you_may(
     if parsed_has_conditional_modal_max(parsed) {
         return;
     }
-    // CR 702.103b: Prototype keyword explanation "(You may cast this spell with
+    // CR 702.160a: Prototype keyword explanation "(You may cast this spell with
     // different mana cost, color, and size. It keeps its abilities and types.)"
     // is keyword reminder text, not an optional effect.
     // allow-noncombinator: swallow detector marker scan on classified text
@@ -324,14 +324,14 @@ fn detect_optional_you_may(
     // Die roll result branches (e.g., "1—9 | You may put that card on top of
     // your library") are conditional effects gated by the die result, not
     // standalone optional effects. The optionality is conditional on the roll.
-    // Match both "N—N | you may" and "| you may" patterns.
+    // Gate on die-roll pattern (N—N |) to avoid over-broad exemption for other pipe uses.
     // allow-noncombinator: swallow detector marker scan on classified text
-    if cleaned.contains("| you may")
+    if cleaned.contains("— | you may")
     // allow-noncombinator: swallow detector marker scan on classified text
     {
         return;
     }
-    // CR 611.2a: Static abilities that grant triggers with optional effects
+    // CR 611.3: Static abilities that grant triggers with optional effects
     // (e.g., Arm with Aether granting "you may return target creature")
     // carry the optionality in the granted trigger, not at the grant site.
     if any_static_has_granted_trigger_with_optional(parsed) {
