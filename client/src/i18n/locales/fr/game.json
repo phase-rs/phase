@@ -283,6 +283,8 @@
     "graveyardShort": "CIM",
     "graveyardTitle": "Cimetière ({{count}})",
     "libraryAlt": "Bibliothèque",
+    "library": "Bibliothèque",
+    "libraryLower": "bibliothèque",
     "libraryCount_one": "Bibliothèque ({{count}} carte)",
     "libraryCount_other": "Bibliothèque ({{count}} cartes)",
     "playFromTop": "Jouer {{name}} depuis le dessus de la bibliothèque",

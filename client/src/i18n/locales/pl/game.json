@@ -283,6 +283,8 @@
     "graveyardShort": "CM",
     "graveyardTitle": "Cmentarz ({{count}})",
     "libraryAlt": "Biblioteka",
+    "library": "Biblioteka",
+    "libraryLower": "biblioteka",
     "libraryCount_one": "Biblioteka ({{count}} karta)",
     "libraryCount_other": "Biblioteka ({{count}} kart)",
     "playFromTop": "Zagraj {{name}} z wierzchu biblioteki",

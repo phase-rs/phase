@@ -283,6 +283,8 @@
     "graveyardShort": "GY",
     "graveyardTitle": "Graveyard ({{count}})",
     "libraryAlt": "Library",
+    "library": "Library",
+    "libraryLower": "library",
     "libraryCount_one": "Library ({{count}} card)",
     "libraryCount_other": "Library ({{count}} cards)",
     "playFromTop": "Play {{name}} from top of library",
