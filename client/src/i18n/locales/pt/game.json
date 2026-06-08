@@ -308,6 +308,7 @@
     "convokeHint": "Vire criaturas para ajudar a pagar.",
     "improviseHint": "Vire artefatos para ajudar a pagar.",
     "convokeOrImproviseHint": "Vire criaturas ou artefatos para ajudar a pagar.",
+    "convokeStaged": "Viradas:",
     "lifeAmount": "2 de vida",
     "lifeCostSummary": "({{count}} de vida)",
     "paymentPending": "O pagamento ainda está pendente. Vire permanentes ou cancele esta ação.",
@@ -354,6 +355,8 @@
     "expandHud": "Expandir HUD de oponente. Mostra a mão e o detalhamento do campo de batalha de cada oponente."
   },
   "combat": {
+    "band": "Bando",
+    "banded": "Bando ✓",
     "attackAll": "Atacar Todos",
     "skip": "Pular",
     "confirmAttackers": "Confirmar Atacantes ({{count}})",
@@ -421,6 +424,7 @@
     "one": "um {{target}}",
     "nounPlayer": "jogador",
     "nounNonlandPermanent": "permanente que não seja terreno",
+    "nounSpell": "feitiço",
     "nounCreature": "criatura",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "permanente alvo",
@@ -722,6 +726,14 @@
       "titleChooseOne": "{{effect}} a Menos Que Você Pague Um",
       "dontPay": "Não Pagar",
       "takeEffect": "Aceitar o Efeito"
+    },
+    "spliceOffer": {
+      "title": "Unir com Arcano?",
+      "subtitle": "Escolha uma carta para revelar e unir a esta mágica, ou conjure sem unir.",
+      "spliceCard": "Unir {{name}}",
+      "decline": "Não Unir",
+      "declineDescription": "Conjure a mágica sem adicionar o texto de outra carta.",
+      "unknownCard": "Carta #{{id}}"
     },
     "activationCost": {
       "title": "Escolher Custo de Ativação"
@@ -1162,12 +1174,25 @@
     "adventureTag": "(Aventura)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Escolher Custo de Conjuração",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Conjurar Normalmente",
     "warpAltLabel": "Conjurar com Warp",
     "warpAltSuffix": "(exilada na etapa final)",
     "warpSubtitle": "Conjure {{name}} normalmente ou use seu custo de Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Conjurar Normalmente",
+    "dashAltLabel": "Conjurar com Dash",
+    "dashAltSuffix": "(ganha ímpeto, volta para a mão na etapa final)",
+    "dashSubtitle": "Conjure {{name}} normalmente ou use seu custo de Dash.",
     "evokeEyebrow": "Evocar",
     "evokeNormalLabel": "Conjurar Normalmente",
     "evokeAltLabel": "Conjurar com Evocar",
@@ -1218,9 +1243,11 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascata",
     "discoverEyebrow": "Descobrir",
+    "rippleEyebrow": "Ripple",
     "title": "Conjurar {{name}}?",
     "subtitleCascade": "Cascata exilou {{name}} (valor de mana abaixo de {{sourceMv}}). Conjure-a sem pagar seu custo de mana, ou recuse e embaralhe todas as {{total}} cartas exiladas no fundo de seu grimório.",
     "subtitleDiscover": "Descobrir exilou {{name}}. Conjure-a sem pagar seu custo de mana, ou coloque-a em sua mão e embaralhe as outras {{missCount}} cartas exiladas no fundo de seu grimório.",
+    "subtitleRipple": "Ripple revelou {{name}}. Conjure-a sem pagar seu custo de mana, ou recuse e coloque todas as {{total}} cartas reveladas no fundo de seu grimório em ordem aleatória.",
     "castNamed": "Conjurar {{name}}",
     "castSuffix": "(sem pagar seu custo de mana)",
     "putIntoHand": "Colocar na mão",
@@ -1238,6 +1265,7 @@
     "variantEscape": "Conjurar com Escapar",
     "variantRetrace": "Conjurar com Refazer",
     "variantHarmonize": "Conjurar com Harmonizar",
+    "variantMayhem": "Conjurar com Mayhem",
     "variantFlashback": "Conjurar com Flashback",
     "variantAftermath": "Conjurar com Sequência",
     "variantGraveyardPermission": "Conjurar do Cemitério",
@@ -1250,6 +1278,7 @@
     "variantForetell": "Conjurar de Prever",
     "variantOverload": "Conjurar com Sobrecarregar",
     "variantBestow": "Conjurar com Conceder",
+    "variantFuse": "Conjurar com Fusão",
     "variantFallback": "Conjurar com {{type}}"
   },
   "categoryChoice": {
@@ -1371,6 +1400,14 @@
     "reportTitle": "Pânico não fatal do motor: {{summary}}",
     "reportWhatHappened": "**O que aconteceu**\n_descreva brevemente o que você estava fazendo_\n\n**Diagnóstico**\n```\n{{diagnostic}}\n```"
   },
+  "stuckDecision": {
+    "heading": "Game appears stuck",
+    "dismiss": "Dismiss",
+    "body": "phase.rs is waiting on a decision that has no available action, so the game can’t continue. This is a bug. Please <report>report it</report> so we can investigate.",
+    "dontShowAgain": "Don’t show again this session",
+    "reportTitle": "Stuck decision: {{kind}}",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
   "optionalEffect": {
     "sourceFallback": "Efeito",
     "title": "{{name}} - Efeito Opcional",
@@ -1384,6 +1421,24 @@
     "top": "Top of library",
     "bottom": "Bottom of library"
   },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
+  "cipher": {
+    "cardFallback": "this card",
+    "creatureFallback": "a creature",
+    "title": "Cipher: {{name}}",
+    "subtitle": "Exile this card encoded on a creature you control, or decline.",
+    "encodeDesc": "Encode here. Whenever this creature deals combat damage to a player, you may cast a copy of the encoded card without paying its mana cost.",
+    "decline": "Don't encode",
+    "declineDesc": "Put this card into its owner's graveyard."
+  },
   "permanentTypeSlot": {
     "eyebrow": "Tipo de Permanente",
     "title": "Escolher Espaço de Tipo",
@@ -1392,6 +1447,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferar",
     "proliferateSubtitle": "Escolha qualquer número de permanentes e jogadores com marcadores. Cada alvo escolhido recebe mais um marcador de cada tipo já presente.",
+    "timeTravelTitle": "Viagem no Tempo",
+    "timeTravelRemoveSubtitle": "Escolha qualquer número de objetos elegíveis para remover um marcador temporal.",
+    "timeTravelAddSubtitle": "Escolha qualquer número de objetos elegíveis restantes para adicionar um marcador temporal.",
     "chooseObjectsTitle": "Escolher Permanentes",
     "chooseObjectsSubtitle": "Escolha qualquer número de permanentes. Você paga um custo por cada um escolhido.",
     "selectAll": "Todos",

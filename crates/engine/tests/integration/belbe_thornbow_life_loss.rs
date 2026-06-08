@@ -161,6 +161,7 @@ fn thornbow_archer_attack_drains_only_elfless_opponents() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(thornbow, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
     runner.advance_until_stack_empty();
@@ -208,6 +209,7 @@ fn thornbow_archer_attack_drains_all_when_no_opponent_controls_elf() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(thornbow, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
     runner.advance_until_stack_empty();

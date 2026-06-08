@@ -3,7 +3,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{map, opt, rest, value};
+use nom::combinator::{opt, rest, value};
 use nom::Parser;
 
 use crate::parser::oracle_ir::context::ParseContext;
@@ -12,6 +12,7 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
     StaticDefinition, TargetFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -40,7 +41,8 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     let lower = text.to_lowercase();
 
     // "create a token that's a copy of {target}"
-    if let Ok((_, (tapped, enters_attacking, count))) = parse_copy_token_entry_modifiers(&lower) {
+    if let Ok((_, (tapped, enters_attacking, mut count))) = parse_copy_token_entry_modifiers(&lower)
+    {
         let tp = TextPair::new(&text, &lower);
         let after_copy_tp = tp
             .strip_after("copy of ")
@@ -96,6 +98,24 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         if let (TargetFilter::ParentTarget, Some(host)) = (&target, &ctx.host_self_reference) {
             target = host.clone();
         }
+        // CR 107.3: bind a variable "X" count to its "where X is <quantity>"
+        // clause (Devastating Onslaught, Nacatl War-Pride, Rionya), mirroring the
+        // non-copy token path. A bare X with no where-clause (Aggressive Biomancy)
+        // is left as `Variable("X")` for the spell's X cost to resolve.
+        if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
+        {
+            if let Some(where_expression) = extract_token_where_x_expression(&text) {
+                count = super::parse_where_x_quantity_expression(&where_expression)
+                    .or_else(|| {
+                        crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
+                    })
+                    .unwrap_or(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: where_expression,
+                        },
+                    });
+            }
+        }
         return Some(Effect::CopyTokenOf {
             target,
             // CR 109.4: Default to the controller; a "target [player] creates"
@@ -127,7 +147,9 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         owner: TargetFilter::Controller,
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
-        supertypes: vec![],
+        // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
+        // onto the token so the legend rule (CR 704.5j) applies.
+        supertypes: token.supertypes,
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
     })
@@ -137,16 +159,20 @@ pub(super) fn parse_copy_token_entry_modifiers(
     input: &str,
 ) -> OracleResult<'_, (bool, bool, QuantityExpr)> {
     let (rest, _) = tag("create ").parse(input)?;
-    let (rest, count) = opt(alt((
-        value(
-            QuantityExpr::Fixed { value: 1 },
-            alt((tag("a "), tag("one "))),
-        ),
-        map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
-            value: value as i32,
-        }),
-    )))
-    .parse(rest)?;
+    // The bare article "a"/"one" → a count of 1. `parse_count_expr` intentionally
+    // excludes the article (to avoid matching the "a" in "another"), so handle it
+    // here; otherwise delegate to the shared count grammar so "X", "two", "twice
+    // X", "that many", etc. all parse uniformly — mirroring the non-copy token
+    // path's `parse_token_count_prefix`. Without this, "Create X tokens that are
+    // copies of …" failed to parse and the whole effect was dropped.
+    let (rest, count) =
+        if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("a "), tag("one "))).parse(rest) {
+            (rest, Some(QuantityExpr::Fixed { value: 1 }))
+        } else if let Some((expr, rest_after)) = parse_count_expr(rest) {
+            (rest_after, Some(expr))
+        } else {
+            (rest, None)
+        };
     let (rest, _) = if count.is_some() {
         opt(tag(" ")).parse(rest)?
     } else {
@@ -328,7 +354,8 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         break;
     }
 
-    rest = strip_token_supertypes(rest);
+    let (supertypes, rest_after_supertypes) = strip_token_supertypes(rest);
+    rest = rest_after_supertypes;
 
     let (mut power, mut toughness, rest) =
         if let Ok((rest, (power, toughness))) = nom_primitives::parse_pt_value.parse(rest) {
@@ -445,6 +472,7 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         power,
         toughness,
         types,
+        supertypes,
         colors,
         keywords,
         tapped,
@@ -502,20 +530,29 @@ fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
     Some((name.to_string(), rest))
 }
 
-fn strip_token_supertypes(mut text: &str) -> &str {
+/// CR 205.4a: Strip leading supertype words from the token description and
+/// return the captured supertypes alongside the remaining text. Previously the
+/// supertypes were discarded; capturing them lets legendary/snow tokens (Marit
+/// Lage etc.) carry their supertype through to `Effect::Token` — load-bearing
+/// for the legend rule (CR 704.5j).
+fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
+    let mut supertypes = Vec::new();
     loop {
         let trimmed = text.trim_start();
         let trimmed_lower = trimmed.to_lowercase();
-        let Some((_, stripped)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+        let Some((supertype, stripped)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
             alt((
-                value((), tag("legendary ")),
-                value((), tag("snow ")),
-                value((), tag("basic ")),
+                value(Supertype::Legendary, tag("legendary ")),
+                value(Supertype::Snow, tag("snow ")),
+                value(Supertype::Basic, tag("basic ")),
             ))
             .parse(i)
         }) else {
-            return trimmed;
+            return (supertypes, trimmed);
         };
+        if !supertypes.contains(&supertype) {
+            supertypes.push(supertype);
+        }
         text = stripped;
     }
 }
@@ -991,8 +1028,57 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode};
+    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TypeFilter};
     use crate::types::card_type::CoreType;
+
+    #[test]
+    fn copy_x_tokens_of_target_parses_variable_count() {
+        // CR 707.2 + CR 107.3: variable X count in copy-token creation.
+        let effect = try_parse_token(
+            "create x tokens that are copies of target creature you control",
+            "Create X tokens that are copies of target creature you control",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf { count, .. } = effect else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn copy_x_tokens_binds_where_clause() {
+        // CR 107.3: X bound to a trailing "where X is <quantity>" clause.
+        let txt = "Create X tokens that are copies of target creature you control, where X is the number of Clues you control.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf { count, .. } = effect else {
+            panic!("expected CopyTokenOf")
+        };
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        } = count
+        else {
+            panic!("expected where-clause to bind X to an ObjectCount, got {count:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Clue".to_string())),
+            "X must count controlled Clues, got {:?}",
+            tf.type_filters
+        );
+    }
 
     #[test]
     fn copy_tokens_of_exiled_cost_card_use_cost_paid_object_source() {
@@ -1506,6 +1592,45 @@ mod tests {
             },
             "die-roll result count must resolve to EventContextAmount, not Variable"
         );
+    }
+
+    /// CR 205.4a + CR 704.5j: A "legendary" (or "snow"/"basic") supertype in the
+    /// inline token grammar must be captured onto `Effect::Token.supertypes`, not
+    /// silently stripped. Covers the whole class of legendary tokens (Marit Lage
+    /// from Dark Depths, the Pia Nalaar Construct, etc.) so the legend rule
+    /// applies. Building-block-level: exercises the supertype-capture path, not a
+    /// single card's full Oracle text.
+    #[test]
+    fn token_captures_legendary_supertype() {
+        use crate::types::card_type::Supertype;
+
+        let effect = try_parse_token(
+            "create marit lage, a legendary 20/20 black avatar creature token with flying and indestructible",
+            "create Marit Lage, a legendary 20/20 black Avatar creature token with flying and indestructible",
+            &mut ParseContext::default(),
+        )
+        .expect("expected Token effect");
+        let Effect::Token {
+            name,
+            supertypes,
+            power,
+            toughness,
+            keywords,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Marit Lage");
+        assert_eq!(
+            supertypes,
+            vec![Supertype::Legendary],
+            "the 'legendary' supertype must be captured, not discarded"
+        );
+        assert_eq!(power, PtValue::Fixed(20));
+        assert_eq!(toughness, PtValue::Fixed(20));
+        assert!(keywords.contains(&Keyword::Flying));
+        assert!(keywords.contains(&Keyword::Indestructible));
     }
 
     #[test]

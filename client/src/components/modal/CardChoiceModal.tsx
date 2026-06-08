@@ -31,7 +31,7 @@ import {
   SeparatePilesPartitionModal,
 } from "./SeparatePilesModal.tsx";
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
-import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
+import { BlockerDamageAssignmentModal, DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
 import { MoveCountersDistributionModal } from "./MoveCountersDistributionModal.tsx";
 import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
@@ -325,6 +325,9 @@ export function CardChoiceModal() {
     case "AssignCombatDamage":
       if (!canActForWaitingState) return null;
       return <DamageAssignmentModal data={waitingFor.data} />;
+    case "AssignBlockerDamage":
+      if (!canActForWaitingState) return null;
+      return <BlockerDamageAssignmentModal data={waitingFor.data} />;
     case "DistributeAmong":
       if (!canActForWaitingState) return null;
       return <DistributeAmongModal data={waitingFor.data} />;
@@ -340,6 +343,14 @@ export function CardChoiceModal() {
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
       return <ProliferateModal data={waitingFor.data} />;
+    case "TimeTravelChoice":
+      if (!canActForWaitingState) return null;
+      return (
+        <ProliferateModal
+          data={waitingFor.data}
+          variant={waitingFor.data.phase === "Add" ? "timeTravelAdd" : "timeTravelRemove"}
+        />
+      );
     case "ChooseObjectsSelection":
       if (!canActForWaitingState) return null;
       return (

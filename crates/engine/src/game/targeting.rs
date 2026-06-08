@@ -107,8 +107,26 @@ fn find_legal_targets_with_context(
         return targets;
     }
 
+    // The "any other target" shape: `Typed { type_filters: [], controller: None,
+    // properties: [Another] }`. Per CR 115.4 ("any target"/"another target" may
+    // be a creature, player, planeswalker, or battle), this is an any-target
+    // filter with the source object excluded — NOT the player-only shape the
+    // empty-`type_filters` branch below handles. Enumerate it like
+    // `TargetFilter::Any` (players + battlefield objects, matching the engine's
+    // existing `Any` breadth) but exclude the source; the object loop's
+    // `matches_target_filter` honors `FilterProp::Another` (CR 109.1) to drop the
+    // source. This is what lets Screaming Nemesis redirect "to any other target"
+    // hit a creature, not just a player.
+    let is_any_other_target = matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf.type_filters.is_empty()
+                && tf.controller.is_none()
+                && tf.properties.iter().any(|p| matches!(p, FilterProp::Another))
+    );
+
     // Check if filter could match players
-    if matches!(filter, TargetFilter::Any | TargetFilter::Player) {
+    if matches!(filter, TargetFilter::Any | TargetFilter::Player) || is_any_other_target {
         add_players(state, &mut targets, source_id);
     }
 
@@ -119,8 +137,11 @@ fn find_legal_targets_with_context(
 
     // Typed filter with no type_filters targets players, not permanents.
     // e.g. "target opponent" → Typed { type_filters: [], controller: Opponent }
+    // The "any other target" shape (handled above as `is_any_other_target`) is
+    // the sole exception: it adds players above and falls through to the object
+    // enumeration below instead of collapsing to players-only here.
     if let TargetFilter::Typed(ref tf) = filter {
-        if tf.type_filters.is_empty() {
+        if tf.type_filters.is_empty() && !is_any_other_target {
             let controller = &tf.controller;
             for player in &state.players {
                 // Player-phasing exclusion (mirrors CR 702.26b for permanents).
@@ -140,10 +161,11 @@ fn find_legal_targets_with_context(
                 ) {
                     continue;
                 }
-                let is_opponent = player.id != source_controller;
                 let include = match controller {
-                    Some(ControllerRef::Opponent) => is_opponent,
-                    Some(ControllerRef::You) => !is_opponent,
+                    Some(ControllerRef::Opponent) => {
+                        super::players::is_opponent(state, source_controller, player.id)
+                    }
+                    Some(ControllerRef::You) => player.id == source_controller,
                     // CR 109.4: TargetPlayer is nonsensical when enumerating target
                     // candidates (the "target player" is what's being chosen here).
                     // Fail closed.
@@ -1126,7 +1148,8 @@ fn stack_spell_entry_matches_filter(
                 TargetRef::Object(id) => {
                     super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
                 }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+                    state,
                     constraint,
                     *pid,
                     source_controller_opt,
@@ -1144,7 +1167,8 @@ fn stack_spell_entry_matches_filter(
                 TargetRef::Object(id) => {
                     super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
                 }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+                    state,
                     constraint,
                     *pid,
                     source_controller_opt,
@@ -1357,6 +1381,19 @@ fn can_target(
         }
     }
     if is_protected_from(obj, source_id, state) {
+        return false;
+    }
+    // CR 702.18a: A static "can't be the target of spells or abilities" is the
+    // descriptive (non-keyworded) form of Shroud — the permanent can't be the
+    // target of any spell or ability, regardless of controller. It is modeled as
+    // `StaticMode::CantBeTargeted`, living on the object's own static definitions
+    // (a self-referential static, or propagated onto a subject via `AddStaticMode`
+    // — see `static_mode_needs_grant_propagation`). The opponent-scoped variant
+    // ("... your opponents control") is parsed as `Keyword::Hexproof` instead, so
+    // it is handled by the Hexproof branch above rather than here.
+    if super::functioning_abilities::active_static_definitions(state, obj)
+        .any(|def| matches!(def.mode, crate::types::statics::StaticMode::CantBeTargeted))
+    {
         return false;
     }
     // CR 702.21a: Ward is a triggered ability, not a targeting restriction.
@@ -1823,6 +1860,34 @@ mod tests {
         let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
         assert!(!targets_p0.contains(&TargetRef::Object(c1)));
         assert!(!targets_p1.contains(&TargetRef::Object(c1)));
+    }
+
+    /// CR 702.18a: A `StaticMode::CantBeTargeted` static (the descriptive Shroud
+    /// form, "~ can't be the target of spells or abilities") makes the permanent
+    /// untargetable by EVERY player, including its own controller — distinguishing
+    /// it from Hexproof, which only blocks opponents.
+    #[test]
+    fn cant_be_targeted_static_blocks_all_players() {
+        let (mut state, _c0, c1) = setup_with_creatures();
+        // c1 is controlled by P1. Grant it the blanket static directly, mirroring
+        // a self-referential static / the `AddStaticMode` propagation onto a subject.
+        state.objects.get_mut(&c1).unwrap().static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::CantBeTargeted,
+            )
+            .affected(crate::types::ability::TargetFilter::SelfRef),
+        );
+
+        let targets_p0 = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
+        assert!(
+            !targets_p0.contains(&TargetRef::Object(c1)),
+            "opponent cannot target a CantBeTargeted permanent"
+        );
+        assert!(
+            !targets_p1.contains(&TargetRef::Object(c1)),
+            "the controller cannot target it either (Shroud semantics, not Hexproof)"
+        );
     }
 
     #[test]
@@ -3181,6 +3246,34 @@ mod tests {
             "protected opponent must not be a legal target, got {:?}",
             targets
         );
+    }
+
+    /// CR 102.3 + CR 115.9c: In team multiplayer, "target opponent" excludes
+    /// teammates and includes opposing-team players.
+    #[test]
+    fn find_legal_targets_typed_opponent_excludes_two_headed_giant_teammate() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source);
+        assert!(
+            !targets.contains(&TargetRef::Player(PlayerId(1))),
+            "teammate must not be a legal target opponent, got {:?}",
+            targets
+        );
+        assert!(targets.contains(&TargetRef::Player(PlayerId(2))));
+        assert!(targets.contains(&TargetRef::Player(PlayerId(3))));
     }
 
     fn make_resolved_with_targets(

@@ -24,6 +24,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::ChangesZone | TriggerMode::Evolve => match_changes_zone,
         TriggerMode::Evolved => match_evolved,
         TriggerMode::ChangesZoneAll => match_changes_zone_all,
+        // CR 702.55c: Haunt payoff — fires from exile when the haunted creature
+        // dies; resolved through the `ExileLinkKind::Haunt` link.
+        TriggerMode::HauntedCreatureDies => crate::game::haunt::match_haunted_creature_dies,
         TriggerMode::DamageDone
         | TriggerMode::DamageDoneOnce
         | TriggerMode::DamageAll
@@ -142,12 +145,13 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::PhaseIn => match_phase_in,
         // CR 702.26b: Phasing triggers fire when a permanent phases out.
         TriggerMode::PhaseOut => match_phase_out,
+        // CR 107.14: "Whenever you get one or more {E}" — batched player-counter trigger.
+        TriggerMode::CounterPlayerAddedAll => match_counter_player_added_all,
         TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
         | TriggerMode::AbilityTriggered
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
-        | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
         | TriggerMode::PhaseOutAll
@@ -167,13 +171,14 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Forage
         | TriggerMode::GiveGift
         | TriggerMode::Mentored
-        | TriggerMode::Mutates
         | TriggerMode::Proliferate
         | TriggerMode::SeekAll
         | TriggerMode::SetInMotion
         | TriggerMode::Trains
         | TriggerMode::VisitAttraction => match_visit_attraction,
         TriggerMode::Specializes => match_specializes,
+        // CR 702.140c-d: "Whenever this creature mutates" fires on `Mutated`.
+        TriggerMode::Mutates => match_mutates,
         // CR 603.8: State triggers are not event-based — they are checked separately
         // in the priority pipeline, not through the event-matching trigger system.
         TriggerMode::StateCondition => return None,
@@ -209,6 +214,11 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Core matchers with real logic
     r.insert(TriggerMode::ChangesZone, match_changes_zone);
     r.insert(TriggerMode::ChangesZoneAll, match_changes_zone_all);
+    // CR 702.55c: Haunt payoff — fires from exile when the haunted creature dies.
+    r.insert(
+        TriggerMode::HauntedCreatureDies,
+        crate::game::haunt::match_haunted_creature_dies,
+    );
     r.insert(TriggerMode::DamageDone, match_damage_done);
     r.insert(TriggerMode::DamageDoneOnce, match_damage_done);
     r.insert(TriggerMode::DamageAll, match_damage_done);
@@ -356,6 +366,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::VisitAttraction, match_visit_attraction);
     r.insert(TriggerMode::Specializes, match_specializes);
 
+    // CR 702.140c-d: "Whenever this creature mutates" fires on `Mutated`.
+    r.insert(TriggerMode::Mutates, match_mutates);
+
     // CR 309 / CR 701.49: Dungeon triggers
     r.insert(TriggerMode::DungeonCompleted, match_dungeon_completed);
     r.insert(TriggerMode::RoomEntered, match_room_entered);
@@ -394,6 +407,12 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 702.26b: Phasing triggers fire when a permanent phases out.
     r.insert(TriggerMode::PhaseOut, match_phase_out);
 
+    // CR 107.14: "Whenever you get one or more {E}" — batched player-counter trigger.
+    r.insert(
+        TriggerMode::CounterPlayerAddedAll,
+        match_counter_player_added_all,
+    );
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -402,7 +421,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::AbilityTriggered,
         TriggerMode::SpellAbilityCast,
         TriggerMode::SpellAbilityCopy,
-        TriggerMode::CounterPlayerAddedAll,
+        // TriggerMode::CounterPlayerAddedAll — moved to real matcher above
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
         // TriggerMode::PhaseOut — moved to real matcher above
@@ -431,7 +450,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Forage,
         TriggerMode::GiveGift,
         TriggerMode::Mentored,
-        TriggerMode::Mutates,
+        // TriggerMode::Mutates — moved to real matcher below
         TriggerMode::SeekAll,
         TriggerMode::SetInMotion,
         // TriggerMode::Specializes — moved to real matcher above
@@ -594,6 +613,9 @@ fn player_matches_filter(
             controller: Some(ControllerRef::Opponent),
             ..
         }) => trigger_controller.is_some_and(|controller| controller != player_id),
+        TargetFilter::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, source_id) == Some(player_id)
+        }
         TargetFilter::AttachedTo => {
             state
                 .objects
@@ -741,6 +763,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PermanentSacrificed { object_id, .. }
         | GameEvent::PermanentTapped { object_id, .. }
         | GameEvent::PermanentUntapped { object_id } => count_one(*object_id),
+        // CR 702.140c + CR 730.2c: the merged (surviving) permanent is the subject.
+        GameEvent::Mutated { merged_id, .. } => count_one(*merged_id),
         // Object target events yield the affected object as subject. Player
         // target events carry no object subject; player scoping lives on
         // `valid_target`.
@@ -775,6 +799,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::StackResolved { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::GameOver { .. }
+        // CR 732.2: a halted-resolution notification carries no trigger subject.
+        | GameEvent::ResolutionHalted { .. }
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::CounterAdded { .. }
@@ -1551,6 +1577,27 @@ pub(super) fn match_counter_added(
                 if !(previous < threshold && threshold <= current) {
                     return false;
                 }
+                // CR 702.155a: A Saga with read ahead can't have its chapter
+                // abilities trigger the turn it entered the battlefield unless its
+                // lore count equals that chapter's number exactly. Entering at
+                // chapter N seeds N lore counters at once (0 -> N), which crosses
+                // every threshold 1..N; suppress all but the exact-count chapter
+                // on the enter-turn. After the enter-turn (one counter per turn)
+                // current == threshold holds at each crossing, so the gate is inert.
+                //
+                // Scoped to Lore: CR 702.155a restricts only chapter abilities
+                // (which trigger on lore counters). A Read-Ahead Saga with a
+                // thresholded trigger on some other counter type must not be
+                // suppressed on its enter turn.
+                if threshold != current
+                    && *counter_type == crate::types::counter::CounterType::Lore
+                    && state.objects.get(object_id).is_some_and(|obj| {
+                        obj.entered_battlefield_turn == Some(state.turn_number)
+                            && obj.has_keyword(&crate::types::keywords::Keyword::ReadAhead)
+                    })
+                {
+                    return false;
+                }
             }
         }
         true
@@ -1697,9 +1744,24 @@ pub(super) fn match_life_gained(
         if *amount <= 0 {
             return false;
         }
+        // CR 119.3: optional per-event magnitude constraint ("gains exactly N life").
+        if !life_amount_matches(trigger, *amount) {
+            return false;
+        }
         valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
+    }
+}
+
+/// CR 119.3: Check a `LifeChanged` event's magnitude against the trigger's
+/// optional `life_amount` constraint. `amount` is signed (negative for loss);
+/// the comparison uses its magnitude so the same combinator serves gain and
+/// loss triggers. `None` (the common case) imposes no restriction.
+fn life_amount_matches(trigger: &TriggerDefinition, amount: i32) -> bool {
+    match trigger.life_amount {
+        Some((cmp, threshold)) => cmp.evaluate(amount.abs(), threshold as i32),
+        None => true,
     }
 }
 
@@ -1711,6 +1773,10 @@ pub(super) fn match_life_lost(
 ) -> bool {
     if let GameEvent::LifeChanged { player_id, amount } = event {
         if *amount >= 0 {
+            return false;
+        }
+        // CR 119.3: optional per-event magnitude constraint ("loses exactly N life").
+        if !life_amount_matches(trigger, *amount) {
             return false;
         }
         valid_player_matches(trigger, state, *player_id, source_id)
@@ -1730,12 +1796,32 @@ pub(super) fn match_life_changed(
         if *amount == 0 {
             return false;
         }
+        // CR 119.3: optional per-event magnitude constraint ("gains or loses exactly N life").
+        if !life_amount_matches(trigger, *amount) {
+            return false;
+        }
         valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }
 }
 
+/// CR 107.14: Match energy gain events.
+/// Fires on `GameEvent::EnergyChanged { delta > 0 }` when the triggering player
+/// matches `valid_target` (typically `Controller`).
+pub(super) fn match_counter_player_added_all(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::EnergyChanged { player, delta } if *delta > 0 => {
+            valid_player_matches(trigger, state, *player, source_id)
+        }
+        _ => false,
+    }
+}
 pub(super) fn match_drawn(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -2379,11 +2465,21 @@ pub(super) fn match_taps_for_mana(
     if let GameEvent::TappedForMana {
         player_id,
         source_id: mana_source,
+        produced,
         ..
     } = event
     {
         if !taps_for_mana_card_matches(trigger, state, *mana_source, source_id) {
             return false;
+        }
+
+        if let Some(required) = &trigger.taps_for_mana_produced {
+            if !produced
+                .iter()
+                .any(|mana_type| required.contains(mana_type))
+            {
+                return false;
+            }
         }
 
         valid_player_matches(trigger, state, *player_id, source_id)
@@ -2717,20 +2813,58 @@ pub(super) fn match_becomes_blocked(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
+    !matching_becomes_blocked_events(event, trigger, source_id, state).is_empty()
+}
+
+pub(super) fn matching_becomes_blocked_events(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> Vec<GameEvent> {
     if let GameEvent::BlockersDeclared { assignments } = event {
-        if trigger.valid_card.is_some() {
-            // Filter: check if any blocked attacker matches the valid_card filter
-            assignments
-                .iter()
-                .any(|(_, attacker)| valid_card_matches(trigger, state, *attacker, source_id))
-        } else {
-            // Default: source itself must be among blocked attackers
-            assignments
-                .iter()
-                .any(|(_, attacker)| *attacker == source_id)
-        }
+        // CR 509.3d: the "becomes blocked by a creature [with quality]" form
+        // (carries a `valid_target` blocker filter) triggers once for each
+        // matching blocker. CR 509.3c: the bare "becomes blocked" form (no
+        // blocker qualifier, `valid_target: None`) triggers only once each combat
+        // for the attacker, regardless of how many creatures block it — so the
+        // matching assignments are collapsed to a single event per attacker.
+        let per_blocker = trigger.valid_target.is_some();
+        let mut emitted_attackers: Vec<ObjectId> = Vec::new();
+        assignments
+            .iter()
+            .filter_map(|(blocker, attacker)| {
+                let attacker_matches = if trigger.valid_card.is_some() {
+                    valid_card_matches(trigger, state, *attacker, source_id)
+                } else {
+                    *attacker == source_id
+                };
+                if !attacker_matches {
+                    return None;
+                }
+                let blocker_matches = match &trigger.valid_target {
+                    Some(filter) => {
+                        target_filter_matches_object(state, *blocker, filter, source_id)
+                    }
+                    None => true,
+                };
+                if !blocker_matches {
+                    return None;
+                }
+                // CR 509.3c: only the first matching blocker fires the bare form.
+                if !per_blocker {
+                    if emitted_attackers.contains(attacker) {
+                        return None;
+                    }
+                    emitted_attackers.push(*attacker);
+                }
+                Some(GameEvent::BlockersDeclared {
+                    assignments: vec![(*blocker, *attacker)],
+                })
+            })
+            .collect()
     } else {
-        false
+        Vec::new()
     }
 }
 
@@ -3055,6 +3189,30 @@ pub(super) fn match_specializes(
 ) -> bool {
     if let GameEvent::Specialized { object_id, .. } = event {
         *object_id == source_id && valid_card_matches(trigger, state, source_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 702.140c-d + CR 730.2: "Whenever this creature mutates" (and the rarer
+/// "whenever a creature you own mutates"). Fires on a `Mutated` event. The merged
+/// permanent keeps the target creature's `ObjectId` (CR 730.2c), so the
+/// self-referential case matches when `merged_id == source_id`. A `valid_card`
+/// filter (when present) restricts which mutating permanent triggers the ability.
+///
+/// Phase 1: the event is observable and the matcher is real; downstream
+/// condition handling for "whenever a creature mutates" (CR 702.140d reflexive
+/// effects beyond the merge itself) is deferred — no Phase-1 card needs it.
+pub(super) fn match_mutates(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Mutated { merged_id, .. } = event {
+        // CR 730.2c: the merged permanent IS the source for "this creature
+        // mutates"; the `valid_card` filter generalizes to "a creature mutates".
+        *merged_id == source_id || valid_card_matches(trigger, state, *merged_id, source_id)
     } else {
         false
     }
@@ -3593,9 +3751,12 @@ fn stack_entry_targets_only(
     let ctx = super::filter::FilterContext::from_source(state, source_id);
     ability.targets.iter().all(|t| match t {
         TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
-        TargetRef::Player(pid) => {
-            super::filter::player_matches_target_filter(constraint, *pid, source_controller)
-        }
+        TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+            state,
+            constraint,
+            *pid,
+            source_controller,
+        ),
     })
 }
 
@@ -3621,9 +3782,12 @@ fn stack_entry_targets_any(
     let ctx = super::filter::FilterContext::from_source(state, source_id);
     ability.targets.iter().any(|t| match t {
         TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
-        TargetRef::Player(pid) => {
-            super::filter::player_matches_target_filter(constraint, *pid, source_controller)
-        }
+        TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+            state,
+            constraint,
+            *pid,
+            source_controller,
+        ),
     })
 }
 
@@ -3647,7 +3811,8 @@ mod tests {
         CastingVariant, GameState, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::player::PlayerId;
+    use crate::types::keywords::Keyword;
+    use crate::types::player::{PlayerCounterKind, PlayerId};
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -6373,6 +6538,47 @@ mod tests {
     }
 
     #[test]
+    fn life_lost_exact_amount_constraint_gates_magnitude() {
+        // CR 119.3: "loses exactly 1 life" — the trigger fires only on an event
+        // whose magnitude is exactly 1, not on larger losses.
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::LifeLost);
+        trigger.life_amount = Some((Comparator::EQ, 1));
+
+        let loss_one = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -1,
+        };
+        assert!(match_life_lost(&loss_one, &trigger, ObjectId(1), &state));
+
+        let loss_two = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -2,
+        };
+        assert!(!match_life_lost(&loss_two, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn life_lost_or_more_amount_constraint_accepts_at_or_above() {
+        // CR 119.3: "loses 3 or more life" — same building block, GE comparator.
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::LifeLost);
+        trigger.life_amount = Some((Comparator::GE, 3));
+
+        let loss_two = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -2,
+        };
+        assert!(!match_life_lost(&loss_two, &trigger, ObjectId(1), &state));
+
+        let loss_four = GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: -4,
+        };
+        assert!(match_life_lost(&loss_four, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
     fn attacker_blocked_matches_when_source_is_blocked() {
         let mut state = setup();
         let attacker = create_object(
@@ -6451,6 +6657,138 @@ mod tests {
                     assignments: vec![(blocker, second_attacker)]
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn becomes_blocked_trigger_events_split_per_non_flanking_blocker() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Knight of Valor".to_string(),
+            Zone::Battlefield,
+        );
+        let first_blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "First Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_blocker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let flanking_blocker = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Flanking Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [attacker, first_blocker, second_blocker, flanking_blocker] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        state
+            .objects
+            .get_mut(&flanking_blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flanking);
+        let trigger = make_trigger(TriggerMode::BecomesBlocked)
+            .valid_card(TargetFilter::SelfRef)
+            .valid_target(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::WithoutKeyword {
+                    value: Keyword::Flanking,
+                }],
+            )));
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![
+                (first_blocker, attacker),
+                (second_blocker, attacker),
+                (flanking_blocker, attacker),
+            ],
+        };
+
+        let matched = matching_becomes_blocked_events(&event, &trigger, attacker, &state);
+
+        assert_eq!(
+            matched,
+            vec![
+                GameEvent::BlockersDeclared {
+                    assignments: vec![(first_blocker, attacker)]
+                },
+                GameEvent::BlockersDeclared {
+                    assignments: vec![(second_blocker, attacker)]
+                },
+            ]
+        );
+    }
+
+    /// CR 509.3c: a bare "becomes blocked" trigger (no by-a-creature qualifier,
+    /// i.e. `valid_target: None` — Bushido CR 702.45a, Rampage CR 702.23a) triggers
+    /// only ONCE per combat for the attacker, even when multiple creatures block it.
+    /// The matcher must collapse a multi-blocker assignment to a single event;
+    /// firing once per blocker double-pumps Bushido (a double-blocked Bushido 2
+    /// would wrongly become 6/6 instead of 4/4) and over-counts Rampage.
+    #[test]
+    fn becomes_blocked_trigger_fires_once_for_bare_form_when_multi_blocked() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bushido Samurai".to_string(),
+            Zone::Battlefield,
+        );
+        let first_blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "First Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_blocker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [attacker, first_blocker, second_blocker] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        // Bare "becomes blocked": self-scoped, no blocker qualifier (valid_target None).
+        let trigger = make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(first_blocker, attacker), (second_blocker, attacker)],
+        };
+
+        let matched = matching_becomes_blocked_events(&event, &trigger, attacker, &state);
+
+        assert_eq!(
+            matched,
+            vec![GameEvent::BlockersDeclared {
+                assignments: vec![(first_blocker, attacker)]
+            }],
+            "CR 509.3c: bare 'becomes blocked' fires once per combat, not once per blocker"
         );
     }
 
@@ -6672,6 +7010,35 @@ mod tests {
         };
         let trigger = make_trigger(TriggerMode::TapsForMana);
         assert!(!match_taps_for_mana(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn taps_for_mana_respects_produced_color_filter() {
+        let state = setup();
+        let source = ObjectId(5);
+        let colorless_event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: source,
+            produced: vec![crate::types::mana::ManaType::Colorless],
+            tap_state: ManaTapState::FromTap,
+        };
+        let green_event = GameEvent::TappedForMana {
+            player_id: PlayerId(0),
+            source_id: source,
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: ManaTapState::FromTap,
+        };
+
+        let mut trigger = make_trigger(TriggerMode::TapsForMana);
+        trigger.taps_for_mana_produced = Some(vec![crate::types::mana::ManaType::Colorless]);
+
+        assert!(match_taps_for_mana(
+            &colorless_event,
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_taps_for_mana(&green_event, &trigger, source, &state));
     }
 
     #[test]
@@ -6920,6 +7287,69 @@ mod tests {
     }
 
     #[test]
+    fn counter_player_added_all_matcher_matches_energy_gain() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fabrication Module".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::CounterPlayerAddedAll);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        let registry = build_trigger_registry();
+
+        assert!(trigger_matcher(TriggerMode::CounterPlayerAddedAll).is_some());
+        assert!(registry.contains_key(&TriggerMode::CounterPlayerAddedAll));
+
+        // Should fire on energy gain for the controller
+        assert!(match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: 2,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire on energy loss (delta <= 0)
+        assert!(!match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: -1,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire on non-energy player counters.
+        assert!(!match_counter_player_added_all(
+            &GameEvent::PlayerCounterChanged {
+                player: PlayerId(0),
+                counter_kind: PlayerCounterKind::Poison,
+                delta: 1,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire for a different player
+        assert!(!match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(1),
+                delta: 3,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
     fn phase_trigger_valid_target_scopes_active_player() {
         let mut state = setup();
         let aura = create_object(
@@ -7160,6 +7590,108 @@ mod tests {
                 threshold: Some(2),
             });
         assert!(!match_counter_added(&event, &trigger_ch2, saga_id, &state));
+    }
+
+    /// CR 702.155a: a read-ahead Saga that entered at chapter N this turn
+    /// (0 -> N lore counters) triggers only the exact-count chapter N; the
+    /// crossed-over chapters 1..N-1 are suppressed. A non-read-ahead Saga that
+    /// jumps to N this turn still fires every crossed chapter.
+    #[test]
+    fn read_ahead_suppresses_skipped_chapters_on_enter_turn() {
+        use crate::types::ability::CounterTriggerFilter;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let chapter = |n: u32| {
+            TriggerDefinition::new(TriggerMode::CounterAdded)
+                .valid_card(TargetFilter::SelfRef)
+                .counter_filter(CounterTriggerFilter {
+                    counter_type: crate::types::counter::CounterType::Lore,
+                    threshold: Some(n),
+                })
+        };
+
+        // Read-ahead Saga that entered this turn at chapter 3 (0 -> 3 at once).
+        let saga_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Read-Ahead Saga".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&saga_id).unwrap();
+            obj.keywords.push(Keyword::ReadAhead);
+            obj.counters
+                .insert(crate::types::counter::CounterType::Lore, 3);
+        }
+        let event = GameEvent::CounterAdded {
+            object_id: saga_id,
+            counter_type: crate::types::counter::CounterType::Lore,
+            count: 3,
+        };
+        assert!(
+            match_counter_added(&event, &chapter(3), saga_id, &state),
+            "chapter 3 (exact count) fires"
+        );
+        assert!(
+            !match_counter_added(&event, &chapter(1), saga_id, &state),
+            "chapter 1 suppressed on read-ahead enter-turn"
+        );
+        assert!(
+            !match_counter_added(&event, &chapter(2), saga_id, &state),
+            "chapter 2 suppressed on read-ahead enter-turn"
+        );
+
+        // A non-read-ahead Saga that jumps 0 -> 3 this turn still fires chapter 1.
+        let normal_id = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Normal Saga".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&normal_id)
+            .unwrap()
+            .counters
+            .insert(crate::types::counter::CounterType::Lore, 3);
+        let normal_event = GameEvent::CounterAdded {
+            object_id: normal_id,
+            counter_type: crate::types::counter::CounterType::Lore,
+            count: 3,
+        };
+        assert!(
+            match_counter_added(&normal_event, &chapter(1), normal_id, &state),
+            "non-read-ahead Saga still fires chapter 1 on a 0->3 jump"
+        );
+
+        // CR 702.155a is scoped to chapter (lore) abilities: a non-Lore
+        // thresholded trigger on the same Read-Ahead Saga must NOT be suppressed
+        // on its enter turn. Give the read-ahead Saga a 0 -> 2 +1/+1 jump and a
+        // +1/+1 threshold-1 trigger; it fires (0 < 1 <= 2) despite threshold != current.
+        state
+            .objects
+            .get_mut(&saga_id)
+            .unwrap()
+            .counters
+            .insert(crate::types::counter::CounterType::Plus1Plus1, 2);
+        let p1p1_event = GameEvent::CounterAdded {
+            object_id: saga_id,
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: 2,
+        };
+        let p1p1_trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .valid_card(TargetFilter::SelfRef)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                threshold: Some(1),
+            });
+        assert!(
+            match_counter_added(&p1p1_event, &p1p1_trigger, saga_id, &state),
+            "non-Lore thresholded trigger on a Read-Ahead Saga is not suppressed (CR 702.155a is lore-only)"
+        );
     }
 
     #[test]

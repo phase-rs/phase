@@ -138,6 +138,12 @@ pub enum GameAction {
     },
     DeclareAttackers {
         attacks: Vec<(ObjectId, AttackTarget)>,
+        /// CR 702.22c: As a player declares attackers, they may declare that one
+        /// or more attacking creatures with banding (or one with banding and any
+        /// number of others) form an attacking band. Each inner `Vec` is one band
+        /// of attacker `ObjectId`s. Empty (the default) means no bands declared.
+        #[serde(default)]
+        bands: Vec<Vec<ObjectId>>,
     },
     DeclareBlockers {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -159,6 +165,18 @@ pub enum GameAction {
     /// one of that prompt's `candidates`.
     ChooseClashOpponent {
         opponent: PlayerId,
+    },
+    /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
+    /// `Some(p)` chooses player `p` (one of the prompt's `candidates`) to help pay
+    /// the generic mana; `None` declines and proceeds to normal payment.
+    ChooseAssistPlayer {
+        player: Option<PlayerId>,
+    },
+    /// CR 702.132a: Assist — the chosen player's answer to `WaitingFor::AssistPayment`.
+    /// `generic` is how much of the spell's generic mana they pay (0 = nothing),
+    /// capped at the prompt's `max_generic`.
+    CommitAssistPayment {
+        generic: u32,
     },
     /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
     /// prompt. See [`MulliganChoice`] for the three branches.
@@ -420,6 +438,13 @@ pub enum GameAction {
     DecideOptionalEffect {
         accept: bool,
     },
+    /// CR 702.47a–e: Respond to a `WaitingFor::SpliceOffer`. `Some(card)` splices
+    /// that card from hand onto the spell being cast (re-presenting the offer for
+    /// any remaining eligible cards, CR 702.47e); `None` declines/finishes
+    /// splicing and proceeds to target selection.
+    RespondToSpliceOffer {
+        card: Option<ObjectId>,
+    },
     DecideOptionalEffectAndRemember {
         choice: AutoMayChoice,
     },
@@ -495,9 +520,27 @@ pub enum GameAction {
     CascadeChoice {
         choice: CastChoice,
     },
+    /// CR 702.60a: Choose to cast a revealed same-named ripple card for free.
+    RippleChoice {
+        choice: CastChoice,
+    },
     /// CR 401.4: Choose top or bottom of library.
     ChooseTopOrBottom {
         top: bool,
+    },
+    /// CR 702.140c + CR 730.2a: As a mutating creature spell resolves with a
+    /// legal target, the spell's controller chooses whether the spell is placed
+    /// on top of or under the target creature. Resolved by
+    /// `merge::handle_mutate_merge_choice`.
+    ChooseMutateMergeSide {
+        side: crate::game::merge::MergeSide,
+    },
+    /// CR 702.99a: As a Cipher spell resolves, the controller chooses a creature
+    /// to encode the card on (`Some`) or declines (`None`, card → graveyard).
+    /// Resolved by `cipher::handle_encode_choice`.
+    CipherEncode {
+        #[serde(default)]
+        creature: Option<ObjectId>,
     },
     /// CR 704.5j: Choose which legendary permanent to keep.
     ChooseLegend {
@@ -531,6 +574,16 @@ pub enum GameAction {
         /// CR 702.19c: Damage to PW controller when trample-over-PW spills past loyalty.
         #[serde(default)]
         controller_damage: u32,
+    },
+    /// CR 510.1d + CR 702.22k: Assign a blocking creature's combat damage,
+    /// divided as the active player chooses, among the creatures it is blocking.
+    /// Answers a `WaitingFor::AssignBlockerDamage` prompt. Each `(ObjectId, u32)`
+    /// is `(attacker_being_blocked, damage)`; the amounts must sum to the
+    /// blocker's combat power. Unlike `AssignCombatDamage`, there is no lethal,
+    /// trample, or planeswalker dimension — a blocker only ever assigns to the
+    /// attackers it blocks.
+    AssignBlockerDamage {
+        assignments: Vec<(ObjectId, u32)>,
     },
     /// CR 601.2d: Distribute N among targets at casting time.
     DistributeAmong {
@@ -803,6 +856,12 @@ pub enum DebugAction {
         player_id: PlayerId,
         mana: Vec<ManaType>,
     },
+    /// Toggle "infinite mana" for a player (debug-only). While `enabled`, the
+    /// engine keeps the player's mana pool topped up after every action and
+    /// suppresses the end-of-step empty (CR 500.5) for that player, so any cost
+    /// is payable. Setting `enabled = false` clears the toggle; the pool then
+    /// empties normally on the next step transition. Off by default.
+    SetInfiniteMana { player_id: PlayerId, enabled: bool },
 
     // ── Game Flow ─────────────────────────────────────────────────────────
     /// Advance or rewind to a specific phase/step.
@@ -1061,6 +1120,11 @@ impl DebugAction {
             DebugAction::AddMana { player_id, mana } => {
                 format!("AddMana ({} gains {:?})", player_label(*player_id), mana)
             }
+            DebugAction::SetInfiniteMana { player_id, enabled } => format!(
+                "SetInfiniteMana ({} {})",
+                player_label(*player_id),
+                if *enabled { "on" } else { "off" }
+            ),
             DebugAction::SetPhase {
                 phase,
                 active_player,
@@ -1208,6 +1272,7 @@ impl GameAction {
             | GameAction::ChooseBranch { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }
+            | GameAction::RespondToSpliceOffer { .. }
             | GameAction::ChooseAdventureFace { .. }
             | GameAction::ChooseModalFace { .. }
             | GameAction::ChooseAlternativeCast { .. }
@@ -1227,13 +1292,19 @@ impl GameAction {
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
+            | GameAction::RippleChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
+            | GameAction::ChooseMutateMergeSide { .. }
+            | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChooseAssistPlayer { .. }
+            | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
             | GameAction::AssignCombatDamage { .. }
+            | GameAction::AssignBlockerDamage { .. }
             | GameAction::DistributeAmong { .. }
             | GameAction::ChooseCounterMoveDistribution { .. }
             | GameAction::SubmitPayAmount { .. }
@@ -1317,6 +1388,7 @@ mod tests {
                 (ObjectId(1), AttackTarget::Player(PlayerId(1))),
                 (ObjectId(2), AttackTarget::Planeswalker(ObjectId(99))),
             ],
+            bands: vec![],
         };
         let serialized = serde_json::to_string(&action).unwrap();
         let deserialized: GameAction = serde_json::from_str(&serialized).unwrap();
@@ -1343,6 +1415,7 @@ mod tests {
     fn declare_attackers_empty_attacks_roundtrips() {
         let action = GameAction::DeclareAttackers {
             attacks: Vec::new(),
+            bands: vec![],
         };
         let serialized = serde_json::to_string(&action).unwrap();
         let deserialized: GameAction = serde_json::from_str(&serialized).unwrap();

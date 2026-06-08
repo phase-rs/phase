@@ -44,8 +44,9 @@ mod prelude {
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
         AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
         ContinuousModification, ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope,
-        ParsedCondition, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ParsedCondition, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -55,8 +56,9 @@ mod prelude {
     pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType};
     pub(super) use crate::types::phase::Phase;
     pub(super) use crate::types::statics::{
-        ActivationExemption, BlockExceptionKind, CastFrequency, CastingProhibitionCondition,
-        CostModifyMode, CostPaymentProhibition, ExileCastCost, HandSizeModification,
+        ActivationExemption, BlockExceptionKind, CastFreeOrigin, CastFrequency,
+        CastingProhibitionCondition, CostModifyMode, CostPaymentProhibition, CrewAction,
+        CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming, HandSizeModification,
         ProhibitionScope, StaticMode, TriggerCause,
     };
     pub(super) use crate::types::zones::Zone;
@@ -99,7 +101,10 @@ mod support {
         parse_compound_subject_rule_static, parse_property_descriptor,
         parse_rule_static_separator_nom, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
-        try_split_and_can_block_additional, try_split_and_must_attack_block,
+        try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
+        try_split_and_cant_attack, try_split_and_cant_be_attached, try_split_and_cant_be_blocked,
+        try_split_and_cant_be_sacrificed, try_split_and_cant_be_targeted, try_split_and_cant_block,
+        try_split_and_doesnt_untap, try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{
@@ -121,7 +126,9 @@ mod support {
     pub(super) use super::{lower_static_ir, parse_static_line};
 }
 
-pub(crate) use cost_mod::parse_spells_alternative_cost;
+pub(crate) use cost_mod::{
+    parse_cast_spells_alternative_cost_multi, parse_spells_alternative_cost,
+};
 pub(crate) use evasion::classify_block_exception;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,
@@ -131,6 +138,7 @@ pub(crate) use keyword_grant::{
 pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
 pub use shared::parse_static_line_multi;
+pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
 pub(crate) use shared::GraveyardGrantedKeywordKind;
 pub(crate) use type_change::{
     parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,

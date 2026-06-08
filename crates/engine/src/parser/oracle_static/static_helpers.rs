@@ -36,12 +36,17 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             take_until(" that are "),
             recognize((tag::<_, _, OracleError<'_>>(" that are "), rest)),
         ),
+        (
+            take_until(" that "),
+            recognize((tag::<_, _, OracleError<'_>>(" that "), rest)),
+        ),
     )))
     .parse(base);
 
     let (base_part, qual_props) = if let Ok((_, (before, suffix))) = that_split {
         let suffix = suffix.trim_start();
-        let (props, consumed) = crate::parser::oracle_target::parse_that_clause_suffix(suffix)?;
+        let (props, consumed) =
+            crate::parser::oracle_target::parse_that_clause_suffix(suffix, None)?;
         if !suffix[consumed..].trim().is_empty() {
             return None;
         }
@@ -81,7 +86,7 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
         }
     };
 
-    match (typed_filter, qual_props.is_empty()) {
+    let filter = match (typed_filter, qual_props.is_empty()) {
         (filter, true) => filter,
         (Some(TargetFilter::Typed(mut tf)), false) => {
             tf.properties.extend(qual_props);
@@ -96,6 +101,37 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
         (None, false) => Some(TargetFilter::Typed(
             TypedFilter::card().properties(qual_props),
         )),
+    };
+    filter.map(remap_cost_mod_imprint_exile_reference)
+}
+
+/// CR 607.2a + CR 607.3: Cost-mod lines such as Semblance Anvil reference
+/// "the exiled card" as the imprinted card exiled by the source permanent. The
+/// shared-quality nom parser emits `TrackedSet` for that phrase; remap to
+/// `ExiledBySource` so live `exile_links` resolve the reference at cast time.
+fn remap_cost_mod_imprint_exile_reference(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            for prop in &mut tf.properties {
+                remap_shares_quality_imprint_reference(prop);
+            }
+            TargetFilter::Typed(tf)
+        }
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(remap_cost_mod_imprint_exile_reference)
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+fn remap_shares_quality_imprint_reference(prop: &mut FilterProp) {
+    if let FilterProp::SharesQuality { reference, .. } = prop {
+        if matches!(reference.as_deref(), Some(TargetFilter::TrackedSet { .. })) {
+            *reference = Some(Box::new(TargetFilter::ExiledBySource));
+        }
     }
 }
 
@@ -795,6 +831,7 @@ pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticConditio
         "its controller's untap step",
         "its controller\u{2019}s untap step",
         "their controllers' untap steps",
+        "their controllers\u{2019} untap steps",
         "your untap step",
     ];
     let mut after_untap = None;

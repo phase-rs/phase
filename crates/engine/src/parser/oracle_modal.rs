@@ -762,6 +762,7 @@ fn lower_as_enters_anchor_word_modal(
             active_zones: Vec::new(),
             characteristic_defining: false,
             description: Some(format!("CR 614.12c [{label}]: {body}")),
+            attack_defended: None,
         };
         result.statics.push(placeholder);
     }

@@ -87,6 +87,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
     match event {
         GameEvent::GameStarted
         | GameEvent::GameOver { .. }
+        // CR 732.2: a halted runaway resolution is game-flow control, grouped
+        // with GameOver under `Game` rather than object-state `State`.
+        | GameEvent::ResolutionHalted { .. }
         | GameEvent::PlayerLost { .. }
         | GameEvent::PlayerEliminated { .. }
         // CR 103.1: grouped with the setup event MulliganStarted under `Game`
@@ -163,6 +166,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::VehicleCrewed { .. }
         | GameEvent::Stationed { .. }
         | GameEvent::Saddled { .. }
+        // CR 702.140c + CR 730.2: a mutating creature spell merged with a permanent.
+        | GameEvent::Mutated { .. }
         | GameEvent::BecomesPlotted { .. } => LogCategory::State,
 
         GameEvent::SpeedChanged { .. } => LogCategory::Special,
@@ -656,6 +661,17 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             ]
         }
 
+        // CR 702.140c + CR 730.2: a mutating creature spell merged with a permanent.
+        GameEvent::Mutated {
+            merged_id,
+            merging_id,
+            ..
+        } => vec![
+            card_seg(state, *merging_id),
+            text(" mutates onto "),
+            card_seg(state, *merged_id),
+        ],
+
         GameEvent::TurnedFaceUp { object_id } => {
             vec![card_seg(state, *object_id), text(" is turned face up")]
         }
@@ -778,6 +794,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             ],
             None => vec![text("Game over — Draw")],
         },
+
+        // CR 732.2: engine-authored game-flow message — raw text, not t()-wrapped
+        // (the i18n boundary keeps engine/log pass-through strings raw).
+        GameEvent::ResolutionHalted { .. } => {
+            vec![text("Resolution halted — possible mandatory loop")]
+        }
 
         GameEvent::MonarchChanged { player_id } => {
             vec![player_seg(state, *player_id), text(" becomes the monarch")]

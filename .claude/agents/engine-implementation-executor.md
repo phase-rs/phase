@@ -125,12 +125,12 @@ If any modified file is under `crates/engine/src/parser/`, inspect added lines f
 ```bash
 git diff --name-only | grep 'crates/engine/src/parser/' | while read f; do
   git diff "$f" | grep '^+' | grep -v '^+++' | grep -vE '^\+\s*//' \
-    | grep -E '\.(contains|starts_with|ends_with|find)\(' \
+    | grep -E '\.(contains|starts_with|ends_with|find|rfind|split|splitn|rsplit|split_once)\(' \
     | grep -v '#\[test\]' | grep -v '#\[cfg(test)\]'
 done
 ```
 
-Any output is a hard failure unless it is a test, comment, explicitly annotated non-dispatch structural use, or `oracle_util.rs` dual-string `TextPair` helper work.
+The `rfind`/`split`/`split_once`/`rsplit` arms are deliberate: `scripts/check-parser-combinators.sh` does not catch them, so a green gate is not proof of combinator compliance — this inline grep covers that blind spot. Any output is a hard failure unless it is a test, comment, explicitly annotated non-dispatch structural use, or `oracle_util.rs` dual-string `TextPair` helper work.
 
 For parser changes always run additionally:
 
@@ -140,6 +140,28 @@ cargo coverage
 cargo semantic-audit
 ```
 
+### Discriminating-test gate
+
+Every behavioral change MUST ship at least one test that drives the real pipeline (`apply()` / the scenario runner / the cast-pipeline harness) and **would fail if the fix were reverted**. A test that only asserts the parsed AST shape — an `assert_eq!` on a parsed `AbilityDefinition` / `Effect` / `StaticMode` without resolving it through the engine — does NOT satisfy this gate. It is a shape test, not a regression test.
+
+Confirm discrimination concretely before returning:
+
+- For the primary fix, name the assertion that flips when the fix is reverted. If you cannot name one, the test does not discriminate — add one that does.
+- Trace each test fixture through the fix's first input-shape dispatches (`is_none()` / `is_empty()` / variant `match` / "has-X" guards). If every fixture is degenerate in the same way (no ability, no targets, empty or single-element collection, all-generic cost), the test likely takes a different internal branch than production inputs and silently passes — reach the real arm instead. (Precedent: an Emerge cost-reduction test whose all-generic sacrifice made the wrong reduction coincide with the right one; an Undaunted test that called a function the reduction never runs in, so the positive case could not pass.)
+
+This is the single most common defect the `/review-impl` loop catches (shape-only tests on keyword and parser PRs). Catch it here, before review.
+
+### CR-annotation diff gate
+
+Before returning, grep every CR number you added or changed **in the diff** against `docs/MagicCompRules.txt` — not just the ones you remember writing:
+
+```bash
+git diff | grep -E '^\+' | grep -oE 'CR [0-9]{3}(\.[0-9]+[a-z]?)?' | sed 's/^CR //' | sort -u \
+  | while read -r n; do grep -qE "^${n}([^0-9]|$)" docs/MagicCompRules.txt || echo "UNVERIFIED: CR ${n}"; done
+```
+
+Any `UNVERIFIED:` line is a hard stop — the rule number does not exist in the rules text (a hallucinated subpart, e.g. the recurring `702.808` / wrong-keyword-subpart class) or is malformed. Re-derive the correct rule or flag it explicitly; never ship an unverified CR annotation. A clean grep is necessary but not sufficient: also confirm the cited rule actually *describes* the annotated code, not merely that the number exists.
+
 ## Output
 
 Return a structured report to the orchestrator:
@@ -147,10 +169,12 @@ Return a structured report to the orchestrator:
 1. **Diff summary** — files touched, grouped by subsystem, with a one-line purpose per file.
 2. **Verification results** — which Tilt resources are green; any failures with `tilt logs` excerpts (own vs unrelated).
 3. **Parser diff gate** — pass/fail with offending lines if any.
-4. **Judgement calls** — any place you had to choose between two readings of the plan, with the reasoning.
-5. **Stop-and-return items** — any places you stopped rather than improvise.
-6. **CR annotations added/changed** — each one with the grep command that verified it.
-7. **Deviations from the plan** — what changed vs. the plan and why.
-8. **Risks** — anything the orchestrator's `/review-impl` loop should pay extra attention to.
+4. **Discriminating-test gate** — for the primary fix, the assertion that flips when the fix is reverted, and confirmation no production-reachable arm is left covered only by a degenerate fixture. State if any test is shape-only.
+5. **CR-annotation diff gate** — the grep result; list any `UNVERIFIED:` rule, or confirm zero.
+6. **Judgement calls** — any place you had to choose between two readings of the plan, with the reasoning.
+7. **Stop-and-return items** — any places you stopped rather than improvise.
+8. **CR annotations added/changed** — each one with the grep command that verified it.
+9. **Deviations from the plan** — what changed vs. the plan and why.
+10. **Risks** — anything the orchestrator's `/review-impl` loop should pay extra attention to.
 
 Do NOT commit. Do NOT push. The orchestrator decides what to stage and when.

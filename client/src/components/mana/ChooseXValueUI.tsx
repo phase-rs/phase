@@ -65,13 +65,16 @@ export function ChooseXValueUI() {
   return (
     <AnimatePresence>
       <motion.div
-        className="fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4"
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center pb-4"
         initial={{ y: 80, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         exit={{ y: 80, opacity: 0 }}
         transition={{ duration: 0.25 }}
       >
-        <div className="rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[320px] max-w-[420px]">
+        {/* Re-enable events on the panel: when DialogHost is click-through
+            (peeked convoke payment) or `pointer-events: none`, the strip must
+            opt back in — same contract as ManaPaymentUI (CR 702.51a). */}
+        <div className="pointer-events-auto rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[320px] max-w-[420px]">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
             {t("mana.chooseXTitle")}
             {cardName && (

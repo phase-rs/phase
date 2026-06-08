@@ -666,6 +666,7 @@ pub fn room_effects(
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 source_id,
                 controller,
@@ -845,6 +846,7 @@ pub fn room_effects(
                         description: Some(
                             "Creatures you control get +2/+2 and have trample.".to_string(),
                         ),
+                        attack_defended: None,
                     }],
                     triggers: Vec::new(),
                 },
@@ -984,6 +986,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         source_id,
         controller,

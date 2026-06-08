@@ -230,6 +230,7 @@ fn test_smoke_game_combat_damage() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(bears_id, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .unwrap();
 
@@ -266,12 +267,10 @@ fn test_smoke_game_combat_damage() {
 
 #[test]
 fn sagu_wildling_loads_both_faces_from_export() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
+    let Some(db) = crate::support::shared_card_db() else {
         eprintln!("skipping: client/public/card-data.json not generated");
         return;
-    }
-    let db = CardDatabase::from_export(&path).expect("export should load");
+    };
     let sagu = db
         .get_face_by_name("Sagu Wildling")
         .expect("Sagu Wildling must be exported");
@@ -295,16 +294,10 @@ fn sagu_wildling_loads_both_faces_from_export() {
 
 #[test]
 fn sagu_wildling_cast_from_hand_prompts_adventure_choice() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
+    let Some(db) = crate::support::shared_card_db() else {
         eprintln!("skipping: client/public/card-data.json not generated");
         return;
-    }
-    // Cache the parsed CardDatabase across test runs of this function — loading
-    // the real client/public/card-data.json is expensive. `OnceLock` gives us
-    // `&'static CardDatabase` without leaking a fresh allocation per invocation.
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    let db = DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load"));
+    };
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -357,13 +350,10 @@ fn sagu_wildling_cast_from_hand_prompts_adventure_choice() {
 
 #[test]
 fn day_of_black_sun_is_castable_with_x_zero_from_export() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
+    let Some(db) = crate::support::shared_card_db() else {
         eprintln!("skipping: client/public/card-data.json not generated");
         return;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    let db = DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load"));
+    };
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

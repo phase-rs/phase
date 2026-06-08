@@ -1696,7 +1696,26 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         | "away"
                         | "off"
                 );
-            if short_name.len() >= 3 && !is_common_english_word {
+            // CR 201.3a: a card's "of"-derived short name normalizes to `~`
+            // (interchangeable name reference). Suppress this ONLY when the
+            // short name is a creature subtype AND the text adds that subtype to
+            // the card itself (copy / type-change context, e.g. Wall of Stolen
+            // Identity: "enter as a copy … except it's a Wall in addition to its
+            // other types"). A blanket subtype suppression wrongly leaves the
+            // short name literal for cards like Curse of Misfortunes, exposing a
+            // search-filter suffix to the target-fallback path. Use the
+            // word-boundary scanner for anchor dispatch, never raw contains().
+            let subtype_in_type_change_context = is_subtype_word(&lower_short)
+                && [
+                    "in addition to its other types",
+                    "enter as a copy",
+                    "enters as a copy",
+                    "become a copy",
+                    "becomes a copy",
+                ]
+                .iter()
+                .any(|anchor| nom_primitives::scan_contains(&result.to_ascii_lowercase(), anchor));
+            if short_name.len() >= 3 && !is_common_english_word && !subtype_in_type_change_context {
                 result = replace_all_words(&result, short_name, "~");
             }
         }
@@ -2104,6 +2123,40 @@ mod tests {
             "should not replace 'copy' as first-word short name, got: {result}"
         );
         assert!(result.contains('~'), "should replace 'this enchantment'");
+    }
+
+    #[test]
+    fn normalize_of_short_name_skips_creature_subtype_wall() {
+        // Wall of Stolen Identity: the "of"-derived short name "Wall" is also a
+        // creature subtype in except-clause text ("except it's a Wall in addition
+        // to its other types") and must not be rewritten to ~.
+        let result = normalize_card_name_refs(
+            "You may have this creature enter as a copy of any creature on the battlefield, \
+             except it's a Wall in addition to its other types and has defender.",
+            "Wall of Stolen Identity",
+        );
+        assert!(
+            result.contains("it's a Wall in addition"), // allow-noncombinator: test assertion, not parsing dispatch
+            "creature subtype Wall must survive normalization, got: {result}"
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_normalizes_subtype_outside_type_change() {
+        // CR 201.3a: Curse of Misfortunes — the "of"-derived short name "Curse"
+        // is a subtype word, but the text does NOT add that subtype to the card
+        // (no copy / "in addition to its other types" anchor). It is a plain
+        // self-reference and must normalize to ~ so the trailing search filter
+        // parses, rather than falling through to the target-fallback path.
+        let result = normalize_card_name_refs(
+            "At the beginning of your upkeep, you may search your library for a Curse card, \
+             put it onto the battlefield attached to enchanted player, then shuffle.",
+            "Curse of Misfortunes",
+        );
+        assert!(
+            result.contains('~'), // allow-noncombinator: test assertion, not parsing dispatch
+            "subtype short name outside a type-change context must normalize, got: {result}"
+        );
     }
 
     #[test]

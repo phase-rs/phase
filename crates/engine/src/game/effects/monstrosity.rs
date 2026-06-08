@@ -1,9 +1,11 @@
-use crate::game::effects::counters::add_counter_with_replacement;
+use crate::game::effects::counters::{
+    add_counter_with_replacement, stash_pending_counter_completion_with_actions,
+};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingCounterPostAction};
 
 /// CR 701.37a: Monstrosity N.
 ///
@@ -36,15 +38,25 @@ pub fn resolve(
     let n = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as u32;
 
     // CR 701.37a: Put N +1/+1 counters on the permanent.
-    if n > 0 {
-        add_counter_with_replacement(
+    if n > 0
+        && !add_counter_with_replacement(
             state,
             ability.controller,
             source_id,
             CounterType::Plus1Plus1,
             n,
             events,
+        )
+    {
+        stash_pending_counter_completion_with_actions(
+            state,
+            EffectKind::Monstrosity,
+            source_id,
+            vec![PendingCounterPostAction::MarkMonstrous {
+                object_id: source_id,
+            }],
         );
+        return Ok(());
     }
 
     // CR 701.37a + CR 701.37b: Set the monstrous designation.

@@ -1,4 +1,4 @@
-// CR 613.3f (Layer 6) — keyword-grant static abilities.
+// CR 613.1f (Layer 6) — keyword-grant static abilities (ability-adding effects).
 
 #[allow(unused_imports)]
 use super::prelude::*;
@@ -45,6 +45,11 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
         alt((
             value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
             value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
+            value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
+            // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
+            // Wire Surgeons (encore) grant activated graveyard keywords.
+            value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
+            value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
         ))
         .parse(i)
     })?
@@ -95,8 +100,27 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     let condition = scoped_tp.as_ref().map(|_| StaticCondition::DuringYourTurn);
     let tp = scoped_tp.as_ref().unwrap_or(tp);
 
-    // Pattern 1: "[type] spell(s) you cast [from zone] have/has [keyword]."
+    // CR 702.74a: keyword-grant lines that read "... gain <keyword> as you cast
+    // them" (Ashling, the Limitless) carry a trailing " as you cast them" after
+    // the keyword text. Strip it structurally (period then suffix) BEFORE the
+    // separator split so the keyword residue is "evoke {4}" rather than
+    // "evoke {4} as you cast them" — `parse_keyword_with_where_x` takes up to the
+    // first comma as keyword_text, and `parse_keyword_from_oracle` would reject
+    // the trailing clause. Mirror the existing trailing-period handling.
+    let trimmed_tp = tp.trim_end_matches('.');
+    let trimmed_tp = trimmed_tp
+        // allow-noncombinator: structural trailing-clause cleanup on the pre-delimited grant phrase, not parsing dispatch (mirrors the trim_end_matches period strip above).
+        .strip_suffix(" as you cast them")
+        .unwrap_or(trimmed_tp);
+    let tp = &trimmed_tp;
+
+    // Pattern 1: "[type] spell(s) you cast [from zone] have/has/gain/gains [keyword]."
     // Find the predicate separator to split subject from keyword.
+    // CR 702.74a: "... spells you cast ... gain <keyword>" (Ashling) uses "gain"/
+    // "gains" as the grant verb instead of "have"/"has". The grant verb is tried
+    // in the fixed priority order have → has → gain → gains (first verb in this
+    // list that appears anywhere wins); the real card class carries exactly one
+    // grant verb, so the order only disambiguates hypothetical mixed-verb text.
     let (have_pos, have_len) = tp
         .lower
         .match_indices(" have ")
@@ -105,6 +129,18 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         .or_else(|| {
             tp.lower
                 .match_indices(" has ")
+                .next()
+                .map(|(pos, sep)| (pos, sep.len()))
+        })
+        .or_else(|| {
+            tp.lower
+                .match_indices(" gain ")
+                .next()
+                .map(|(pos, sep)| (pos, sep.len()))
+        })
+        .or_else(|| {
+            tp.lower
+                .match_indices(" gains ")
                 .next()
                 .map(|(pos, sep)| (pos, sep.len()))
         })?;
@@ -173,7 +209,7 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         );
         // CR 105.2: trailing "that's one or more colors"/"that's exactly N colors" relative clause → ColorCount.
         let color_props = if let Some((props, consumed)) =
-            crate::parser::oracle_target::parse_that_clause_suffix(cursor)
+            crate::parser::oracle_target::parse_that_clause_suffix(cursor, None)
         {
             cursor = cursor[consumed..].trim_start();
             props
@@ -278,6 +314,81 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     }
 
     None
+}
+
+/// Parse the static permission "You may cast [type] spells as though they had
+/// flash." (Leyline of Anticipation, Vedalken Orrery, Vivien, Champion of the
+/// Wilds' first ability).
+///
+/// CR 601.3b: An effect that lets a player cast a spell "as though it had flash"
+/// lets that player begin to cast it at instant speed. CR 702.8a: flash means
+/// the spell may be cast any time its controller could cast an instant.
+///
+/// This must emit `StaticMode::CastWithKeyword { keyword: Flash }` with the
+/// spell-type filter in `affected` — that is the ONLY static mode the
+/// flash-timing path (`granted_spell_keywords` in casting.rs) actually reads.
+/// The legacy `StaticMode::CastWithFlash` carries no spell filter and is never
+/// consumed by that path, so it silently dropped both the timing grant and the
+/// "creature spells" restriction (issue #1957). Mirrors the activated/triggered
+/// `try_parse_cast_as_though_flash_permission` (oracle_effect) so the static and
+/// duration-scoped forms share one filter-construction contract.
+pub(crate) fn parse_cast_as_though_flash_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (type_text, all_players) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, all_players) = alt((
+            value(false, tag::<_, _, OracleError<'_>>("you may ")),
+            value(true, tag("players may ")),
+            value(true, tag("any player may ")),
+            value(false, tag("")),
+        ))
+        .parse(i)?;
+        let (i, _) = tag("cast ").parse(i)?;
+        // "[type] spells as though they had flash" — the bare "spells" form
+        // (no type prefix) grants flash to every spell (Leyline of Anticipation).
+        let (i, type_part) = alt((
+            value("", tag("spells as though they had flash")),
+            map(
+                terminated(
+                    take_until(" spells as though they had flash"),
+                    tag(" spells as though they had flash"),
+                ),
+                str::trim,
+            ),
+        ))
+        .parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, (type_part.to_string(), all_players)))
+    })?
+    .0;
+
+    // CR 601.3b: scope the grant to the spell class. A bare "spells" grant
+    // applies to every spell the controller casts; a typed grant ("creature
+    // spells") constrains to that type. "Players may" / "Any player may" forms
+    // intentionally remain unscoped, while "you may" forms recurse through
+    // `TargetFilter::Or` via `apply_spell_keyword_subject_constraints`.
+    let base_filter = if type_text.is_empty() {
+        TargetFilter::Typed(TypedFilter::card())
+    } else {
+        let phrase = format!("{type_text} spells");
+        parse_type_phrase(&phrase).0
+    };
+    let affected = if all_players {
+        base_filter
+    } else {
+        apply_spell_keyword_subject_constraints(base_filter, None, None, Vec::new())
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash,
+        })
+        .affected(affected)
+        .description(text.to_string())
+        .active_zones(vec![Zone::Battlefield]),
+    )
 }
 
 pub(crate) fn apply_spell_keyword_subject_constraints(
@@ -632,6 +743,21 @@ pub(crate) fn push_grant_clause_modifications(
 
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
+        return;
+    }
+
+    // CR 702.18a / 702.11a: a descriptive "can't be the target [of ...]" grant is
+    // Shroud (blanket) or Hexproof (opponents only). Emit the keyword so the
+    // existing targeting checks apply the correct controller scope, rather than a
+    // scope-less rule static.
+    if let Some(scope) =
+        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str())
+    {
+        let keyword = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
+        };
+        modifications.push(ContinuousModification::AddKeyword { keyword });
         return;
     }
 

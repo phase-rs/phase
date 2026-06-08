@@ -4,6 +4,7 @@ use engine::ai_support::build_decision_context;
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastOfferKind, CostResume, GameState, WaitingFor};
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
@@ -14,6 +15,7 @@ use crate::planner::{
     apply_candidate, build_continuation_planner, PlannerServices, RankedCandidate, SearchBudget,
 };
 use crate::policies::context::PolicyContext;
+use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
 use crate::tactical_gate::gate_candidates;
@@ -67,6 +69,19 @@ const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 /// flashback + recast, Eternal Witness reanimate chain) while preventing the
 /// thousands-of-iterations pathology observed in #563.
 const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
+
+fn pick_lowest_value_sacrifices(
+    state: &GameState,
+    cards: &[ObjectId],
+    count: usize,
+) -> Vec<ObjectId> {
+    let mut scored: Vec<_> = cards
+        .iter()
+        .map(|&id| (id, evaluate_card_value(state, id)))
+        .collect();
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().take(count).map(|(id, _)| id).collect()
+}
 
 /// Choose the best action for the AI player given the current game state.
 ///
@@ -327,6 +342,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseTarget { target: None })
         }
 
+        // CR 701.21a: Mandatory spell-effect sacrifices (Deadly Brew, Edict
+        // riders) must pick a legal permanent — an empty SelectCards fails
+        // validation when `count > 0` and `up_to` is false.
+        WaitingFor::EffectZoneChoice {
+            cards,
+            count,
+            up_to,
+            effect_kind: engine::types::ability::EffectKind::Sacrifice,
+            ..
+        } if !cards.is_empty() && !*up_to && *count > 0 => Some(GameAction::SelectCards {
+            cards: pick_lowest_value_sacrifices(state, cards, *count),
+        }),
+
         // Selection states: empty selection is a valid "choose nothing".
         WaitingFor::ScryChoice { .. }
         | WaitingFor::DigChoice { .. }
@@ -531,6 +559,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 702.60a: Ripple — decline as the default; candidates explore casting.
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { .. },
+            ..
+        } => Some(GameAction::RippleChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        }),
         // CR 107.1c: "repeat this process" — stop as the forced-action default;
         // the candidate generator still explores repeating.
         WaitingFor::RepeatDecision { .. } => {
@@ -546,6 +581,18 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::TopOrBottomChoice { .. } | WaitingFor::ClashCardPlacement { .. } => {
             Some(GameAction::ChooseTopOrBottom { top: true })
         }
+
+        // CR 702.140c + CR 730.2a: mutate merge side — default to placing the
+        // mutating spell on top (the candidate generator still explores bottom).
+        WaitingFor::MutateMergeChoice { .. } => Some(GameAction::ChooseMutateMergeSide {
+            side: engine::game::merge::MergeSide::Top,
+        }),
+
+        // CR 702.99a: cipher encode — default to encoding on the first legal host
+        // (the candidate generator still explores declining and other hosts).
+        WaitingFor::CipherEncodeChoice { creatures, .. } => Some(GameAction::CipherEncode {
+            creature: creatures.first().copied(),
+        }),
 
         // CR 701.30b: clash opponent choice — fall back to the first candidate.
         WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
@@ -672,9 +719,14 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             choice_text.map(|choice| GameAction::ChooseOption { choice })
         }
 
-        // Legend choice: pick the first candidate.
+        // CR 704.5j: keep the commander / original over ephemeral copy tokens.
         WaitingFor::ChooseLegend { candidates, .. } => candidates
-            .first()
+            .iter()
+            .max_by(|&&left, &&right| {
+                score_legend_rule_keep(state, left)
+                    .partial_cmp(&score_legend_rule_keep(state, right))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|&keep| GameAction::ChooseLegend { keep }),
 
         // Battle protector: pick the first candidate.
@@ -687,23 +739,45 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
+        // CR 701.56a: Time travel — default to changing nothing this phase
+        // (an empty selection is legal: "choose any number").
+        WaitingFor::TimeTravelChoice { .. } => Some(GameAction::SelectTargets {
+            targets: Vec::new(),
+        }),
+
+        // CR 702.132a: Assist — default to not seeking help (decline the offer)
+        // and, if asked to contribute, contribute nothing.
+        WaitingFor::AssistChoosePlayer { .. } => {
+            Some(GameAction::ChooseAssistPlayer { player: None })
+        }
+        WaitingFor::AssistPayment { .. } => Some(GameAction::CommitAssistPayment { generic: 0 }),
+
         // ChooseObjectsIntoTrackedSet: default to declining (empty selection).
         WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
             targets: Vec::new(),
         }),
 
-        // Copy retarget: keep current targets when present; freshly cast
-        // prepare/paradigm copies start empty, so choose the first legal target.
-        WaitingFor::CopyRetarget { target_slots, .. } => {
-            let targets: Option<Vec<_>> = target_slots
-                .iter()
-                .map(|slot| {
-                    slot.current
-                        .clone()
-                        .or_else(|| slot.legal_alternatives.first().cloned())
-                })
-                .collect();
-            targets.map(|new_targets| GameAction::RetargetSpell { new_targets })
+        // Copy retarget: keep copied targets when all slots already have a
+        // current value; freshly cast prepare/paradigm copies start empty, so
+        // choose the first legal target for the current slot.
+        WaitingFor::CopyRetarget {
+            target_slots,
+            current_slot,
+            ..
+        } => {
+            let slot = target_slots.get(*current_slot)?;
+            if target_slots.iter().all(|slot| slot.current.is_some()) {
+                Some(GameAction::KeepAllCopyTargets)
+            } else if slot.current.is_some() {
+                Some(GameAction::ChooseTarget { target: None })
+            } else {
+                slot.legal_alternatives
+                    .first()
+                    .cloned()
+                    .map(|target| GameAction::ChooseTarget {
+                        target: Some(target),
+                    })
+            }
         }
 
         // Assign combat damage: greedy lethal-to-each, mirroring the engine's
@@ -756,6 +830,21 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 controller_damage,
             })
         }
+
+        // CR 510.1d + CR 702.22k: a banded blocker's damage is divided by the
+        // ACTIVE player among the attackers it blocks. There is no lethal rule
+        // (CR 510.1d), so the simplest legal division dumps the blocker's full
+        // power onto the first blocked attacker — mirroring the engine's
+        // ai_support::candidates AssignBlockerDamage arm.
+        WaitingFor::AssignBlockerDamage {
+            total_damage,
+            attackers,
+            ..
+        } => attackers
+            .first()
+            .map(|first| GameAction::AssignBlockerDamage {
+                assignments: vec![(*first, *total_damage)],
+            }),
 
         // X value: pick max (CR 107.1c + CR 601.2f). The engine has already
         // capped `max` to the maximum legally-payable X for this cast (see
@@ -903,6 +992,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // for exhaustive match. ManaPayment is a pending-cast state.
         WaitingFor::ManaPayment { .. }
         | WaitingFor::OptionalCostChoice { .. }
+        | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PayCost {
             resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
@@ -1393,6 +1483,25 @@ pub(crate) fn deterministic_choice(
         }
     }
 
+    if let WaitingFor::EffectZoneChoice {
+        cards,
+        count,
+        up_to,
+        effect_kind,
+        ..
+    } = &state.waiting_for
+    {
+        if matches!(effect_kind, engine::types::ability::EffectKind::Sacrifice)
+            && !cards.is_empty()
+            && !*up_to
+            && *count > 0
+        {
+            return Some(GameAction::SelectCards {
+                cards: pick_lowest_value_sacrifices(state, cards, *count),
+            });
+        }
+    }
+
     if let WaitingFor::SearchChoice {
         cards,
         count,
@@ -1742,7 +1851,10 @@ fn validated_declare_attackers(
         engine::game::combat::AttackTarget,
     )>,
 ) -> GameAction {
-    let candidate = GameAction::DeclareAttackers { attacks };
+    let candidate = GameAction::DeclareAttackers {
+        attacks,
+        bands: vec![],
+    };
     let mut sim = state.clone();
     if engine::game::engine::apply_as_current(&mut sim, candidate.clone()).is_ok() {
         return candidate;
@@ -1752,6 +1864,7 @@ fn validated_declare_attackers(
         .find(|action| matches!(action, GameAction::DeclareAttackers { .. }))
         .unwrap_or(GameAction::DeclareAttackers {
             attacks: Vec::new(),
+            bands: vec![],
         })
 }
 
@@ -2535,7 +2648,7 @@ mod tests {
         let action = validated_declare_attackers(&state, vec![(creature, target)]);
 
         match action {
-            GameAction::DeclareAttackers { attacks } => assert!(
+            GameAction::DeclareAttackers { attacks, .. } => assert!(
                 !attacks.iter().any(|(id, _)| *id == creature),
                 "guard must drop the illegal (tapped) attacker, got {attacks:?}"
             ),
@@ -2688,6 +2801,83 @@ mod tests {
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "foe"),
             "AI labeling opponent must pick foe, got {action:?}"
         );
+    }
+
+    #[test]
+    fn copy_retarget_fallback_keeps_existing_targets_with_legal_action() {
+        let mut state = make_state();
+        let original_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![engine::types::game_state::CopyTargetSlot {
+                current: Some(original_target),
+                legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
+            }],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(action, GameAction::KeepAllCopyTargets);
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn copy_retarget_fallback_keeps_current_slot_before_later_empty_slot() {
+        let mut state = make_state();
+        let current_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![
+                engine::types::game_state::CopyTargetSlot {
+                    current: Some(current_target),
+                    legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
+                },
+                engine::types::game_state::CopyTargetSlot {
+                    current: None,
+                    legal_alternatives: vec![TargetRef::Object(ObjectId(12))],
+                },
+            ],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(action, GameAction::ChooseTarget { target: None });
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CopyRetarget {
+                current_slot: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn copy_retarget_fallback_selects_first_target_for_fresh_copy_cast() {
+        let mut state = make_state();
+        let first_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![engine::types::game_state::CopyTargetSlot {
+                current: None,
+                legal_alternatives: vec![first_target.clone(), TargetRef::Object(ObjectId(11))],
+            }],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(
+            action,
+            GameAction::ChooseTarget {
+                target: Some(first_target),
+            }
+        );
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     /// A classic vote (`actor == player`) keeps the pre-existing "first

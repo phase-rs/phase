@@ -523,6 +523,14 @@ pub enum TriggerMode {
     Waterbend,
     ElementalBend,
 
+    /// CR 702.55c: Haunt payoff — "When the creature this card haunts dies, …".
+    /// A dynamic, per-card trigger that fires while the card is in the exile zone
+    /// (`trigger_zones = [Exile]`): it matches a creature's death only when that
+    /// creature is the one the source card haunts, resolved through the
+    /// `ExileLinkKind::Haunt` link. Matched by
+    /// `game::haunt::match_haunted_creature_dies`.
+    HauntedCreatureDies,
+
     /// Fallback for unrecognized trigger mode strings.
     Unknown(String),
 }

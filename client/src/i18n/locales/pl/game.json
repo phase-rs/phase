@@ -308,6 +308,7 @@
     "convokeHint": "Obróć stwory, aby pomóc zapłacić.",
     "improviseHint": "Obróć artefakty, aby pomóc zapłacić.",
     "convokeOrImproviseHint": "Obróć stwory lub artefakty, aby pomóc zapłacić.",
+    "convokeStaged": "Obrócone:",
     "lifeAmount": "2 życia",
     "lifeCostSummary": "({{count}} życia)",
     "paymentPending": "Płatność wciąż oczekuje. Obróć trwałe lub anuluj tę akcję.",
@@ -354,6 +355,8 @@
     "statOther": "Inne"
   },
   "combat": {
+    "band": "Banda",
+    "banded": "Banda ✓",
     "attackAll": "Atakuj wszystkich",
     "skip": "Pomiń",
     "confirmAttackers": "Potwierdź atakujących ({{count}})",
@@ -423,6 +426,7 @@
     "one": "{{target}}",
     "nounPlayer": "gracz",
     "nounNonlandPermanent": "trwały niebędący ziemią",
+    "nounSpell": "czar",
     "nounCreature": "stwór",
     "nounPlaneswalker": "wędrowiec",
     "nounTargetPermanent": "docelowy trwały",
@@ -722,6 +726,14 @@
       "titleChooseOne": "{{effect}}, chyba że zapłacisz jeden",
       "dontPay": "Nie płać",
       "takeEffect": "Przyjmij efekt"
+    },
+    "spliceOffer": {
+      "title": "Połącz z Arcane?",
+      "subtitle": "Wybierz kartę do ujawnienia i połączenia z tym czarem albo rzuć go bez łączenia.",
+      "spliceCard": "Połącz {{name}}",
+      "decline": "Nie łącz",
+      "declineDescription": "Rzuć czar bez dodawania tekstu innej karty.",
+      "unknownCard": "Karta #{{id}}"
     },
     "activationCost": {
       "title": "Wybierz koszt aktywacji"
@@ -1162,12 +1174,25 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Wybierz koszt rzucania",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Rzuć normalnie",
     "warpAltLabel": "Rzuć z Warp",
     "warpAltSuffix": "(wygnanie w kroku końcowym)",
     "warpSubtitle": "Rzuć {{name}} normalnie lub użyj jego kosztu Warp.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Rzuć normalnie",
+    "dashAltLabel": "Rzuć z Dash",
+    "dashAltSuffix": "(zyskuje pośpiech, wraca do ręki w kroku końcowym)",
+    "dashSubtitle": "Rzuć {{name}} normalnie lub użyj jego kosztu Dash.",
     "evokeEyebrow": "Evoke",
     "evokeNormalLabel": "Rzuć normalnie",
     "evokeAltLabel": "Rzuć z Evoke",
@@ -1218,9 +1243,11 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Discover",
+    "rippleEyebrow": "Ripple",
     "title": "Rzucić {{name}}?",
     "subtitleCascade": "Cascade wygnało {{name}} (wartość many poniżej {{sourceMv}}). Rzuć go bez płacenia jego kosztu many lub odmów i przetasuj wszystkie {{total}} wygnanych kart na spód swojej biblioteki.",
     "subtitleDiscover": "Discover wygnało {{name}}. Rzuć go bez płacenia jego kosztu many lub weź go do ręki i przetasuj pozostałe {{missCount}} wygnanych kart na spód swojej biblioteki.",
+    "subtitleRipple": "Ripple ujawniło {{name}}. Rzuć go bez płacenia jego kosztu many lub odmów i umieść wszystkie {{total}} ujawnionych kart na spodzie swojej biblioteki w losowej kolejności.",
     "castNamed": "Rzuć {{name}}",
     "castSuffix": "(bez płacenia jego kosztu many)",
     "putIntoHand": "Weź do ręki",
@@ -1238,6 +1265,7 @@
     "variantEscape": "Rzuć z Escape",
     "variantRetrace": "Rzuć z Retrace",
     "variantHarmonize": "Rzuć z Harmonize",
+    "variantMayhem": "Rzuć z Mayhem",
     "variantFlashback": "Rzuć z Flashback",
     "variantAftermath": "Rzuć z Aftermath",
     "variantGraveyardPermission": "Rzuć z cmentarza",
@@ -1250,6 +1278,7 @@
     "variantForetell": "Rzuć z Foretell",
     "variantOverload": "Rzuć z Overload",
     "variantBestow": "Rzuć z Bestow",
+    "variantFuse": "Rzuć z Fuse",
     "variantFallback": "Rzuć z {{type}}"
   },
   "categoryChoice": {
@@ -1371,6 +1400,14 @@
     "reportTitle": "Niekrytyczna awaria silnika: {{summary}}",
     "reportWhatHappened": "**Co się stało**\n_opisz krótko, co robiłeś_\n\n**Diagnostyka**\n```\n{{diagnostic}}\n```"
   },
+  "stuckDecision": {
+    "heading": "Game appears stuck",
+    "dismiss": "Dismiss",
+    "body": "phase.rs is waiting on a decision that has no available action, so the game can’t continue. This is a bug. Please <report>report it</report> so we can investigate.",
+    "dontShowAgain": "Don’t show again this session",
+    "reportTitle": "Stuck decision: {{kind}}",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
   "optionalEffect": {
     "sourceFallback": "Efekt",
     "title": "{{name}} - Efekt opcjonalny",
@@ -1384,6 +1421,24 @@
     "top": "Wierzch biblioteki",
     "bottom": "Spód biblioteki"
   },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
+  "cipher": {
+    "cardFallback": "this card",
+    "creatureFallback": "a creature",
+    "title": "Cipher: {{name}}",
+    "subtitle": "Exile this card encoded on a creature you control, or decline.",
+    "encodeDesc": "Encode here. Whenever this creature deals combat damage to a player, you may cast a copy of the encoded card without paying its mana cost.",
+    "decline": "Don't encode",
+    "declineDesc": "Put this card into its owner's graveyard."
+  },
   "permanentTypeSlot": {
     "eyebrow": "Typ trwałego",
     "title": "Wybierz slot typu",
@@ -1392,6 +1447,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferate",
     "proliferateSubtitle": "Wybierz dowolną liczbę trwałych i graczy ze znacznikami. Każdy wybrany cel otrzymuje po jednym dodatkowym znaczniku każdego rodzaju, który już tam jest.",
+    "timeTravelTitle": "Podróż w czasie",
+    "timeTravelRemoveSubtitle": "Wybierz dowolną liczbę kwalifikujących się obiektów, z których usunąć znacznik czasu.",
+    "timeTravelAddSubtitle": "Wybierz dowolną liczbę pozostałych kwalifikujących się obiektów, na które dodać znacznik czasu.",
     "chooseObjectsTitle": "Wybierz trwałe",
     "chooseObjectsSubtitle": "Wybierz dowolną liczbę trwałych. Płacisz koszt za każdego wybranego.",
     "selectAll": "Wszystko",

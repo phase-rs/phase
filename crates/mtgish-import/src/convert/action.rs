@@ -262,6 +262,7 @@ fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityE
         }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => 0,
         QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::UpTo { max: inner }
@@ -316,6 +317,7 @@ fn rewrite_bound_x_in_mana_production(
         | ManaProduction::ChoiceAmongExiledColors { .. }
         | ManaProduction::ChoiceAmongCombinations { .. }
         | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::AnyOneColorAmongPermanents { .. }
         | ManaProduction::TriggerEventManaType => 0,
     }
 }
@@ -2351,6 +2353,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ])
         }
@@ -2380,6 +2383,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             let return_ability = AbilityDefinition::new(AbilityKind::Spell, return_effect);
             Ok(vec![
@@ -2394,6 +2398,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 Effect::CreateDelayedTrigger {
                     condition,
@@ -2766,6 +2771,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
+            enter_tapped: false,
         },
 
         // CR 701.20e + CR 608.2c: "Look at the top N cards of your library.
@@ -2822,6 +2828,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         Action::ExileAPermanent(filter) => Effect::ChangeZone {
             origin: Some(engine::types::zones::Zone::Battlefield),
@@ -2834,6 +2841,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
 
         // CR 701.13 + CR 400.7: Mass exile — "Exile each <filter>"
@@ -2852,6 +2860,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
 
         // CR 701.13a + CR 400.3: "Exile target player's graveyard" moves the
@@ -2873,6 +2882,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             }
         }
 
@@ -2977,6 +2987,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
 
         // CR 400.7: Mass return-from-graveyard-to-hand — "Return each <filter>
@@ -2996,6 +3007,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
 
         // CR 400.7 + CR 614.12: Mass reanimate from a specific player's
@@ -3024,6 +3036,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                face_down_profile: None,
             }
         }
 
@@ -3048,6 +3061,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                face_down_profile: None,
             }
         }
 
@@ -3231,6 +3245,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
 
         // CR 122.1: Mass counter placement — "Put a [counter] on each
@@ -3446,6 +3461,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                face_down_profile: None,
             }
         }
 
@@ -3465,6 +3481,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
 
         // CR 111.1 + CR 111.5: Token creation with attached `TokenFlag`s.
@@ -3674,6 +3691,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 enters_attacking: r.enters_attacking,
                 up_to: false,
                 enter_with_counters: r.enter_with_counters,
+                face_down_profile: None,
             }
         }
 
@@ -4350,6 +4368,7 @@ fn convert_look_at_top(
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
+            enter_tapped: false,
         }),
 
         // Brainstorm-style "put one into your hand and the rest on the
@@ -4367,6 +4386,7 @@ fn convert_look_at_top(
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
                 reveal: false,
+                enter_tapped: false,
             })
         }
 
@@ -4383,6 +4403,7 @@ fn convert_look_at_top(
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             })
         }
 
@@ -4402,6 +4423,7 @@ fn convert_look_at_top(
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
                 reveal: true,
+                enter_tapped: false,
             })
         }
 
@@ -4417,6 +4439,7 @@ fn convert_look_at_top(
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Graveyard),
                 reveal: true,
+                enter_tapped: false,
             })
         }
 
@@ -4475,6 +4498,7 @@ fn convert_reveal_top_dig(
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
                 reveal: true,
+                enter_tapped: false,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4487,6 +4511,7 @@ fn convert_reveal_top_dig(
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: None,
                 reveal: true,
+                enter_tapped: false,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutAGenericCardIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
@@ -4499,6 +4524,7 @@ fn convert_reveal_top_dig(
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: true,
+                enter_tapped: false,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4512,6 +4538,7 @@ fn convert_reveal_top_dig(
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
                 reveal: true,
+                enter_tapped: false,
             })
         }
         [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
@@ -4525,6 +4552,7 @@ fn convert_reveal_top_dig(
                 filter: filter_mod::cards_to_filter(cards)?,
                 rest_destination: Some(Zone::Library),
                 reveal: true,
+                enter_tapped: false,
             })
         }
         _ => Err(prereq(format!(
@@ -6124,6 +6152,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         enters_attacking: enter_repls.enters_attacking,
         up_to: false,
         enter_with_counters: enter_repls.enter_with_counters,
+        face_down_profile: None,
     });
     if shuffle {
         out.push(Effect::Shuffle {
@@ -6187,6 +6216,7 @@ fn convert_multi_filter_search_library(
             enters_attacking: enter_repls.enters_attacking,
             up_to: false,
             enter_with_counters: enter_repls.enter_with_counters.clone(),
+            face_down_profile: None,
         });
     }
     if shuffle {

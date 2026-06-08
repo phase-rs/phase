@@ -31,7 +31,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{EchoCost, Keyword};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
@@ -100,14 +100,15 @@ fn goblin_tokens(state: &engine::types::game_state::GameState) -> usize {
 /// trigger and the dies → Goblin trigger, with `echo_due` set so the echo
 /// trigger's intervening-if (`TriggerCondition::EchoDue`) is satisfied.
 fn build_echo_creature(scenario: &mut GameScenario) -> engine::types::identifiers::ObjectId {
-    let echo_trigger = KeywordTriggerInstaller::triggers_for(&Keyword::Echo(echo_cost()))
-        .into_iter()
-        .next()
-        .expect("echo keyword synthesizes one upkeep trigger");
+    let echo_trigger =
+        KeywordTriggerInstaller::triggers_for(&Keyword::Echo(EchoCost::Mana(echo_cost())))
+            .into_iter()
+            .next()
+            .expect("echo keyword synthesizes one upkeep trigger");
 
     scenario
         .add_creature(P0, "Mogg War Marshal", 1, 1)
-        .with_keyword(Keyword::Echo(echo_cost()))
+        .with_keyword(Keyword::Echo(EchoCost::Mana(echo_cost())))
         .with_trigger_definition(echo_trigger)
         .with_trigger_definition(dies_create_goblin_trigger())
         .id()

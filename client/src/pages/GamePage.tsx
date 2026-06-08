@@ -57,6 +57,7 @@ import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { AlternativeCostModal } from "../components/modal/AlternativeCostModal.tsx";
 import { CastingVariantModal } from "../components/modal/CastingVariantModal.tsx";
 import { MiracleRevealModal } from "../components/modal/MiracleRevealModal.tsx";
+import { SpliceOfferModal } from "../components/modal/SpliceOfferModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { OptionalEffectModalContent } from "../components/modal/OptionalEffectModal.tsx";
@@ -73,6 +74,8 @@ import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
+import { MutateMergeChoiceModalContent } from "../components/modal/MutateMergeChoiceModal.tsx";
+import { CipherEncodeChoiceModalContent } from "../components/modal/CipherEncodeChoiceModal.tsx";
 import { DialogHost, isClickThroughWaitingFor } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -107,6 +110,7 @@ import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
+import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
 import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
@@ -204,7 +208,7 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" | "playtest" =
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
@@ -213,13 +217,11 @@ export function GamePage() {
           ? "draft-match"
           : rawMode === "spectate"
             ? "spectate"
-            : rawMode === "playtest"
-              ? "playtest"
-              : rawMode === "host" || rawMode === "join"
-                ? "online"
-                : rawMode === "ai"
-                  ? "ai"
-                  : "local";
+            : rawMode === "host" || rawMode === "join"
+              ? "online"
+              : rawMode === "ai"
+                ? "ai"
+                : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -308,7 +310,8 @@ export function GamePage() {
         // If WE conceded, navigate to menu immediately
         if (event.player === useMultiplayerStore.getState().activePlayerId) {
           hasConcededRef.current = true;
-          if (gameId) clearGame(gameId);
+          clearPromptOverlayState();
+          if (gameId) void clearGame(gameId);
           navigate("/");
         }
         break;
@@ -835,8 +838,9 @@ function GamePageContent({
       handleConcede();
       return;
     }
+    clearPromptOverlayState();
     if (gameId) {
-      clearGame(gameId);
+      void clearGame(gameId);
     }
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);
@@ -1392,6 +1396,10 @@ function GamePageContent({
         <CascadeChoiceModal />
         <ModalFaceModal />
         <MiracleRevealModal />
+        {waitingFor?.type === "SpliceOffer" &&
+          canActForWaitingState && (
+            <SpliceOfferModal />
+          )}
 
         {/* Scry/Dig/Surveil card choice modal */}
         <CardChoiceModal />
@@ -1427,6 +1435,18 @@ function GamePageContent({
         {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
           canActForWaitingState && (
             <TopOrBottomModal />
+          )}
+
+        {/* CR 702.140c + CR 730.2a: mutate spell controller chooses top/bottom */}
+        {waitingFor?.type === "MutateMergeChoice" &&
+          canActForWaitingState && (
+            <MutateMergeModal />
+          )}
+
+        {/* CR 702.99a: cipher spell controller chooses a creature to encode on */}
+        {waitingFor?.type === "CipherEncodeChoice" &&
+          canActForWaitingState && (
+            <CipherEncodeModal />
           )}
 
         {waitingFor?.type === "UntapChoice" &&
@@ -2519,6 +2539,28 @@ function TopOrBottomModal() {
   if (waitingFor?.type !== "TopOrBottomChoice" && waitingFor?.type !== "ClashCardPlacement") return null;
 
   return <TopOrBottomChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+// ── Mutate Merge Choice Modal (CR 702.140c + CR 730.2a) ────────────────
+
+function MutateMergeModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "MutateMergeChoice") return null;
+
+  return <MutateMergeChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+function CipherEncodeModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "CipherEncodeChoice") return null;
+
+  return <CipherEncodeChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
 // ── Untap Choice Modal ─────────────────────────────────────────────────

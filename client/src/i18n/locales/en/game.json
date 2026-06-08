@@ -308,6 +308,7 @@
     "convokeHint": "Tap creatures to help pay.",
     "improviseHint": "Tap artifacts to help pay.",
     "convokeOrImproviseHint": "Tap creatures or artifacts to help pay.",
+    "convokeStaged": "Tapped:",
     "lifeAmount": "2 life",
     "lifeCostSummary": "({{count}} life)",
     "paymentPending": "Payment is still pending. Tap permanents or cancel this action.",
@@ -354,6 +355,8 @@
     "statOther": "Other"
   },
   "combat": {
+    "band": "Band",
+    "banded": "Banded ✓",
     "attackAll": "Attack All",
     "skip": "Skip",
     "confirmAttackers": "Confirm Attackers ({{count}})",
@@ -423,6 +426,7 @@
     "one": "a {{target}}",
     "nounPlayer": "player",
     "nounNonlandPermanent": "nonland permanent",
+    "nounSpell": "spell",
     "nounCreature": "creature",
     "nounPlaneswalker": "planeswalker",
     "nounTargetPermanent": "target permanent",
@@ -722,6 +726,14 @@
       "titleChooseOne": "{{effect}} Unless You Pay One",
       "dontPay": "Don’t Pay",
       "takeEffect": "Take the Effect"
+    },
+    "spliceOffer": {
+      "title": "Splice onto Arcane?",
+      "subtitle": "Choose a card to reveal and splice into this spell, or cast without splicing.",
+      "spliceCard": "Splice {{name}}",
+      "decline": "Don’t Splice",
+      "declineDescription": "Cast the spell without adding another card’s text.",
+      "unknownCard": "Card #{{id}}"
     },
     "activationCost": {
       "title": "Choose Activation Cost"
@@ -1167,12 +1179,25 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "blitzEyebrow": "Blitz",
+    "blitzNormalLabel": "Cast Normally",
+    "blitzAltLabel": "Blitz",
+    "blitzSubtitle": "Cast {{name}} normally, or pay its Blitz cost — it gains haste and \"when it dies, draw a card\", but is sacrificed at the beginning of the next end step.",
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Choose Casting Cost",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Cast Normally",
     "warpAltLabel": "Cast with Warp",
     "warpAltSuffix": "(exiles at end step)",
     "warpSubtitle": "Cast {{name}} normally or use its Warp cost.",
+    "dashEyebrow": "Dash",
+    "dashNormalLabel": "Cast Normally",
+    "dashAltLabel": "Cast with Dash",
+    "dashAltSuffix": "(gains haste, returns to hand at end step)",
+    "dashSubtitle": "Cast {{name}} normally or use its Dash cost.",
     "evokeEyebrow": "Evoke",
     "evokeNormalLabel": "Cast Normally",
     "evokeAltLabel": "Cast with Evoke",
@@ -1223,9 +1248,11 @@
   "cascadeChoice": {
     "cascadeEyebrow": "Cascade",
     "discoverEyebrow": "Discover",
+    "rippleEyebrow": "Ripple",
     "title": "Cast {{name}}?",
     "subtitleCascade": "Cascade exiled {{name}} (mana value below {{sourceMv}}). Cast it without paying its mana cost, or decline and shuffle all {{total}} exiled cards to the bottom of your library.",
     "subtitleDiscover": "Discover exiled {{name}}. Cast it without paying its mana cost, or put it into your hand and shuffle the other {{missCount}} exiled cards to the bottom of your library.",
+    "subtitleRipple": "Ripple revealed {{name}}. Cast it without paying its mana cost, or decline and put all {{total}} revealed cards on the bottom of your library in a random order.",
     "castNamed": "Cast {{name}}",
     "castSuffix": "(without paying its mana cost)",
     "putIntoHand": "Put into hand",
@@ -1243,6 +1270,7 @@
     "variantEscape": "Cast with Escape",
     "variantRetrace": "Cast with Retrace",
     "variantHarmonize": "Cast with Harmonize",
+    "variantMayhem": "Cast with Mayhem",
     "variantFlashback": "Cast with Flashback",
     "variantAftermath": "Cast with Aftermath",
     "variantGraveyardPermission": "Cast from Graveyard",
@@ -1255,6 +1283,7 @@
     "variantForetell": "Cast from Foretell",
     "variantOverload": "Cast with Overload",
     "variantBestow": "Cast with Bestow",
+    "variantFuse": "Cast with Fuse",
     "variantFallback": "Cast with {{type}}"
   },
   "categoryChoice": {
@@ -1376,6 +1405,14 @@
     "reportTitle": "Non-fatal engine panic: {{summary}}",
     "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
   },
+  "stuckDecision": {
+    "heading": "Game appears stuck",
+    "dismiss": "Dismiss",
+    "body": "phase.rs is waiting on a decision that has no available action, so the game can’t continue. This is a bug. Please <report>report it</report> so we can investigate.",
+    "dontShowAgain": "Don’t show again this session",
+    "reportTitle": "Stuck decision: {{kind}}",
+    "reportWhatHappened": "**What happened**\n_briefly describe what you were doing_\n\n**Diagnostic**\n```\n{{diagnostic}}\n```"
+  },
   "optionalEffect": {
     "sourceFallback": "Effect",
     "title": "{{name}} - Optional Effect",
@@ -1389,6 +1426,24 @@
     "top": "Top of library",
     "bottom": "Bottom of library"
   },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
+  "cipher": {
+    "cardFallback": "this card",
+    "creatureFallback": "a creature",
+    "title": "Cipher: {{name}}",
+    "subtitle": "Exile this card encoded on a creature you control, or decline.",
+    "encodeDesc": "Encode here. Whenever this creature deals combat damage to a player, you may cast a copy of the encoded card without paying its mana cost.",
+    "decline": "Don't encode",
+    "declineDesc": "Put this card into its owner's graveyard."
+  },
   "permanentTypeSlot": {
     "eyebrow": "Permanent Type",
     "title": "Choose Type Slot",
@@ -1397,6 +1452,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferate",
     "proliferateSubtitle": "Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there.",
+    "timeTravelTitle": "Time Travel",
+    "timeTravelRemoveSubtitle": "Choose any number of eligible objects to remove a time counter from.",
+    "timeTravelAddSubtitle": "Choose any number of remaining eligible objects to add a time counter to.",
     "chooseObjectsTitle": "Choose Permanents",
     "chooseObjectsSubtitle": "Choose any number of permanents. You pay a cost for each one chosen.",
     "selectAll": "All",

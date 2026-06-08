@@ -1275,6 +1275,16 @@ pub fn evaluate_layers(state: &mut GameState) {
             }
         }
 
+        // CR 613.1f: "Effects that say an object can't have an ability" are
+        // applied in Layer 6 (Ability), together with the keyword grants/removals.
+        // Strip denied keywords at the END of Layer 6 — after all grants in this
+        // bucket but BEFORE Layer 7 — so a keyword-conditional P/T effect
+        // ("creatures with flying get +1/+1") evaluated later observes the denied
+        // state (Archetype cycle, Arcane Lighthouse).
+        if *layer == Layer::Ability {
+            apply_cant_have_keyword_denials(state, None);
+        }
+
         // CR 613.4c: P/T counters modify power/toughness in layer 7c. Counters
         // are object state, not continuous effects, so the `CounterPT` bucket is
         // empty and the fold runs here — after the 7c `+N/+N` effects above and
@@ -1339,6 +1349,12 @@ pub fn evaluate_layers(state: &mut GameState) {
             }
         }
     }
+
+    // CR 113.11: "It's also impossible for an effect or keyword counter to add
+    // [a denied] ability to the object." The keyword-counter grant above runs
+    // after the in-loop Layer 6 denial, so re-apply the denial to strip any
+    // counter-granted keyword that a `CantHaveKeyword` static forbids.
+    apply_cant_have_keyword_denials(state, None);
 
     // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
     // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
@@ -1820,6 +1836,12 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
                 apply_continuous_effect_to(state, effect, entered_ids);
             }
         }
+        // CR 613.1f: mirror the full-pass end-of-Layer-6 denial hook for the
+        // incremental path, restricted to the freshly-entered objects that were
+        // reset and re-derived in this pass.
+        if *layer == Layer::Ability {
+            apply_cant_have_keyword_denials(state, Some(entered_ids));
+        }
         // CR 613.4c: P/T counters modify power/toughness in layer 7c, before the
         // 7d switch (CR 613.4d). The CounterPT bucket carries no continuous
         // effects, so fold the on-object counters in here.
@@ -1879,6 +1901,12 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             }
         }
     }
+
+    // CR 113.11: re-apply the can't-have denial after the keyword-counter grant
+    // (which runs after the in-loop Layer 6 denial) so a counter can't add a
+    // forbidden keyword. Restricted to the freshly-entered objects, mirroring the
+    // incremental denial hook above.
+    apply_cant_have_keyword_denials(state, Some(entered_ids));
 
     // CR 613.11: Combat-assignment rule effects, restricted to entered objects.
     apply_combat_assignment_rule_effects_filtered(state, Some(entered_ids));
@@ -2472,6 +2500,54 @@ fn apply_combat_assignment_rule_effects_filtered(
     }
 }
 
+/// CR 613.1f: Layer 6 applies "effects that say an object can't have an ability."
+/// `StaticMode::CantHaveKeyword { keyword }` (Theros Archetype cycle, Arcane
+/// Lighthouse: "... can't have or gain [keyword]") denies the keyword to its
+/// affected objects. This is run AFTER all keyword grants/removals are applied,
+/// so the denial wins regardless of grant timestamp — the rules-correct "can't
+/// have" outcome (a concurrent anthem can't restore a denied keyword).
+fn apply_cant_have_keyword_denials(state: &mut GameState, restrict_to: Option<&HashSet<ObjectId>>) {
+    // Collect (affected object, denied keyword) pairs under an immutable borrow,
+    // then strip — avoids a borrow conflict with the per-object mutation.
+    let mut denials: Vec<(ObjectId, Keyword)> = Vec::new();
+    for (source, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
+        let StaticMode::CantHaveKeyword { keyword } = &def.mode else {
+            continue;
+        };
+        let ctx = FilterContext::from_source(state, source.id);
+        for id in super::targeting::zone_object_ids(state, crate::types::zones::Zone::Battlefield) {
+            if restrict_to.is_some_and(|ids| !ids.contains(&id)) {
+                continue;
+            }
+            // CR 604.1: a static with no `affected` filter is intrinsically SelfRef.
+            let affected = match def.affected.as_ref() {
+                None => id == source.id,
+                Some(filter) => matches_target_filter(state, id, filter, &ctx),
+            };
+            if !affected {
+                continue;
+            }
+            if let Some(condition) = def.condition.as_ref() {
+                if !evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    source.controller,
+                    source.id,
+                    id,
+                ) {
+                    continue;
+                }
+            }
+            denials.push((id, keyword.clone()));
+        }
+    }
+    for (id, keyword) in denials {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.keywords.retain(|k| k != &keyword);
+        }
+    }
+}
+
 fn collect_active_combat_assignment_rule_effects(
     state: &GameState,
 ) -> Vec<ActiveCombatAssignmentRuleEffect> {
@@ -3019,7 +3095,8 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
-        | ContinuousModification::RemoveSupertype { .. } => None,
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::RemoveManaCost => None,
     }
 }
 
@@ -3476,6 +3553,17 @@ fn apply_continuous_effect_filtered(
                 debug_assert!(
                     false,
                     "AddCounterOnEnter must be consumed at resolution time, \
+                     not via apply_continuous_effect"
+                );
+            }
+            // CR 707.9 + CR 202.1b: the "has no mana cost" copy exception is
+            // consumed at copy resolution (token_copy.rs bakes it into the token;
+            // become_copy.rs strips it from the copied values), never via a
+            // continuous effect. Reaching this arm means a wiring bug.
+            ContinuousModification::RemoveManaCost => {
+                debug_assert!(
+                    false,
+                    "RemoveManaCost must be consumed at copy resolution time, \
                      not via apply_continuous_effect"
                 );
             }
@@ -4889,6 +4977,301 @@ mod tests {
         );
     }
 
+    /// CR 613.1f + CR 702: End-to-end confirmation that the Theros Archetype cycle /
+    /// Arcane Lighthouse "can't have or gain [keyword]" denial wins in Layer 6 over a
+    /// concurrent keyword grant. A creature given Flying by an anthem must NOT keep
+    /// Flying once an Archetype-style `CantHaveKeyword { Flying }` static is in play —
+    /// the denial is applied after all grants, so it is order-independent.
+    #[test]
+    fn cant_have_keyword_denial_overrides_concurrent_grant() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Anthem: grants Flying to all creatures (Layer 6 ability-adding effect).
+        let anthem_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flight Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(anthem_static);
+        }
+
+        // Baseline: with only the anthem, the bear gains Flying.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "anthem must grant Flying before the denial is added"
+        );
+
+        // Archetype: creatures can't have or gain Flying (Layer 6 denial).
+        let denial_static = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::Flying,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Imagination".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial_static);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
+        );
+    }
+
+    /// CR 113.11 + CR 122.1b: a "can't have [keyword]" effect makes it impossible
+    /// for even a KEYWORD COUNTER to add that ability. A first-strike counter on a
+    /// creature under an Archetype-of-Courage-style `CantHaveKeyword { FirstStrike }`
+    /// denial must NOT grant first strike. The keyword-counter grant ran after the
+    /// denial pass with no re-denial, so the counter wrongly re-added the keyword.
+    #[test]
+    fn cant_have_keyword_denial_overrides_keyword_counter() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .counters
+            .insert(CounterType::Keyword(KeywordKind::FirstStrike), 1);
+
+        // Baseline: the keyword counter grants first strike with no denial present.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "keyword counter grants first strike before the denial is added"
+        );
+
+        // Archetype of Courage: creatures can't have first strike (Layer 6 denial).
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::FirstStrike,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Courage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "CR 113.11: a keyword counter cannot grant a denied keyword"
+        );
+    }
+
+    /// CR 613.1f → CR 613.1g: The denial is applied at the END of Layer 6, so a
+    /// Layer 7 power/toughness effect conditional on the denied keyword
+    /// ("creatures with flying get +1/+1") observes the keyword as already removed
+    /// and does NOT apply. Regression guard for the layer-evaluation-order fix:
+    /// running the strip after the full layer loop (post-Layer-7) would let the
+    /// buff land incorrectly.
+    #[test]
+    fn cant_have_keyword_denial_is_observed_by_layer7_pt() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Layer 6: grant Flying to all creatures.
+        let flying_anthem = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        // Layer 7: creatures WITH flying get +1/+1 — keyword-conditional P/T.
+        let flying_pt_anthem = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).properties(vec![FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flight & Buff".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(flying_anthem);
+            obj.static_definitions.push(flying_pt_anthem);
+        }
+
+        // Layer 6 denial: creatures can't have or gain Flying.
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::Flying,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Imagination".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let b = state.objects.get(&bear).unwrap();
+        assert!(
+            !b.has_keyword(&Keyword::Flying),
+            "denial must strip Flying at the end of Layer 6"
+        );
+        assert_eq!(
+            b.power,
+            Some(2),
+            "Layer 7 'flying creatures get +1/+1' must NOT apply — the denial removed \
+             Flying before Layer 7, so the keyword-conditional buff sees no Flying"
+        );
+        assert_eq!(b.toughness, Some(2), "toughness likewise unbuffed");
+    }
+
+    /// CR 613.1f: The incremental layer path must mirror the full pass's
+    /// end-of-Layer-6 keyword denial for newly-entered objects. Regression guard:
+    /// if the incremental path omits the denial hook, this plain entered creature
+    /// keeps Flying from the existing anthem even though the existing Archetype
+    /// static says creatures can't have or gain Flying.
+    #[test]
+    fn cant_have_keyword_denial_applies_to_incremental_entry() {
+        let mut state = setup();
+
+        let flying_anthem = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flight Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(flying_anthem);
+        }
+
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::Flying,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Imagination".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        evaluate_layers(&mut state);
+
+        let entered = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Fresh Bear".to_string(),
+            Zone::Hand,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&entered).unwrap();
+            obj.zone = Zone::Battlefield;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.timestamp = ts;
+        }
+        state.battlefield.push_back(entered);
+        mark_layers_entered(&mut state, entered);
+        flush_layers(&mut state);
+
+        assert!(
+            !state
+                .objects
+                .get(&entered)
+                .unwrap()
+                .has_keyword(&Keyword::Flying),
+            "entered creature must have Flying stripped by the incremental Layer 6 denial hook"
+        );
+    }
+
     /// CR 301.5 + CR 303.4 + CR 613.4c: End-to-end runtime confirmation of
     /// the Strong Back / Mantle of the Ancients class — "Enchanted creature
     /// gets +N/+N for each Aura and Equipment attached to it." The pronoun
@@ -5876,6 +6259,60 @@ mod tests {
             vec!["Insect".to_string()],
             "subtypes must be exactly [Insect]"
         );
+    }
+
+    #[test]
+    fn muraganda_petroglyphs_buffs_only_abilityless_creatures_e2e() {
+        // Drive the REAL parser end-to-end: Muraganda Petroglyphs' Oracle text
+        // ("Creatures with no abilities get +2/+2.") is parsed via
+        // `from_oracle_text` into a global continuous static, placed on the
+        // battlefield as an enchantment, then applied by `evaluate_layers`.
+        // Discriminates on two axes: ability-presence (vanilla buffed, flyer not)
+        // and global scope (an OPPONENT's vanilla creature is buffed, since the
+        // anthem has no controller restriction).
+        let mut scenario = GameScenario::new();
+
+        // Opponent's vanilla creature (no abilities) — must be buffed (global).
+        let opp_vanilla = scenario
+            .add_creature(PlayerId(1), "Vanilla Bear", 2, 2)
+            .id();
+
+        // Controller's flyer (has a keyword ability) — must NOT be buffed.
+        let flyer = {
+            let mut card = scenario.add_creature(PlayerId(0), "Sky Bear", 2, 2);
+            card.flying();
+            card.id()
+        };
+
+        // Muraganda Petroglyphs as a real battlefield enchantment whose static is
+        // parsed from Oracle text (exercises the new `parse_no_abilities` arm).
+        scenario
+            .add_creature(PlayerId(0), "Muraganda Petroglyphs", 0, 0)
+            .as_enchantment()
+            .from_oracle_text("Creatures with no abilities get +2/+2.");
+
+        let mut state = scenario.build().state().clone();
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        // CR 613.4c: the abilityless creature gets +2/+2 — every player's
+        // creatures, so the opponent's vanilla is buffed to 4/4.
+        let v = state.objects.get(&opp_vanilla).unwrap();
+        assert_eq!(
+            v.power,
+            Some(4),
+            "abilityless creature should be buffed to 4/4"
+        );
+        assert_eq!(v.toughness, Some(4));
+
+        // CR 113.3: the flyer HAS an ability, so it is excluded — stays 2/2.
+        let f = state.objects.get(&flyer).unwrap();
+        assert_eq!(
+            f.power,
+            Some(2),
+            "ability-bearing creature must not be buffed"
+        );
+        assert_eq!(f.toughness, Some(2));
     }
 
     #[test]

@@ -6,12 +6,14 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
+use super::oracle_effect::imperative::parse_discard_card_filter;
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_quantity::parse_for_each_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
@@ -242,9 +244,9 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((u32::MAX, counter_type));
     }
-    // CR 107.2: "any number of" — variable removal; the player chooses how
-    // many counters to remove (including zero). u32::MAX lets the runtime
-    // clamp to the actual count via saturating subtraction.
+    // CR 601.2b / CR 602.2b: "any number of" is a casting/activation-time
+    // variable choice. u32::MAX lets the runtime clamp to the actual count via
+    // saturating subtraction.
     if let Ok((_, counter_type)) = all_consuming(preceded(
         tag::<_, _, E<'_>>("any number of "),
         parse_remove_counter_kind,
@@ -328,6 +330,21 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 target: TargetFilter::SelfRef,
                 count: 1,
             };
+        }
+        // CR 107.2: "sacrifice any number of [filter]" — player chooses 0..=all
+        // eligible permanents (Rottenmouth Viper, Scapeshift-class additional costs).
+        if let Some(((), rest_after_any)) = nom_on_lower(rest, &rest_lower, |i| {
+            value((), tag("any number of ")).parse(i)
+        }) {
+            let filter_text = rest_after_any.trim().trim_end_matches('.');
+            let target_phrase = format!("target {filter_text}");
+            let (filter, remainder) = parse_target(&target_phrase);
+            if remainder.trim().is_empty() {
+                return AbilityCost::Sacrifice {
+                    target: filter,
+                    count: u32::MAX,
+                };
+            }
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
         // CR 107.3a: `X` in an activation or additional cost is chosen as part
@@ -482,6 +499,25 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 self_ref: false,
             };
         }
+        // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
+        // card-type filter so only matching cards can pay the cost (Lotleth
+        // Troll: "Discard a creature card:"). Without this the typed
+        // restriction is dropped and any card pays the cost. Mirrors the
+        // effect-form discard and the trigger-side cost parser, which both
+        // delegate to `parse_discard_card_filter`: `parse_count_expr` eats the
+        // leading count token ("a "/"two ") and the remainder is the typed noun
+        // phrase. Ordered before the plain `parse_number` arm so "two creature
+        // cards" is not swallowed as an untyped count.
+        if let Some((count, after_count)) = parse_count_expr(&rest_lower) {
+            if let Some(filter) = parse_discard_card_filter(after_count.trim_start()) {
+                return AbilityCost::Discard {
+                    count,
+                    filter: Some(filter),
+                    random: false,
+                    self_ref: false,
+                };
+            }
+        }
         if let Some((n, _)) = parse_number(&rest_lower) {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: n as i32 },
@@ -620,12 +656,24 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    // "Forage" — exile three cards from graveyard or sacrifice a Food (CR 701.61)
+    // "Forage" — exile three cards from your graveyard or sacrifice a Food
+    // (CR 701.61a). A modal cost: both ways are offered, so a player who can't
+    // exile three cards can still forage by sacrificing a Food (and vice versa).
     if lower == "forage" {
-        return AbilityCost::Exile {
-            count: 3,
-            zone: Some(Zone::Graveyard),
-            filter: None,
+        return AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::Exile {
+                    count: 3,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(
+                        TypedFilter::permanent().subtype("Food".to_string()),
+                    ),
+                    count: 1,
+                },
+            ],
         };
     }
 
@@ -1298,6 +1346,21 @@ mod tests {
     }
 
     #[test]
+    fn cost_sacrifice_any_number_nonland_permanents() {
+        match parse_oracle_cost("Sacrifice any number of nonland permanents") {
+            AbilityCost::Sacrifice { target, count } => {
+                assert_eq!(count, u32::MAX);
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed(ref tf)
+                        if tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Non(_)))
+                ));
+            }
+            other => panic!("Expected Sacrifice any number nonland, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn cost_sacrifice_x_squirrels() {
         match parse_oracle_cost("Sacrifice X Squirrels") {
             AbilityCost::Sacrifice { target, count } => {
@@ -1447,6 +1510,37 @@ mod tests {
         );
     }
 
+    /// CR 701.9a + CR 608.2c: A typed cost-form discard must capture its
+    /// card-type filter (Lotleth Troll: "Discard a creature card:"). Before this
+    /// the filter was dropped, letting any card pay the cost.
+    #[test]
+    fn cost_discard_typed_creature_card() {
+        assert_eq!(
+            parse_oracle_cost("Discard a creature card"),
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+                random: false,
+                self_ref: false,
+            }
+        );
+    }
+
+    /// The typed-filter arm must not swallow plural untyped discards: "Discard
+    /// two cards" stays `filter: None, count: 2`.
+    #[test]
+    fn cost_discard_two_untyped_cards_keeps_no_filter() {
+        assert_eq!(
+            parse_oracle_cost("Discard two cards"),
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                filter: None,
+                random: false,
+                self_ref: false,
+            }
+        );
+    }
+
     #[test]
     fn cost_discard_this_card() {
         assert_eq!(
@@ -1503,6 +1597,37 @@ mod tests {
                 assert!(matches!(costs[1], AbilityCost::Exile { .. }));
             }
             other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_exile_colored_card_with_mana_value_x_from_hand() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef};
+
+        match parse_oracle_cost("Exile a green card with mana value X from your hand") {
+            AbilityCost::Exile {
+                zone,
+                filter: Some(TargetFilter::Typed(typed)),
+                ..
+            } => {
+                assert_eq!(zone, Some(Zone::Hand));
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Green
+                    }
+                )));
+                assert!(typed.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name }
+                        }
+                    } if name == "X"
+                )));
+            }
+            other => panic!("Expected Exile with green + CmcEQ(X), got {:?}", other),
         }
     }
 

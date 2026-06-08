@@ -7,7 +7,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::zones::Zone;
 
 /// CR 701.50a: Connive — draw N cards, then discard N cards. For each nonland
@@ -211,20 +211,25 @@ pub(crate) fn add_connive_counters(
     }
 
     let proposed = ProposedEvent::AddCounter {
-        actor: state
-            .objects
-            .get(&conniver_id)
-            .map(|obj| obj.controller)
-            .unwrap_or(crate::types::player::PlayerId(0)),
-        object_id: conniver_id,
-        counter_type: CounterType::Plus1Plus1,
+        placement: CounterPlacement::Object {
+            actor: state
+                .objects
+                .get(&conniver_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(crate::types::player::PlayerId(0)),
+            object_id: conniver_id,
+            counter_type: CounterType::Plus1Plus1,
+        },
         count,
         applied: HashSet::new(),
     };
     if let ReplacementResult::Execute(ProposedEvent::AddCounter {
-        actor,
-        object_id,
-        counter_type,
+        placement:
+            CounterPlacement::Object {
+                actor,
+                object_id,
+                counter_type,
+            },
         count: final_count,
         ..
     }) = replacement::replace_event(state, proposed, events)

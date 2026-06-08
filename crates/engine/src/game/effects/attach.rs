@@ -27,6 +27,27 @@ pub fn resolve(
     let target_id = resolve_object_filter(state, ability, target_filter, &mut target_slots)
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
+    // CR 303.4j: If an effect attempts to attach an Aura on the battlefield to an
+    // object it can't legally enchant, the Aura doesn't move. Delegate to the single
+    // COMPLETE legality authority (sba::is_valid_attachment_target) — attachment_illegality
+    // (protection/prohibition) + the Aura's Enchant filter + the zone gate. A bespoke
+    // Enchant-only check would silently miss zone/protection mismatches. Scoped to Aura
+    // attachments so Equipment/Fortification resolution is unchanged.
+    let attacher_is_aura = state
+        .objects
+        .get(&attachment_id)
+        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
+    if attacher_is_aura
+        && !crate::game::sba::is_valid_attachment_target(state, attachment_id, target_id)
+    {
+        // CR 303.4j: the aura doesn't move.
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id,
+        });
+        return Ok(());
+    }
+
     if let Some(old_target) = attach_to(state, attachment_id, target_id) {
         events.push(GameEvent::Unattached {
             attachment_id,

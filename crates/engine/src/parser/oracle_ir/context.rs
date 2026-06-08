@@ -50,6 +50,12 @@ pub(crate) struct ParseContext {
     /// `parse_effect_chain_ir` snapshots this into the produced `ClauseIr` and
     /// resets it to `Chosen` for the next chunk so the marker is per-clause.
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
+    /// the most recent target phrase's target(s) at stack placement. Set when a
+    /// targeted "of their choice" suffix is stripped from a `ScopedPlayer`-controlled
+    /// filter ("destroy target X that player controls of their choice"). Snapshotted
+    /// into the produced `ClauseIr` alongside `target_selection_mode`.
+    pub target_chooser: Option<TargetFilter>,
     /// CR 303.4 + CR 702.103: Typed self-reference for the enclosing card's
     /// attachment host. Set to `Some(TargetFilter::AttachedTo)` only when the
     /// card being parsed is an Aura or has the Bestow keyword (i.e. it can be
@@ -81,6 +87,17 @@ pub(crate) struct ParseContext {
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
     /// inventing a parent target.
     pub parent_target_available: bool,
+    /// CR 608.2c + CR 601.2a: The chain's prior referent is an explicit target
+    /// SELECTION (`Effect::TargetOnly`, e.g. Emry's "Choose target artifact
+    /// card in your graveyard"), as distinct from an exile/impulse publisher
+    /// (`ExileTop`, `ExileFromTopUntil`, …) whose "that card" anaphor is a
+    /// tracked exile set. Only a chosen-target referent reroutes a "you may
+    /// cast/play that card this turn" grant to `CastFromZone { ParentTarget }`;
+    /// impulse publishers keep their `PlayFromExile { TrackedSet }` grant. This
+    /// is a strict subset of `parent_target_available` — it stays false for the
+    /// `ExileFromTopUntil` referent (Territorial Bruntar) that
+    /// `parent_target_available` would otherwise include.
+    pub parent_target_is_chosen: bool,
 }
 
 impl ParseContext {

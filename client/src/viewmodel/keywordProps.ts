@@ -48,6 +48,7 @@ const KEYWORD_REMINDER_TEXT: Partial<Record<string, string>> = {
   "Skulk":         "Can't be blocked by creatures with greater power.",
   "Madness":       "If you discard this card, you may cast it for its madness cost instead.",
   "Escape":        "Cast from your graveyard for its escape cost by also exiling other cards from your graveyard.",
+  "Mayhem":        "Cast from your graveyard for its mayhem cost if you discarded it this turn.",
   "Evoke":         "Cast for its evoke cost and sacrifice it when it enters the battlefield.",
   "Embalm":        "Exile from your graveyard: create a white Zombie token copy of this card.",
   "Eternalize":    "Exile from your graveyard: create a 4/4 black Zombie token copy of this card.",

@@ -171,18 +171,25 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
             // CR 701.6: counter-targeting filter is dynamic; rare.
             return (keys, true);
         }
+        // CR 702.55c: Haunt payoff triggers live on a card in the EXILE zone and
+        // fire via the off-zone scan, never through this battlefield-scoped
+        // index. Route to `unclassified` so the index stays exhaustive without
+        // claiming a battlefield bucket these triggers can never occupy.
+        TriggerMode::HauntedCreatureDies => return (keys, true),
 
         // --- Combat ---
         TriggerMode::Attacks
         | TriggerMode::AttackersDeclared
         | TriggerMode::YouAttack
-        | TriggerMode::AttackersDeclaredOneTarget
-        | TriggerMode::AttackerBlocked
+        | TriggerMode::AttackersDeclaredOneTarget => push(TriggerEventKey::Attacks),
+        TriggerMode::AttackerBlocked
         | TriggerMode::AttackerBlockedOnce
         | TriggerMode::AttackerBlockedByCreature
         | TriggerMode::AttackerUnblocked
-        | TriggerMode::AttackerUnblockedOnce => push(TriggerEventKey::Attacks),
-        TriggerMode::Blocks | TriggerMode::BlockersDeclared | TriggerMode::BecomesBlocked => {
+        | TriggerMode::AttackerUnblockedOnce
+        | TriggerMode::Blocks
+        | TriggerMode::BlockersDeclared
+        | TriggerMode::BecomesBlocked => {
             push(TriggerEventKey::Blocks);
         }
 
@@ -190,8 +197,10 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::CounterAdded
         | TriggerMode::CounterAddedOnce
         | TriggerMode::CounterAddedAll
-        | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll => push(TriggerEventKey::CounterAdded),
+        // CR 107.14: "Whenever you get one or more {E}" — energy uses the
+        // player-counter event key, not the object-counter key.
+        TriggerMode::CounterPlayerAddedAll => push(TriggerEventKey::PlayerCounterChanged),
         TriggerMode::CounterRemoved | TriggerMode::CounterRemovedOnce => {
             push(TriggerEventKey::CounterRemoved);
         }
@@ -429,7 +438,8 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
     };
 
     match event {
-        GameEvent::GameStarted => {}
+        // CR 732.2: a halted-resolution notification produces no trigger keys.
+        GameEvent::GameStarted | GameEvent::ResolutionHalted { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
@@ -585,6 +595,10 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::AttractionOpened { .. } | GameEvent::AttractionsRolledToVisit { .. } => {}
         GameEvent::AttractionVisited { .. } => push(TriggerEventKey::VisitAttraction),
         GameEvent::Specialized { .. } => push(TriggerEventKey::Specializes),
+        // CR 702.140c-d: `TriggerMode::Mutates` is routed to the always-checked
+        // unclassified bucket (see `keys_from_trigger_def`), so the `Mutated`
+        // event needs no dedicated index key — `match_mutates` is always consulted.
+        GameEvent::Mutated { .. } => {}
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
@@ -681,6 +695,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::TimeTravel
         | EffectKind::BecomeMonarch
         | EffectKind::Proliferate
+        | EffectKind::ProliferateTarget
         | EffectKind::EndTheTurn
         | EffectKind::EndCombatPhase
         | EffectKind::Populate
@@ -691,6 +706,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::CopySpell
         | EffectKind::CopyTokenOf
         | EffectKind::Myriad
+        | EffectKind::Encore
+        | EffectKind::ExileHaunting
+        | EffectKind::HideawayConceal
         | EffectKind::BecomeCopy
         | EffectKind::ChooseCard
         | EffectKind::PutCounter
@@ -759,6 +777,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileFromTopUntil
         | EffectKind::RevealUntil
         | EffectKind::Cascade
+        | EffectKind::Ripple
         | EffectKind::MiracleCast
         | EffectKind::MadnessCast
         | EffectKind::PutAtLibraryPosition

@@ -371,6 +371,17 @@ pub fn apply_debug_action(
             }
         }
 
+        DebugAction::SetInfiniteMana { player_id, enabled } => {
+            validate_player(state, player_id)?;
+            if enabled {
+                state.debug_infinite_mana.insert(player_id);
+                // Seed immediately so the pool reads full before the next probe.
+                super::mana_payment::refill_infinite_mana(state);
+            } else {
+                state.debug_infinite_mana.remove(&player_id);
+            }
+        }
+
         DebugAction::SetPhase {
             phase,
             active_player,
@@ -440,6 +451,7 @@ pub fn apply_debug_action(
             let proposed = ProposedEvent::CreateToken {
                 owner,
                 spec: Box::new(spec),
+                copy: None,
                 enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                 count: 1,
                 applied: HashSet::new(),
@@ -618,20 +630,30 @@ pub fn route_debug_create_to_battlefield(
         enter_with_counters: vec![],
         controller_override: None,
         enter_transformed: false,
+        face_down_profile: None,
         applied: HashSet::new(),
     };
 
     let mut waiting_for = state.waiting_for.clone();
     match replacement::replace_event(state, proposed, &mut events) {
         ReplacementResult::Execute(event) => {
-            super::effects::change_zone::deliver_replaced_zone_change(
+            // CR 614.12a: a Devour as-enters sacrifice may surface its own
+            // `EffectZoneChoice`; park on it so the debug-place flow keeps the
+            // pending sacrifice prompt instead of overwriting it.
+            match super::effects::change_zone::deliver_replaced_zone_change(
                 state,
                 event,
                 None,
                 None,
                 false,
                 &mut events,
-            );
+            ) {
+                super::effects::change_zone::ZoneDeliveryResult::Done => {}
+                super::effects::change_zone::ZoneDeliveryResult::NeedsChoice(player) => {
+                    replacement::park_waiting_for(state, player);
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
             super::triggers::process_triggers(state, &events); // CR 603: Process triggers
             super::sba::check_state_based_actions(state, &mut events); // CR 704: Check SBAs
         }

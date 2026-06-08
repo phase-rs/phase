@@ -11,6 +11,13 @@ import {
 import { getSupabaseClient, isSupabaseConfigured } from "./supabaseClient";
 
 const BACKUP_TABLE = "user_backups";
+/**
+ * Lightweight projection of (user_id, revision, updated_at) maintained
+ * transactionally by `upsert_backup`. Realtime CDC watches this table instead
+ * of `user_backups` so the heavy `payload` jsonb is never broadcast over the
+ * WebSocket. See `supabase/schema.sql`.
+ */
+const REVISION_TABLE = "user_backup_revisions";
 /** PostgREST surfaces a PL/pgSQL `raise exception` as this SQLSTATE. */
 const PG_RAISE_EXCEPTION = "P0001";
 
@@ -74,6 +81,24 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
     return this.current;
   }
 
+  async pullMeta(): Promise<RemoteMeta | null> {
+    // Metadata-only read: omit the `payload` column so the common "did anything
+    // change?" check transfers a handful of bytes instead of the whole backup.
+    // RLS + PK make this at most one row; null = never synced.
+    const { data, error } = await getSupabaseClient()
+      .from(BACKUP_TABLE)
+      .select("revision, updated_at")
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return null;
+    return {
+      // Postgres `bigint` may serialize as a JSON string; coerce so the value
+      // compares (===) against lastSyncedRevision and is safe as expectedRevision.
+      revision: Number(data.revision),
+      updatedAt: data.updated_at as string,
+    };
+  }
+
   async pull(): Promise<RemoteSnapshot | null> {
     // RLS scopes the table to auth.uid(); the PK is user_id so there is at most
     // one row. maybeSingle() returns null when the account has never synced.
@@ -86,7 +111,7 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
     return {
       backup: data.payload as PhaseBackup,
       meta: {
-        revision: data.revision as number,
+        revision: Number(data.revision), // bigint-as-string guard (see pullMeta)
         updatedAt: data.updated_at as string,
       },
     };
@@ -110,20 +135,26 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
       throw error;
     }
     const row = Array.isArray(data) ? data[0] : data;
+    // upsert_backup always returns one row or raises, but this is a network/DB
+    // boundary — guard so a malformed empty response throws a clear error
+    // instead of a cryptic `Cannot read properties of undefined`.
+    if (!row) throw new Error("upsert_backup returned no row");
     return {
-      revision: row.revision as number,
+      revision: Number(row.revision), // bigint-as-string guard (see pullMeta)
       updatedAt: row.updated_at as string,
     };
   }
 
   /**
    * Subscribe to Postgres CDC (Postgres Change Data Capture) on
-   * `public.user_backups` filtered to this user's row. Supabase Realtime
-   * delivers INSERT/UPDATE payloads over a single WebSocket; we map them to
-   * a revision number for the caller to compare against its lastSyncedRevision.
+   * `public.user_backup_revisions` filtered to this user's row — the
+   * lightweight projection, NOT `user_backups`, so the heavy `payload` jsonb is
+   * never streamed over the WebSocket. Supabase Realtime delivers INSERT/UPDATE
+   * rows over a single WebSocket; we map them to a revision number for the
+   * caller to compare against its lastSyncedRevision.
    *
-   * Requires the table to be in the `supabase_realtime` publication — see
-   * `supabase/schema.sql` for the ALTER PUBLICATION statement. Without it,
+   * Requires the projection table to be in the `supabase_realtime` publication —
+   * see `supabase/schema.sql` for the ALTER PUBLICATION statement. Without it,
    * `subscribe` succeeds but no events ever fire (silent degrade).
    */
   subscribe(onChange: (newRevision: number) => void): () => void {
@@ -131,7 +162,7 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
     const userId = this.current.userId;
     const client = getSupabaseClient();
     const channel = client
-      .channel(`user_backups:${userId}`)
+      .channel(`user_backup_revisions:${userId}`)
       // Postgres `bigint` may be serialized as a JSON string to preserve
       // precision past 2^53, so type the payload column as `number | string`
       // and coerce at the boundary. The revision counter is realistically
@@ -141,7 +172,7 @@ export class SupabaseSyncProvider implements CloudSyncProvider {
         {
           event: "*",
           schema: "public",
-          table: BACKUP_TABLE,
+          table: REVISION_TABLE,
           filter: `user_id=eq.${userId}`,
         },
         (payload) => {

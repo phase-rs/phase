@@ -101,6 +101,10 @@ pub fn build_resolved_from_def_with_targets(
     // through to the resolved ability so target-selection sites can short-circuit
     // `WaitingFor::TargetSelection` for `Random` abilities.
     resolved.target_selection_mode = def.target_selection_mode;
+    // CR 601.2c + CR 603.3d: Carry the parser-stamped target chooser through so the
+    // trigger target-selection site can route a targeted "of their choice" to the
+    // scoped (upkeep) player instead of the source's controller.
+    resolved.target_chooser = def.target_chooser.clone();
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
@@ -170,6 +174,7 @@ pub(crate) fn apply_instead_swap(
     overridden.unless_pay = sub.unless_pay.clone();
     overridden.distribution = sub.distribution.clone();
     overridden.target_selection_mode = sub.target_selection_mode;
+    overridden.target_chooser = sub.target_chooser.clone();
     overridden
 }
 
@@ -1514,6 +1519,7 @@ fn quantity_expr_has_unresolved_variable(
             qty: QuantityRef::Variable { .. },
         } => state.last_named_choice.is_none(),
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::UpTo { max: inner }
@@ -1748,6 +1754,80 @@ pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     }
 }
 
+/// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
+/// affects, for an effect whose targets live on `ability`.
+///
+/// Explicit `TargetRef::Player` targets win. Otherwise a player-typed mass
+/// filter (`Controller`, `Player`, or a `Typed` filter with no `type_filters`
+/// and an optional `controller` ref) expands to the matching player ids.
+/// Returns an empty vec if the filter doesn't refer to players (the caller's
+/// object branch handles those). Every `ControllerRef` variant is matched
+/// exhaustively so this is the single authority for the
+/// "player-typed filter → `Vec<PlayerId>`" shape (shared by phasing's
+/// player path and the transient-effect player-scope binding).
+pub(crate) fn collect_player_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<PlayerId> {
+    let from_targets: Vec<PlayerId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Player(pid) => Some(*pid),
+            TargetRef::Object(_) => None,
+        })
+        .collect();
+    if !from_targets.is_empty() {
+        return from_targets;
+    }
+
+    match target {
+        TargetFilter::Controller => vec![ability.scoped_player.unwrap_or(ability.controller)],
+        TargetFilter::Player => state.players.iter().map(|p| p.id).collect(),
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            ..
+        }) if type_filters.is_empty() => state
+            .players
+            .iter()
+            .filter(|p| match controller {
+                Some(ControllerRef::You) => p.id == ability.controller,
+                Some(ControllerRef::Opponent) => p.id != ability.controller,
+                Some(ControllerRef::ScopedPlayer) => {
+                    p.id == ability.scoped_player.unwrap_or(ability.controller)
+                }
+                // CR 109.4: TargetPlayer is ambiguous here (player targets are
+                // resolved from ability.targets directly); fail closed.
+                Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::ParentTargetController) => false,
+                Some(ControllerRef::DefendingPlayer) => false,
+                // CR 613.1: no card scopes this shape to a persisted chosen
+                // player; fail closed (mirrors DefendingPlayer).
+                Some(ControllerRef::SourceChosenPlayer) => false,
+                // CR 608.2c + CR 109.4: Player chosen by an earlier
+                // `Choose(Player)` in this resolution.
+                Some(ControllerRef::ChosenPlayer { index }) => {
+                    ability.chosen_players.get(*index as usize).copied() == Some(p.id)
+                }
+                // CR 603.2 + CR 109.4: The triggering player. Resolved against
+                // the current trigger event; fail closed when there is none.
+                Some(ControllerRef::TriggeringPlayer) => {
+                    state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| targeting::extract_player_from_event(e, state))
+                        == Some(p.id)
+                }
+                None => true,
+            })
+            .map(|p| p.id)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn target_creature_quantity_slot_filter() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::creature())
 }
@@ -1909,6 +1989,7 @@ fn quantity_expr_references_target_creature(expr: &QuantityExpr) -> bool {
     match expr {
         QuantityExpr::Ref { qty } => quantity_ref_references_target_creature(qty),
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::UpTo { max: inner }
@@ -2261,6 +2342,49 @@ fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::abili
     }
 }
 
+/// CR 702.5a + CR 303.4: When `spec` is the host slot of an `Effect::Attach`
+/// whose `attachment` resolves to an object, return the host filter that object's
+/// Enchant keyword imposes, plus the attachment id/controller. `None` = no
+/// restriction (not an Attach, attachment unresolved, or aura_enchant_filter
+/// returned None: not an Aura / Aura with no Enchant keyword). No restriction ⇒
+/// ANY battlefield permanent is legal (CR 702.5a; mirrors the no-Enchant
+/// else-branch in sba::is_valid_attachment_target).
+fn attach_host_enchant_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &TargetSlotSpec,
+    selected_slots: &[Option<TargetRef>],
+) -> Option<(TargetFilter, ObjectId, PlayerId)> {
+    // Walk the effect + sub_ability chain (mirrors collect_target_slot_specs) to
+    // find the Attach whose host `target` filter is the one we're enumerating.
+    let mut current = Some(ability);
+    let mut attachment_filter: Option<&TargetFilter> = None;
+    while let Some(node) = current {
+        if let Effect::Attach { attachment, target } = &node.effect {
+            if target == &spec.filter {
+                attachment_filter = Some(attachment);
+                break;
+            }
+        }
+        current = node.sub_ability.as_deref();
+    }
+    let attachment_filter = attachment_filter?;
+
+    // Resolve the attachment (the moved Aura) to a concrete object id.
+    let attachment_id = match attachment_filter {
+        TargetFilter::SelfRef => ability.source_id,
+        TargetFilter::ParentTarget => selected_slots.iter().find_map(|sel| match sel {
+            Some(TargetRef::Object(id)) => Some(*id),
+            _ => None,
+        })?,
+        _ => return None,
+    };
+
+    let filter = crate::game::effects::change_targets::aura_enchant_filter(state, attachment_id)?;
+    let controller = state.objects.get(&attachment_id)?.controller;
+    Some((filter, attachment_id, controller))
+}
+
 fn is_per_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
     if ability.target_choice_timing != TargetChoiceTiming::Stack {
         return false;
@@ -2572,6 +2696,29 @@ fn legal_targets_for_selected_slot(
             targeting::find_legal_targets(state, &spec.filter, controller, ability.source_id)
         }
     };
+
+    // CR 702.5a + CR 303.4j: An Aura being attached may only go to a host it can
+    // legally enchant. Restrict offered hosts to those matching the moved aura's own
+    // Enchant filter; no Enchant keyword => no restriction (any host).
+    if let Some((enchant_filter, aura_id, aura_controller)) =
+        attach_host_enchant_filter(state, ability, spec, selected_slots)
+    {
+        let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+            aura_id,
+            aura_controller,
+        );
+        legal.retain(|t| match t {
+            TargetRef::Object(id) => {
+                crate::game::filter::matches_target_filter(state, *id, &enchant_filter, &ctx)
+            }
+            TargetRef::Player(pid) => crate::game::filter::player_matches_target_filter_in_state(
+                state,
+                &enchant_filter,
+                *pid,
+                Some(aura_controller),
+            ),
+        });
+    }
 
     // CR 601.2c + CR 115.3: within one instance of "target", the same object
     // can't be chosen twice. Remove objects already chosen in prior slots of
@@ -3815,14 +3962,15 @@ fn validate_target_constraints(
                         )
                     }
                 };
-                // CR 202.3: combined mana value of the chosen object targets.
+                // CR 202.3 + CR 202.3e: combined mana value of the chosen object
+                // targets; on-stack spells include the announced X value.
                 let sum: i32 = targets
                     .iter()
                     .filter_map(|t| match t {
                         TargetRef::Object(id) => state
                             .objects
                             .get(id)
-                            .map(|o| o.mana_cost.mana_value() as i32),
+                            .map(|o| o.mana_cost.mana_value_with_x(o.zone, o.cost_x_paid) as i32),
                         TargetRef::Player(_) => None,
                     })
                     .sum();
@@ -4117,9 +4265,9 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
         CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification, CountScope,
-        CounterTransferMode, Duration, Effect, FilterProp, GameRestriction, LibraryPosition,
-        ModalChoice, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope,
-        ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        CounterTransferMode, DamageKindFilter, Duration, Effect, FilterProp, GameRestriction,
+        LibraryPosition, ModalChoice, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
+        ObjectScope, ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality,
         SharedQualityRelation, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
         UnlessPayModifier,
@@ -4167,6 +4315,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(victim)],
             ObjectId(99),
@@ -4882,6 +5031,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -5085,6 +5235,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -5144,6 +5295,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(2),
@@ -5724,6 +5876,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             Vec::new(),
             ObjectId(1),
@@ -5761,6 +5914,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             Vec::new(),
             ObjectId(1),
@@ -5792,6 +5946,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             Vec::new(),
             ObjectId(1),
@@ -5855,6 +6010,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(900),
@@ -6022,6 +6178,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(900),
@@ -6500,6 +6657,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(10),
@@ -6606,6 +6764,39 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    #[test]
+    fn build_target_slots_surfaces_player_slot_for_search_target_player_library() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
+        assert!(
+            !slots[0]
+                .legal_targets
+                .contains(&TargetRef::Player(PlayerId(0))),
+            "target opponent library search must not allow targeting yourself"
+        );
     }
 
     /// Issue #933: mass filters can declare a target only through a dynamic
@@ -6724,6 +6915,7 @@ mod tests {
                 target: Box::new(target_power_filter()),
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
+                damage_kind: DamageKindFilter::Any,
             },
         };
         assert!(quantity_expr_references_target_creature(&damage));
@@ -6863,6 +7055,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(900),

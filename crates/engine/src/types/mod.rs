@@ -39,7 +39,7 @@ pub use events::GameEvent;
 pub use format::{DeckCopyLimit, FormatConfig, GameFormat};
 pub use game_state::{
     ActionResult, BattlefieldEntryRecord, CommanderDamageEntry, CostResume, GameState, LKISnapshot,
-    NextSpellModifier, PayCostKind, PendingNextSpellModifier, PendingReplacement,
+    LandPlayRecord, NextSpellModifier, PayCostKind, PendingNextSpellModifier, PendingReplacement,
     PendingSpellCostReduction, PlayerDeckPool, ScheduledTurnControl, SpellCastRecord, StackEntry,
     StackEntryKind, TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
 };

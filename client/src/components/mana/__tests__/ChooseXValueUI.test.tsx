@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { ChooseXValueUI } from "../ChooseXValueUI";
+import { DialogHost } from "../../modal/DialogHost.tsx";
 import { useGameStore } from "../../../stores/gameStore";
 import type { GameState, PendingCast, WaitingFor } from "../../../adapter/types";
 
@@ -198,5 +199,32 @@ describe("ChooseXValueUI", () => {
 
     const { container } = render(<ChooseXValueUI />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("range slider accepts input when mounted inside DialogHost (#2427)", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const waitingFor = chooseXWaitingFor(5);
+
+    act(() => {
+      useGameStore.setState({
+        gameState: createGameState({
+          turn_decision_controller: 0,
+          active_player: 0,
+          waiting_for: waitingFor,
+        }),
+        waitingFor,
+        dispatch,
+      });
+    });
+
+    render(
+      <DialogHost>
+        <ChooseXValueUI />
+      </DialogHost>,
+    );
+
+    const slider = screen.getByLabelText("Choose X value") as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: "4" } });
+    expect(screen.getByRole("button", { name: "Confirm X = 4" })).toBeInTheDocument();
   });
 });

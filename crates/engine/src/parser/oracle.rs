@@ -32,15 +32,16 @@ use super::oracle_nom::primitives::scan_contains;
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
+    split_additional_cost_trailing_spell_reduction,
 };
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_cant_win_lose_compound, is_compound_turn_limit, is_defiler_cost_pattern,
-    is_enters_tapped_cant_untap_compound, is_flashback_equal_mana_cost, is_granted_static_line,
-    is_instead_replacement_line, is_opening_hand_begin_game, is_replacement_pattern,
-    is_spells_alternative_cost_pattern, is_static_pattern, is_vehicle_tier_line, lower_starts_with,
-    should_defer_spell_to_effect,
+    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern, is_compound_turn_limit,
+    is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound, is_enters_with_counter_trigger,
+    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
+    is_opening_hand_begin_game, is_replacement_pattern, is_spells_alternative_cost_pattern,
+    is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -62,18 +63,21 @@ use super::oracle_modal::{
     extract_ability_word_reminder_body, lower_oracle_block, parse_oracle_block, strip_ability_word,
     strip_ability_word_with_name,
 };
-use super::oracle_replacement::{lower_replacement_ir, parse_replacement_line};
+use super::oracle_replacement::{
+    find_copy_verb_present, lower_replacement_ir, parse_replacement_line,
+};
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
     attach_die_result_branches_to_chain, normalize_self_refs_for_static,
     parse_cumulative_upkeep_keyword, parse_defiler_cost_reduction, parse_escape_keyword,
-    parse_harmonize_keyword, parse_solve_condition, try_parse_die_roll_table,
+    parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    lower_static_ir, parse_chosen_creature_type_static_prefix,
-    parse_every_creature_type_static_prefix, parse_spells_alternative_cost,
-    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    lower_static_ir, parse_cast_spells_alternative_cost_multi,
+    parse_chosen_creature_type_static_prefix, parse_every_creature_type_static_prefix,
+    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
+    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -496,6 +500,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             up_to: false,
             // CR 122.1: entry counters parsed from "with [N] [type] counter(s) on it".
             enter_with_counters,
+            face_down_profile: None,
         },
     )
     .description(line.to_string());
@@ -589,6 +594,16 @@ fn parse_graveyard_keyword_continuation(
         rest.trim().trim_end_matches('.').trim().is_empty()
     }
 
+    fn parse_self_mana_cost_suffix(text: &str) -> Option<&str> {
+        let lower = text.to_lowercase();
+        let (_, rest) = nom_on_lower(text, &lower, |i| {
+            let (i, _) = alt((tag("that card's"), tag("the card's"), tag("its"))).parse(i)?;
+            let (i, _) = tag(" mana cost").parse(i)?;
+            Ok((i, ()))
+        })?;
+        Some(rest)
+    }
+
     let lower = text.to_lowercase();
 
     match kind {
@@ -596,18 +611,7 @@ fn parse_graveyard_keyword_continuation(
             let (_, rest) = nom_on_lower(text, &lower, |i| {
                 value((), tag("the flashback cost is equal to ")).parse(i)
             })?;
-            let rest_lower = rest.to_lowercase();
-            let (_, rest) = nom_on_lower(rest, &rest_lower, |i| {
-                value(
-                    (),
-                    alt((
-                        tag("that card's mana cost"),
-                        tag("the card's mana cost"),
-                        tag("its mana cost"),
-                    )),
-                )
-                .parse(i)
-            })?;
+            let rest = parse_self_mana_cost_suffix(rest)?;
             if !continuation_fully_consumed(rest) {
                 return None;
             }
@@ -619,17 +623,10 @@ fn parse_graveyard_keyword_continuation(
             let (_, rest) = nom_on_lower(text, &lower, |i| {
                 value((), tag("the escape cost is equal to ")).parse(i)
             })?;
+            let rest = parse_self_mana_cost_suffix(rest)?;
             let rest_lower = rest.to_lowercase();
             let (_, rest) = nom_on_lower(rest, &rest_lower, |i| {
-                value(
-                    (),
-                    alt((
-                        tag("that card's mana cost plus exile "),
-                        tag("the card's mana cost plus exile "),
-                        tag("its mana cost plus exile "),
-                    )),
-                )
-                .parse(i)
+                value((), tag(" plus exile ")).parse(i)
             })?;
             let (exile_count, rest) = parse_number(rest)?;
             let rest_lower = rest.to_lowercase();
@@ -643,6 +640,59 @@ fn parse_graveyard_keyword_continuation(
                 cost: ManaCost::SelfManaCost,
                 exile_count,
             })
+        }
+        GraveyardGrantedKeywordKind::Mayhem => {
+            // CR 702.187b: "The mayhem cost is equal to [its/that card's/the
+            // card's] mana cost." (Green Goblin's Goblin Formula). Mirrors the
+            // Flashback continuation; the cost resolves to the card's own mana
+            // cost via `ManaCost::SelfManaCost`.
+            let (_, rest) = nom_on_lower(text, &lower, |i| {
+                value((), tag("the mayhem cost is equal to ")).parse(i)
+            })?;
+            let rest = parse_self_mana_cost_suffix(rest)?;
+            if !continuation_fully_consumed(rest) {
+                return None;
+            }
+            Some(Keyword::Mayhem(ManaCost::SelfManaCost))
+        }
+        GraveyardGrantedKeywordKind::Scavenge => {
+            // CR 702.97a: "The scavenge cost is equal to its mana cost." (Varolz,
+            // the Scar-Striped; Young Deathclaws; The Cave of Skulls). Mirrors the
+            // Flashback continuation; cost resolves to the card's own mana cost.
+            let (_, rest) = nom_on_lower(text, &lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("the scavenge cost is equal to "),
+                        tag("its scavenge cost is equal to "),
+                    )),
+                )
+                .parse(i)
+            })?;
+            let rest = parse_self_mana_cost_suffix(rest)?;
+            if !continuation_fully_consumed(rest) {
+                return None;
+            }
+            Some(Keyword::Scavenge(ManaCost::SelfManaCost))
+        }
+        GraveyardGrantedKeywordKind::Encore => {
+            // CR 702.141a: "Its encore cost is equal to its mana cost." (Wire
+            // Surgeons). Same shape as scavenge.
+            let (_, rest) = nom_on_lower(text, &lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("its encore cost is equal to "),
+                        tag("the encore cost is equal to "),
+                    )),
+                )
+                .parse(i)
+            })?;
+            let rest = parse_self_mana_cost_suffix(rest)?;
+            if !continuation_fully_consumed(rest) {
+                return None;
+            }
+            Some(Keyword::Encore(ManaCost::SelfManaCost))
         }
     }
 }
@@ -1128,6 +1178,7 @@ fn is_spell_resolution_instruction_line(
         || lower_starts_with(&lower, "activate ")
         || lower_starts_with(&lower, "suspend ")
         || lower_starts_with(&lower, "harmonize ")
+        || lower_starts_with(&lower, "mayhem ")
         || lower_starts_with(&lower, "flashback")
         || lower_starts_with(&lower, "buyback")
         || lower_starts_with(&lower, "this spell costs ")
@@ -1811,6 +1862,35 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
+        let lower = line.to_lowercase();
+
+        // Priority 8b (early): "As an additional cost to cast this spell" — must
+        // precede static-pattern classifiers (Priority 7) that match embedded
+        // "This spell costs {N} less..." tails on combined lines (Rottenmouth
+        // Viper class). Defiler cycle lines share the prefix but route at
+        // Priority 6c-defiler instead.
+        if lower_starts_with(&lower, "as an additional cost") && !is_defiler_cost_pattern(&lower) {
+            let (cost_line, trailing_reduction) =
+                split_additional_cost_trailing_spell_reduction(&line, &lower);
+            let cost_lower = cost_line.to_lowercase();
+            result.additional_cost = parse_additional_cost_line(&cost_lower, cost_line);
+            if let Some(reduction_text) = trailing_reduction {
+                if let Some(mut def) = parse_static_line(reduction_text) {
+                    // CR 702.166a analogue: reduction only applies when the optional
+                    // additional cost is declared, not when the player declines it.
+                    def.condition = Some(match def.condition {
+                        Some(existing) => StaticCondition::And {
+                            conditions: vec![existing, StaticCondition::AdditionalCostPaid],
+                        },
+                        None => StaticCondition::AdditionalCostPaid,
+                    });
+                    result.statics.push(def);
+                }
+            }
+            i += 1;
+            continue;
+        }
+
         // Priority 0: Semicolon-separated keyword lines (e.g., "Defender; reach").
         // Oracle text uses semicolons exclusively to separate keywords on a single line.
         // The colon guard prevents splitting activated ability lines like "{T}: Draw a card".
@@ -1849,8 +1929,6 @@ pub(crate) fn parse_oracle_ir(
             i = next_i;
             continue;
         }
-
-        let lower = line.to_lowercase();
 
         // Pre-keyword activated ability: "Equip {cost}" / "Equip — {cost}"
         // (but not "Equipped ...").
@@ -2083,11 +2161,9 @@ pub(crate) fn parse_oracle_ir(
         if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
             value((), alt((tag("channel \u{2014} "), tag("channel -- ")))).parse(i)
         }) {
-            let rest_lower = rest_original.to_lowercase();
-            if let Some(colon_pos) = find_activated_colon(&rest_lower) {
-                let prefix_len = line.len() - rest_original.len();
-                let cost_text = line[prefix_len..prefix_len + colon_pos].trim();
-                let effect_text = line[prefix_len + colon_pos + 1..].trim();
+            if let Some(colon_pos) = find_activated_colon(rest_original) {
+                let cost_text = rest_original[..colon_pos].trim();
+                let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
                 ctx.subject = None;
@@ -2120,11 +2196,9 @@ pub(crate) fn parse_oracle_ir(
         if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
             value((), alt((tag("boast \u{2014} "), tag("boast -- ")))).parse(i)
         }) {
-            let rest_lower = rest_original.to_lowercase();
-            if let Some(colon_pos) = find_activated_colon(&rest_lower) {
-                let prefix_len = line.len() - rest_original.len();
-                let cost_text = line[prefix_len..prefix_len + colon_pos].trim();
-                let effect_text = line[prefix_len + colon_pos + 1..].trim();
+            if let Some(colon_pos) = find_activated_colon(rest_original) {
+                let cost_text = rest_original[..colon_pos].trim();
+                let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
                 ctx.subject = None;
@@ -2161,11 +2235,9 @@ pub(crate) fn parse_oracle_ir(
         if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
             value((), alt((tag("exhaust \u{2014} "), tag("exhaust -- ")))).parse(i)
         }) {
-            let rest_lower = rest_original.to_lowercase();
-            if let Some(colon_pos) = find_activated_colon(&rest_lower) {
-                let prefix_len = line.len() - rest_original.len();
-                let cost_text = line[prefix_len..prefix_len + colon_pos].trim();
-                let effect_text = line[prefix_len + colon_pos + 1..].trim();
+            if let Some(colon_pos) = find_activated_colon(rest_original) {
+                let cost_text = rest_original[..colon_pos].trim();
+                let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
                 ctx.subject = None;
@@ -2181,6 +2253,46 @@ pub(crate) fn parse_oracle_ir(
                 def.activation_restrictions
                     .push(ActivationRestriction::OnlyOnce);
                 def.ability_tag = Some(AbilityTag::Exhaust);
+                extract_cost_reduction_from_chain(&mut def);
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 3f: Forecast — "Forecast — {cost}: {effect}" (CR 702.57).
+        // A forecast ability is an activated ability with three implicit
+        // restrictions (CR 702.57a-b): it can be activated only from the card's
+        // owner's hand, only during that player's upkeep, and only once each
+        // turn. Must run before `is_keyword_cost_line` (which lists "forecast"):
+        // there is no `Keyword::Forecast` synthesizer, so without this branch the
+        // line is skipped and the ability is silently dropped. Mirrors the
+        // Boast/Channel/Exhaust em-dash activated-ability handlers above.
+        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
+            value((), alt((tag("forecast \u{2014} "), tag("forecast -- ")))).parse(i)
+        }) {
+            if let Some(colon_pos) = find_activated_colon(rest_original) {
+                let cost_text = rest_original[..colon_pos].trim();
+                let effect_text = rest_original[colon_pos + 1..].trim();
+                let (effect_text, constraints) = strip_activated_constraints(effect_text);
+                let cost = parse_oracle_cost(cost_text);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                def.cost = Some(cost);
+                def.description = Some(line.to_string());
+                // CR 702.57a: a forecast ability is activated only from hand.
+                def.activation_zone = Some(Zone::Hand);
+                if constraints.sorcery_speed() {
+                    def.sorcery_speed = true;
+                }
+                def.activation_restrictions.extend(constraints.restrictions);
+                // CR 702.57b: only during the owner's upkeep, only once each turn.
+                def.activation_restrictions
+                    .push(ActivationRestriction::DuringYourUpkeep);
+                def.activation_restrictions
+                    .push(ActivationRestriction::OnlyOnceEachTurn);
                 extract_cost_reduction_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
@@ -2213,14 +2325,25 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 5-pre: "Whenever you cast [spell], that [subject] enters with
-        // [counters] on it" is a replacement effect per CR 614.1c, not a
-        // triggered ability — despite the "whenever" framing. Intercept before
-        // the generic trigger dispatch routes it through the SpellCast matcher.
+        // Priority 5-pre: trigger-framed "… enters with [counters] on it" lines
+        // are CR 614.1c replacement effects, not triggered abilities — despite
+        // the "whenever"/"when" framing. Intercept before the generic trigger
+        // dispatch routes them through the SpellCast / ChangesZone matcher.
         // Applies to Wildgrowth Archaic and cousin cards (Runadi, Boreal
-        // Outrider, Torgal, …). `parse_replacement_line` handles all the
-        // compositional variants (fixed / X / "where X is …").
-        if has_trigger_prefix(&lower) && scan_contains(&lower, "enters with") {
+        // Outrider, Torgal, Dragon Broodmother, …). `parse_replacement_line`
+        // handles all the compositional variants (fixed / X / "where X is …").
+        //
+        // CR 603.2 exclusion: an ETB-with-counter TRIGGER ("… enters with a
+        // counter on it, <consequence>") watches for ANY (untyped) counter and
+        // is a real triggered ability (Murderous Redcap Avatar class). The
+        // typed/counted enters-with forms ("a +1/+1 counter", "X +1/+1
+        // counters", "an additional loyalty counter") are CR 614.1c
+        // replacements. `is_enters_with_counter_trigger` recognizes the untyped
+        // trigger and excludes it from this replacement interceptor.
+        if has_trigger_prefix(&lower)
+            && !is_enters_with_counter_trigger(&lower)
+            && scan_contains(&lower, "enters with")
+        {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                 result.replacements.push(rep_def);
                 i += 1;
@@ -2423,7 +2546,7 @@ pub(crate) fn parse_oracle_ir(
         }
 
         // Priority 6c-altcost: CR 118.9 — "You may pay X rather than pay the mana
-        // cost for [filter] spells you cast." Mana-cost-alternative-grant static
+        // cost for [filter] spells you cast." Alternative-cost-grant static
         // (Rooftop Storm, Fist of Suns, Jodah). Must run before Priority 7
         // because `is_static_pattern` does not classify this shape, so the line
         // would otherwise fall through to the imperative parser as
@@ -2431,6 +2554,18 @@ pub(crate) fn parse_oracle_ir(
         if is_spells_alternative_cost_pattern(&lower) {
             if let Some(static_def) = parse_spells_alternative_cost(&line) {
                 result.statics.push(static_def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-b: CR 118.9 — "You may cast [filter] by paying {X}
+        // rather than paying their mana costs." (Primal Prayers). May also carry a
+        // flash rider on the same line.
+        if is_cast_spells_alternative_cost_pattern(&lower) {
+            let defs = parse_cast_spells_alternative_cost_multi(&line);
+            if !defs.is_empty() {
+                result.statics.extend(defs);
                 i += 1;
                 continue;
             }
@@ -2475,7 +2610,26 @@ pub(crate) fn parse_oracle_ir(
         // effect parser at Priority 9. Damage-verb lines are also deferred because
         // parse_effect_chain handles embedded statics via split_clause_sequence.
         if is_static_pattern(&lower) {
-            if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
+            // CR 614.1c / CR 707.9: Lines that are both static-shaped (e.g.
+            // trailing "doesn't untap during…" from a reflexive "When you do"
+            // clause) and a copy-replacement ("enter as a copy of") must route
+            // to the replacement parser first — Wall of Stolen Identity class.
+            // The copy-verb gate keeps static / prevent lines (Anthem of Rakdos,
+            // Pollen Lullaby, Subdue, Mikey & Don Party Planners) out of the
+            // replacement parsers; the legacy `as long as` precondition still
+            // routes the duration-gated replacement fallback.
+            if find_copy_verb_present(&lower) {
+                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
+                    result.replacements.extend(rep_defs);
+                    i += 1;
+                    continue;
+                }
+                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
+                    result.replacements.push(rep_def);
+                    i += 1;
+                    continue;
+                }
+            } else if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
                 if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                     result.replacements.push(rep_def);
                     i += 1;
@@ -2680,13 +2834,6 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        // Priority 8b: "As an additional cost to cast this spell"
-        if lower_starts_with(&lower, "as an additional cost") {
-            result.additional_cost = parse_additional_cost_line(&lower, &line);
-            i += 1;
-            continue;
-        }
-
         // Priority 8c-strive: Skip strive lines (cost already extracted in pre-parse above).
         // Must run before Priority 9 (spell imperative catch-all) which would otherwise
         // consume the entire "Strive — This spell costs..." line as an unimplemented ability.
@@ -2765,6 +2912,18 @@ pub(crate) fn parse_oracle_ir(
         if lower_starts_with(&lower, "harmonize ") {
             if let Some(harmonize_kw) = parse_harmonize_keyword(&line) {
                 result.extracted_keywords.push(harmonize_kw);
+                i += 1;
+                continue;
+            }
+        }
+
+        // CR 702.187b: Mayhem {cost} — parse mana cost from Oracle text, same as
+        // Harmonize. MTGJSON's keywords array carries only the bare "Mayhem"
+        // name, so the cost is extracted here. Must run before the spell
+        // imperative catch-all so the line is a keyword, not an effect.
+        if lower_starts_with(&lower, "mayhem ") {
+            if let Some(mayhem_kw) = parse_mayhem_keyword(&line) {
+                result.extracted_keywords.push(mayhem_kw);
                 i += 1;
                 continue;
             }
@@ -3751,6 +3910,48 @@ fn find_top_level_colon(line: &str) -> Option<usize> {
     None
 }
 
+/// CR 602.5: Map a trailing activation-timing phrase to its
+/// `ActivationRestriction`(s). Used for the "Any player may activate this ability
+/// but only <phrase>" form (and composable with other timing-suffix handlers).
+/// Returns `None` for phrases without a recognized timing gate so the caller can
+/// decline rather than mis-classify.
+fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRestriction>> {
+    let phrase = phrase.trim().trim_end_matches('.').trim();
+    let lower = phrase.to_lowercase();
+    // Speed / turn / upkeep gates — case-insensitive value matches. "their" is the
+    // activating player's possessive, equivalent to "your" once an activator is fixed.
+    let gate = alt((
+        value(
+            ActivationRestriction::AsSorcery,
+            tag::<_, _, OracleError<'_>>("as a sorcery"),
+        ),
+        value(ActivationRestriction::AsInstant, tag("as an instant")),
+        value(
+            ActivationRestriction::DuringYourTurn,
+            alt((tag("during your turn"), tag("during their turn"))),
+        ),
+        value(
+            ActivationRestriction::DuringYourUpkeep,
+            alt((tag("during your upkeep"), tag("during their upkeep"))),
+        ),
+    ))
+    .parse(lower.as_str());
+    if let Ok((rest, restr)) = gate {
+        if rest.trim().is_empty() {
+            return Some(vec![restr]);
+        }
+    }
+    // CR 602.5: "if <condition>" gate (Lightning Storm "if ~ is on the stack").
+    if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("if ")).parse(lower.as_str()) {
+        let condition_start = phrase.len() - rest.len();
+        let condition_text = phrase[condition_start..].trim();
+        return Some(vec![ActivationRestriction::RequiresCondition {
+            condition: parse_restriction_condition(condition_text),
+        }]);
+    }
+    None
+}
+
 pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
     let mut remaining = text.trim().trim_end_matches('.').trim().to_string();
     let mut constraints = ActivatedConstraintAst::default();
@@ -3772,6 +3973,31 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
                     .push(ActivationRestriction::RequiresCondition {
                         condition: parse_restriction_condition(&condition_text),
                     });
+                continue;
+            }
+        }
+
+        // CR 602.2 + CR 602.5: "Any player may activate this ability but only
+        // <restriction>" combines the any-player permission with an activation
+        // timing restriction (Endbringer's Revel "as a sorcery", Volrath's Dungeon
+        // "during their turn", Lightning Storm "if ~ is on the stack"). Split so
+        // BOTH are recorded; otherwise the whole trailing sentence is dropped and
+        // the runtime-enforced timing restriction is silently lost. Must precede
+        // the terminal "any player may activate this ability" strip below, which
+        // would not match because the sentence continues past that phrase.
+        if let Some((before, restriction)) =
+            tp.rsplit_around("any player may activate this ability but only ")
+        {
+            if let Some(parsed) = parse_activation_timing_restriction(restriction.original) {
+                constraints.any_player_may_activate = true;
+                constraints.restrictions.extend(parsed);
+                remaining = before
+                    .original
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                if remaining.trim().is_empty() {
+                    break;
+                }
                 continue;
             }
         }
@@ -4370,11 +4596,11 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-        Duration, FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-        MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount,
-        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-        RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition,
-        TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        Duration, Effect, FilterProp, ManaProduction, ManaSpendRestriction,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter,
+        PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind,
+        StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -4394,6 +4620,44 @@ mod tests {
         let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
         let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
+    }
+
+    /// CR 508.1a + CR 508.6: "During any turn you attacked with <filter>, you
+    /// may play that card" must gate the play permission on a (filtered)
+    /// AttackedThisTurn condition instead of dropping the clause to
+    /// Unimplemented. Neyali (token) and Boros Strike-Captain (count) both
+    /// produce a gated CastFromZone with no Unimplemented chunk.
+    #[test]
+    fn attacked_with_filter_gates_play_permission() {
+        let neyali = parse(
+            "Whenever one or more tokens you control attack a player, exile the top card of your library. During any turn you attacked with a token, you may play that card.",
+            "Neyali, Suns' Vanguard",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let s = format!("{:?}", neyali.triggers);
+        // allow-noncombinator: test assertions over Debug-formatted AST, not parser dispatch.
+        assert!(!s.contains("Unimplemented"), "no Unimplemented chunk: {s}");
+        assert!(
+            s.contains("AttackedThisTurn") && s.contains("Token"), // allow-noncombinator: Debug-string assertion
+            "expected a token-filtered AttackedThisTurn gate, got {s}"
+        );
+
+        let boros = parse(
+            "Battalion \u{2014} Whenever this creature and at least two other creatures attack, exile the top card of your library. During any turn you attacked with three or more creatures, you may play that card.",
+            "Boros Strike-Captain",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let s = format!("{:?}", boros.triggers);
+        // allow-noncombinator: test assertions over Debug-formatted AST, not parser dispatch.
+        assert!(!s.contains("Unimplemented"), "no Unimplemented chunk: {s}");
+        assert!(
+            s.contains("AttackedThisTurn"), // allow-noncombinator: Debug-string assertion
+            "expected an AttackedThisTurn gate, got {s}"
+        );
     }
 
     /// Parse with raw MTGJSON keyword names (for testing keyword extraction).
@@ -4622,6 +4886,77 @@ mod tests {
             r.abilities[0].target_selection_mode,
             TargetSelectionMode::Chosen
         ));
+    }
+
+    /// CR 601.2c + CR 603.3d: a TARGETED "of their choice" whose filter is
+    /// controlled by the phase-trigger active player ("destroy target X that
+    /// player controls of their choice") routes target selection to that scoped
+    /// player. The parser stamps `target_chooser = Some(ScopedPlayer)` so the
+    /// trigger target-selection site can override the chooser away from the
+    /// source's controller (Magus of the Abyss / The Abyss deadlock). Tests the
+    /// `controller == ScopedPlayer` discriminator (the building block), not the
+    /// card name — any phase-trigger "that player controls of their choice"
+    /// target qualifies.
+    #[test]
+    fn scoped_player_of_their_choice_marks_target_chooser() {
+        use crate::types::ability::TargetFilter;
+        let r = parse(
+            "At the beginning of each player's upkeep, destroy target nonartifact creature that player controls of their choice. It can't be regenerated.",
+            "Magus of the Abyss",
+            &[],
+            &["Creature"],
+            &["Human", "Wizard"],
+        );
+        // The phase trigger's effect lives in `trigger.execute`; the parser
+        // stamps the chooser onto that lowered `AbilityDefinition`.
+        assert!(
+            r.triggers.iter().any(|t| t
+                .execute
+                .as_ref()
+                .and_then(|e| e.target_chooser.as_ref())
+                == Some(&TargetFilter::ScopedPlayer)),
+            "expected a trigger whose execute.target_chooser == Some(ScopedPlayer); triggers: {:#?}",
+            r.triggers
+                .iter()
+                .map(|t| t.execute.as_ref().map(|e| &e.target_chooser))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// CR 601.2c: an ordinary "destroy target creature" has no scoped-player
+    /// chooser — controller chooses (default `None`). Negative guard so a
+    /// regression that always stamps the chooser cannot pass silently.
+    #[test]
+    fn ordinary_destroy_target_creature_leaves_chooser_none() {
+        let r = parse(
+            "Destroy target creature.",
+            "Test Card",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].target_chooser, None);
+    }
+
+    /// CR 608.2d: a resolution-time "of their choice" sacrifice (not a targeted
+    /// stack-placement choice) must NOT set `target_chooser` — the chooser
+    /// override is reserved for `ControllerRef::ScopedPlayer`-controlled target
+    /// filters. "each player sacrifices a creature of their choice" iterates a
+    /// player scope and chooses at resolution, so the chooser stays `None`.
+    #[test]
+    fn resolution_time_of_their_choice_sacrifice_leaves_chooser_none() {
+        let r = parse(
+            "Each player sacrifices a creature of their choice.",
+            "Test Card",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            r.abilities.iter().all(|a| a.target_chooser.is_none()),
+            "resolution-time sacrifice must not set target_chooser",
+        );
     }
 
     #[test]
@@ -4900,6 +5235,43 @@ mod tests {
     }
 
     #[test]
+    fn rottenmouth_viper_parses_optional_sacrifice_and_cost_reduction() {
+        let oracle = concat!(
+            "As an additional cost to cast this spell, you may sacrifice any number of nonland permanents. ",
+            "This spell costs {1} less to cast for each permanent sacrificed this way.\n",
+            "Whenever this creature enters or attacks, put a blight counter on it."
+        );
+        let r = parse(oracle, "Rottenmouth Viper", &[], &["Creature"], &[]);
+        match r.additional_cost {
+            Some(AdditionalCost::Optional {
+                cost:
+                    AbilityCost::Sacrifice {
+                        count: u32::MAX, ..
+                    },
+                repeatable: false,
+            }) => {}
+            other => panic!("expected optional any-number sacrifice, got {other:?}"),
+        }
+        assert!(
+            r.statics.iter().any(|s| {
+                matches!(
+                    s.mode,
+                    crate::types::statics::StaticMode::ModifyCost {
+                        mode: crate::types::statics::CostModifyMode::Reduce,
+                        dynamic_count: Some(
+                            QuantityRef::TrackedSetSize
+                                | QuantityRef::FilteredTrackedSetSize { .. }
+                        ),
+                        ..
+                    }
+                ) && s.condition == Some(StaticCondition::AdditionalCostPaid)
+            }),
+            "expected sacrificed-this-way reduction static, got statics: {:?}",
+            r.statics
+        );
+    }
+
+    #[test]
     fn harrow_parses_required_sacrifice_land_additional_cost() {
         let r = parse(
             "As an additional cost to cast this spell, sacrifice a land.\nSearch your library for up to two basic land cards, put them onto the battlefield, then shuffle.",
@@ -4921,6 +5293,110 @@ mod tests {
         }
         assert_eq!(r.abilities.len(), 1);
         assert!(r.abilities[0].cost.is_none());
+    }
+
+    /// Issue #1965 — Eldritch Evolution: required creature sacrifice + library
+    /// search whose mana-value cap tracks the sacrificed creature (+2).
+    #[test]
+    fn eldritch_evolution_parses_sacrifice_cost_and_dynamic_search_filter() {
+        let r = parse(
+            "As an additional cost to cast this spell, sacrifice a creature.\n\
+             Search your library for a creature card with mana value X or less, where X is 2 plus the sacrificed creature's mana value. \
+             Put that card onto the battlefield, then shuffle. Exile Eldritch Evolution.",
+            "Eldritch Evolution",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) => {
+                assert_eq!(count, 1);
+                assert_eq!(target, TargetFilter::Typed(TypedFilter::creature()));
+            }
+            other => panic!("expected required sacrifice-creature cost, got {other:?}"),
+        }
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::SearchLibrary { filter, .. } = r.abilities[0].effect.as_ref() else {
+            panic!(
+                "expected SearchLibrary spell effect, got {:?}",
+                r.abilities[0].effect
+            );
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed search filter, got {filter:?}");
+        };
+        let cmc = typed
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+                _ => None,
+            })
+            .expect("search filter must carry Cmc bound");
+        assert_eq!(*cmc.0, Comparator::LE);
+        assert_eq!(
+            *cmc.1,
+            QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                }),
+                offset: 2,
+            }
+        );
+    }
+
+    /// Issue #1997 — Embiggen: +1/+1 per typeline component on the targeted creature.
+    #[test]
+    fn embiggen_parses_non_brushwagg_pump_scaled_by_typeline_components() {
+        use crate::types::ability::{ObjectScope, PtValue, TypeFilter};
+        let r = parse(
+            "Until end of turn, target non-Brushwagg creature gets +1/+1 for each supertype, card type, and subtype it has.",
+            "Embiggen",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        match r.abilities[0].effect.as_ref() {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                let PtValue::Quantity(expr) = power else {
+                    panic!("expected dynamic power, got {power:?}");
+                };
+                assert_eq!(toughness, &PtValue::Quantity(expr.clone()));
+                let TargetFilter::Typed(typed) = target else {
+                    panic!("expected typed creature target, got {target:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "must target creatures"
+                );
+                assert!(
+                    typed.type_filters.iter().any(|t| {
+                        matches!(
+                            t,
+                            TypeFilter::Non(inner)
+                                if matches!(inner.as_ref(), TypeFilter::Subtype(s) if s == "Brushwagg")
+                        )
+                    }),
+                    "must exclude Brushwagg, got {:?}",
+                    typed.type_filters
+                );
+                let crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::ObjectTypelineComponentCount { scope },
+                } = expr
+                else {
+                    panic!("expected typeline component count, got {expr:?}");
+                };
+                assert_eq!(*scope, ObjectScope::Recipient);
+            }
+            other => panic!("expected Pump, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4995,6 +5471,32 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
+    }
+
+    /// Issue #1990 — Spellskite must parse to forced-self `ChangeTargets` so the
+    /// AI `SpellskitePriorityPolicy` effect-shape gate fires at runtime.
+    #[test]
+    fn spellskite_activated_change_targets_forced_to_self() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::game_state::RetargetScope;
+
+        let r = parse(
+            "{U/P}: Change a target of target spell or ability to ~.",
+            "Spellskite",
+            &[],
+            &["Artifact", "Creature"],
+            &["Phyrexian", "Horror"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
+        assert!(matches!(
+            r.abilities[0].effect.as_ref(),
+            Effect::ChangeTargets {
+                scope: RetargetScope::Single,
+                forced_to: Some(TargetFilter::SelfRef),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -5125,7 +5627,10 @@ mod tests {
                         assert_eq!(*factor, expected_power_factor);
                         assert!(matches!(
                             inner.as_ref(),
-                            QuantityExpr::Offset { offset: -1, .. }
+                            QuantityExpr::ClampMin {
+                                inner,
+                                minimum: 0,
+                            } if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
                         ));
                     }
                     other => panic!("expected dynamic power multiplier, got {other:?}"),
@@ -6523,14 +7028,20 @@ mod tests {
         // Walk to the innermost SequentialSibling chain — the WinTheGame node.
         let mut node = exec;
         while let Some(sub) = node.sub_ability.as_ref() {
-            if matches!(*sub.effect, crate::types::ability::Effect::WinTheGame) {
+            if matches!(
+                *sub.effect,
+                crate::types::ability::Effect::WinTheGame { .. }
+            ) {
                 node = sub;
                 break;
             }
             node = sub;
         }
         assert!(
-            matches!(*node.effect, crate::types::ability::Effect::WinTheGame),
+            matches!(
+                *node.effect,
+                crate::types::ability::Effect::WinTheGame { .. }
+            ),
             "expected to find WinTheGame in the SequentialSibling chain, got {:?}",
             node.effect
         );
@@ -7403,6 +7914,79 @@ mod tests {
             }
             other => panic!("expected Forest ReturnToHand cost, got {other:?}"),
         }
+    }
+
+    /// CR 602.2 + CR 602.5: "Any player may activate this ability but only
+    /// <restriction>" must record BOTH the any-player permission and the timing
+    /// restriction, instead of dropping the whole sentence to Unimplemented.
+    #[test]
+    fn any_player_may_activate_but_only_records_timing_restriction() {
+        let activation_restrictions_for = |text: &str, name: &str| {
+            let parsed = parse(text, name, &[], &["Artifact"], &[]);
+            assert!(
+                parsed.abilities.iter().all(|ability| !matches!(
+                    ability.effect.as_ref(),
+                    Effect::Unimplemented { .. }
+                )),
+                "expected no unimplemented fallback, got {:?}",
+                parsed.abilities
+            );
+            parsed
+                .abilities
+                .into_iter()
+                .find(|ability| !ability.activation_restrictions.is_empty())
+                .expect("expected an activated ability with restrictions")
+                .activation_restrictions
+        };
+
+        // "as a sorcery" form (Endbringer's Revel / Scandalmonger / Task Mage Assembly).
+        let restrictions = activation_restrictions_for(
+            "{T}: Draw a card. Any player may activate this ability but only as a sorcery.",
+            "Test Any-Player Sorcery",
+        );
+        assert!(
+            restrictions.contains(&ActivationRestriction::AsSorcery),
+            "expected AsSorcery, got {:?}",
+            restrictions
+        );
+
+        // "during their turn" form (Volrath's Dungeon) → the activator's turn.
+        let restrictions = activation_restrictions_for(
+            "{T}: Draw a card. Any player may activate this ability but only during their turn.",
+            "Test Any-Player Turn",
+        );
+        assert!(
+            restrictions.contains(&ActivationRestriction::DuringYourTurn),
+            "expected DuringYourTurn, got {:?}",
+            restrictions
+        );
+
+        // "during their upkeep" form maps to the activator's upkeep restriction.
+        let restrictions = activation_restrictions_for(
+            "{T}: Draw a card. Any player may activate this ability but only during their upkeep.",
+            "Test Any-Player Upkeep",
+        );
+        assert!(
+            restrictions.contains(&ActivationRestriction::DuringYourUpkeep),
+            "expected DuringYourUpkeep, got {:?}",
+            restrictions
+        );
+
+        // "if <condition>" form (Lightning Storm) keeps the parsed condition gate.
+        let restrictions = activation_restrictions_for(
+            "{T}: Draw a card. Any player may activate this ability but only if ~ is on the stack.",
+            "Test Any-Player Condition",
+        );
+        assert!(
+            restrictions.iter().any(|restriction| matches!(
+                restriction,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::SourceInZone { zone: Zone::Stack })
+                }
+            )),
+            "expected source-on-stack condition, got {:?}",
+            restrictions
+        );
     }
 
     #[test]
@@ -10331,6 +10915,64 @@ mod tests {
     }
 
     #[test]
+    fn forecast_em_dash_parses_as_hand_activated_upkeep_once_per_turn() {
+        // CR 702.57a-b: a forecast ability is an activated ability that can be
+        // activated only from the owner's hand, only during that player's
+        // upkeep, and only once each turn. Without the Priority 3f interceptor
+        // the line is matched by `is_keyword_cost_line` and silently skipped.
+        let r = parse(
+            "Forecast \u{2014} {1}{U}: Draw a card.",
+            "Train of Thought",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "forecast must produce one ability");
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(
+            ability.activation_zone,
+            Some(Zone::Hand),
+            "forecast activates from hand (CR 702.57a)"
+        );
+        assert!(
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::DuringYourUpkeep),
+            "forecast: only during your upkeep (CR 702.57b)"
+        );
+        assert!(
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "forecast: only once each turn (CR 702.57b)"
+        );
+        assert!(matches!(
+            ability.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost { generic: 1, .. }
+            })
+        ));
+    }
+
+    /// Double-hyphen ("Forecast -- ...") variant of the same parse.
+    #[test]
+    fn forecast_double_hyphen_variant_parses_from_hand() {
+        let r = parse(
+            "Forecast -- {2}{W}: You gain 2 life.",
+            "Test Forecaster",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].activation_zone, Some(Zone::Hand));
+        assert!(r.abilities[0]
+            .activation_restrictions
+            .contains(&ActivationRestriction::DuringYourUpkeep));
+    }
+
+    #[test]
     fn self_exile_from_hand_mana_ability_activates_from_hand() {
         let r = parse(
             "Exile this creature from your hand: Add {G}.",
@@ -11544,6 +12186,23 @@ mod tests {
         );
     }
 
+    // CR 106.6: Tablet of Discovery (issue #1975) phrases its restricted mana as
+    // "instant and sorcery spells". This must parse to the same two-type union
+    // the " or " phrasing yields so the runtime matcher accepts either type.
+    #[test]
+    fn mana_spend_restriction_instant_and_sorcery() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::ManaSpendRestriction;
+        let result =
+            parse_mana_spend_restriction("spend this mana only to cast instant and sorcery spells");
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellType(
+                "Instant and Sorcery".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn mana_spend_restriction_colorless_eldrazi_spell_or_activation() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
@@ -11948,6 +12607,174 @@ mod tests {
                     },
                 })
         }));
+    }
+
+    #[test]
+    fn top_level_static_mayhem_grant_stays_on_graveyard_cards() {
+        // CR 702.187b: Green Goblin's "Goblin Formula" grants Mayhem to every
+        // nonland card in the controller's graveyard, with the mayhem cost equal
+        // to that card's own mana cost (ManaCost::SelfManaCost). The general
+        // off-zone keyword-grant pipeline then surfaces it to the cast path
+        // (Norman Osborn // Green Goblin, #2354).
+        let result = parse(
+            "Each nonland card in your graveyard has mayhem.\nThe mayhem cost is equal to its mana cost.",
+            "Green Goblin",
+            &[],
+            &["Creature"],
+            &["Goblin", "Human", "Villain"],
+        );
+        assert!(result.extracted_keywords.is_empty());
+        assert_eq!(result.statics.len(), 1);
+        let static_def = &result.statics[0];
+        let TargetFilter::Typed(tf) = static_def
+            .affected
+            .as_ref()
+            .expect("expected affected filter")
+        else {
+            panic!("expected typed affected filter");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(crate::types::ability::ControllerRef::You)
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "missing graveyard filter: {:?}",
+            tf.properties
+        );
+        assert!(
+            static_def
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Mayhem(ManaCost::SelfManaCost),
+                }),
+            "missing mayhem grant: {:?}",
+            static_def.modifications
+        );
+    }
+
+    /// CR 702.97 / CR 702.141: Varolz (scavenge) and Wire Surgeons (encore)
+    /// grant an activated graveyard keyword to every matching card in the
+    /// controller's graveyard, with the cost equal to that card's mana cost.
+    #[test]
+    fn top_level_static_scavenge_and_encore_grants_stay_on_graveyard_cards() {
+        for (text, name, subtypes, expected) in [
+            (
+                "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost.",
+                "Varolz, the Scar-Striped",
+                &["Troll", "Warrior"][..],
+                Keyword::Scavenge(ManaCost::SelfManaCost),
+            ),
+            (
+                "Each artifact creature card in your graveyard has encore. Its encore cost is equal to its mana cost.",
+                "Wire Surgeons",
+                &["Phyrexian", "Artificer"][..],
+                Keyword::Encore(ManaCost::SelfManaCost),
+            ),
+        ] {
+            let result = parse(text, name, &[], &["Creature"], subtypes);
+            assert_eq!(result.statics.len(), 1, "{name}: {:?}", result.statics);
+            let static_def = &result.statics[0];
+            let TargetFilter::Typed(tf) = static_def
+                .affected
+                .as_ref()
+                .expect("expected affected filter")
+            else {
+                panic!("{name}: expected typed affected filter");
+            };
+            assert!(
+                tf.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }),
+                "{name}: missing graveyard filter: {:?}",
+                tf.properties
+            );
+            assert!(
+                static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: expected.clone()
+                    }),
+                "{name}: missing {expected:?} grant: {:?}",
+                static_def.modifications
+            );
+        }
+    }
+
+    #[test]
+    fn green_goblin_full_face_parses_mayhem_and_graveyard_cost_reduction() {
+        // CR 702.187b + CR 601.2f: The full Green Goblin face — flying/menace,
+        // the graveyard-cast cost reduction, and the Goblin Formula mayhem grant
+        // — must all parse (Norman Osborn // Green Goblin, #2354). The two novel
+        // statics (cost reduction scoped to graveyard casts, and the mayhem
+        // grant) are asserted here; the printed evasion keywords arrive via the
+        // MTGJSON keyword array.
+        use crate::types::statics::{CostModifyMode, StaticMode};
+        let result = parse(
+            "Flying, menace\n\
+             Spells you cast from your graveyard cost {2} less to cast.\n\
+             Goblin Formula — Each nonland card in your graveyard has mayhem. \
+             The mayhem cost is equal to its mana cost.",
+            "Green Goblin",
+            &[],
+            &["Creature"],
+            &["Goblin", "Human", "Villain"],
+        );
+        assert!(
+            result.statics.iter().any(|static_def| {
+                static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Mayhem(ManaCost::SelfManaCost),
+                    })
+            }),
+            "missing mayhem grant static: {:?}",
+            result.statics
+        );
+        assert!(
+            result.statics.iter().any(|static_def| {
+                matches!(
+                    &static_def.mode,
+                    StaticMode::ModifyCost {
+                        mode: CostModifyMode::Reduce,
+                        amount: ManaCost::Cost { generic: 2, .. },
+                        ..
+                    }
+                )
+            }),
+            "missing graveyard-cast cost reduction static: {:?}",
+            result.statics
+        );
+    }
+
+    #[test]
+    fn green_goblin_goblin_formula_line_grants_mayhem() {
+        // CR 702.187b: the real card line carries the "Goblin Formula —" ability
+        // word and a parenthesized reminder; both must be stripped so the grant
+        // is recognized (Norman Osborn // Green Goblin, #2354).
+        let result = parse(
+            "Goblin Formula — Each nonland card in your graveyard has mayhem. \
+             The mayhem cost is equal to its mana cost. (You may cast a card from \
+             your graveyard for its mayhem cost if you discarded it this turn. \
+             Timing rules still apply.)",
+            "Green Goblin",
+            &[],
+            &["Creature"],
+            &["Goblin", "Human", "Villain"],
+        );
+        assert!(
+            result.statics.iter().any(|static_def| {
+                static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Mayhem(ManaCost::SelfManaCost),
+                    })
+            }),
+            "Green Goblin's Goblin Formula must grant Mayhem to graveyard cards; got {:?}",
+            result.statics
+        );
     }
 
     #[test]
@@ -13783,7 +14610,7 @@ mod tests {
                 inner.as_ref(),
                 AbilityCondition::QuantityCheck {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::AttackedThisTurn,
+                        qty: QuantityRef::AttackedThisTurn { filter: None },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },

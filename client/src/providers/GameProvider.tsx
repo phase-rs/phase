@@ -19,6 +19,7 @@ import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore"
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
+import { clearPromptOverlayState } from "../game/sessionCleanup";
 import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
@@ -27,7 +28,6 @@ import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { ensureCardDatabase } from "../services/cardData";
 import { loadDraftRun } from "../services/quickDraftPersistence";
-import { consumePlaytestDeck } from "../services/playtestDeck";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import { detectServerUrl } from "../services/serverDetection";
@@ -382,7 +382,7 @@ function scheduleStoreReset(reset: () => void): void {
 
 export interface GameProviderProps {
   gameId: string;
-  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" | "playtest";
+  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate";
   difficulty?: string;
   joinCode?: string;
   formatConfig?: FormatConfig;
@@ -503,6 +503,11 @@ export function GameProvider({
     // is about to populate the store via initGame/resumeGame, and a fire from
     // the previous cleanup would null out the state we just wrote.
     cancelPendingStoreReset();
+    // Issue #2369: convoke ManaPayment + pendingAbilityChoice must not survive
+    // across sessions while initGame/resumeGame is still in flight — canceling
+    // the deferred reset alone leaves stale overlays clickable until the engine
+    // responds.
+    clearPromptOverlayState();
 
     const { initGame, resumeGame, resumeP2PHost, reset, setGameMode } = useGameStore.getState();
     setGameMode(mode);
@@ -510,9 +515,8 @@ export function GameProvider({
     const isOnline = mode === "online" || mode === "spectate";
     const isSpectate = mode === "spectate";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
-    const isPlaytest = mode === "playtest";
     if (!isOnline && !isP2P) {
-      if (mode === "ai" || isPlaytest) {
+      if (mode === "ai") {
         setupRandomAvatars(playerCount ?? 2, gameId);
       } else if (mode === "draft-match") {
         setupDraftMatchAvatars(gameId);
@@ -1044,7 +1048,7 @@ export function GameProvider({
       };
     }
 
-    // AI, playtest, or local mode — async setup (loadGame is async due to IndexedDB)
+    // AI or local mode — async setup (loadGame is async due to IndexedDB)
     //
     // Uses the shared singleton adapter so the WASM worker (and its V8 TurboFan-
     // optimized code, card database, and AI worker pool) persist across game sessions.
@@ -1193,9 +1197,7 @@ export function GameProvider({
         }
       }
 
-      const playtestPayload = isPlaytest ? consumePlaytestDeck() : null;
-      const parsedDeck = playtestPayload?.deck ?? loadActiveDeck();
-      const effectiveFormatConfig = playtestPayload?.formatConfig ?? formatConfig;
+      const parsedDeck = loadActiveDeck();
       if (!parsedDeck) {
         onNoDeckRef.current?.();
         return;
@@ -1207,7 +1209,7 @@ export function GameProvider({
           tRef.current,
           parsedDeck,
           playerCount ?? 2,
-          effectiveFormatConfig,
+          formatConfig,
           matchConfig?.match_type,
           loadActiveDeckBracket(),
         );
@@ -1220,7 +1222,7 @@ export function GameProvider({
           gameId,
           adapter,
           deckList,
-          effectiveFormatConfig,
+          formatConfig,
           playerCount,
           matchConfig,
           firstPlayer,
@@ -1257,6 +1259,9 @@ export function GameProvider({
       cancelled = true;
       if (controller) controller.dispose();
       audioManager.setContext("menu");
+      // Issue #2369: drop prompt overlays synchronously so the next mount's
+      // `cancelPendingStoreReset` cannot resurrect convoke payment UI.
+      clearPromptOverlayState();
       // Clear store state but keep the shared WASM worker alive — its V8
       // TurboFan-compiled code, card database, and AI pool persist for reuse.
       const adapter = useGameStore.getState().adapter;

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DialogHost } from "../DialogHost.tsx";
 import { DialogShell } from "../DialogShell.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
 import type { WaitingFor } from "../../../adapter/types.ts";
 
 function setWaitingFor(waitingFor: WaitingFor | null) {
@@ -28,6 +29,7 @@ describe("DialogHost", () => {
     cleanup();
     setWaitingFor(null);
     useGameStore.setState({ gameState: null });
+    useUiStore.setState({ pendingAbilityChoice: null, enchantmentsDialogPlayer: null });
   });
 
   it("hides the peek-restore tab while the dialog is visible (un-peeked)", () => {
@@ -111,6 +113,31 @@ describe("DialogHost", () => {
     expect(wrapper?.style.pointerEvents).toBe("none");
   });
 
+  it("restores host pointer events during convoke when a UI modal is open (#1532)", () => {
+    // Issue #1532: convoke payment is click-through so board taps reach creatures,
+    // but an ability picker opened mid-payment (mana dork + convoke-eligible) must
+    // stay interactive — not inherit pointer-events:none from the host.
+    setWaitingFor({
+      type: "ManaPayment",
+      data: { player: 0, convoke_mode: "Convoke" },
+    } as never);
+    useUiStore.setState({
+      pendingAbilityChoice: {
+        objectId: 41,
+        actions: [{ type: "TapForConvoke", data: { object_id: 41, mana_type: "Green" } }],
+      },
+    });
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.className ?? "").toMatch(/z-40/);
+    expect(wrapper?.style.pointerEvents).not.toBe("none");
+  });
+
   it("keeps the viewport wrapper for plain mana payment without convoke", () => {
     // Plain payment is committed via the panel's Pay button (no board taps), so
     // the host wraps normally — only `convoke_mode` payments go click-through.
@@ -144,5 +171,19 @@ describe("DialogHost", () => {
       setWaitingFor({ type: "ReplacementChoice", data: { player: 0 } } as never);
     });
     expect(screen.queryByLabelText("Restore dialog")).not.toBeInTheDocument();
+  });
+
+  it("does not apply a peek slide transform while the dialog is visible but un-peeked (#2427)", () => {
+    // Framer-motion keeps a residual CSS transform whenever `animate` is set —
+    // even at `{ x: 0, y: 0 }` — which breaks range inputs in bottom panels.
+    // The slide transform must only be active while `peeked` is true.
+    setWaitingFor({ type: "ChooseXValue", data: { player: 0, max: 3 } } as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.style.transform ?? "").toBe("");
   });
 });

@@ -12,11 +12,18 @@ import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 // `WaitingFor` variants that do NOT render a centered dialog/overlay.
 // Board-level interactions (Priority, combat declarations) and pre-game
 // flows render inline on the board rather than as a centered modal.
+//
+// NOTE: combat damage *assignment* (`AssignCombatDamage` / `AssignBlockerDamage`)
+// is deliberately ABSENT — unlike attacker/blocker declaration, it renders a
+// centered `ChoiceOverlay` modal (via `CardChoiceModal` → `DamageAssignmentModal`).
+// Listing it here would leave the host un-anchored (`className=""`), so the
+// modal's `fixed inset-0 z-50` would be trapped inside framer-motion's
+// transform stacking context and paint BELOW the board/HUD/hand (see the
+// anchoring contract on lines 114-123). Centered modals must stay out of this set.
 const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<WaitingFor["type"]>([
   "Priority",
   "DeclareAttackers",
   "DeclareBlockers",
-  "AssignCombatDamage",
   "MulliganDecision",
   "MulliganBottomCards",
   "OpeningHandBottomCards",
@@ -109,7 +116,15 @@ export function DialogHost({ children }: { children: ReactNode }) {
 
   const dialogVisible =
     (isDialogVisibleFor(waitingFor) && canActForWaitingState) || hasUiDialog;
-  const clickThrough = isClickThroughDialog(waitingFor);
+  // CR 702.51a: convoke/improvise payment marks the host click-through so board
+  // taps reach creatures. But a UI-driven modal opened mid-payment — e.g. the
+  // ability picker fired by tapping a mana creature like Birds of Paradise, which
+  // is convoke-eligible AND has an activatable mana ability — renders INSIDE this
+  // host. Leaving the host click-through makes that modal inherit
+  // `pointer-events: none`, so its buttons are dead and clicks fall through to the
+  // board/hand behind it. While such a modal is up the player interacts with it,
+  // not the board, so suppress click-through to restore pointer events.
+  const clickThrough = isClickThroughDialog(waitingFor) && !hasUiDialog;
   // BASE INVARIANT: every visible prompt is anchored in this viewport-level
   // `fixed inset-0 z-40` stacking context, so no prompt can ever be trapped
   // beneath the board. The board grid is its own `relative z-10` stacking
@@ -121,10 +136,15 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // Click-through is achieved with `pointer-events: none` (below), NOT by
   // un-anchoring, so board taps still reach the battlefield.
   const anchored = dialogVisible;
-  // Only non-click-through dialogs participate in the peek/slide affordance;
-  // click-through overlays (convoke/improvise board taps, target picking) stay
-  // put and pass taps through to the board.
-  const peekable = anchored && !clickThrough;
+  // The convoke/improvise payment panel is bottom-anchored and can overlap the
+  // very creatures the player must tap to pay. Unlike the translucent full-screen
+  // target overlays, it benefits from the peek/slide affordance so the player can
+  // collapse it off an overlapped creature — so it stays peekable even while
+  // click-through. Other click-through overlays (target picking) are translucent
+  // and full-screen, so they stay put and pass taps straight through.
+  const isConvokePayment =
+    waitingFor?.type === "ManaPayment" && waitingFor.data.convoke_mode != null;
+  const peekable = anchored && (!clickThrough || isConvokePayment);
   const showPeekTab = peeked && peekable;
 
   const ctxValue = useMemo<DialogPeekContext>(
@@ -140,11 +160,16 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // right (mirrors the stack panel — established muscle memory). On narrow
   // viewports it slides down (more reachable on phones).
   const isNarrow = useIsNarrowViewport();
+  // Only apply the peek slide transform while peeked. Framer-motion keeps a
+  // residual `transform` (even at `{ x: 0, y: 0 }`) whenever `animate` is set,
+  // which breaks `<input type="range">` hit-testing in bottom-anchored panels
+  // such as ChooseXValueUI — the slider looks fine but ignores drags until
+  // something else reflows the tree (issue #2427).
   const slideTransform = peeked
     ? isNarrow
       ? { x: 0, y: "calc(100vh - 64px)" }
       : { x: "calc(100vw - 32px)", y: 0 }
-    : { x: 0, y: 0 };
+    : undefined;
 
   return (
     <DialogPeekCtx.Provider value={ctxValue}>
@@ -163,7 +188,7 @@ export function DialogHost({ children }: { children: ReactNode }) {
             ? { pointerEvents: clickThrough || peeked ? "none" : undefined }
             : undefined
         }
-        animate={peekable ? slideTransform : undefined}
+        animate={peekable && peeked ? slideTransform : undefined}
         transition={
           shouldReduceMotion
             ? { duration: 0 }

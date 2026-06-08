@@ -2,17 +2,20 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, DisplaySource};
 
 use super::counter::CounterType;
 
-use super::ability::{Duration, StaticDefinition, TargetRef};
+use super::ability::{
+    ContinuousModification, CopiableValues, Duration, FaceDownProfile, StaticDefinition, TargetRef,
+};
+use super::card::PrintedCardRef;
 use super::card_type::{CoreType, Supertype};
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaType, UnitDecision};
 use super::phase::Phase;
-use super::player::PlayerId;
+use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -25,6 +28,51 @@ pub struct ReplacementId {
 pub enum CounterMoveStage {
     Remove,
     Add,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CounterPlacement {
+    Object {
+        #[serde(default)]
+        actor: PlayerId,
+        object_id: ObjectId,
+        counter_type: CounterType,
+    },
+    Player {
+        actor: PlayerId,
+        player_id: PlayerId,
+        counter_kind: PlayerCounterKind,
+    },
+    Energy {
+        actor: PlayerId,
+        player_id: PlayerId,
+    },
+}
+
+impl CounterPlacement {
+    pub fn object_id(&self) -> Option<ObjectId> {
+        match self {
+            CounterPlacement::Object { object_id, .. } => Some(*object_id),
+            CounterPlacement::Player { .. } | CounterPlacement::Energy { .. } => None,
+        }
+    }
+
+    pub fn player_id(&self) -> Option<PlayerId> {
+        match self {
+            CounterPlacement::Player { player_id, .. }
+            | CounterPlacement::Energy { player_id, .. } => Some(*player_id),
+            CounterPlacement::Object { .. } => None,
+        }
+    }
+
+    pub fn actor(&self) -> PlayerId {
+        match self {
+            CounterPlacement::Object { actor, .. }
+            | CounterPlacement::Player { actor, .. }
+            | CounterPlacement::Energy { actor, .. } => *actor,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -126,6 +174,29 @@ pub struct TokenSpec {
     pub attach_to: Option<AttachTarget>,
 }
 
+/// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same
+/// `CreateToken` proposed event that ordinary token creation uses for
+/// replacement effects. `TokenSpec` remains the replacement-visible probe
+/// characteristics; this payload carries the full copiable values needed once
+/// the event is accepted, including display metadata that is not copiable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyTokenSpec {
+    pub values: Box<CopiableValues>,
+    pub display_source: DisplaySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_keywords: Vec<Keyword>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_modifications: Vec<ContinuousModification>,
+    pub tapped: bool,
+    pub enters_attacking: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sacrifice_at: Option<Duration>,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProposedEvent {
     ZoneChange {
@@ -157,6 +228,14 @@ pub enum ProposedEvent {
         /// Set by "return ... transformed" effects.
         #[serde(default)]
         enter_transformed: bool,
+        /// CR 708.2a + CR 708.3: When `Some`, the object is turned face down
+        /// (before entering, CR 708.3) with these characteristics as it enters
+        /// the battlefield. Carried through the replacement pipeline so the
+        /// face-down state is established before ETB triggers would fire.
+        /// Boxed so this rarely-set field doesn't inflate the size of every
+        /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<Box<FaceDownProfile>>,
         applied: HashSet<ReplacementId>,
     },
     Damage {
@@ -207,10 +286,11 @@ pub enum ProposedEvent {
         applied: HashSet<ReplacementId>,
     },
     AddCounter {
-        #[serde(default)]
-        actor: PlayerId,
-        object_id: ObjectId,
-        counter_type: CounterType,
+        /// CR 122.1 + CR 107.14: Counter placement may affect an object or a
+        /// player. Energy is represented as a dedicated player field at runtime
+        /// but is still a counter-placement event for replacement purposes.
+        #[serde(flatten)]
+        placement: CounterPlacement,
         count: u32,
         applied: HashSet<ReplacementId>,
     },
@@ -248,6 +328,12 @@ pub enum ProposedEvent {
         /// Resolved token characteristics, keyed by replacement pipeline
         /// matchers on the apply path to reproduce the token faithfully.
         spec: Box<TokenSpec>,
+        /// CR 707.2: When present, the event creates tokens that are copies of
+        /// a permanent. Replacement matching still reads `spec`; the apply path
+        /// reads this payload so replacement-choice resume does not degrade to a
+        /// generic token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<Box<CopyTokenSpec>>,
         /// Explicit ETB tap-state override carried through the replacement pipeline.
         /// `Unspecified` preserves the token spec's authored `tapped` bit.
         #[serde(default)]
@@ -361,6 +447,7 @@ impl ProposedEvent {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            face_down_profile: None,
             applied: HashSet::new(),
         }
     }
@@ -485,16 +572,39 @@ impl ProposedEvent {
 
     pub fn affected_player(&self, state: &crate::types::game_state::GameState) -> PlayerId {
         match self {
-            ProposedEvent::ZoneChange { object_id, .. }
-            | ProposedEvent::Tap { object_id, .. }
+            // CR 614.12 + CR 109.4: A permanent entering under another player's
+            // control (Tergrid's "onto the battlefield under your control",
+            // reanimation "under your control", etc.) carries a
+            // `controller_override`. The object itself is still in its origin
+            // zone — typically a graveyard, where CR 109.4 gives it no controller
+            // so `o.controller` defaults to the owner. "As-it-enters" replacement
+            // effects (Mirrormade's "enter as a copy", CR 707.9) must be offered
+            // to the controller the permanent WOULD have on the battlefield, so
+            // honor the override before falling back to the object's controller.
+            ProposedEvent::ZoneChange {
+                object_id,
+                controller_override,
+                ..
+            } => controller_override
+                .or_else(|| state.objects.get(object_id).map(|o| o.controller))
+                .unwrap_or(PlayerId(0)),
+            ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
-            | ProposedEvent::AddCounter { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. } => state
                 .objects
                 .get(object_id)
                 .map(|o| o.controller)
                 .unwrap_or(PlayerId(0)),
+            ProposedEvent::AddCounter { placement, .. } => match placement {
+                CounterPlacement::Object { object_id, .. } => state
+                    .objects
+                    .get(object_id)
+                    .map(|o| o.controller)
+                    .unwrap_or(PlayerId(0)),
+                CounterPlacement::Player { player_id, .. }
+                | CounterPlacement::Energy { player_id, .. } => *player_id,
+            },
             ProposedEvent::MoveCounter {
                 source_id,
                 destination_id,
@@ -542,10 +652,10 @@ impl ProposedEvent {
             | ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
-            | ProposedEvent::AddCounter { object_id, .. }
             | ProposedEvent::RemoveCounter { object_id, .. }
             | ProposedEvent::Discard { object_id, .. }
             | ProposedEvent::Sacrifice { object_id, .. } => Some(*object_id),
+            ProposedEvent::AddCounter { placement, .. } => placement.object_id(),
             ProposedEvent::MoveCounter {
                 source_id,
                 destination_id,
@@ -581,8 +691,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proposed_event_has_21_variants() {
-        // Verify all 21 variants compile
+    fn proposed_event_variants_compile() {
+        // Verify all variants compile, including the parameterized counter
+        // placement recipients.
         let events: Vec<ProposedEvent> = vec![
             ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
             ProposedEvent::Damage {
@@ -624,9 +735,28 @@ mod tests {
                 applied: HashSet::new(),
             },
             ProposedEvent::AddCounter {
-                actor: PlayerId(0),
-                object_id: ObjectId(1),
-                counter_type: CounterType::Plus1Plus1,
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(0),
+                    object_id: ObjectId(1),
+                    counter_type: CounterType::Plus1Plus1,
+                },
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::AddCounter {
+                placement: CounterPlacement::Player {
+                    actor: PlayerId(0),
+                    player_id: PlayerId(0),
+                    counter_kind: PlayerCounterKind::Poison,
+                },
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::AddCounter {
+                placement: CounterPlacement::Energy {
+                    actor: PlayerId(0),
+                    player_id: PlayerId(0),
+                },
                 count: 1,
                 applied: HashSet::new(),
             },
@@ -669,6 +799,7 @@ mod tests {
                     controller: PlayerId(0),
                     attach_to: None,
                 }),
+                copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: 1,
                 applied: HashSet::new(),
@@ -707,7 +838,7 @@ mod tests {
                 applied: HashSet::new(),
             },
         ];
-        assert_eq!(events.len(), 21);
+        assert_eq!(events.len(), 23);
     }
 
     #[test]
@@ -731,6 +862,77 @@ mod tests {
         set.insert(id1);
         assert!(set.contains(&id2));
         assert!(!set.contains(&id3));
+    }
+
+    #[test]
+    fn add_counter_object_serde_keeps_legacy_flat_shape() {
+        let event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let value = serde_json::to_value(&event).unwrap();
+        let add_counter = value
+            .get("AddCounter")
+            .expect("externally tagged AddCounter variant")
+            .as_object()
+            .expect("AddCounter payload object");
+        assert!(add_counter.get("placement").is_none());
+        assert!(add_counter.get("actor").is_some());
+        assert!(add_counter.get("object_id").is_some());
+        assert!(add_counter.get("counter_type").is_some());
+
+        let roundtrip: ProposedEvent = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            roundtrip,
+            ProposedEvent::AddCounter {
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(0),
+                    object_id: ObjectId(1),
+                    counter_type: CounterType::Plus1Plus1,
+                },
+                count: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn add_counter_object_serde_accepts_legacy_missing_actor() {
+        let event = ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let mut value = serde_json::to_value(&event).unwrap();
+        value
+            .get_mut("AddCounter")
+            .and_then(|payload| payload.as_object_mut())
+            .expect("AddCounter payload object")
+            .remove("actor");
+
+        let roundtrip: ProposedEvent = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            roundtrip,
+            ProposedEvent::AddCounter {
+                placement: CounterPlacement::Object {
+                    actor: PlayerId(0),
+                    object_id: ObjectId(1),
+                    counter_type: CounterType::Plus1Plus1,
+                },
+                count: 1,
+                ..
+            }
+        ));
     }
 
     #[test]

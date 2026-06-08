@@ -102,7 +102,10 @@ fn controls_attraction(state: &GameState, player: PlayerId) -> bool {
         state
             .objects
             .get(id)
-            .is_some_and(|o| o.controller == player && is_attraction_permanent(o))
+            // CR 702.26b: a phased-out permanent is treated as though it does not exist.
+            .is_some_and(|o| {
+                o.controller == player && o.is_phased_in() && is_attraction_permanent(o)
+            })
     })
 }
 
@@ -112,7 +115,8 @@ fn visited_attraction_ids(state: &GameState, player: PlayerId, roll: u8) -> Vec<
         .iter()
         .filter_map(|id| {
             let obj = state.objects.get(id)?;
-            if obj.controller != player || !is_attraction_permanent(obj) {
+            // CR 702.26b: a phased-out permanent is treated as though it does not exist.
+            if obj.controller != player || !obj.is_phased_in() || !is_attraction_permanent(obj) {
                 return None;
             }
             if obj.attraction_lights.contains(&roll) {

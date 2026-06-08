@@ -14,10 +14,6 @@
 //! `auto_advance` from `Phase::Untap`, and assert the Mill effect lands the
 //! trigger on the stack with the expected `Effect::Mill` resolution shape.
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
@@ -27,14 +23,7 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        return None;
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
-}
+use crate::support::shared_card_db as load_db;
 
 /// Stack the controller's library so the Mill effect has cards to move.
 fn seed_library(runner: &mut GameRunner, count: usize) {
@@ -244,7 +233,10 @@ fn ripples_of_undeath_triggers_after_being_cast_and_next_turn() {
                 let _ = runner.act(GameAction::PassPriority);
             }
             WaitingFor::DeclareAttackers { .. } => {
-                let _ = runner.act(GameAction::DeclareAttackers { attacks: vec![] });
+                let _ = runner.act(GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                });
             }
             WaitingFor::DeclareBlockers { .. } => {
                 let _ = runner.act(GameAction::DeclareBlockers {

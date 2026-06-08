@@ -139,19 +139,8 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Dredge(g) => Keyword::Dredge(int_or_gap(g, "Rule::Dredge", path)?),
         Rule::Modular(g) => Keyword::Modular(int_or_gap(g, "Rule::Modular", path)?),
         Rule::Mobilize(g) => Keyword::Mobilize(quantity::convert(g)?),
-        // CR 702.60a: Ripple N. The engine keyword is currently the fixed
-        // Oracle corpus shape (Ripple 4), so strict-fail any non-4 payload
-        // instead of dropping semantic data.
-        Rule::Ripple(g) => {
-            let count = int_or_gap(g, "Rule::Ripple", path)?;
-            if count != 4 {
-                return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "Keyword::Ripple",
-                    needed_variant: format!("parameterized Ripple {count}"),
-                });
-            }
-            Keyword::Ripple
-        }
+        // CR 702.60a: Ripple N — engine now carries the parameterized count.
+        Rule::Ripple(g) => Keyword::Ripple(int_or_gap(g, "Rule::Ripple", path)?),
         Rule::Saddle(g) => Keyword::Saddle(int_or_gap(g, "Rule::Saddle", path)?),
         Rule::Soulshift(g) => Keyword::Soulshift(int_or_gap(g, "Rule::Soulshift", path)?),
         Rule::Poisonous(n) => Keyword::Poisonous(non_negative(*n)?),
@@ -178,7 +167,11 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Dash(c) => Keyword::Dash(pure_mana(c, "Rule::Dash", path)?),
         Rule::Disturb(c) => Keyword::Disturb(pure_mana(c, "Rule::Disturb", path)?),
         Rule::Disguise(c) => Keyword::Disguise(pure_mana(c, "Rule::Disguise", path)?),
-        Rule::Echo(c) => Keyword::Echo(pure_mana(c, "Rule::Echo", path)?),
+        Rule::Echo(c) => Keyword::Echo(engine::types::keywords::EchoCost::Mana(pure_mana(
+            c,
+            "Rule::Echo",
+            path,
+        )?)),
         Rule::Embalm(c) => Keyword::Embalm(pure_mana(c, "Rule::Embalm", path)?),
         Rule::Emerge(c) => Keyword::Emerge(pure_mana(c, "Rule::Emerge", path)?),
         Rule::Encore(c) => Keyword::Encore(pure_mana(c, "Rule::Encore", path)?),
@@ -296,10 +289,13 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // the cost as `Box<Cost>`; engine takes only the mana cost.
         Rule::WebSlinging(c) => Keyword::WebSlinging(pure_mana(c, "Rule::WebSlinging", path)?),
 
-        // CR 702.47a: Splice onto [quality] [cost]. The engine keyword
-        // stores the quality string only (matching the native parser);
-        // splice-cost payment is not represented in the current keyword type.
-        Rule::SpliceOnto(spells, _cost) => Keyword::Splice(splice_quality(spells, path)?),
+        // CR 702.47a: Splice onto [quality] [cost]. The engine keyword carries
+        // both the quality string and the splice cost paid as an additional
+        // cost when the card is spliced onto a host spell.
+        Rule::SpliceOnto(spells, cost) => Keyword::Splice {
+            subtype: splice_quality(spells, path)?,
+            cost: pure_mana(cost, "Rule::SpliceOnto", path)?,
+        },
 
         // CR 702.56a: Replicate {cost} — additional-cost-on-cast copy
         // mechanic. Engine carries only the mana cost.

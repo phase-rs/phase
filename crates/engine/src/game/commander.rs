@@ -64,7 +64,8 @@ pub fn controls_any_commander(state: &GameState, player: PlayerId) -> bool {
         state
             .objects
             .get(id)
-            .is_some_and(|obj| obj.controller == player && obj.is_commander)
+            // CR 702.26b: a phased-out permanent is treated as though it does not exist.
+            .is_some_and(|obj| obj.is_commander && obj.controller == player && obj.is_phased_in())
     })
 }
 
@@ -77,7 +78,13 @@ pub fn controls_own_commander(state: &GameState, player: PlayerId) -> bool {
         state
             .objects
             .get(id)
-            .is_some_and(|obj| obj.is_commander && obj.owner == player && obj.controller == player)
+            // CR 702.26b: a phased-out permanent is treated as though it does not exist.
+            .is_some_and(|obj| {
+                obj.is_commander
+                    && obj.owner == player
+                    && obj.controller == player
+                    && obj.is_phased_in()
+            })
     })
 }
 
@@ -528,6 +535,28 @@ mod tests {
 
         assert!(commander_eligible_for_zone_return(&state).is_none());
         let _ = obj_id; // suppress unused warning
+    }
+
+    // --- Control-Condition Phasing Tests (CR 702.26b) ---
+
+    #[test]
+    fn phased_out_commander_excluded_from_control_conditions() {
+        use crate::game::game_object::PhaseOutCause;
+        use crate::game::phasing::phase_out_object;
+
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kaalia", vec![]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
+
+        // Phased in: both "you control a commander" conditions hold.
+        assert!(controls_any_commander(&state, PlayerId(0)));
+        assert!(controls_own_commander(&state, PlayerId(0)));
+
+        // CR 702.26b: a phased-out commander is treated as though it does not exist.
+        phase_out_object(&mut state, cmd_id, PhaseOutCause::Directly, &mut events);
+        assert!(!controls_any_commander(&state, PlayerId(0)));
+        assert!(!controls_own_commander(&state, PlayerId(0)));
     }
 
     // --- Color Identity Tests ---

@@ -16,11 +16,16 @@ import { useConcedeHandler } from "../useConcedeHandler";
 // ---- Mocks -----------------------------------------------------------------
 
 const dispatchMock = vi.fn();
-const clearGameMock = vi.fn();
+const clearGameMock = vi.fn().mockResolvedValue(undefined);
+const clearPromptOverlayStateMock = vi.fn();
 const recordMatchResultMock = vi.fn();
 const reportActiveMatchConcessionMock = vi.fn();
 const sendConcedeMock = vi.fn();
 const navigateMock = vi.fn();
+
+vi.mock("../../game/sessionCleanup", () => ({
+  clearPromptOverlayState: () => clearPromptOverlayStateMock(),
+}));
 
 vi.mock("../../stores/gameStore", () => ({
   useGameStore: {
@@ -65,6 +70,8 @@ function wrapper({ children }: { children: ReactNode }) {
 beforeEach(() => {
   dispatchMock.mockReset();
   clearGameMock.mockReset();
+  clearGameMock.mockResolvedValue(undefined);
+  clearPromptOverlayStateMock.mockReset();
   recordMatchResultMock.mockReset();
   reportActiveMatchConcessionMock.mockReset();
   sendConcedeMock.mockReset();
@@ -106,6 +113,7 @@ describe("useConcedeHandler", () => {
       type: "Concede",
       data: { player_id: 0 },
     });
+    expect(clearPromptOverlayStateMock).toHaveBeenCalledTimes(1);
     expect(clearGameMock).toHaveBeenCalledWith("g1");
     expect(navigateMock).toHaveBeenCalledWith("/");
 
@@ -113,8 +121,10 @@ describe("useConcedeHandler", () => {
     // Without the await, a future refactor would silently regress and the
     // WasmAdapter singleton would retain the conceded game.
     const dispatchOrder = dispatchMock.mock.invocationCallOrder[0];
+    const overlayOrder = clearPromptOverlayStateMock.mock.invocationCallOrder[0];
     const clearOrder = clearGameMock.mock.invocationCallOrder[0];
-    expect(dispatchOrder).toBeLessThan(clearOrder);
+    expect(dispatchOrder).toBeLessThan(overlayOrder);
+    expect(overlayOrder).toBeLessThan(clearOrder);
   });
 
   it("isDraft branch records match loss then clears + navigates to draft resume", async () => {
