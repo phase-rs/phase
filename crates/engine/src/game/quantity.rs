@@ -15,10 +15,10 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, AttackScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
-    ControllerRef, CountScope, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter,
-    ZoneRef,
+    AggregateFunction, AttackScope, BasicLandType, CardTypeSetSource, CastManaObjectScope,
+    CastManaSpentMetric, ControllerRef, CountScope, FilterProp, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -1779,51 +1779,27 @@ fn resolve_ref(
         QuantityRef::BasicLandTypeCount {
             controller: land_controller,
         } => {
-            let target_player = ability.and_then(|a| {
-                a.targets.iter().find_map(|target| match target {
-                    TargetRef::Player(player) => Some(*player),
-                    TargetRef::Object(_) => None,
-                })
-            });
-            let basic_subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
+            let filter =
+                TargetFilter::Typed(TypedFilter::land().controller(land_controller.clone()));
             let mut found = HashSet::new();
-            for &id in state.battlefield.iter() {
+            for &id in crate::game::targeting::zone_object_ids(
+                state,
+                crate::types::zones::Zone::Battlefield,
+            )
+            .iter()
+            {
+                if !matches_target_filter(state, id, &filter, &filter_ctx) {
+                    continue;
+                }
                 if let Some(obj) = state.objects.get(&id) {
-                    let controller_matches = match land_controller {
-                        ControllerRef::You => obj.controller == controller,
-                        ControllerRef::Opponent => obj.controller != controller,
-                        ControllerRef::ScopedPlayer => {
-                            obj.controller == scoped_player_or_controller(ability, controller)
-                        }
-                        ControllerRef::TargetPlayer => target_player == Some(obj.controller),
-                        ControllerRef::ParentTargetController => ability
-                            .and_then(|ability| {
-                                crate::game::ability_utils::parent_target_controller(ability, state)
-                            })
-                            .is_some_and(|player| player == obj.controller),
-                        ControllerRef::DefendingPlayer => {
-                            crate::game::combat::defending_player_for_attacker(state, ctx.source)
-                                .is_some_and(|pid| pid == obj.controller)
-                        }
-                        // CR 613.1: Land controlled by the source's chosen player.
-                        ControllerRef::SourceChosenPlayer => {
-                            crate::game::game_object::source_chosen_player(state, ctx.source)
-                                .is_some_and(|pid| pid == obj.controller)
-                        }
-                        // CR 608.2c + CR 109.4: Land controlled by a chosen player.
-                        ControllerRef::ChosenPlayer { index } => ability
-                            .and_then(|a| a.chosen_players.get(*index as usize).copied())
-                            .is_some_and(|pid| pid == obj.controller),
-                        // CR 603.2 + CR 109.4: Land controlled by the triggering player.
-                        ControllerRef::TriggeringPlayer => {
-                            triggering_event_player(state).is_some_and(|pid| pid == obj.controller)
-                        }
-                    };
-                    if controller_matches && obj.card_types.core_types.contains(&CoreType::Land) {
-                        for subtype in &basic_subtypes {
-                            if obj.card_types.subtypes.iter().any(|s| s == subtype) {
-                                found.insert(*subtype);
-                            }
+                    for land_type in BasicLandType::all() {
+                        if obj
+                            .card_types
+                            .subtypes
+                            .iter()
+                            .any(|subtype| subtype == land_type.as_subtype_str())
+                        {
+                            found.insert(*land_type);
                         }
                     }
                 }
@@ -9488,5 +9464,95 @@ mod tests {
 
         // 3 + 5 = 8 from LKI; pre-fix this returned 0 because obj.power was None.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 8);
+    }
+
+    fn add_basic_land(state: &mut GameState, controller: PlayerId, subtype: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.objects.len() as u64 + 100),
+            controller,
+            subtype.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes.push(subtype.to_string());
+        id
+    }
+
+    fn domain_expr_for(controller: ControllerRef) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::BasicLandTypeCount { controller },
+        }
+    }
+
+    fn domain_expr() -> QuantityExpr {
+        domain_expr_for(ControllerRef::You)
+    }
+
+    #[test]
+    fn domain_counts_distinct_basic_land_types() {
+        // CR 305.6: domain counts distinct basic land types, not land count.
+        let mut state = GameState::new_two_player(42);
+        add_basic_land(&mut state, PlayerId(0), "Forest");
+        add_basic_land(&mut state, PlayerId(0), "Forest"); // duplicate — still counts as 1
+        add_basic_land(&mut state, PlayerId(0), "Island");
+        let expr = domain_expr();
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+    }
+
+    #[test]
+    fn domain_phased_out_land_does_not_count() {
+        // CR 702.26b: a phased-out permanent is treated as though it does not
+        // exist — its land type must not contribute to domain.
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = GameState::new_two_player(42);
+        let plains = add_basic_land(&mut state, PlayerId(0), "Plains");
+        let island = add_basic_land(&mut state, PlayerId(0), "Island");
+        let mountain = add_basic_land(&mut state, PlayerId(0), "Mountain");
+        let expr = domain_expr();
+
+        // Three distinct types phased in → domain 3.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
+
+        // Phase out Mountain — domain must drop to 2.
+        state.objects.get_mut(&mountain).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+
+        // Also phase out Island — domain drops to 1 (only Plains remains).
+        state.objects.get_mut(&island).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+
+        // Opponent's phased-in land does not affect caster's domain either:
+        // this assertion isolates controller scope from the phasing check.
+        let _ = plains; // silence unused-variable warning
+        let opp_swamp = add_basic_land(&mut state, PlayerId(1), "Swamp");
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+        state.objects.get_mut(&opp_swamp).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+    }
+
+    #[test]
+    fn domain_opponent_scope_uses_filter_phasing_choke_point() {
+        // CR 702.26b: when domain is scoped to opponents, an opponent's phased-out
+        // basic land type is excluded by `matches_target_filter`.
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = GameState::new_two_player(42);
+        add_basic_land(&mut state, PlayerId(0), "Plains");
+        add_basic_land(&mut state, PlayerId(1), "Swamp");
+        let mountain = add_basic_land(&mut state, PlayerId(1), "Mountain");
+        let expr = domain_expr_for(ControllerRef::Opponent);
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+        state.objects.get_mut(&mountain).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
     }
 }

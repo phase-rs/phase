@@ -493,6 +493,7 @@ fn redundancy_delta(
         // policy treats it as a no-op here; the cascade resolver handles the
         // cast-or-decline choice through its own WaitingFor state.
         | Effect::Cascade
+        | Effect::Ripple { .. }
         | Effect::Reveal { .. }
         // CR 702.xxx: Prepare (Strixhaven) — no redundancy detection.
         | Effect::BecomePrepared { .. }

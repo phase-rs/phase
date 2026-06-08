@@ -129,6 +129,7 @@ pub mod reveal_hand;
 pub mod reveal_top;
 pub mod reveal_until;
 pub mod ring;
+pub mod ripple;
 pub mod roll_die;
 pub mod sacrifice;
 pub mod scry;
@@ -585,8 +586,10 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             effect_kind,
                         });
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
+                    // may already have surfaced its own `EffectZoneChoice` during the
+                    // resumed member's entry.
+                    crate::game::replacement::park_waiting_for(state, player);
                     paused = true;
                     break;
                 }
@@ -619,6 +622,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             state,
             &mut events[events_before_drain..],
         );
+        // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
+        // the whole ChangeZone entry event is complete, so clear the pre-entry
+        // Devour snapshot. NOT cleared on the `paused` break above (a further
+        // devourer's sacrifice and the remaining members still need it).
+        let _ = state.devour_eligible_snapshot.take();
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
@@ -1978,6 +1986,7 @@ pub fn resolve_effect(
         // CR 702.85a: Cascade — synthesized from the keyword at trigger time;
         // resolver performs the exile-until loop and sets CascadeChoice.
         Effect::Cascade => cascade::resolve(state, ability, events),
+        Effect::Ripple { .. } => ripple::resolve(state, ability, events),
         // CR 702.94a: Miracle trigger resolution — offer the cast from hand.
         Effect::MiracleCast { ref cost } => {
             state.waiting_for = WaitingFor::CastOffer {
@@ -2157,6 +2166,15 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     // not spell/ability targets). Inspect directly so "the rest" / "those
     // cards" sub-abilities chained off exile-all effects still record the set.
     if let Effect::GrantCastingPermission { target, .. } = effect {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
+    // CR 608.2c + CR 707.2: `CopyTokenOf` may carry `TrackedSet` on
+    // `target` while `target_filter()` surfaces `owner` (context-ref copy
+    // sources). Sin, Spira's Punishment — random exile publishes the set for
+    // the chained copy.
+    if let Effect::CopyTokenOf { target, .. } = effect {
         if filter_references_tracked_set(target) {
             return true;
         }
@@ -2569,10 +2587,32 @@ fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
 /// True if any object-target slot of the effect references the per-iteration
 /// object via a parent context ref. Member-driven `repeat_for: ObjectCount`
 /// loops use this to decide whether to rebind the parent target each iteration.
+fn filter_refs_same_name_as_parent_target(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SameNameAsParentTarget)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_refs_same_name_as_parent_target)
+        }
+        TargetFilter::Not { filter } => filter_refs_same_name_as_parent_target(filter),
+        _ => false,
+    }
+}
+
 fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
-    effect_parent_ref_slots(effect)
+    if effect_parent_ref_slots(effect)
         .iter()
         .any(|f| filter_refs_parent_target(f))
+    {
+        return true;
+    }
+    // CR 608.2c: Doubling Chant — `repeat_for: ObjectCount` over creatures you
+    // control with a `SearchLibrary` filter using `SameNameAsParentTarget` must
+    // rebind the parent target each iteration even though the parent-ref lives on
+    // the search filter, not a `TargetFilter::ParentTarget` slot.
+    matches!(effect, Effect::SearchLibrary { filter, .. } if filter_refs_same_name_as_parent_target(filter))
 }
 
 /// Recurse into compound filters so a wrapped `ParentTargetController` is
@@ -2631,6 +2671,24 @@ fn has_kind_driven_repeat(ability: &ResolvedAbility) -> bool {
             qty: QuantityRef::DistinctCounterKindsAmong { .. },
         })
     )
+}
+
+/// CR 608.2c + CR 608.2d: Doubling Chant — `repeat_for: ObjectCount` with a
+/// per-iteration parent ref (`SameNameAsParentTarget` on `SearchLibrary`) makes
+/// its "you may" apply per iterated creature, not once up front. Suppress the
+/// single optional gate in `resolve_chain_body` and fire optionality inside the
+/// `repeat_for` loop instead (mirrors `has_kind_driven_repeat`).
+fn has_member_driven_repeat(ability: &ResolvedAbility) -> bool {
+    matches!(
+        ability.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { .. },
+        })
+    ) && effect_iterates_over_parent_target(&ability.effect)
+}
+
+fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &ResolvedAbility) -> bool {
+    has_member_driven_repeat(&ability_with_event_context_targets(state, ability))
 }
 
 fn rebind_iterated_counter_kind(
@@ -3781,7 +3839,10 @@ fn resolve_chain_body(
     // accept another. Suppress the single up-front gate here; the `repeat_for`
     // loop below fires its own per-iteration `OptionalEffectChoice` for each
     // counter kind (see the `kind_driven` optional path in the loop).
-    if ability.optional && !has_kind_driven_repeat(ability) {
+    if ability.optional
+        && !has_kind_driven_repeat(ability)
+        && !has_member_driven_repeat_after_hydration(state, ability)
+    {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);
         let may_trigger_key = ability
@@ -4171,17 +4232,14 @@ fn resolve_chain_body(
                                 &mut iter_ability,
                                 iterated_counter_kinds[iteration].clone(),
                             );
-                            // CR 608.2c + CR 608.2d: when the per-kind action is
-                            // optional (Bribe Taker's "you may"), this iteration
-                            // must route through `resolve_ability_chain` so the
-                            // up-front optional gate fires its OWN
-                            // `OptionalEffectChoice` for THIS kind (decline →
-                            // place nothing for this kind and advance; accept →
-                            // the `ChooseOneOf` branch prompt). The loop owns
-                            // iteration, so clear `repeat_for` on the clone to
-                            // prevent re-entering this loop (the up-front gate at
-                            // the top of `resolve_chain_body` is suppressed for
-                            // kind-driven loops via `has_kind_driven_repeat`).
+                        }
+                        // CR 608.2c + CR 608.2d: per-iteration optional actions
+                        // (Bribe Taker per counter kind; Doubling Chant per
+                        // creature search) route through `resolve_ability_chain`
+                        // so each iteration fires its own `OptionalEffectChoice`.
+                        // Clear `repeat_for` on the clone so the inner chain does
+                        // not re-enter this outer loop.
+                        if kind_driven || (member_driven && iter_ability.optional) {
                             iter_ability.repeat_for = None;
                         }
                         if let (true, Effect::CopySpell { retarget, .. }) =
@@ -4193,13 +4251,13 @@ fn resolve_chain_body(
                     } else {
                         effective
                     };
-                // CR 608.2d: A kind-driven iteration whose action is optional
-                // fires its per-kind "you may" gate (and any accepted
-                // `ChooseOneOf` branch prompt) through the full chain. All other
-                // iterations resolve the effect directly — `resolve_effect` does
-                // not check `optional`, which is correct because non-kind loops
-                // apply their `optional` once up front in `resolve_chain_body`.
-                if kind_driven && iter_effective.optional {
+                // CR 608.2d: A kind-driven or member-driven iteration whose action
+                // is optional fires its per-iteration "you may" gate through the
+                // full chain. All other iterations resolve the effect directly —
+                // `resolve_effect` does not check `optional`, which is correct
+                // because non-per-iteration loops apply their `optional` once up
+                // front in `resolve_chain_body`.
+                if (kind_driven || member_driven) && iter_effective.optional {
                     // CR 608.2c: pass a non-zero depth so the depth==0 prelude
                     // (chain-local state clearing, resolution counter) does not
                     // re-run mid-loop — this iteration continues the current
@@ -4976,6 +5034,7 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::RevealedHasCardType {
             card_type,
             additional_filter,
+            subtype_filter,
         } => {
             let subject_id = state
                 .last_revealed_ids
@@ -4985,6 +5044,18 @@ pub(crate) fn evaluate_condition(
             let type_matches = subject_id
                 .map(|id| super::printed_cards::object_has_core_type(state, id, *card_type))
                 .unwrap_or(false);
+            // CR 205.3m: Match the revealed card's subtype against the subtype filter.
+            let subtype_matches = match subtype_filter.as_ref() {
+                None => true,
+                Some(filter) => subject_id.is_some_and(|id| {
+                    crate::game::filter::matches_target_filter(
+                        state,
+                        id,
+                        filter.as_ref(),
+                        &crate::game::filter::FilterContext::from_ability(ability),
+                    )
+                }),
+            };
             let filter_matches = match additional_filter {
                 // CR 205.3m: "of the chosen type" — check the revealed card's subtype
                 // against the source permanent's chosen creature type.
@@ -5009,7 +5080,7 @@ pub(crate) fn evaluate_condition(
                 }
                 None => true,
             };
-            type_matches && filter_matches
+            type_matches && subtype_matches && filter_matches
         }
         // CR 400.7 + CR 608.2c: source permanent entered the battlefield this turn.
         // For the "unless ~ entered this turn" sense, wrap with `Not`.
@@ -13312,6 +13383,7 @@ mod tests {
         let land_cond = AbilityCondition::RevealedHasCardType {
             card_type: CoreType::Land,
             additional_filter: None,
+            subtype_filter: None,
         };
 
         // Empty trackers — no reveal, no zone change: condition is false.
@@ -13411,6 +13483,7 @@ mod tests {
         .condition(AbilityCondition::RevealedHasCardType {
             card_type: CoreType::Land,
             additional_filter: None,
+            subtype_filter: None,
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
@@ -15335,6 +15408,307 @@ mod tests {
                 }
             ),
             None
+        );
+    }
+
+    /// Issue #2405: Broken Bond — optional hand→battlefield land put must not
+    /// consume the land-drop counter (CR 305.4).
+    #[test]
+    fn issue_2405_broken_bond_land_put_does_not_consume_land_drop() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Destroy target artifact or enchantment. You may put a land card from your hand onto the battlefield.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("land put sub");
+
+        let mut state = GameState::new_two_player(42);
+        state.lands_played_this_turn = 1;
+        state.players[0].lands_played_this_turn = 1;
+        let _played_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let hand_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        for id in [_played_land, hand_land] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Land];
+        }
+        let mut ability =
+            crate::game::ability_utils::build_resolved_from_def(sub, ObjectId(999), PlayerId(0));
+        ability.optional = false;
+        ability.context.optional_effect_performed = true;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.lands_played_this_turn, 1,
+            "effect-driven land put must not consume land drop"
+        );
+        assert!(
+            state.battlefield.contains(&hand_land),
+            "land must reach battlefield, waiting_for={:?}",
+            state.waiting_for
+        );
+    }
+
+    /// Issue #2403: Sin, Spira's Punishment — random exile must publish a
+    /// tracked set so the chained `CopyTokenOf` creates a tapped copy.
+    #[test]
+    fn issue_2403_sin_spira_random_exile_copy_token_from_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+
+        let gy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_card).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_name = "Grizzly Bears".to_string();
+        }
+        state.players[0].graveyard.push_back(gy_card);
+
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Sin, Spira's Punishment".to_string(),
+            Zone::Stack,
+        );
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Exile a permanent card from your graveyard at random, then create a tapped token that's a copy of that card.",
+            AbilityKind::Spell,
+        );
+        let mut ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+        ability.target_selection_mode = crate::types::ability::TargetSelectionMode::Random;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).expect("copy token created");
+        assert!(token.is_token);
+        assert!(token.tapped);
+        assert_eq!(token.name, "Grizzly Bears");
+        assert_eq!(state.objects[&gy_card].zone, Zone::Exile);
+    }
+
+    /// Issue #2400: Doubling Chant — `repeat_for: ObjectCount` over controlled
+    /// creatures must drive the `SearchLibrary` loop when the search filter uses
+    /// `SameNameAsParentTarget`, not silently produce zero iterations.
+    #[test]
+    fn issue_2400_doubling_chant_member_driven_search_iterations() {
+        let mut state = GameState::new_two_player(42);
+
+        for (card_id, name) in [(CardId(1), "Bear"), (CardId(2), "Elephant")] {
+            let id = create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let library_bear = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&library_bear)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let library_elephant = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Elephant".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&library_elephant)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let library_bear_noncreature = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Doubling Chant".to_string(),
+            Zone::Stack,
+        );
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "For each creature you control, you may search your library for a creature card with the same name as that creature. Put those cards onto the battlefield, then shuffle.",
+            AbilityKind::Spell,
+        );
+        let ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        let pending = state
+            .pending_repeat_iteration
+            .as_ref()
+            .expect("first optional prompt must stash the remaining iteration");
+        assert_eq!(
+            pending.total_iterations, 2,
+            "two controlled creatures imply two search iterations"
+        );
+        assert_eq!(pending.next_iteration, 1);
+        assert_eq!(pending.tracked_members.len(), 2);
+
+        let first_member = pending.tracked_members[0];
+        let first_name = state.objects.get(&first_member).unwrap().name.clone();
+        let expected_first_card = match first_name.as_str() {
+            "Bear" => library_bear,
+            "Elephant" => library_elephant,
+            other => panic!("unexpected iterated creature {other}"),
+        };
+        let other_card = if expected_first_card == library_bear {
+            library_elephant
+        } else {
+            library_bear
+        };
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        let WaitingFor::SearchChoice { cards, count, .. } = &state.waiting_for else {
+            panic!(
+                "accepting first per-creature optional search must enter SearchChoice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*count, 1);
+        assert!(
+            cards.contains(&expected_first_card),
+            "SearchChoice must offer same-named creature card {expected_first_card:?} for {first_name}"
+        );
+        assert!(
+            !cards.contains(&other_card),
+            "SearchChoice must not offer a creature with the other iterated name"
+        );
+        assert!(
+            !cards.contains(&library_bear_noncreature),
+            "SearchChoice must still require a creature card"
+        );
+    }
+
+    #[test]
+    fn dichotomancy_member_driven_search_uses_target_players_library() {
+        let mut state = GameState::new_two_player(42);
+
+        let battlefield_relic = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battlefield_relic).unwrap();
+            obj.controller = PlayerId(1);
+            obj.tapped = true;
+            obj.card_types.core_types = vec![crate::types::card_type::CoreType::Artifact];
+        }
+
+        let caster_library_relic = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Relic".to_string(),
+            Zone::Library,
+        );
+        let opponent_library_relic = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Relic".to_string(),
+            Zone::Library,
+        );
+
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Dichotomancy".to_string(),
+            Zone::Stack,
+        );
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "For each tapped nonland permanent target opponent controls, search that player's library for a card with the same name as that permanent and put it onto the battlefield under your control. Then that player shuffles.",
+            AbilityKind::Spell,
+        );
+        let mut ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+        ability.targets = vec![TargetRef::Player(PlayerId(1))];
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let WaitingFor::SearchChoice {
+            player,
+            cards,
+            count,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "Dichotomancy must enter a search choice for the target player's library, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*player, PlayerId(0), "the caster searches that library");
+        assert_eq!(*count, 1);
+        assert!(
+            cards.contains(&opponent_library_relic),
+            "search must offer same-named card from the target opponent's library"
+        );
+        assert!(
+            !cards.contains(&caster_library_relic),
+            "search must not offer same-named card from the caster's library"
         );
     }
 }

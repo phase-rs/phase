@@ -1655,6 +1655,87 @@ pub fn has_banding(state: &GameState, object_id: ObjectId) -> bool {
         .is_some_and(|obj| obj.has_keyword(&Keyword::Banding))
 }
 
+fn bands_with_other_qualities(state: &GameState, object_id: ObjectId) -> Vec<&str> {
+    state
+        .objects
+        .get(&object_id)
+        .map(|obj| {
+            obj.keywords
+                .iter()
+                .filter_map(|keyword| match keyword {
+                    Keyword::BandsWithOther(quality) => Some(quality.as_str()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn object_matches_bands_with_other_quality(
+    state: &GameState,
+    object_id: ObjectId,
+    quality: &str,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if quality.eq_ignore_ascii_case("legend") {
+        return obj.card_types.supertypes.contains(&Supertype::Legendary);
+    }
+    obj.card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype.eq_ignore_ascii_case(quality))
+}
+
+fn has_bands_with_other_quality(state: &GameState, object_id: ObjectId, quality: &str) -> bool {
+    bands_with_other_qualities(state, object_id)
+        .into_iter()
+        .any(|other| other.eq_ignore_ascii_case(quality))
+}
+
+/// CR 702.22j/k: Damage-assignment control also applies to "bands with other"
+/// when the relevant blocker/attacker set contains a qualifying keyword-holder
+/// and another creature of the same quality.
+pub fn has_bands_with_other_damage_assignment_group(
+    state: &GameState,
+    creatures: &[ObjectId],
+) -> bool {
+    creatures.iter().any(|&holder| {
+        bands_with_other_qualities(state, holder)
+            .into_iter()
+            .any(|quality| {
+                object_matches_bands_with_other_quality(state, holder, quality)
+                    && creatures.iter().any(|&other| {
+                        other != holder
+                            && object_matches_bands_with_other_quality(state, other, quality)
+                    })
+            })
+    })
+}
+
+fn validate_bands_with_other_declaration(
+    state: &GameState,
+    members: &[ObjectId],
+) -> Result<(), String> {
+    if members.is_empty() {
+        return Err("empty bands-with-other declaration".to_string());
+    }
+    for &holder in members {
+        for quality in bands_with_other_qualities(state, holder) {
+            if object_matches_bands_with_other_quality(state, holder, quality)
+                && has_bands_with_other_quality(state, holder, quality)
+                && members
+                    .iter()
+                    .all(|&member| object_matches_bands_with_other_quality(state, member, quality))
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err("band must satisfy ordinary banding or a shared bands-with-other quality".to_string())
+}
+
 /// CR 702.22: Attackers sharing a `band_id` (declaration order preserved).
 pub fn band_members(combat: &CombatState, band_id: u32) -> Vec<&AttackerInfo> {
     combat
@@ -1667,7 +1748,8 @@ pub fn band_members(combat: &CombatState, band_id: u32) -> Vec<&AttackerInfo> {
 /// CR 702.22c/d: Validate explicit band declarations at declare attackers.
 /// Each band must contain only declared attackers (702.22c), share one attack
 /// target (702.22d), include at least one banding creature, and at most one
-/// non-banding creature (702.22c).
+/// non-banding creature (702.22c), or satisfy a "bands with other [quality]"
+/// declaration over a shared quality.
 pub fn validate_attack_band_declarations(
     state: &GameState,
     attacks: &[(ObjectId, AttackTarget)],
@@ -1713,12 +1795,15 @@ pub fn validate_attack_band_declarations(
             }
         }
 
-        if banding_count == 0 {
-            return Err(format!(
-                "band {band_index} must include at least one banding creature"
-            ));
-        }
-        if non_banding_count > 1 {
+        if banding_count == 0 || non_banding_count > 1 {
+            if validate_bands_with_other_declaration(state, members).is_ok() {
+                continue;
+            }
+            if banding_count == 0 {
+                return Err(format!(
+                    "band {band_index} must include at least one banding creature"
+                ));
+            }
             return Err(format!(
                 "band {band_index} has {non_banding_count} non-banding creatures (max 1)"
             ));
@@ -3492,6 +3577,75 @@ mod tests {
         assert_eq!(combat.attackers[0].band_id, Some(1));
     }
 
+    fn add_wolf_subtype(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Wolf".to_string());
+    }
+
+    fn grant_bands_with_other_wolves(state: &mut GameState, id: ObjectId) {
+        add_wolf_subtype(state, id);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(Keyword::BandsWithOther("Wolf".to_string()));
+    }
+
+    #[test]
+    fn bands_with_other_declaration_assigns_shared_band_id() {
+        let mut state = setup();
+        let wolf_a = create_creature(&mut state, PlayerId(0), "Wolf A", 2, 2);
+        let wolf_b = create_creature(&mut state, PlayerId(0), "Wolf B", 2, 2);
+        grant_bands_with_other_wolves(&mut state, wolf_a);
+        add_wolf_subtype(&mut state, wolf_b);
+
+        let target = AttackTarget::Player(PlayerId(1));
+        declare_attackers_with_bands(
+            &mut state,
+            &[(wolf_a, target), (wolf_b, target)],
+            &[vec![wolf_a, wolf_b]],
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let combat = state.combat.as_ref().unwrap();
+        assert_eq!(combat.attackers[0].band_id, Some(1));
+        assert_eq!(combat.attackers[1].band_id, Some(1));
+    }
+
+    #[test]
+    fn bands_with_other_declaration_rejects_mixed_quality() {
+        let mut state = setup();
+        let wolf = create_creature(&mut state, PlayerId(0), "Wolf", 2, 2);
+        let bear = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        grant_bands_with_other_wolves(&mut state, wolf);
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .keywords
+            .push(Keyword::BandsWithOther("Wolf".to_string()));
+
+        let target = AttackTarget::Player(PlayerId(1));
+        let err = declare_attackers_with_bands(
+            &mut state,
+            &[(wolf, target), (bear, target)],
+            &[vec![wolf, bear]],
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("banding creature"),
+            "expected mixed-quality bands-with-other declaration to fail, got: {err}"
+        );
+    }
+
     #[test]
     fn band_declaration_rejects_two_non_banding_members() {
         let mut state = setup();
@@ -3555,6 +3709,33 @@ mod tests {
                 .get(&blocker)
                 .is_some_and(|attackers| attackers.contains(&hero) && attackers.contains(&pegasus)),
             "blocker_to_attacker must list every propagated band member"
+        );
+    }
+
+    #[test]
+    fn bands_with_other_block_propagates_to_all_members() {
+        let mut state = setup();
+        let wolf_a = create_creature(&mut state, PlayerId(0), "Wolf A", 2, 2);
+        let wolf_b = create_creature(&mut state, PlayerId(0), "Wolf B", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Soldier", 1, 1);
+        grant_bands_with_other_wolves(&mut state, wolf_a);
+        grant_bands_with_other_wolves(&mut state, wolf_b);
+
+        let target = AttackTarget::Player(PlayerId(1));
+        declare_attackers_with_bands(
+            &mut state,
+            &[(wolf_a, target), (wolf_b, target)],
+            &[vec![wolf_a, wolf_b]],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        declare_blockers(&mut state, &[(blocker, wolf_a)], &mut Vec::new()).unwrap();
+
+        let combat = state.combat.as_ref().unwrap();
+        assert!(combat.attackers.iter().all(|a| a.blocked));
+        assert_eq!(
+            combat.blocker_assignments.get(&wolf_b),
+            combat.blocker_assignments.get(&wolf_a)
         );
     }
 

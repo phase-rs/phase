@@ -5068,20 +5068,17 @@ fn parse_damage_prevention_replacement(
         || nom_primitives::scan_contains(working_lower, "deal to you")
     {
         Some(damage_target_controller())
-    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature")
-        || nom_primitives::scan_contains(working_lower, "dealt to ~")
-        || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
-    {
+    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature") {
         Some(DamageTargetFilter::CreatureOnly)
     } else {
         // "prevent all combat damage" with no target → any target
         None
     };
 
-    // CR 301.5 + CR 303.4 + CR 614.1a: Damage prevention scoped to the source's
+    // CR 301.5 + CR 303.4 + CR 615.1a: Damage prevention scoped to the source's
     // attached creature ("equipped creature" / "enchanted creature"). The dedicated
     // `DamageTargetFilter` enum can't express attachment relationships (it covers
-    // only player/creature type axes per CR 614.1a), so route through `valid_card`
+    // only player/creature type axes), so route through `valid_card`
     // — the runtime resolves `EquippedBy`/`EnchantedBy` against the source's own
     // `attached_to` (see `game/filter.rs` `FilterProp::EquippedBy`), correctly
     // scoping the shield to only the attached creature regardless of how many
@@ -5090,17 +5087,25 @@ fn parse_damage_prevention_replacement(
     // any target, which was the Multiclass Baldric / Inviolability / Artifact Ward
     // class of bug.
     let valid_card_filter: Option<TargetFilter> =
-        nom_primitives::scan_at_word_boundaries(working_lower, |input| {
-            preceded(
-                tag::<_, _, OracleError<'_>>("dealt to "),
-                terminated(
-                    parse_attached_subject_target_filter,
-                    alt((value((), eof), value((), multispace1), value((), tag(".")))),
-                ),
-            )
-            .parse(input)
-        })
-        .or_else(|| parse_damage_recipient_valid_card_filter(working_lower));
+        if nom_primitives::scan_contains(working_lower, "dealt to ~")
+            || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
+        {
+            // CR 615.1a: Self-scoped prevention ("If damage would be dealt to ~")
+            // must gate on `valid_card: SelfRef`, not a broad creature damage filter.
+            Some(TargetFilter::SelfRef)
+        } else {
+            nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+                preceded(
+                    tag::<_, _, OracleError<'_>>("dealt to "),
+                    terminated(
+                        parse_attached_subject_target_filter,
+                        alt((value((), eof), value((), multispace1), value((), tag(".")))),
+                    ),
+                )
+                .parse(input)
+            })
+            .or_else(|| parse_damage_recipient_valid_card_filter(working_lower))
+        };
 
     // --- 4. Extract damage source filter ---
     let damage_source_filter = parse_damage_source_filter(working_lower);
@@ -6201,6 +6206,28 @@ mod tests {
         ));
     }
 
+    /// Anti-Venom self-scoped prevention must use `valid_card: SelfRef`, not `CreatureOnly`.
+    #[test]
+    fn anti_venom_self_prevention_uses_valid_card_self_ref() {
+        for text in [
+            "If damage would be dealt to ~, prevent that damage and put that many +1/+1 counters on him.",
+            "If damage would be dealt to and dealt by ~, prevent that damage and put that many +1/+1 counters on him.",
+        ] {
+            let def = parse_replacement_line(text, "Anti-Venom, Horrifying Healer")
+                .expect("Anti-Venom prevention should parse");
+
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "self-scoped prevention must gate on SelfRef: {text}"
+            );
+            assert!(
+                def.damage_target_filter.is_none(),
+                "must not use broad CreatureOnly damage_target_filter: {text}"
+            );
+        }
+    }
+
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
     /// another creature you control, prevent that damage. Put a +1/+1 counter
     /// on that creature for each 1 damage prevented this way."
@@ -6223,7 +6250,6 @@ mod tests {
     /// 3. The rider count resolves to `QuantityRef::EventContextAmount` (the
     ///    prevented amount), via the existing `for each 1 damage prevented
     ///    this way` post-target suffix path.
-
     #[test]
     fn vigor_event_recipient_filter_and_counter_target_rewrite() {
         let def = parse_replacement_line(

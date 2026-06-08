@@ -9,7 +9,7 @@ use super::ability::{
     TargetFilter,
 };
 use super::identifiers::ObjectId;
-use super::keywords::Keyword;
+use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, StepEndManaAction};
 use super::phase::Phase;
 use super::player::PlayerId;
@@ -688,6 +688,22 @@ pub enum StaticMode {
         cost: AbilityCost,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timing_permission: Option<CastTimingPermission>,
+    },
+    /// CR 118.9 + CR 702.29a + CR 702.122a: Controller may pay `cost` instead
+    /// of the printed cost for `keyword` ability activations. Covers New
+    /// Perspectives (cycling, {0}), Heart of Kiran (crew, remove-loyalty),
+    /// Gavi Nest Warden (cycling, {0}, first-per-turn).
+    ///
+    /// `frequency`: None = all activations; Some(OncePerTurn) = first per turn.
+    ///
+    /// Parser-complete structured gap; runtime hook deferred.
+    /// CR 702.29a (docs/MagicCompRules.txt:4202), CR 702.122a (docs/MagicCompRules.txt:4870),
+    /// CR 118.9 (docs/MagicCompRules.txt:1014).
+    AlternativeKeywordCost {
+        keyword: KeywordKind,
+        cost: AbilityCost,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frequency: Option<CastFrequency>,
     },
     /// CR 601.2f: Modifies the mana cost of spells matching `spell_filter`
     /// (or all spells when `None`) by `amount`, in the direction described by `mode`.
@@ -1373,6 +1389,12 @@ impl Hash for StaticMode {
             // CR 107.4f: Parameterized by ManaColor — hash the color so distinct
             // grants (Black vs Red) don't collide.
             StaticMode::PayLifeAsColoredMana { color } => color.hash(state),
+            // CR 118.9: Parameterized by KeywordKind — hash the keyword so
+            // distinct grants (Cycling vs Crew) don't collide. The `cost` and
+            // `frequency` fields are non-Hash / discriminant-covered.
+            StaticMode::AlternativeKeywordCost { keyword, .. } => {
+                keyword.hash(state);
+            }
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
@@ -1394,6 +1416,113 @@ impl Hash for StaticMode {
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
+        }
+    }
+}
+
+impl StaticMode {
+    /// Map bare keyword static modes onto their corresponding keyword identity.
+    pub fn as_keyword(&self) -> Option<Keyword> {
+        match self {
+            StaticMode::Indestructible => Some(Keyword::Indestructible),
+            StaticMode::Shroud => Some(Keyword::Shroud),
+            StaticMode::Hexproof => Some(Keyword::Hexproof),
+            StaticMode::Flying => Some(Keyword::Flying),
+            StaticMode::Vigilance => Some(Keyword::Vigilance),
+            StaticMode::Menace => Some(Keyword::Menace),
+            StaticMode::Reach => Some(Keyword::Reach),
+            StaticMode::Trample => Some(Keyword::Trample),
+            StaticMode::Deathtouch => Some(Keyword::Deathtouch),
+            StaticMode::Lifelink => Some(Keyword::Lifelink),
+            StaticMode::Continuous
+            | StaticMode::CantAttack
+            | StaticMode::CantBlock
+            | StaticMode::CantAttackOrBlock
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
+            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeCast { .. }
+            | StaticMode::CantBeActivated { .. }
+            | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::CantCauseSacrificeOrExile { .. }
+            | StaticMode::CastWithFlash
+            | StaticMode::GrantsExtraVote
+            | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CastWithAlternativeCost { .. }
+            | StaticMode::AlternativeKeywordCost { .. }
+            | StaticMode::ModifyCost { .. }
+            | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::ModifyActivationLimit { .. }
+            | StaticMode::ActivateAsInstant { .. }
+            | StaticMode::CantPayCost { .. }
+            | StaticMode::CantGainLife
+            | StaticMode::CantLoseLife
+            | StaticMode::PlayerProtection(_)
+            | StaticMode::MustAttack
+            | StaticMode::MustAttackPlayer { .. }
+            | StaticMode::MustBlock
+            | StaticMode::MustBlockAttacker { .. }
+            | StaticMode::CantDraw { .. }
+            | StaticMode::DoubleTriggers { .. }
+            | StaticMode::IgnoreHexproof
+            | StaticMode::ExtraBlockers { .. }
+            | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::GraveyardCastPermission { .. }
+            | StaticMode::TopOfLibraryCastPermission { .. }
+            | StaticMode::CastFromHandFree { .. }
+            | StaticMode::ExileCastPermission { .. }
+            | StaticMode::CantBeCountered
+            | StaticMode::CantBeCopied
+            | StaticMode::CantEnterBattlefieldFrom
+            | StaticMode::CantCastFrom { .. }
+            | StaticMode::CantCastDuring { .. }
+            | StaticMode::CantActivateDuring { .. }
+            | StaticMode::PerTurnCastLimit { .. }
+            | StaticMode::PerTurnDrawLimit { .. }
+            | StaticMode::SuppressTriggers { .. }
+            | StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedExceptBy { .. }
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedByMoreThan { .. }
+            | StaticMode::AttachmentRestriction { .. }
+            | StaticMode::Protection
+            | StaticMode::CantBeDestroyed
+            | StaticMode::CantBeRegenerated
+            | StaticMode::FlashBack
+            | StaticMode::CantTap
+            | StaticMode::CantUntap
+            | StaticMode::MustBeBlocked
+            | StaticMode::MustBeBlockedByAll
+            | StaticMode::Goaded
+            | StaticMode::CantAttackAlone
+            | StaticMode::CantBlockAlone
+            | StaticMode::CantCrew
+            | StaticMode::CrewContribution { .. }
+            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayChooseNotToUntap
+            | StaticMode::AdditionalLandDrop { .. }
+            | StaticMode::EmblemStatic
+            | StaticMode::BlockRestriction
+            | StaticMode::NoMaximumHandSize
+            | StaticMode::MaximumHandSize { .. }
+            | StaticMode::MayPlayAdditionalLand
+            | StaticMode::CantHaveKeyword { .. }
+            | StaticMode::CantWinTheGame
+            | StaticMode::CantLoseTheGame
+            | StaticMode::LegendRuleDoesntApply
+            | StaticMode::SpeedCanIncreaseBeyondFour
+            | StaticMode::DefilerCostReduction { .. }
+            | StaticMode::SkipStep { .. }
+            | StaticMode::SpendManaAsAnyColor
+            | StaticMode::PayLifeAsColoredMana { .. }
+            | StaticMode::StepEndUnspentMana { .. }
+            | StaticMode::CanAttackWithDefender
+            | StaticMode::IgnoreLandwalkForBlocking { .. }
+            | StaticMode::CanActivateAbilitiesAsThoughHaste
+            | StaticMode::AssignNoCombatDamage
+            | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::Other(_) => None,
         }
     }
 }
@@ -1429,6 +1558,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CastWithAlternativeCost { cost, .. } => {
                 write!(f, "CastWithAlternativeCost({cost:?})")
+            }
+            StaticMode::AlternativeKeywordCost { keyword, .. } => {
+                write!(f, "AlternativeKeywordCost({keyword:?})")
             }
             StaticMode::ModifyCost { mode, .. } => match mode {
                 CostModifyMode::Reduce => write!(f, "ReduceCost"),
@@ -2322,6 +2454,27 @@ mod tests {
             StaticMode::from_str("NoMaximumHandSize").unwrap(),
             StaticMode::NoMaximumHandSize
         );
+    }
+
+    #[test]
+    fn static_mode_as_keyword_maps_bare_keyword_modes() {
+        let cases = [
+            (StaticMode::Indestructible, Keyword::Indestructible),
+            (StaticMode::Shroud, Keyword::Shroud),
+            (StaticMode::Hexproof, Keyword::Hexproof),
+            (StaticMode::Flying, Keyword::Flying),
+            (StaticMode::Vigilance, Keyword::Vigilance),
+            (StaticMode::Menace, Keyword::Menace),
+            (StaticMode::Reach, Keyword::Reach),
+            (StaticMode::Trample, Keyword::Trample),
+            (StaticMode::Deathtouch, Keyword::Deathtouch),
+            (StaticMode::Lifelink, Keyword::Lifelink),
+        ];
+        for (mode, keyword) in cases {
+            assert_eq!(mode.as_keyword(), Some(keyword));
+        }
+        assert_eq!(StaticMode::Protection.as_keyword(), None);
+        assert_eq!(StaticMode::CantBeBlocked.as_keyword(), None);
     }
 
     #[test]

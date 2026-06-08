@@ -13,10 +13,10 @@ use crate::types::ability::{
     AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter,
-    DamageModification, Duration, Effect, FilterProp, KickerVariant, ManaContribution,
-    ManaProduction, ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant,
-    ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
     RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
     TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier,
@@ -684,7 +684,8 @@ pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
 // - `stack.rs::resolve_top` creates a delayed exile trigger on resolution
 
 /// Synthesize Mobilize N trigger: when this creature attacks, create N 1/1 red
-/// Warrior creature tokens tapped and attacking. Sacrifice them at end of combat.
+/// Warrior creature tokens tapped and attacking. Sacrifice them at the beginning
+/// of the next end step (CR 702.181a).
 pub fn synthesize_mobilize(face: &mut CardFace) {
     use crate::types::ability::PtValue;
     use crate::types::triggers::TriggerMode;
@@ -720,11 +721,27 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
                 enter_with_counters: vec![],
             };
 
+            let sacrifice_at_end_step = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Sacrifice {
+                            target: TargetFilter::LastCreated,
+                            count: qty.clone(),
+                            min_count: 0,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+            );
+
             face.triggers.push(
                 TriggerDefinition::new(TriggerMode::Attacks)
                     .execute(
                         AbilityDefinition::new(AbilityKind::Spell, token_effect)
-                            .duration(Duration::UntilEndOfCombat),
+                            .sub_ability(sacrifice_at_end_step),
                     )
                     .description(
                         "Mobilize — create Warrior tokens tapped and attacking".to_string(),
@@ -1002,6 +1019,28 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
                 .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+                .cda(),
+        );
+    }
+}
+
+/// CR 702.114a + CR 604.3: Devoid is a characteristic-defining ability —
+/// "This object is colorless." Synthesize a SelfRef color-overriding CDA
+/// (`SetColor { colors: [] }`, Layer 5 / CR 613.1e), mirroring
+/// `synthesize_changeling_cda`. This drives the on-battlefield color computation;
+/// a later "becomes [color]" effect (higher timestamp) can still override it.
+///
+/// CR 604.3 also requires Devoid to function in **all** zones, even outside the
+/// game. Off-battlefield color is read from the object's stored `color` /
+/// `base_color` rather than recomputed through layers, so the all-zones half is
+/// handled where those base characteristics are derived (`printed_cards.rs`
+/// builds a devoid face colorless), not here.
+pub fn synthesize_devoid_cda(face: &mut CardFace) {
+    if face.keywords.iter().any(|k| matches!(k, Keyword::Devoid)) {
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetColor { colors: vec![] }])
                 .cda(),
         );
     }
@@ -8367,6 +8406,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     // The Keyword::Crew(N) on the card provides display information.
     synthesize_ninjutsu_family(face);
     synthesize_changeling_cda(face);
+    // CR 702.114a: Devoid — colorless CDA.
+    synthesize_devoid_cda(face);
     synthesize_kicker(face);
     synthesize_buyback(face);
     synthesize_bargain(face);
@@ -9108,15 +9149,25 @@ pub(crate) fn strip_level_gated_keywords(face: &mut CardFace) {
                     )
             )
         })
-        .flat_map(|stat| {
-            stat.modifications.iter().filter_map(|m| match m {
-                ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
-                _ => None,
-            })
-        })
+        .flat_map(keyword_granted_by_level_gated_static)
         .collect();
 
     face.keywords.retain(|kw| !gated.contains(kw));
+}
+
+fn keyword_granted_by_level_gated_static(stat: &StaticDefinition) -> Vec<Keyword> {
+    let mut gated = stat
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(kw) = stat.mode.as_keyword() {
+        gated.push(kw);
+    }
+    gated
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.
@@ -9647,6 +9698,65 @@ mod buyback_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_buyback(&mut face);
         assert!(face.additional_cost.is_none());
+    }
+}
+
+#[cfg(test)]
+mod devoid_synthesis_tests {
+    use super::*;
+
+    fn devoid_cda(face: &CardFace) -> Option<&StaticDefinition> {
+        face.static_abilities.iter().find(|s| {
+            s.characteristic_defining
+                && s.affected == Some(TargetFilter::SelfRef)
+                && s.modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::SetColor { colors } if colors.is_empty()))
+        })
+    }
+
+    /// CR 702.114a: Devoid synthesizes a SelfRef colorless CDA (SetColor {[]}).
+    #[test]
+    fn synthesize_devoid_cda_pushes_colorless_cda() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Devoid],
+            ..CardFace::default()
+        };
+        synthesize_devoid_cda(&mut face);
+        assert!(
+            devoid_cda(&face).is_some(),
+            "devoid must push a SelfRef SetColor {{[]}} CDA; got {:?}",
+            face.static_abilities
+        );
+    }
+
+    /// No-op when the card has no Devoid keyword.
+    #[test]
+    fn synthesize_devoid_cda_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_devoid_cda(&mut face);
+        assert!(devoid_cda(&face).is_none());
+    }
+
+    /// A single synthesis pass for one Devoid keyword yields one colorless CDA.
+    #[test]
+    fn synthesize_devoid_cda_single_pass_pushes_one_cda() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Devoid],
+            ..CardFace::default()
+        };
+        synthesize_devoid_cda(&mut face);
+        let count = face
+            .static_abilities
+            .iter()
+            .filter(|s| {
+                s.characteristic_defining
+                    && s.modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::SetColor { colors } if colors.is_empty())
+                    })
+            })
+            .count();
+        assert_eq!(count, 1, "exactly one colorless CDA");
     }
 }
 
@@ -16438,8 +16548,19 @@ mod idempotency_tests {
     //! the engine's per-event dedup (keyed on `(ObjectId, trig_idx)`) to fail
     //! — distinct `trig_idx` values register separately.
     use super::*;
-    use crate::types::ability::QuantityExpr;
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::game::effects::resolve_ability_chain;
+    use crate::game::stack::resolve_top;
+    use crate::game::triggers::check_delayed_triggers;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        CountScope, QuantityExpr, QuantityRef, TargetRef, TypeFilter, ZoneRef,
+    };
     use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
 
     #[test]
     fn synthesize_mobilize_is_idempotent() {
@@ -16456,9 +16577,123 @@ mod idempotency_tests {
     }
 
     #[test]
-    fn synthesize_mobilize_preserves_dynamic_quantity() {
-        use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
+    fn synthesize_mobilize_schedules_sacrifice_at_next_end_step() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
 
+        synthesize_mobilize(&mut face);
+
+        let trigger = face.triggers.first().expect("mobilize trigger");
+        let execute = trigger.execute.as_ref().expect("execute body");
+        let delayed = execute
+            .sub_ability
+            .as_ref()
+            .expect("mobilize must chain end-step sacrifice");
+        match &*delayed.effect {
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase },
+                effect,
+                ..
+            } => {
+                assert_eq!(*phase, Phase::End);
+                match &*effect.effect {
+                    Effect::Sacrifice {
+                        target: TargetFilter::LastCreated,
+                        count: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    } => {}
+                    other => panic!("expected LastCreated Sacrifice, got {other:?}"),
+                }
+            }
+            other => panic!("expected CreateDelayedTrigger sacrifice rider, got {other:?}"),
+        }
+        assert!(
+            execute.duration.is_none(),
+            "token must not use UntilEndOfCombat duration"
+        );
+    }
+
+    /// CR 702.181a: Mobilized tokens are sacrificed at the beginning of the
+    /// next end step, not the end of combat. This drives the synthesized
+    /// Token -> CreateDelayedTrigger(Sacrifice LastCreated) chain through the
+    /// runtime resolver so reverting to `Duration::UntilEndOfCombat` fails.
+    #[test]
+    fn synthesize_mobilize_runtime_sacrifices_tokens_at_next_end_step() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
+        synthesize_mobilize(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mobilizer".to_string(),
+            Zone::Battlefield,
+        );
+        let execute = face
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("mobilize trigger must have an execute body");
+        let ability = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let mobilized_tokens = state.last_created_token_ids.clone();
+        assert_eq!(
+            mobilized_tokens.len(),
+            2,
+            "Mobilize 2 must create exactly two tracked tokens"
+        );
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+        );
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            mobilized_tokens
+                .iter()
+                .copied()
+                .map(TargetRef::Object)
+                .collect::<Vec<_>>(),
+            "end-step cleanup must snapshot the exact mobilized tokens"
+        );
+
+        let stacked = check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::EndCombat,
+            }],
+        );
+        assert!(
+            stacked.is_empty(),
+            "Mobilize cleanup must not fire at end of combat"
+        );
+        for token_id in &mobilized_tokens {
+            assert!(state.battlefield.contains(token_id));
+        }
+
+        let stacked =
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        assert_eq!(stacked.len(), 1, "end-step cleanup must stack once");
+        resolve_top(&mut state, &mut events);
+
+        for token_id in mobilized_tokens {
+            assert_eq!(
+                state.objects[&token_id].zone,
+                Zone::Graveyard,
+                "mobilized token must be sacrificed at the next end step"
+            );
+            assert!(!state.battlefield.contains(&token_id));
+        }
+    }
+
+    #[test]
+    fn synthesize_mobilize_preserves_dynamic_quantity() {
         let quantity = QuantityExpr::Ref {
             qty: QuantityRef::ZoneCardCount {
                 zone: ZoneRef::Graveyard,
@@ -16841,6 +17076,32 @@ mod sorcery_speed_invariant_tests {
 
         // Both gated keywords stripped; the LevelUp keyword survives.
         assert_eq!(face.keywords, vec![level_up]);
+    }
+
+    /// CR 711.4: Level-block standalone keyword static modes (Hada Spy Patrol's
+    /// "Shroud" line) must strip the matching base keyword.
+    #[test]
+    fn strip_level_gated_keywords_strips_static_mode_keyword_grants() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Shroud],
+            static_abilities: vec![StaticDefinition::new(StaticMode::Shroud)
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
+                .condition(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Generic("level".to_string())),
+                    minimum: 3,
+                    maximum: None,
+                })],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        assert!(
+            face.keywords.is_empty(),
+            "Shroud must strip from base keywords"
+        );
     }
 
     /// Negative case: a `HasCounters` static on a NON-"level" generic counter
@@ -20009,6 +20270,20 @@ mod bloodthirst_synthesis_tests {
             base,
             vec![Keyword::Bloodthirst(BloodthirstValue::Fixed(3))],
             "parser-extracted Bloodthirst(3) must replace the MTGJSON default"
+        );
+    }
+
+    /// CR 702.60a: MTGJSON carries bare "Ripple", but Oracle carries "Ripple N".
+    /// The shared merge authority must replace the default with the parsed depth so
+    /// trigger collection sees a non-zero reveal count.
+    #[test]
+    fn merge_extracted_keywords_replaces_bare_ripple_default() {
+        let mut base = vec![Keyword::Ripple(1)];
+        merge_extracted_keywords(&mut base, vec![Keyword::Ripple(4)]);
+        assert_eq!(
+            base,
+            vec![Keyword::Ripple(4)],
+            "parser-extracted Ripple(4) must replace MTGJSON's bare Ripple default"
         );
     }
 

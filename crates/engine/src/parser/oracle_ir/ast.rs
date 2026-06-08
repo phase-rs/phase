@@ -302,6 +302,10 @@ pub(crate) enum ContinuationAst {
         /// Cyberman artifact creatures."). `None` = normal face-up entry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<FaceDownProfile>,
+        /// CR 614.1 / CR 110.5b: "onto the battlefield tapped" on the
+        /// from-among put-step.
+        #[serde(default)]
+        enter_tapped: bool,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.
@@ -1006,6 +1010,9 @@ pub(crate) enum PutImperativeAst {
     NthFromTop {
         n: u32,
     },
+    /// CR 121.5: "put that many cards from the top of your library into your
+    /// hand" moves library cards without drawing them (Scroll Rack).
+    PutTopCardsIntoHandMatchingExileCount,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

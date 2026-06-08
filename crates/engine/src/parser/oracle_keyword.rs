@@ -19,7 +19,8 @@ use crate::types::ability::{
     TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost,
+    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost,
+    Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -298,11 +299,6 @@ pub(crate) fn extract_keyword_line(
             // Prefix match: Oracle text has more detail (e.g. "protection from red").
             // Extract the full parameterized keyword.
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                if matches!(kw, Keyword::Ripple)
-                    && mtgjson_keyword_names.contains(&keyword_display_name(&kw))
-                {
-                    continue;
-                }
                 new_keywords.push(kw);
                 continue;
             }
@@ -384,6 +380,9 @@ fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keywo
         // standalone keyword line MTGJSON does not surface in its `keywords` array,
         // so it must be recovered from the Oracle line here.
         Keyword::TotemArmor => Some(vec![keyword]),
+        // CR 702.22: "Bands with other [quality]" carries the quality in Oracle
+        // text; MTGJSON's keyword list has no typed payload to preserve it.
+        Keyword::BandsWithOther(_) => Some(vec![keyword]),
         _ => None,
     }
 }
@@ -1276,16 +1275,15 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.60a: Ripple N — when you cast this spell, you may reveal the top N cards
     // of your library and cast any with the same name without paying their mana cost.
-    // Keyword::Ripple is currently a unit variant (N is not yet tracked by the engine).
-    // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels.
-    if all_consuming(preceded(
+    // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels;
+    // Thrumming Stone grants Ripple 4.
+    if let Ok((_, n)) = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("ripple "),
         nom_primitives::parse_number,
     ))
     .parse(text)
-    .is_ok()
     {
-        return Some(Keyword::Ripple);
+        return Some(Keyword::Ripple(n));
     }
 
     // CR 702.89a/b: "umbra armor" — and the obsolete "totem armor" the Oracle text
@@ -1300,6 +1298,13 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     .is_ok()
     {
         return Some(Keyword::TotemArmor);
+    }
+
+    if let Ok((quality, _)) = tag::<_, _, OracleError<'_>>("bands with other ").parse(text) {
+        let normalized = normalize_bands_with_other_quality(quality);
+        if !normalized.is_empty() {
+            return Some(Keyword::BandsWithOther(normalized));
+        }
     }
 
     // For parameterized keywords, find the first space to split name from parameter.
@@ -1391,6 +1396,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::StartYourEngines => "start your engines!".to_string(),
         Keyword::Soulbond => "soulbond".to_string(),
         Keyword::Banding => "banding".to_string(),
+        Keyword::BandsWithOther(quality) => format!("bands with other {}", quality.to_lowercase()),
         // CR 702.24a: Cumulative upkeep's display includes its base cost so
         // tooltips and AI hint text show the actual payment ("cumulative upkeep
         // — {1}", "cumulative upkeep — Pay 2 life", etc.) instead of a bare
@@ -1415,7 +1421,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Provoke => "provoke".to_string(),
         Keyword::Rebound => "rebound".to_string(),
         Keyword::Retrace => "retrace".to_string(),
-        Keyword::Ripple => "ripple".to_string(),
+        Keyword::Ripple(_) => "ripple".to_string(),
         Keyword::SplitSecond => "split second".to_string(),
         Keyword::Storm => "storm".to_string(),
         Keyword::Suspend { .. } => "suspend".to_string(),
@@ -1955,22 +1961,40 @@ mod tests {
         );
     }
 
-    /// CR 702.60a: Ripple N triggers when the spell is cast. The engine
-    /// currently stores `Keyword::Ripple` as a unit variant, so supported
-    /// numeric suffixes map to that variant while trailing text is rejected.
+    /// CR 702.60a: Ripple N triggers when the spell is cast. N is captured into
+    /// the parameterized `Keyword::Ripple(u32)`; trailing text is rejected.
     #[test]
     fn parse_keyword_from_oracle_ripple() {
         assert_eq!(
             parse_keyword_from_oracle("ripple 4"),
-            Some(Keyword::Ripple),
-            "ripple 4 (Surging Aether oracle text)"
+            Some(Keyword::Ripple(4)),
+            "ripple 4 (Thrumming Stone grant)"
         );
         assert_eq!(
             parse_keyword_from_oracle("ripple 2"),
-            Some(Keyword::Ripple),
-            "ripple 2 — numeric variant still maps to unit Ripple"
+            Some(Keyword::Ripple(2)),
+            "ripple 2 — N is captured"
         );
         assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_bands_with_other_quality() {
+        assert_eq!(
+            parse_keyword_from_oracle("bands with other wolves"),
+            Some(Keyword::BandsWithOther("Wolf".to_string()))
+        );
+        assert_eq!(
+            parse_keyword_from_oracle("bands with other legends"),
+            Some(Keyword::BandsWithOther("Legend".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_keyword_line_bands_with_other_quality() {
+        let result = extract_keyword_line("Bands with other Wolves", &[])
+            .expect("bands with other should parse from Oracle keyword line");
+        assert_eq!(result, vec![Keyword::BandsWithOther("Wolf".to_string())]);
     }
 
     /// CR 702.48a: Offering — the Oracle line "<Subtype> offering (...)" carries
@@ -1997,15 +2021,16 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_ripple_does_not_duplicate_mtgjson_keyword() {
+    fn extract_keyword_line_ripple_preserves_oracle_depth() {
         let mtgjson_kws = vec!["ripple".to_string()];
 
         let result = extract_keyword_line("Ripple 4", &mtgjson_kws)
             .expect("Ripple N line should be recognized as a keyword line");
 
-        assert!(
-            result.is_empty(),
-            "MTGJSON already carries Keyword::Ripple; Oracle validation must not add a duplicate"
+        assert_eq!(
+            result,
+            vec![Keyword::Ripple(4)],
+            "Oracle text carries the ripple depth that MTGJSON's bare keyword omits"
         );
     }
 

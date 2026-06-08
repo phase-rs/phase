@@ -195,3 +195,47 @@ fn coralhelm_commander_flying_is_level_gated() {
         "CR 711.2b: Flying granted within LEVEL 4+"
     );
 }
+
+/// Hada Spy Patrol — base 1/1; "Level up {2}{U}"; LEVEL 1-2 → 2/2 can't be blocked;
+/// LEVEL 3+ → 3/3 Shroud + can't be blocked (#2412).
+const HADA_SPY_PATROL: &str =
+    "Level up {2}{U} ({2}{U}: Put a level counter on this. Level up only as a sorcery.)\n\
+LEVEL 1-2\n\
+2/2\n\
+This creature can't be blocked.\n\
+LEVEL 3+\n\
+3/3\n\
+Shroud (This creature can't be the target of spells or abilities.)\n\
+This creature can't be blocked.";
+
+#[test]
+fn hada_spy_patrol_shroud_is_level_gated() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let id = scenario
+        .add_creature_from_oracle(P0, "Hada Spy Patrol", 1, 1, HADA_SPY_PATROL)
+        .id();
+    let mut runner = scenario.build();
+
+    assert_eq!(effective_pt(&mut runner, id), (1, 1), "base P/T at level 0");
+    assert!(
+        !has_kw(&mut runner, id, &Keyword::Shroud),
+        "CR 711.4: Shroud is level-gated (LEVEL 3+) — absent at level 0"
+    );
+
+    let pay_blue = |r: &mut GameRunner| {
+        add_mana(r, ManaType::Colorless);
+        add_mana(r, ManaType::Colorless);
+        add_mana(r, ManaType::Blue);
+    };
+
+    for _ in 0..3 {
+        level_up(&mut runner, id, pay_blue);
+    }
+
+    assert_eq!(effective_pt(&mut runner, id), (3, 3), "LEVEL 3+ sets 3/3");
+    assert!(
+        has_kw(&mut runner, id, &Keyword::Shroud),
+        "CR 711.2b: Shroud granted at 3+ level counters"
+    );
+}
