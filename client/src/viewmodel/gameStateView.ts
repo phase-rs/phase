@@ -46,14 +46,53 @@ export function isOneOnOne(gameState: GameState | null): boolean {
 
 export function getPlayerZoneIds(
   gameState: GameState | null,
-  zone: "graveyard" | "exile",
+  zone: "graveyard" | "exile" | "library",
   playerId: PlayerId,
 ): ObjectId[] {
   if (!gameState) return [];
   if (zone === "graveyard") {
     return gameState.players[playerId]?.graveyard ?? [];
   }
+  if (zone === "library") {
+    // library[0] = top of library (engine convention from zones.rs). Returns
+    // the full ordered library; the library viewer filters to the cards the
+    // engine has revealed to the viewer (isLibraryCardRevealedToViewer) so
+    // unrevealed cards are never shown.
+    return gameState.players[playerId]?.library ?? [];
+  }
   return gameState.exile.filter((id) => gameState.objects[id]?.owner === playerId);
+}
+
+/**
+ * Whether the engine has revealed a given library card's identity to `viewerId`.
+ *
+ * Mirrors the engine's library visibility (`crates/engine/src/game/visibility.rs`)
+ * using the explicit reveal sets — NEVER the card name. In single-player the
+ * client renders the raw, unredacted state (the `showAiHand` debug toggle depends
+ * on it), so `name !== "Hidden Card"` is always true and cannot be used to infer
+ * visibility; doing so leaks every opponent library card. This is the same
+ * pattern `OpponentHand` uses for opponent hand cards.
+ *
+ * Deliberately excludes `public_revealed_cards`: the engine does not un-redact
+ * library cards by that persistent memory set (a card revealed once and put back
+ * must not leak its new position).
+ */
+export function isLibraryCardRevealedToViewer(
+  gameState: GameState | null,
+  objectId: ObjectId,
+  viewerId: PlayerId,
+): boolean {
+  if (!gameState) return false;
+  // CR 701.20b: publicly revealed top cards (RevealTop, "play with the top card
+  // revealed") are visible to every player.
+  if (gameState.revealed_cards?.includes(objectId)) return true;
+  // CR 701.20e: a private "look at the top card" (Mishra's Bauble at an
+  // opponent's library; your own scry look) surfaces the peeked ids only to the
+  // looking player.
+  return (
+    gameState.private_look_player === viewerId &&
+    (gameState.private_look_ids?.includes(objectId) ?? false)
+  );
 }
 
 export function getWaitingForObjectChoiceIds(

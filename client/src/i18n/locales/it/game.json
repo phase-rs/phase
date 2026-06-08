@@ -283,6 +283,8 @@
     "graveyardShort": "CIM",
     "graveyardTitle": "Cimitero ({{count}})",
     "libraryAlt": "Grimorio",
+    "library": "Grimorio",
+    "libraryLower": "grimorio",
     "libraryCount_one": "Grimorio ({{count}} carta)",
     "libraryCount_other": "Grimorio ({{count}} carte)",
     "playFromTop": "Gioca {{name}} dalla cima del grimorio",
