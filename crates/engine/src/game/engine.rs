@@ -1254,6 +1254,8 @@ fn finalize_copy_retarget(
     player: PlayerId,
     copy_id: ObjectId,
     slots: &[crate::types::game_state::CopyTargetSlot],
+    effect_kind: crate::types::ability::EffectKind,
+    effect_source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     let targets: Vec<_> = slots
@@ -1272,8 +1274,10 @@ fn finalize_copy_retarget(
         }
     }
     events.push(GameEvent::EffectResolved {
-        kind: crate::types::ability::EffectKind::CopySpell,
-        source_id: copy_id,
+        kind: effect_kind,
+        // Pre-metadata CopyRetarget saves omitted this field; those states were
+        // generic copy-spell choices whose completion source is the copy.
+        source_id: effect_source_id.unwrap_or(copy_id),
     });
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
@@ -4399,6 +4403,8 @@ fn apply_action(
                 player,
                 copy_id,
                 target_slots,
+                effect_kind,
+                effect_source_id,
                 current_slot,
             },
             GameAction::ChooseTarget { target },
@@ -4433,10 +4439,20 @@ fn apply_action(
                     player: p,
                     copy_id: cid,
                     target_slots: updated_slots,
+                    effect_kind: *effect_kind,
+                    effect_source_id: *effect_source_id,
                     current_slot: next_slot,
                 };
             } else {
-                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events)?;
+                finalize_copy_retarget(
+                    state,
+                    p,
+                    cid,
+                    &updated_slots,
+                    *effect_kind,
+                    *effect_source_id,
+                    &mut events,
+                )?;
             }
             state.waiting_for.clone()
         }
@@ -4451,6 +4467,8 @@ fn apply_action(
                 player,
                 copy_id,
                 target_slots,
+                effect_kind,
+                effect_source_id,
                 ..
             },
             GameAction::KeepAllCopyTargets,
@@ -4458,7 +4476,15 @@ fn apply_action(
             let p = *player;
             let cid = *copy_id;
             let slots = target_slots.clone();
-            finalize_copy_retarget(state, p, cid, &slots, &mut events)?;
+            finalize_copy_retarget(
+                state,
+                p,
+                cid,
+                &slots,
+                *effect_kind,
+                *effect_source_id,
+                &mut events,
+            )?;
             state.waiting_for.clone()
         }
         // CR 510.1c/d: Combat damage assignment from attacker to blockers.

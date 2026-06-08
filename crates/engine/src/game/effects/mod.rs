@@ -75,6 +75,12 @@ pub(super) mod end_phase;
 pub mod end_the_turn;
 pub mod endure;
 pub mod energy;
+pub mod epic;
+// Tests for `epic` live in a sibling file (declared here, not in `epic.rs`, so
+// `epic.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "epic_tests.rs"]
+mod epic_tests;
 pub mod exchange_control;
 pub mod exchange_life;
 pub mod exile_from_top_until;
@@ -1888,6 +1894,7 @@ pub fn resolve_effect(
         Effect::SeparateIntoPiles { .. } => separate_piles::resolve(state, ability, events),
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
+        Effect::EpicCopy { .. } => epic::resolve(state, ability, events),
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::Myriad => myriad::resolve(state, ability, events),

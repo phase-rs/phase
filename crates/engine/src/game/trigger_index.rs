@@ -704,6 +704,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SeparateIntoPiles
         | EffectKind::SwitchPT
         | EffectKind::CopySpell
+        | EffectKind::EpicCopy
         | EffectKind::CopyTokenOf
         | EffectKind::Myriad
         | EffectKind::Encore

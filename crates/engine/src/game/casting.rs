@@ -307,6 +307,13 @@ fn is_blocked_by_cant_cast_spells(
     caster: PlayerId,
     spell_obj: Option<&super::game_object::GameObject>,
 ) -> bool {
+    // CR 702.50b: a player who controls a resolved Epic spell can't cast spells
+    // for the rest of the game. Activated/triggered abilities and spell copies
+    // are unaffected — neither routes through this cast-legality gate.
+    if super::effects::epic::is_epic_locked(state, caster) {
+        return true;
+    }
+
     let spell_record = spell_obj.map(spell_record_for_restrictions);
 
     state.restrictions.iter().any(|restriction| {

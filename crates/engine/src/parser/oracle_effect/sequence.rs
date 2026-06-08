@@ -18,8 +18,8 @@ use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Chooser, ControllerRef,
     CopyRetargetPermission, CounterSourceRider, Effect, FaceDownProfile, LibraryPosition,
-    PermissionGrantee, PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
-    TypeFilter, TypedFilter,
+    MultiTargetSpec, PermissionGrantee, PtValue, QuantityExpr, QuantityRef, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -2100,13 +2100,18 @@ pub(super) fn apply_clause_continuation(
                      supported; route via the tracked-set push (see Mill branch)"
                 );
                 // CR 701.20e: Map the typed `PutCount` onto the `Dig`'s
-                // `keep_count`/`up_to`. `All` has no fixed cap — `keep_count =
-                // None` lets the Dig resolver route every kept card (defensive;
-                // mass-from-Dig is rare).
+                // `keep_count`/`up_to`. `u32::MAX` is an unbounded parser
+                // sentinel here: the Dig resolver clamps it to the number of
+                // seen cards, preserving "all" and "any number" without the old
+                // arbitrary 255 cap or overloading `None`'s default meaning.
                 match quantity {
                     PutCount::All => {
-                        *keep_count = None;
+                        *keep_count = Some(u32::MAX);
                         *up_to = false;
+                    }
+                    PutCount::AnyNumber => {
+                        *keep_count = Some(u32::MAX);
+                        *up_to = true;
                     }
                     PutCount::Up(n) => {
                         *keep_count = Some(n);
@@ -2171,10 +2176,10 @@ pub(super) fn apply_clause_continuation(
                             },
                         ));
                     }
-                    PutCount::Up(n) | PutCount::Exactly(n) => {
-                        let is_up_to = matches!(quantity, PutCount::Up(_));
-                        let _ = n;
-                        defs.push(AbilityDefinition::new(
+                    PutCount::AnyNumber | PutCount::Up(_) | PutCount::Exactly(_) => {
+                        let is_any_number = matches!(quantity, PutCount::AnyNumber);
+                        let is_up_to = matches!(quantity, PutCount::AnyNumber | PutCount::Up(_));
+                        let mut def = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZone {
                                 // CR 400.3: a bounded "put up to N <filter> milled
@@ -2200,7 +2205,13 @@ pub(super) fn apply_clause_continuation(
                                 enter_with_counters: vec![],
                                 face_down_profile,
                             },
-                        ));
+                        );
+                        if is_any_number {
+                            def = def
+                                .multi_target(MultiTargetSpec::unlimited(0))
+                                .target_choice_timing(TargetChoiceTiming::Resolution);
+                        }
+                        defs.push(def);
                     }
                 }
             }
@@ -2817,17 +2828,23 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             .unwrap_or(before_of);
 
         // Delegate to nom combinator (input already lowercase from lower).
-        let quantity =
-            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
-                nom_primitives::parse_number
-                    .parse(rest)
-                    .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
-            } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
-                PutCount::Exactly(n)
-            } else {
-                // "a/an" or unrecognized → treat as up_to 1
-                PutCount::Up(1)
-            };
+        let quantity = if let Ok((_rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("any number of "),
+            tag("any number"),
+        ))
+        .parse(after_put)
+        {
+            PutCount::AnyNumber
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
+            nom_primitives::parse_number
+                .parse(rest)
+                .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
+        } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
+            PutCount::Exactly(n)
+        } else {
+            // "a/an" or unrecognized → treat as up_to 1
+            PutCount::Up(1)
+        };
 
         // Detect rest destination from "and the rest on the bottom/into graveyard" suffix.
         let rest_destination = parse_of_them_rest_destination(lower);
@@ -2894,7 +2911,7 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         } else if let Ok((rest, _)) =
             tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
         {
-            (PutCount::Up(255), rest)
+            (PutCount::AnyNumber, rest)
         } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
             (
                 if prefix_optional {
@@ -3002,8 +3019,7 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             (PutCount::Up(1), rest)
         }
     } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(after_put) {
-        // "any number of creatures" → up_to with a high cap
-        (PutCount::Up(255), rest)
+        (PutCount::AnyNumber, rest)
     } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
         // "a creature card" / "an artifact card" — up_to 1 (player may choose none)
         (PutCount::Up(1), rest)
@@ -3271,6 +3287,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
         Effect::StartYourEngines { .. }
+        | Effect::EpicCopy { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::Draw { .. }
@@ -5271,6 +5288,28 @@ mod tests {
     }
 
     #[test]
+    fn put_any_number_of_them_into_hand_is_uncapped() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put any number of them into your hand and the rest on the bottom of your library in any order.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::DigFromAmong {
+                quantity: PutCount::AnyNumber,
+                filter: TargetFilter::Any,
+                destination: Some(Zone::Hand),
+                rest_destination: Some(Zone::Library),
+                enters_under: None,
+                face_down_profile: None,
+                enter_tapped: false,
+            })
+        );
+    }
+
+    #[test]
     fn from_among_enter_tapped_is_local_to_kept_destination() {
         assert_eq!(
             parse_dig_kept_destination(
@@ -5389,6 +5428,174 @@ mod tests {
         assert_eq!(filter, TargetFilter::Any);
         assert_eq!(destination, Some(Zone::Hand));
         assert_eq!(rest_destination, None);
+    }
+
+    #[test]
+    fn mill_return_any_number_milled_this_way_is_uncapped() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 6 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "Return any number of creature cards milled this way to your hand.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(quantity, PutCount::AnyNumber);
+        assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
+        assert_eq!(destination, Some(Zone::Hand));
+    }
+
+    #[test]
+    fn from_among_any_number_is_uncapped() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put any number of creature cards from among them into your hand.",
+            &dig,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            filter,
+            destination,
+            ..
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(quantity, PutCount::AnyNumber);
+        assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
+        assert_eq!(destination, Some(Zone::Hand));
+    }
+
+    #[test]
+    fn dig_any_number_from_among_lowers_to_up_to_all_seen_cards() {
+        let mut defs = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            make_dig_effect(),
+        )];
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::DigFromAmong {
+                quantity: PutCount::AnyNumber,
+                filter: TargetFilter::Any,
+                destination: Some(Zone::Hand),
+                rest_destination: Some(Zone::Library),
+                enters_under: None,
+                face_down_profile: None,
+                enter_tapped: false,
+            },
+            AbilityKind::Spell,
+        );
+
+        let Effect::Dig {
+            keep_count,
+            up_to,
+            destination,
+            rest_destination,
+            ..
+        } = &*defs[0].effect
+        else {
+            panic!("expected patched Dig, got {:?}", defs[0].effect);
+        };
+        assert_eq!(*keep_count, Some(u32::MAX));
+        assert!(*up_to);
+        assert_eq!(*destination, Some(Zone::Hand));
+        assert_eq!(*rest_destination, Some(Zone::Library));
+    }
+
+    #[test]
+    fn dig_all_from_among_lowers_to_all_seen_cards() {
+        let mut defs = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            make_dig_effect(),
+        )];
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::DigFromAmong {
+                quantity: PutCount::All,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                destination: Some(Zone::Hand),
+                rest_destination: None,
+                enters_under: None,
+                face_down_profile: None,
+                enter_tapped: false,
+            },
+            AbilityKind::Spell,
+        );
+
+        let Effect::Dig {
+            keep_count,
+            up_to,
+            destination,
+            filter,
+            ..
+        } = &*defs[0].effect
+        else {
+            panic!("expected patched Dig, got {:?}", defs[0].effect);
+        };
+        assert_eq!(*keep_count, Some(u32::MAX));
+        assert!(!*up_to);
+        assert_eq!(*destination, Some(Zone::Hand));
+        assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
+    }
+
+    #[test]
+    fn mill_any_number_milled_this_way_lowers_to_unlimited_resolution_choice() {
+        let mut defs = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 6 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+        )];
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::DigFromAmong {
+                quantity: PutCount::AnyNumber,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                destination: Some(Zone::Hand),
+                rest_destination: None,
+                enters_under: None,
+                face_down_profile: None,
+                enter_tapped: false,
+            },
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(defs.len(), 2, "expected Mill + pushed ChangeZone");
+        let pushed = &defs[1];
+        let Effect::ChangeZone {
+            target,
+            up_to,
+            destination,
+            ..
+        } = &*pushed.effect
+        else {
+            panic!("expected pushed ChangeZone, got {:?}", pushed.effect);
+        };
+        assert!(*up_to);
+        assert_eq!(*destination, Zone::Hand);
+        assert_eq!(pushed.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        assert_eq!(pushed.target_choice_timing, TargetChoiceTiming::Resolution);
+        assert!(matches!(
+            target,
+            TargetFilter::TrackedSetFiltered {
+                filter,
+                ..
+            } if matches!(filter.as_ref(), TargetFilter::Typed(_))
+        ));
     }
 
     /// CR 701.17c: `apply_clause_continuation` must PUSH a `ChangeZone`

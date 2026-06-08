@@ -372,11 +372,13 @@ pub(crate) enum ContinuationAst {
 
 /// CR 701.20e / CR 701.17c: How many cards a "from among [set]" continuation
 /// takes. `All` is the mass quantifier ("put all creature cards milled this
-/// way ...") that lowers to a `ChangeZoneAll`; the bounded forms lower to a
+/// way ...") that lowers to a `ChangeZoneAll`; `AnyNumber` is an unbounded
+/// player choice ("put any number of ..."), and the bounded forms lower to a
 /// singular `ChangeZone` (`Up` → up_to, `Exactly` → fixed count).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum PutCount {
     All,
+    AnyNumber,
     Up(u32),
     Exactly(u32),
 }
