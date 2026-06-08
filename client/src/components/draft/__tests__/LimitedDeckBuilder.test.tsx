@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
 
@@ -53,14 +53,6 @@ const TEST_VIEW: BuilderView = {
   pairings: [],
 };
 
-function bucketCount(curveRoot: HTMLElement, label: string): string {
-  const labelNode = within(curveRoot).getByText(label);
-  const bucket = labelNode.parentElement;
-  if (!bucket) return "";
-  const countNode = bucket.querySelector("span.h-4");
-  return countNode?.textContent ?? "";
-}
-
 function Harness() {
   const [mainDeck, setMainDeck] = useState<string[]>([]);
 
@@ -90,15 +82,11 @@ describe("LimitedDeckBuilder", () => {
   it("updates mana curve when a card is added from pool", () => {
     render(<Harness />);
 
-    const curveTitle = screen.getByText(/mana curve/i);
-    const curveRoot = curveTitle.parentElement;
-    expect(curveRoot).not.toBeNull();
-    if (!curveRoot) return;
-
-    expect(bucketCount(curveRoot, "3")).toBe("");
+    const threeDropBucket = screen.getByRole("meter", { name: "Mana value 3" });
+    expect(threeDropBucket).toHaveAttribute("aria-valuenow", "0");
 
     fireEvent.click(screen.getByRole("button", { name: /wind drake/i }));
 
-    expect(bucketCount(curveRoot, "3")).toBe("1");
+    expect(threeDropBucket).toHaveAttribute("aria-valuenow", "1");
   });
 });

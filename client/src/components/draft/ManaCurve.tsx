@@ -50,7 +50,15 @@ export function ManaCurve({ pool, cards }: ManaCurveProps) {
       </div>
       <div className="flex items-end gap-1.5" style={{ height: MAX_BAR_HEIGHT + 24 }}>
         {counts.map(({ label, count }) => (
-          <div key={label} className="flex flex-1 flex-col items-center gap-0.5">
+          <div
+            key={label}
+            role="meter"
+            aria-label={t("manaCurve.bucketLabel", { bucket: label })}
+            aria-valuemin={0}
+            aria-valuemax={maxCount}
+            aria-valuenow={count}
+            className="flex flex-1 flex-col items-center gap-0.5"
+          >
             <span className="h-4 text-[10px] leading-4 text-white/50">
               {count > 0 ? count : ""}
             </span>
