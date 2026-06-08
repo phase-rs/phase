@@ -13,7 +13,7 @@ use crate::types::game_state::{
     ExileLink, ExileLinkKind, GameState, PendingCounterPostAction, WaitingFor,
     ZoneDeliveryExileTracking,
 };
-use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -84,18 +84,14 @@ pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec
 /// in the library/hand — so an interactive `ChangeZone` selecting "from among"
 /// such a set must scan the members' actual zone, not the battlefield default.
 ///
-/// The `TrackedSetId(0)` sentinel resolves to the most recent non-empty set,
-/// mirroring the binding pass in `resolve` (CR 603.7). Returns `None` when the
+/// The `TrackedSetId(0)` sentinel resolves through the same chain-first binding
+/// authority as `matches_target_filter` (CR 603.7). Returns `None` when the
 /// filter is not tracked-set-backed or the set is empty/unbound.
 fn tracked_set_member_zone(state: &GameState, filter: &TargetFilter) -> Option<Zone> {
-    let id = match filter {
+    let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter.clone());
+    let id = match &filter {
         TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
         _ => return None,
-    };
-    let id = if id == TrackedSetId(0) {
-        crate::game::targeting::latest_tracked_set_id(state)?
-    } else {
-        id
     };
     state
         .tracked_object_sets
@@ -1404,8 +1400,12 @@ pub fn resolve_all(
             let extracted = target.extract_zones();
             let scan_zones = if extracted.len() > 1 {
                 extracted
+            } else if let Some(origin) = origin {
+                vec![*origin]
+            } else if let Some(zone) = tracked_set_member_zone(state, target) {
+                vec![zone]
             } else {
-                vec![origin.unwrap_or(Zone::Battlefield)]
+                vec![Zone::Battlefield]
             };
             (scan_zones, *destination, target.clone(), *enter_tapped)
         }
@@ -1761,7 +1761,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::{StackEntry, StackEntryKind, ZoneChangeRecord};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::statics::{ProhibitionScope, StaticMode};
@@ -5734,6 +5734,133 @@ mod tests {
         // The land stays in P1's graveyard.
         assert_eq!(state.objects[&land].zone, Zone::Graveyard);
         assert_eq!(state.objects[&land].owner, PlayerId(1));
+    }
+
+    /// CR 701.20b: Tracked-set mass moves without an explicit origin
+    /// must scan the tracked objects' actual zone, not the battlefield default.
+    /// Zimone-style "revealed this way" cards leave the revealed cards in the
+    /// library until the follow-up `ChangeZoneAll` routes them by type.
+    #[test]
+    fn change_zone_all_tracked_set_without_origin_uses_member_zone() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Tracked Land".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+        let creature = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Tracked Creature".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![land, creature]);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::land())),
+                },
+                enters_under: None,
+                enter_tapped: true,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        assert!(state.objects[&land].tapped);
+        assert_eq!(state.objects[&creature].zone, Zone::Library);
+    }
+
+    /// CR 603.7: `TrackedSetId(0)` must bind through `chain_tracked_set_id`
+    /// before falling back to the globally latest tracked set, matching the
+    /// target-filter resolver used by `matches_target_filter`.
+    #[test]
+    fn change_zone_all_tracked_set_zone_uses_chain_binding() {
+        let mut state = GameState::new_two_player(42);
+        let chain_land = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Chain Land".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&chain_land)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        let latest_land = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Latest Land".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&latest_land)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+
+        let chain_set = TrackedSetId(5);
+        let latest_set = TrackedSetId(9);
+        state
+            .tracked_object_sets
+            .insert(chain_set, vec![chain_land]);
+        state
+            .tracked_object_sets
+            .insert(latest_set, vec![latest_land]);
+        state.chain_tracked_set_id = Some(chain_set);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::land())),
+                },
+                enters_under: None,
+                enter_tapped: false,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&chain_land].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&latest_land].zone, Zone::Graveyard);
     }
 
     /// CR 708.2a: An empty milled set (no eligible cards) is a clean no-op.
