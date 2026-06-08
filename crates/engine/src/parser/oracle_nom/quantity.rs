@@ -5760,7 +5760,7 @@ mod tests {
 
     /// Test parse_that_cards_mana_cost for anaphoric mana cost reference.
     #[test]
-    fn parse_that_cards_mana_cost() {
+    fn test_parse_that_cards_mana_cost() {
         let (rest, q) = parse_that_cards_mana_cost("that card's mana cost").unwrap();
         assert_eq!(rest, "");
         match q {
