@@ -8,6 +8,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::combinator::{map, opt, value};
+use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -1766,20 +1767,6 @@ fn parse_anaphoric_target_card_property_ref(input: &str) -> OracleResult<'_, Qua
     Ok((rest, qty))
 }
 
-/// Parse "that card's mana cost" — anaphoric reference to a card's mana cost.
-/// Used for patterns like "equal to that card's mana cost" (e.g., Aether Vial).
-/// CR 202.3: Maps to ObjectManaValue since mana cost is the primary determinant of mana value.
-/// Note: For cards with {X} in their cost, the printed mana cost differs from computed mana value.
-fn parse_that_cards_mana_cost(input: &str) -> OracleResult<'_, QuantityRef> {
-    value(
-        QuantityRef::ObjectManaValue {
-            scope: ObjectScope::Target,
-        },
-        tag("that card's mana cost"),
-    )
-    .parse(input)
-}
-
 /// Parse event-context quantity references.
 ///
 /// CR 603.7c: "that {noun}" in a triggered ability refers to the object or
@@ -1839,10 +1826,6 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         // reference to a card selected by an earlier instruction in the same
         // resolution sequence.
         parse_anaphoric_target_card_property_ref,
-        // CR 117.1 + CR 202.3: "that card's mana cost" — anaphoric reference
-        // to a card's mana cost (e.g., Aether Vial: "equal to that card's mana cost").
-        // Maps to ObjectManaValue since mana cost is the primary determinant of mana value.
-        parse_that_cards_mana_cost,
     ))
     .parse(input)
 }
@@ -1985,20 +1968,23 @@ pub fn parse_equal_to(input: &str) -> OracleResult<'_, QuantityExpr> {
 }
 
 /// Parse sum expressions like "the number of X and the number of Y".
-/// Used for patterns like "equal to the number of Warriors and Equipment".
-/// Parses exactly two summands, both prefixed with "the number of" to avoid
-/// greedy type-list consumption by parse_the_number_of.
+/// Each summand is prefixed with "the number of" to avoid greedy type-list
+/// consumption by parse_the_number_of.
 fn parse_equal_to_sum(input: &str) -> OracleResult<'_, QuantityExpr> {
-    let (rest, first_qty) = parse_the_number_of(input)?;
-    let (rest, _) = tag(" and ").parse(rest)?;
-    let (rest, second_qty) = parse_the_number_of(rest)?;
+    let (rest, refs) = separated_list1(tag(" and "), parse_the_number_of).parse(input)?;
+    if refs.len() < 2 {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
     Ok((
         rest,
         QuantityExpr::Sum {
-            exprs: vec![
-                QuantityExpr::Ref { qty: first_qty },
-                QuantityExpr::Ref { qty: second_qty },
-            ],
+            exprs: refs
+                .into_iter()
+                .map(|qty| QuantityExpr::Ref { qty })
+                .collect(),
         },
     ))
 }
@@ -2064,7 +2050,7 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_foretold_cards_owned_in_exile,
         parse_zone_card_count,
         parse_for_each_attached_to_source,
-        // CR 201.2 + CR 603.4: "for each differently named <type>" — distinct-by-name
+        // CR 201.2: "for each differently named <type>" — distinct-by-name
         // iteration. Must precede generic type-filter arm.
         parse_for_each_differently_named,
         // CR 700.8: "creature in your party" must precede the generic
@@ -5764,19 +5750,6 @@ mod tests {
         }
     }
 
-    /// Test parse_that_cards_mana_cost for anaphoric mana cost reference.
-    #[test]
-    fn test_parse_that_cards_mana_cost() {
-        let (rest, q) = parse_that_cards_mana_cost("that card's mana cost").unwrap();
-        assert_eq!(rest, "");
-        match q {
-            QuantityRef::ObjectManaValue { scope } => {
-                assert_eq!(scope, ObjectScope::Target);
-            }
-            _ => panic!("expected ObjectManaValue"),
-        }
-    }
-
     /// Test parse_equal_to_sum for two-way sum expressions.
     #[test]
     fn parse_equal_to_sum_two_way() {
@@ -5791,6 +5764,28 @@ mod tests {
             }
             _ => panic!("expected Sum"),
         }
+    }
+
+    /// Test parse_equal_to_sum for three-way sum expressions.
+    #[test]
+    fn parse_equal_to_sum_three_way() {
+        let (rest, expr) = parse_equal_to_sum(
+            "the number of creatures you control and the number of artifacts you control and the number of enchantments you control",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match expr {
+            QuantityExpr::Sum { exprs } => {
+                assert_eq!(exprs.len(), 3);
+            }
+            _ => panic!("expected Sum"),
+        }
+    }
+
+    /// A single quantity must stay on the normal parse_quantity path.
+    #[test]
+    fn parse_equal_to_sum_rejects_single_quantity() {
+        assert!(parse_equal_to_sum("the number of creatures you control").is_err());
     }
 
     /// Test parse_for_each_differently_named for distinct-by-name iteration.
