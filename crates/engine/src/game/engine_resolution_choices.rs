@@ -18,7 +18,7 @@ use super::effects;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
-use super::{casting, casting_costs};
+use super::{casting, casting_costs, mana_abilities};
 
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
@@ -763,6 +763,7 @@ pub(super) fn handle_resolution_choice(
                 max,
                 accumulated,
                 source_id,
+                pending_mana_ability,
             },
             GameAction::SubmitPayAmount { amount },
         ) => {
@@ -771,6 +772,13 @@ pub(super) fn handle_resolution_choice(
                     "Submitted pay amount {} outside legal range [{}, {}]",
                     amount, min, max
                 )));
+            }
+            if let Some(pending_mana_ability) = pending_mana_ability {
+                let mut pending = pending_mana_ability.as_ref().clone();
+                pending.chosen_counter_count = Some(amount);
+                let waiting_for =
+                    mana_abilities::advance_mana_ability_activation(state, pending, events)?;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             match resource {
                 PayableResource::Energy => {
@@ -804,6 +812,11 @@ pub(super) fn handle_resolution_choice(
                         )));
                     }
                     let _ = casting::pay_unless_cost(state, player, &cost, events);
+                }
+                PayableResource::Counters => {
+                    return Err(EngineError::InvalidAction(
+                        "Counter amount choices require a pending mana ability".to_string(),
+                    ));
                 }
             }
             // CR 603.7c: Bind the paid amount for downstream chain steps that

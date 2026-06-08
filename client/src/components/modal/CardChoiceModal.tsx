@@ -9,7 +9,10 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import type {
+  CounterMatch,
+  CounterType,
   ExileCostSourceZone,
+  GameObject,
   ManaCost,
   ManaType,
   ObjectId,
@@ -22,6 +25,7 @@ import type {
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
+import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
@@ -1305,6 +1309,11 @@ function ReturnToHandModal({ data }: { data: PayCost["data"] }) {
 
 function RemoveCounterModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
+  const isAmongObjects =
+    data.kind.type === "RemoveCounter" && data.kind.selection === "AmongObjects";
+  if (isAmongObjects) {
+    return <RemoveCounterDistributionCostModal data={data} />;
+  }
   return (
     <PermanentCostModal
       data={data}
@@ -1312,10 +1321,157 @@ function RemoveCounterModal({ data }: { data: PayCost["data"] }) {
       title={t("cardChoice.removeCounter.title")}
       subtitle={t("cardChoice.removeCounter.subtitle")}
       label={t("cardChoice.removeCounter.label")}
+      maxSelections={isAmongObjects ? data.count : 1}
+      minSelections={isAmongObjects ? data.min_count : 1}
+      labelCount={isAmongObjects ? data.count : 1}
       selectedClassName="z-10 ring-2 ring-violet-300/80"
       overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-violet-500/20"
       badgeClassName="rounded-full bg-violet-500/90 px-3 py-1 text-xs font-bold text-white"
     />
+  );
+}
+
+function removableCounterCostEntries(
+  obj: GameObject,
+  counterType: CounterMatch,
+): [CounterType, number][] {
+  if (counterType.type === "OfType") {
+    const count = obj.counters[counterType.data] ?? 0;
+    return count > 0 ? [[counterType.data, count]] : [];
+  }
+  return Object.entries(obj.counters)
+    .filter((entry): entry is [CounterType, number] => typeof entry[1] === "number" && entry[1] > 0);
+}
+
+function RemoveCounterDistributionCostModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [amounts, setAmounts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    setAmounts({});
+  }, [data]);
+
+  if (data.kind.type !== "RemoveCounter") return null;
+  if (!objects) return null;
+
+  const counterKind = data.kind;
+  const requiredCount = data.kind.count;
+  const assigned = Object.values(amounts).reduce((sum, amount) => sum + amount, 0);
+  const remaining = requiredCount - assigned;
+  const isReady = assigned === requiredCount;
+
+  const amountKey = (id: ObjectId, counterType: CounterType) => `${id}:${counterType}`;
+
+  const setAmount = (id: ObjectId, counterType: CounterType, value: number, max: number) => {
+    setAmounts((prev) => ({
+      ...prev,
+      [amountKey(id, counterType)]: Math.max(0, Math.min(max, value)),
+    }));
+  };
+
+  const handleConfirm = () => {
+    if (!isReady) return;
+    const distribution = data.choices
+      .flatMap((id) => {
+        const obj = objects[id];
+        if (!obj) return [];
+        return removableCounterCostEntries(obj, counterKind.counter_type).map(([counterType]) => ({
+          object_id: id,
+          counter_type: counterType,
+          count: amounts[amountKey(id, counterType)] ?? 0,
+        }));
+      })
+      .filter((choice) => choice.count > 0);
+    dispatch({
+      type: "ChooseRemoveCounterCostDistribution",
+      data: { distribution },
+    });
+  };
+
+  return (
+    <ChoiceOverlay
+      title={t("cardChoice.removeCounter.title")}
+      subtitle={t("cardChoice.removeCounter.subtitle")}
+      footer={
+        <CostActionFooter onCancel={() => dispatch({ type: "CancelCast" })}>
+          <ConfirmButton
+            onClick={handleConfirm}
+            disabled={!isReady}
+            label={t("cardChoice.buttons.labelCount", {
+              label: t("cardChoice.removeCounter.label"),
+              selected: assigned,
+              count: requiredCount,
+            })}
+          />
+        </CostActionFooter>
+      }
+    >
+      <ScrollableCardStrip>
+        {data.choices.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const entries = removableCounterCostEntries(obj, counterKind.counter_type);
+          const selectedAmount = entries.reduce(
+            (sum, [counterType]) => sum + (amounts[amountKey(id, counterType)] ?? 0),
+            0,
+          );
+          return (
+            <motion.div
+              key={id}
+              className="relative shrink-0 rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: selectedAmount > 0 ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              <div className="absolute inset-x-2 bottom-2 flex flex-col gap-1 rounded-lg bg-gray-950/85 px-2 py-1">
+                {entries.map(([counterType, maxAmount]) => {
+                  const key = amountKey(id, counterType);
+                  const amount = amounts[key] ?? 0;
+                  return (
+                    <div key={key} className="flex items-center justify-center gap-2">
+                      {counterKind.counter_type.type === "Any" && (
+                        <span className="w-14 truncate text-xs font-semibold text-gray-200">
+                          {formatCounterType(counterType)}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="h-7 w-7 rounded-full bg-gray-700 text-sm font-bold text-white disabled:opacity-40"
+                        onClick={() => setAmount(id, counterType, amount - 1, maxAmount)}
+                        disabled={amount <= 0}
+                      >
+                        -
+                      </button>
+                      <span className="w-8 text-center text-sm font-bold text-white">
+                        {amount}
+                      </span>
+                      <button
+                        type="button"
+                        className="h-7 w-7 rounded-full bg-gray-700 text-sm font-bold text-white disabled:opacity-40"
+                        onClick={() => setAmount(id, counterType, amount + 1, maxAmount)}
+                        disabled={remaining <= 0 || amount >= maxAmount}
+                      >
+                        +
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </motion.div>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
   );
 }
 
@@ -1325,6 +1481,9 @@ function PermanentCostModal({
   title,
   subtitle,
   label,
+  minSelections,
+  maxSelections,
+  labelCount,
   selectedClassName,
   overlayClassName,
   badgeClassName,
@@ -1334,6 +1493,9 @@ function PermanentCostModal({
   title: string;
   subtitle: string;
   label: string;
+  minSelections?: number;
+  maxSelections?: number;
+  labelCount?: number;
   selectedClassName: string;
   overlayClassName: string;
   badgeClassName: string;
@@ -1343,6 +1505,9 @@ function PermanentCostModal({
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+  const minCount = minSelections ?? data.count;
+  const maxCount = maxSelections ?? data.count;
+  const confirmCount = labelCount ?? data.count;
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -1350,13 +1515,13 @@ function PermanentCostModal({
         const next = new Set(prev);
         if (next.has(id)) {
           next.delete(id);
-        } else if (next.size < data.count) {
+        } else if (next.size < maxCount) {
           next.add(id);
         }
         return next;
       });
     },
-    [data.count],
+    [maxCount],
   );
 
   const handleConfirm = useCallback(() => {
@@ -1372,7 +1537,7 @@ function PermanentCostModal({
 
   if (!objects) return null;
 
-  const isReady = selected.size === data.count;
+  const isReady = selected.size >= minCount && selected.size <= maxCount;
 
   return (
     <ChoiceOverlay
@@ -1380,7 +1545,7 @@ function PermanentCostModal({
       subtitle={subtitle}
       footer={
         <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.labelCount", { label, selected: selected.size, count: data.count })} />
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.labelCount", { label, selected: selected.size, count: confirmCount })} />
         </CostActionFooter>
       }
     >

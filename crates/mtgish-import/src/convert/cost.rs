@@ -4,7 +4,9 @@
 //! SacrificeAPermanent, PayLife, DiscardACard, And, Or, ExileAPermanent)
 //! cover the overwhelming majority of activated ability costs.
 
-use engine::types::ability::{AbilityCost, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, CounterCostSelection, QuantityExpr, TargetFilter, REMOVE_COUNTER_COST_ALL,
+};
 use engine::types::ManaCost;
 use engine::types::Zone;
 
@@ -156,6 +158,7 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
             count: 1,
             counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
             target: counter_target(target)?,
+            selection: CounterCostSelection::SingleObject,
         },
         // CR 122.1d: "Remove N {type} counters from ~" — fixed count form.
         // X-bound counts strict-fail with `EnginePrerequisiteMissing` since
@@ -169,14 +172,16 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
                 )?,
                 counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
                 target: counter_target(target)?,
+                selection: CounterCostSelection::SingleObject,
             }
         }
-        // CR 122.1d: "Remove all {type} counters from ~". Engine uses `u32::MAX`
-        // as the "all" sentinel (matches the native parser, see oracle_cost.rs).
+        // CR 122.1d: "Remove all {type} counters from ~". Engine uses a named
+        // sentinel distinct from literal X so this does not prompt for X.
         Cost::RemoveAllCountersOfTypeFromPermanent(ct, target) => AbilityCost::RemoveCounter {
-            count: u32::MAX,
+            count: REMOVE_COUNTER_COST_ALL,
             counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
             target: counter_target(target)?,
+            selection: CounterCostSelection::SingleObject,
         },
 
         // CR 107.3a: Pay {X} mana for an activation cost. The mtgish encoding

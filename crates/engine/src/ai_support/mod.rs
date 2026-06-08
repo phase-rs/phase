@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
-use crate::types::ability::AbilityKind;
+use crate::types::ability::{AbilityKind, CounterCostSelection};
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
@@ -384,15 +384,45 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(*count)),
-        // CR 118.3: RemoveCounter chooses exactly one counter source.
+        // CR 118.3: Single-object RemoveCounter chooses exactly one counter source.
         (
             WaitingFor::PayCost {
-                kind: PayCostKind::RemoveCounter { .. },
+                kind:
+                    PayCostKind::RemoveCounter {
+                        selection: CounterCostSelection::SingleObject,
+                        ..
+                    },
                 choices,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, choices, Some(1)),
+        // CR 118.3: "from among" RemoveCounter submits exact per-object
+        // counter counts, not a bare object selection.
+        (
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::RemoveCounter {
+                        selection: CounterCostSelection::AmongObjects,
+                        count,
+                        ..
+                    },
+                choices,
+                ..
+            },
+            GameAction::ChooseRemoveCounterCostDistribution { distribution },
+        ) => remove_counter_distribution_mismatch(distribution, choices, *count),
+        (
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::RemoveCounter {
+                        selection: CounterCostSelection::AmongObjects,
+                        ..
+                    },
+                ..
+            },
+            GameAction::SelectCards { .. },
+        ) => true,
         // CR 118.3: Sacrifice honors the [min_count, count] range.
         (
             WaitingFor::PayCost {
@@ -543,6 +573,27 @@ fn selection_mismatch<'a>(
     chosen
         .iter()
         .any(|card| !option_set.contains(card) || !seen.insert(*card))
+}
+
+fn remove_counter_distribution_mismatch(
+    distribution: &[crate::types::game_state::CounterCostChoice],
+    choices: &[ObjectId],
+    count: u32,
+) -> bool {
+    let mut total = 0u32;
+    let mut seen = HashSet::new();
+    distribution.is_empty()
+        || distribution.iter().any(|choice| {
+            if choice.count == 0
+                || !choices.contains(&choice.object_id)
+                || !seen.insert((choice.object_id, choice.counter_type.clone()))
+            {
+                return true;
+            }
+            total = total.saturating_add(choice.count);
+            false
+        })
+        || total != count
 }
 
 fn matches_target_choice(

@@ -7,16 +7,16 @@ use crate::game::effects::prepare;
 use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
 use crate::game::mana_sources;
-use crate::types::ability::ChoiceType;
-use crate::types::ability::TargetRef;
+use crate::types::ability::{ChoiceType, CounterCostSelection, TargetRef};
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
 };
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
+use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, ConvokeMode, CounterMoveChoice, GameState, PayCostKind, TargetSelectionSlot,
-    WaitingFor,
+    CastOfferKind, ConvokeMode, CounterCostChoice, CounterMoveChoice, GameState, PayCostKind,
+    TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -1458,12 +1458,16 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ),
         ],
         // CR 118.3 + CR 601.2b + CR 605.3b: AI selects objects to pay a cost.
-        // RemoveCounter chooses exactly one source (one permanent per
-        // candidate); Sacrifice honors the [min, max] range; every other kind
-        // selects exactly `count` objects.
+        // Single-object RemoveCounter chooses one source per candidate;
+        // from-among RemoveCounter and Sacrifice honor the [min, max] range;
+        // every other kind selects exactly `count` objects.
         WaitingFor::PayCost {
             player,
-            kind: PayCostKind::RemoveCounter { .. },
+            kind:
+                PayCostKind::RemoveCounter {
+                    selection: CounterCostSelection::SingleObject,
+                    ..
+                },
             choices,
             ..
         } => choices
@@ -1476,6 +1480,24 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::PayCost {
+            player,
+            kind:
+                PayCostKind::RemoveCounter {
+                    selection: CounterCostSelection::AmongObjects,
+                    counter_type,
+                    count: counter_count,
+                    ..
+                },
+            choices,
+            ..
+        } => remove_counter_cost_distribution_candidate(
+            state,
+            *player,
+            choices,
+            counter_type,
+            *counter_count,
+        ),
         WaitingFor::PayCost {
             player,
             kind: PayCostKind::Sacrifice,
@@ -3441,6 +3463,62 @@ fn bounded_select_card_candidates(
             )
         })
         .collect()
+}
+
+fn remove_counter_cost_distribution_candidate(
+    state: &GameState,
+    player: PlayerId,
+    cards: &[ObjectId],
+    counter_type: &CounterMatch,
+    count: u32,
+) -> Vec<CandidateAction> {
+    let mut remaining = count;
+    let mut distribution = Vec::new();
+    for &object_id in cards {
+        if remaining == 0 {
+            break;
+        }
+        let Some(obj) = state.objects.get(&object_id) else {
+            continue;
+        };
+        let available: Vec<_> = match counter_type {
+            CounterMatch::OfType(counter_type) => obj
+                .counters
+                .get(counter_type)
+                .copied()
+                .into_iter()
+                .map(|count| (counter_type.clone(), count))
+                .collect(),
+            CounterMatch::Any => obj
+                .counters
+                .iter()
+                .map(|(counter_type, count)| (counter_type.clone(), *count))
+                .collect(),
+        };
+        for (counter_type, available) in available {
+            if remaining == 0 {
+                break;
+            }
+            let assigned = available.min(remaining);
+            if assigned > 0 {
+                distribution.push(CounterCostChoice {
+                    object_id,
+                    counter_type,
+                    count: assigned,
+                });
+                remaining -= assigned;
+            }
+        }
+    }
+    if remaining == 0 {
+        vec![candidate(
+            GameAction::ChooseRemoveCounterCostDistribution { distribution },
+            TacticalClass::Selection,
+            Some(player),
+        )]
+    } else {
+        Vec::new()
+    }
 }
 
 fn mode_actions(

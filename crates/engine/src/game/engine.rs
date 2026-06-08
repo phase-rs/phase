@@ -2137,6 +2137,48 @@ fn apply_action(
         (
             WaitingFor::PayCost {
                 player,
+                kind:
+                    PayCostKind::RemoveCounter {
+                        counter_type,
+                        count: counter_count,
+                        selection,
+                    },
+                choices,
+                resume,
+                ..
+            },
+            GameAction::ChooseRemoveCounterCostDistribution { distribution },
+        ) => match resume {
+            CostResume::Spell {
+                spell: pending_cast,
+            }
+            | CostResume::SpellCost {
+                spell: pending_cast,
+                ..
+            } => {
+                casting_costs::handle_remove_counter_distribution_for_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *counter_count,
+                    counter_type.clone(),
+                    *selection,
+                    choices,
+                    &distribution,
+                    &mut events,
+                )?
+            }
+            CostResume::ManaAbility {
+                ..
+            } => {
+                return Err(EngineError::InvalidAction(
+                    "Counter-cost distribution is not valid for mana abilities".to_string(),
+                ));
+            }
+        },
+        (
+            WaitingFor::PayCost {
+                player,
                 kind,
                 choices,
                 count,
@@ -2217,13 +2259,18 @@ fn apply_action(
                         &mut events,
                     )?
                 }
-                PayCostKind::RemoveCounter { counter_type } => {
+                PayCostKind::RemoveCounter {
+                    counter_type,
+                    count: counter_count,
+                    selection,
+                } => {
                     casting_costs::handle_remove_counter_for_cost(
                         state,
                         *player,
                         *pending_cast.clone(),
-                        *count as u32,
+                        *counter_count,
                         counter_type.clone(),
+                        *selection,
                         choices,
                         &chosen,
                         &mut events,

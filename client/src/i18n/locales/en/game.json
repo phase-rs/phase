@@ -319,7 +319,8 @@
     "chooseAmountAria": "Choose amount to pay",
     "payAmount": "Pay {{value}} {{resource}}",
     "resourceEnergy": "energy",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "counters"
   },
   "hand": {
     "viewFullHand_one": "View full hand ({{count}} card)",

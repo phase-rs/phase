@@ -16,7 +16,8 @@
 //! the enumerations.
 
 use crate::types::ability::{
-    AbilityCost, Comparator, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+    is_variable_remove_counter_cost_count, AbilityCost, Comparator, CounterCostSelection,
+    FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
@@ -349,28 +350,46 @@ impl AbilityCost {
             // CR 601.2b: RemoveCounter requires counters on the implied target.
             // If `target` is None, the source must have the required counters.
             // Otherwise, at least one matching permanent must carry N counters.
-            // CR 107.2: `u32::MAX` encodes "any number of" — the player chooses
-            // how many counters to remove (including zero), so the cost is always
-            // payable regardless of the current counter count.
+            // CR 107.2 / CR 107.3a: variable remove-counter costs are payable
+            // before the final count is known.
             AbilityCost::RemoveCounter {
                 count,
                 counter_type,
                 target,
+                selection,
             } => {
-                if *count == u32::MAX {
+                if is_variable_remove_counter_cost_count(*count) {
                     return true;
                 }
                 match target {
-                    None => counter_on_object(state, source, counter_type) >= *count,
+                    None => {
+                        counter_on_object_for_selection(state, source, counter_type, *selection)
+                            >= *count
+                    }
                     Some(tf) => {
                         let ctx = FilterContext::from_source(state, source);
-                        state.battlefield.iter().any(|&id| {
-                            state.objects.get(&id).is_some_and(|o| {
-                                o.controller == player
-                                    && matches_target_filter(state, id, tf, &ctx)
-                                    && counter_on_object(state, id, counter_type) >= *count
+                        let matching_counts = state.battlefield.iter().filter_map(|&id| {
+                            state.objects.get(&id).and_then(|o| {
+                                (o.controller == player
+                                    && matches_target_filter(state, id, tf, &ctx))
+                                .then(|| {
+                                    counter_on_object_for_selection(
+                                        state,
+                                        id,
+                                        counter_type,
+                                        *selection,
+                                    )
+                                })
                             })
-                        })
+                        });
+                        match selection {
+                            CounterCostSelection::SingleObject => matching_counts
+                                .into_iter()
+                                .any(|available| available >= *count),
+                            CounterCostSelection::AmongObjects => {
+                                matching_counts.fold(0, u32::saturating_add) >= *count
+                            }
+                        }
                     }
                 }
             }
@@ -709,6 +728,22 @@ fn counter_on_object(
     }
 }
 
+fn counter_on_object_for_selection(
+    state: &GameState,
+    id: ObjectId,
+    kind: &crate::types::counter::CounterMatch,
+    selection: CounterCostSelection,
+) -> u32 {
+    match (kind, selection) {
+        (crate::types::counter::CounterMatch::Any, CounterCostSelection::SingleObject) => state
+            .objects
+            .get(&id)
+            .and_then(|obj| obj.counters.values().copied().max())
+            .unwrap_or(0),
+        _ => counter_on_object(state, id, kind),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,6 +1076,7 @@ mod tests {
             count: 1,
             counter_type: crate::types::counter::CounterMatch::Any,
             target: None,
+            selection: CounterCostSelection::SingleObject,
         };
         assert!(
             cost.is_payable(&scenario.state, P0, src),
@@ -1061,19 +1097,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remove_counter_single_object_any_uses_one_concrete_stack_for_counts_above_one() {
+        use crate::types::counter::CounterType;
+
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Mixed Counters", 0, 0).id();
+        {
+            let obj = scenario.state.objects.get_mut(&src).unwrap();
+            obj.counters
+                .insert(CounterType::Generic("charge".to_string()), 1);
+            obj.counters
+                .insert(CounterType::Generic("quest".to_string()), 1);
+        }
+
+        let cost = AbilityCost::RemoveCounter {
+            count: 2,
+            counter_type: crate::types::counter::CounterMatch::Any,
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        };
+
+        assert!(
+            !cost.is_payable(&scenario.state, P0, src),
+            "single-object untyped counter costs must align with payment, which removes one concrete counter type"
+        );
+    }
+
     /// CR 107.2: "Remove any number of" counters is always payable — the
     /// player may choose zero, so no minimum counter count is required.
     #[test]
     fn remove_counter_any_number_always_payable() {
+        use crate::types::ability::REMOVE_COUNTER_COST_ANY_NUMBER;
         use crate::types::counter::CounterType;
+
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Mage-Ring Network", 0, 0).id();
         let cost = AbilityCost::RemoveCounter {
-            count: u32::MAX,
+            count: REMOVE_COUNTER_COST_ANY_NUMBER,
             counter_type: crate::types::counter::CounterMatch::OfType(CounterType::Generic(
                 "storage".to_string(),
             )),
             target: None,
+            selection: CounterCostSelection::SingleObject,
         };
         // Payable even with zero counters.
         assert!(

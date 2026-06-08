@@ -1,15 +1,16 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AdditionalCost, BeholdCostAction, CastTimingPermission,
-    CostPaidObjectSnapshot, Effect, KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility,
-    SpellCastingOptionKind, StaticCondition, TargetFilter, TypedFilter,
+    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AdditionalCost,
+    BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot, CounterCostSelection, Effect,
+    KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility, SpellCastingOptionKind,
+    StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit,
-    GameState, PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
+    DistributionUnit, GameState, PayCostKind, PendingCast, PendingDiscardForCostResume,
+    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -509,23 +510,6 @@ fn finish_pending_cost_or_cast(
     mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if let Some(ability_index) = pending.activation_ability_index {
-        let waiting_for = push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            events,
-        )?;
-        return Ok(drain_deferred_triggers_after_stack_object_announcement(
-            state,
-            events,
-            waiting_for,
-        ));
-    }
-
     if matches!(
         pending.additional_cost_flow,
         Some(AdditionalCost::Required(_))
@@ -689,6 +673,30 @@ fn finish_pending_cost_or_cast(
             pending,
             events,
         );
+    }
+
+    if pending.activation_ability_index.is_some()
+        && !matches!(pending.cost, ManaCost::NoCost | ManaCost::SelfManaCost)
+    {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, None, events);
+    }
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        let waiting_for = push_activated_ability_to_stack(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
+            events,
+        )?;
+        return Ok(drain_deferred_triggers_after_stack_object_announcement(
+            state,
+            events,
+            waiting_for,
+        ));
     }
 
     let base_cost = pending.base_cost.clone();
@@ -1270,20 +1278,42 @@ pub(crate) fn handle_remove_counter_for_cost(
     mut pending: PendingCast,
     count: u32,
     counter_type: crate::types::counter::CounterMatch,
+    selection: CounterCostSelection,
     legal_permanents: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != 1 {
-        return Err(EngineError::InvalidAction(format!(
-            "Must choose exactly one permanent, got {}",
-            chosen.len()
-        )));
+    if selection == CounterCostSelection::AmongObjects {
+        return Err(EngineError::InvalidAction(
+            "Counter distribution is required for from-among counter costs".to_string(),
+        ));
     }
-    let chosen = chosen[0];
-    if !legal_permanents.contains(&chosen) {
+    let paid_object = match selection {
+        CounterCostSelection::SingleObject => {
+            if chosen.len() != 1 {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose exactly one permanent, got {}",
+                    chosen.len()
+                )));
+            }
+            Some(chosen[0])
+        }
+        CounterCostSelection::AmongObjects => chosen.first().copied(),
+    };
+    if chosen.is_empty() || chosen.iter().any(|id| !legal_permanents.contains(id)) {
         return Err(EngineError::InvalidAction(
             "Selected permanent not eligible for counter removal".to_string(),
+        ));
+    }
+
+    let selected_removable = chosen
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| super::casting::removable_counter_count(obj, &counter_type))
+        .fold(0, u32::saturating_add);
+    if selected_removable < count {
+        return Err(EngineError::InvalidAction(
+            "Selected permanents do not have enough removable counters".to_string(),
         ));
     }
 
@@ -1297,24 +1327,158 @@ pub(crate) fn handle_remove_counter_for_cost(
         }
     }
 
-    let concrete_counter =
-        super::effects::counters::resolve_counter_match_for_removal(state, chosen, &counter_type)
-            .ok_or_else(|| EngineError::ActionNotAllowed("No removable counter".to_string()))?;
-    super::effects::counters::remove_counter_with_replacement(
-        state,
-        chosen,
-        concrete_counter,
-        count,
-        events,
-    );
+    let mut remaining = count;
+    for &object_id in chosen {
+        if remaining == 0 {
+            break;
+        }
+        let Some(concrete_counter) = super::effects::counters::resolve_counter_match_for_removal(
+            state,
+            object_id,
+            &counter_type,
+        ) else {
+            continue;
+        };
+        let removable = state
+            .objects
+            .get(&object_id)
+            .and_then(|obj| obj.counters.get(&concrete_counter))
+            .copied()
+            .unwrap_or(0);
+        let to_remove = removable.min(remaining);
+        if to_remove > 0 {
+            super::effects::counters::remove_counter_with_replacement(
+                state,
+                object_id,
+                concrete_counter,
+                to_remove,
+                events,
+            );
+            remaining -= to_remove;
+        }
+    }
+    if remaining > 0 {
+        return Err(EngineError::ActionNotAllowed(
+            "No removable counter".to_string(),
+        ));
+    }
 
-    if let Some(obj) = state.objects.get(&chosen) {
+    if let Some(obj) = paid_object.and_then(|id| state.objects.get(&id).map(|obj| (id, obj))) {
         pending
             .ability
             .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                object_id: chosen,
-                lki: obj.snapshot_for_mana_spent(),
+                object_id: obj.0,
+                lki: obj.1.snapshot_for_mana_spent(),
             });
+    }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 118.3 + CR 122.1 + CR 601.2b: Complete "remove N counters from among"
+/// cost payment after the player assigns exact counter counts per object.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_remove_counter_distribution_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    count: u32,
+    counter_type: crate::types::counter::CounterMatch,
+    selection: CounterCostSelection,
+    legal_permanents: &[ObjectId],
+    distribution: &[CounterCostChoice],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if selection != CounterCostSelection::AmongObjects {
+        return Err(EngineError::InvalidAction(
+            "Counter distribution is only valid for from-among counter costs".to_string(),
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut total = 0u32;
+    for choice in distribution {
+        if choice.count == 0 {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution amounts must be positive".to_string(),
+            ));
+        }
+        if !seen.insert((choice.object_id, choice.counter_type.clone())) {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution contains duplicate counter choices".to_string(),
+            ));
+        }
+        if !legal_permanents.contains(&choice.object_id) {
+            return Err(EngineError::InvalidAction(
+                "Selected permanent not eligible for counter removal".to_string(),
+            ));
+        }
+        if matches!(
+            &counter_type,
+            crate::types::counter::CounterMatch::OfType(required) if required != &choice.counter_type
+        ) {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution uses the wrong counter type".to_string(),
+            ));
+        }
+        let removable = state
+            .objects
+            .get(&choice.object_id)
+            .and_then(|obj| obj.counters.get(&choice.counter_type))
+            .copied()
+            .unwrap_or(0);
+        if removable < choice.count {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution exceeds removable counters".to_string(),
+            ));
+        }
+        total = total.saturating_add(choice.count);
+    }
+    if total != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Counter distribution must total {count}, got {total}",
+        )));
+    }
+
+    if pending.activation_ability_index.is_some() {
+        if let Some(cost) = pending.activation_cost.take() {
+            // CR 601.2h + CR 602.2b: Pay automatic activation-cost components
+            // such as {T} before removing the assigned counters and putting
+            // the ability on the stack.
+            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
+        }
+    }
+
+    for choice in distribution {
+        let removable = state
+            .objects
+            .get(&choice.object_id)
+            .and_then(|obj| obj.counters.get(&choice.counter_type))
+            .copied()
+            .unwrap_or(0);
+        if removable < choice.count {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution exceeds removable counters".to_string(),
+            ));
+        }
+        super::effects::counters::remove_counter_with_replacement(
+            state,
+            choice.object_id,
+            choice.counter_type.clone(),
+            choice.count,
+            events,
+        );
+    }
+
+    if let Some(choice) = distribution.first() {
+        if let Some(obj) = state.objects.get(&choice.object_id) {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: choice.object_id,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
+        }
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -1674,6 +1838,16 @@ pub(super) fn push_activated_ability_to_stack(
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        let concretized_cost;
+        let cost = if let Some(chosen_x) = resolved.chosen_x {
+            // CR 602.2b + CR 601.2f + CR 122.1: Once X is announced for an
+            // activation cost, the symbolic counter-removal cost becomes a
+            // concrete count before payment removes counters.
+            concretized_cost = concretize_x_counter_removal_cost(cost, chosen_x);
+            &concretized_cost
+        } else {
+            cost
+        };
         if super::casting::variable_speed_payment_range(
             cost,
             super::speed::effective_speed(state, player),
@@ -1773,6 +1947,29 @@ pub(super) fn push_activated_ability_to_stack(
     emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
     push_ability_entry(state, player, source_id, ability_index, resolved, events)
+}
+
+fn concretize_x_counter_removal_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
+    match cost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target,
+            selection,
+        } if is_chosen_remove_counter_cost_count(*count) => AbilityCost::RemoveCounter {
+            count: chosen_x,
+            counter_type: counter_type.clone(),
+            target: target.clone(),
+            selection: *selection,
+        },
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|cost| concretize_x_counter_removal_cost(cost, chosen_x))
+                .collect(),
+        },
+        _ => cost.clone(),
+    }
 }
 
 /// Final step: create stack entry and record activation.
@@ -3044,28 +3241,63 @@ fn pay_additional_cost_with_source(
             count,
             ref counter_type,
             target: Some(ref target),
+            selection,
         } => {
+            if count == 0 {
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
+            let required_count = match selection {
+                CounterCostSelection::SingleObject => count,
+                CounterCostSelection::AmongObjects => 1,
+            };
             let eligible = super::casting::find_eligible_remove_counter_for_cost_targets(
                 state,
                 player,
                 pending.object_id,
                 target,
                 counter_type,
-                count,
+                required_count,
             );
             if eligible.is_empty() {
                 return Err(EngineError::ActionNotAllowed(
                     "No eligible permanents with counters".into(),
                 ));
             }
+            if selection == CounterCostSelection::AmongObjects {
+                let removable_count = eligible
+                    .iter()
+                    .filter_map(|object_id| state.objects.get(object_id))
+                    .map(|obj| {
+                        super::casting::removable_counter_count_for_cost_selection(
+                            obj,
+                            counter_type,
+                            selection,
+                        )
+                    })
+                    .fold(0, u32::saturating_add);
+                if removable_count < count {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Not enough eligible counters to remove".into(),
+                    ));
+                }
+            }
+            let max_count = match selection {
+                CounterCostSelection::SingleObject => 1,
+                CounterCostSelection::AmongObjects => eligible.len(),
+            };
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::RemoveCounter {
                     counter_type: counter_type.clone(),
+                    count,
+                    selection,
                 },
                 choices: eligible,
-                count: count as usize,
-                min_count: 0,
+                count: max_count,
+                min_count: match selection {
+                    CounterCostSelection::SingleObject => 0,
+                    CounterCostSelection::AmongObjects => 1,
+                },
                 resume: CostResume::Spell {
                     spell: Box::new(pending),
                 },
@@ -3312,21 +3544,34 @@ fn additional_cost_x_max(
             target,
             count,
             counter_type,
-        } if *count == u32::MAX => {
+            selection,
+        } if is_chosen_remove_counter_cost_count(*count) => {
             // CR 601.2b: X in a variable counter removal cost is announced before later target choices.
             let target_filter = target.as_ref().unwrap_or(&TargetFilter::SelfRef);
+            let eligible = super::casting::find_eligible_remove_counter_for_cost_targets(
+                state,
+                player,
+                source_id,
+                target_filter,
+                counter_type,
+                *count,
+            );
+            let removable_counts = eligible
+                .into_iter()
+                .filter_map(|object_id| state.objects.get(&object_id))
+                .map(|obj| {
+                    super::casting::removable_counter_count_for_cost_selection(
+                        obj,
+                        counter_type,
+                        *selection,
+                    )
+                });
             Some(
-                super::casting::find_eligible_remove_counter_for_cost_targets(
-                    state,
-                    player,
-                    source_id,
-                    target_filter,
-                    counter_type,
-                    *count,
-                )
-                .len()
-                .try_into()
-                .unwrap_or(u32::MAX),
+                if target.is_some() && *selection == CounterCostSelection::SingleObject {
+                    removable_counts.max().unwrap_or(0)
+                } else {
+                    removable_counts.fold(0, u32::saturating_add)
+                },
             )
         }
         AbilityCost::Composite { costs } => costs
@@ -3335,6 +3580,56 @@ fn additional_cost_x_max(
             .min(),
         AbilityCost::PerCounter { base, .. } => {
             additional_cost_x_max(state, player, source_id, base)
+        }
+        _ => None,
+    }
+}
+
+fn activation_counter_cost_x_max(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    cost: &AbilityCost,
+) -> Option<u32> {
+    if !activation_cost_needs_x_choice(ability, cost) {
+        return None;
+    }
+    additional_cost_x_max(state, player, source_id, cost)
+}
+
+pub(super) fn activation_cost_needs_x_choice(
+    ability: &ResolvedAbility,
+    cost: &AbilityCost,
+) -> bool {
+    ability.chosen_x.is_none() && cost_has_symbolic_counter_removal(cost)
+}
+
+fn cost_has_symbolic_counter_removal(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::RemoveCounter { count, .. } => is_chosen_remove_counter_cost_count(*count),
+        AbilityCost::Composite { costs } => costs.iter().any(cost_has_symbolic_counter_removal),
+        _ => false,
+    }
+}
+
+fn cost_has_targeted_symbolic_counter_removal(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::RemoveCounter { count, target, .. } => {
+            is_chosen_remove_counter_cost_count(*count) && target.is_some()
+        }
+        AbilityCost::Composite { costs } => {
+            costs.iter().any(cost_has_targeted_symbolic_counter_removal)
+        }
+        _ => false,
+    }
+}
+
+fn targeted_remove_counter_choice_cost(cost: &AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::RemoveCounter { target, .. } if target.is_some() => Some(cost.clone()),
+        AbilityCost::Composite { costs } => {
+            costs.iter().find_map(targeted_remove_counter_choice_cost)
         }
         _ => None,
     }
@@ -5606,7 +5901,12 @@ pub fn enter_payment_step(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(pending) = state.pending_cast.as_ref() {
-        if pending.ability.chosen_x.is_none() && cost_has_x(&pending.cost) {
+        let activation_counter_x_max = pending.activation_cost.as_ref().and_then(|cost| {
+            activation_counter_cost_x_max(state, player, pending.object_id, &pending.ability, cost)
+        });
+        if pending.ability.chosen_x.is_none()
+            && (cost_has_x(&pending.cost) || activation_counter_x_max.is_some())
+        {
             // CR 601.2f: Every spell-cast path that reaches X announcement must
             // carry the captured tax-inclusive base so the X cap and the locked-in
             // cost can be recomputed from scratch (`concrete_cost_for_x`). Activated
@@ -5624,13 +5924,23 @@ pub fn enter_payment_step(
                     super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
                 })
                 .unwrap_or_default();
-            let max = max_x_value_excluding(
-                state,
-                player,
-                &pending.cost,
-                Some(pending.object_id),
-                &excluded_sources,
-            );
+            let mana_max = if cost_has_x(&pending.cost) {
+                max_x_value_excluding(
+                    state,
+                    player,
+                    &pending.cost,
+                    Some(pending.object_id),
+                    &excluded_sources,
+                )
+            } else {
+                u32::MAX
+            };
+            let max = pending
+                .activation_cost
+                .as_ref()
+                .and_then(|cost| additional_cost_x_max(state, player, pending.object_id, cost))
+                .or(activation_counter_x_max)
+                .map_or(mana_max, |cost_max| mana_max.min(cost_max));
             if min > max {
                 let pending_for_cancel = pending.clone();
                 state.pending_cast = None;
@@ -5647,6 +5957,30 @@ pub fn enter_payment_step(
                 pending_cast,
                 convoke_mode,
             });
+        }
+
+        let targeted_counter_resume = pending.ability.chosen_x.and_then(|chosen_x| {
+            pending
+                .activation_cost
+                .as_ref()
+                .filter(|cost| cost_has_targeted_symbolic_counter_removal(cost))
+                .cloned()
+                .map(|cost| (pending.as_ref().clone(), cost, chosen_x))
+        });
+        if let Some((mut pending, cost, chosen_x)) = targeted_counter_resume {
+            let concretized_cost = concretize_x_counter_removal_cost(&cost, chosen_x);
+            let prompt_cost = targeted_remove_counter_choice_cost(&concretized_cost)
+                .unwrap_or_else(|| concretized_cost.clone());
+            pending.activation_cost = Some(concretized_cost);
+            state.pending_cast = None;
+            return pay_additional_cost_with_source(
+                state,
+                player,
+                prompt_cost,
+                SpellCostSource::Other,
+                pending,
+                events,
+            );
         }
     }
 
@@ -6365,6 +6699,40 @@ mod tests {
                     .description("Apply discard replacement".to_string()),
             );
         replacement_source
+    }
+
+    #[test]
+    fn remove_counter_additional_cost_x_max_counts_counters_not_targets() {
+        use crate::types::ability::REMOVE_COUNTER_COST_X;
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_003),
+            PlayerId(0),
+            "Marath Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 3);
+
+        let cost = AbilityCost::RemoveCounter {
+            target: None,
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
+            selection: CounterCostSelection::SingleObject,
+        };
+
+        assert_eq!(
+            additional_cost_x_max(&state, PlayerId(0), source, &cost),
+            Some(3),
+            "X must be capped by removable +1/+1 counters, not by eligible target count"
+        );
     }
 
     /// CR 603.10a + CR 701.21a + CR 601.2h: when a spell's additional cost

@@ -289,6 +289,7 @@ export type LibraryPosition =
 // only `Hand` (pitch spells) and `Graveyard` (escape) are valid (mirrors the
 // engine's `ExileCostSourceZone`).
 export type ExileCostSourceZone = "Hand" | "Graveyard";
+export type CounterCostSelection = "SingleObject" | "AmongObjects";
 
 // CR 118.3 + CR 601.2b + CR 605.3b: which action a `PayCost` selection applies
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
@@ -302,7 +303,7 @@ export type PayCostKind =
   // the modal only renders `choices`, so it is opaque pass-through here.
   | { type: "ExileMaterials"; materials: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
-  | { type: "RemoveCounter"; counter_type: CounterMatch }
+  | { type: "RemoveCounter"; counter_type: CounterMatch; count: number; selection: CounterCostSelection }
   | { type: "TapCreatures" }
   | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
 
@@ -520,6 +521,12 @@ export type ChosenAttribute =
 
 export type CounterMoveChoice = {
   destination_id: ObjectId;
+  counter_type: CounterType;
+  count: number;
+};
+
+export type CounterCostChoice = {
+  object_id: ObjectId;
   counter_type: CounterType;
   count: number;
 };
@@ -1083,7 +1090,7 @@ export type WaitingFor =
       type: "ChooseXValue";
       data: { player: PlayerId; min?: number; max: number; pending_cast: PendingCast };
     }
-  | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
+  | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId; pending_mana_ability?: unknown } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number> } }
@@ -1554,6 +1561,7 @@ export type GameAction =
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
+  | { type: "ChooseRemoveCounterCostDistribution"; data: { distribution: CounterCostChoice[] } }
   | { type: "ChooseCounterMoveDistribution"; data: { selections: CounterMoveChoice[] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
   | { type: "LearnDecision"; data: { choice: LearnOption } }
@@ -1594,7 +1602,8 @@ export type ShardChoice =
 
 export type PayableResource =
   | { type: "Energy" }
-  | { type: "ManaGeneric"; data: { per_x: number } };
+  | { type: "ManaGeneric"; data: { per_x: number } }
+  | { type: "Counters" };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }

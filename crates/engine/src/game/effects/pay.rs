@@ -59,6 +59,7 @@ pub fn resolve(
                     max,
                     accumulated: 0,
                     source_id: ability.source_id,
+                    pending_mana_ability: None,
                 };
                 return Ok(());
             }
@@ -129,6 +130,7 @@ pub fn resolve(
                     max,
                     accumulated: 0,
                     source_id: ability.source_id,
+                    pending_mana_ability: None,
                 };
                 return Ok(());
             }

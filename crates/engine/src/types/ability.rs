@@ -4807,6 +4807,41 @@ impl CostObjectCount {
     }
 }
 
+/// Sentinel for literal `X` in remove-counter costs. `AbilityCost::RemoveCounter`
+/// keeps a compact numeric payload for generated data compatibility, so use
+/// these named constants instead of raw `u32::MAX` checks.
+pub const REMOVE_COUNTER_COST_X: u32 = u32::MAX;
+/// Sentinel for "all" remove-counter costs.
+pub const REMOVE_COUNTER_COST_ALL: u32 = u32::MAX - 1;
+/// Sentinel for "any number of" remove-counter costs. This still requires a
+/// count choice, but is distinct from literal `X` for parser/data clarity.
+pub const REMOVE_COUNTER_COST_ANY_NUMBER: u32 = u32::MAX - 2;
+
+pub fn is_x_remove_counter_cost_count(count: u32) -> bool {
+    count == REMOVE_COUNTER_COST_X
+}
+
+pub fn is_chosen_remove_counter_cost_count(count: u32) -> bool {
+    matches!(
+        count,
+        REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER
+    )
+}
+
+pub fn is_variable_remove_counter_cost_count(count: u32) -> bool {
+    matches!(
+        count,
+        REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER | REMOVE_COUNTER_COST_ALL
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CounterCostSelection {
+    #[default]
+    SingleObject,
+    AmongObjects,
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -4885,15 +4920,16 @@ pub enum AbilityCost {
     /// CR 122.1 + CR 601.2h: Remove `count` counters matching `counter_type`
     /// as an additional cost. `CounterMatch::Any` is the untyped "remove a
     /// counter" form (Loch Mare's `{1}{U}, Remove a counter from ~`); the
-    /// payment path sums across every counter type on the chosen permanent
-    /// and resolves to a concrete kind at payment time. `CounterMatch::OfType`
-    /// is the typed form ("remove a +1/+1 counter", "remove a charge counter"),
-    /// scoped to a single counter kind.
+    /// payment path resolves to one concrete kind at payment time.
+    /// `CounterMatch::OfType` is the typed form ("remove a +1/+1 counter",
+    /// "remove a charge counter"), scoped to a single counter kind.
     RemoveCounter {
         count: u32,
         counter_type: CounterMatch,
         #[serde(default)]
         target: Option<TargetFilter>,
+        #[serde(default)]
+        selection: CounterCostSelection,
     },
     PayEnergy {
         amount: QuantityExpr,
@@ -10795,13 +10831,6 @@ pub enum TriggerCondition {
         comparator: Comparator,
         count: u32,
     },
-    /// CR 508.1a: "Whenever ~ and at least N other creatures attack" (minimum form).
-    /// True when combat is active and at least `minimum` other creatures
-    /// controlled by the same player are also attacking.
-    AttackersDeclaredMin { minimum: u32 },
-    /// CR 508.1a: "if none of those creatures targeted you" — intervening-if for
-    /// attack triggers where the defending player was not targeted by any attacker.
-    NoneOfAttackersTargetedYou,
 
     /// CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they] draw in
     /// each of [your|their] draw steps" — the trigger fires for every card-draw
@@ -14383,6 +14412,7 @@ mod tests {
                 count: 1,
                 counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             };
             assert_eq!(cost.categories(), vec![CostCategory::RemovesCounters]);
         }
