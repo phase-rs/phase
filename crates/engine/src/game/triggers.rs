@@ -4064,6 +4064,32 @@ pub(crate) fn check_trigger_condition(
                 co_attacker_count >= *minimum as usize
             })
         }
+        TriggerCondition::AttackersDeclaredMin { minimum } => {
+            state.combat.as_ref().is_some_and(|combat| {
+                let attacker_count = combat
+                    .attackers
+                    .iter()
+                    .filter(|a| {
+                        state
+                            .objects
+                            .get(&a.object_id)
+                            .is_some_and(|obj| obj.controller == controller)
+                    })
+                    .count();
+                attacker_count >= *minimum as usize
+            })
+        }
+        TriggerCondition::NoneOfAttackersTargetedYou => {
+            state.combat.as_ref().is_some_and(|combat| {
+                !combat.attackers.iter().any(|a| {
+                    matches!(
+                        a.attack_target,
+                        crate::game::combat::AttackTarget::Player(player_id)
+                            if player_id == controller
+                    )
+                })
+            })
+        }
         // CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Compare a count over the
         // current attack declaration, either by attacker controller (optionally
         // narrowed to a typed class, e.g. "two or more Dinosaurs") or by the

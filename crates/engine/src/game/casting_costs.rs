@@ -3308,6 +3308,27 @@ fn additional_cost_x_max(
                     .unwrap_or(u32::MAX),
             )
         }
+        AbilityCost::RemoveCounter {
+            target,
+            count,
+            counter_type,
+        } if *count == u32::MAX => {
+            // CR 601.2b: X in a variable counter removal cost is announced before later target choices.
+            let target_filter = target.as_ref().unwrap_or(&TargetFilter::SelfRef);
+            Some(
+                super::casting::find_eligible_remove_counter_for_cost_targets(
+                    state,
+                    player,
+                    source_id,
+                    target_filter,
+                    counter_type,
+                    *count,
+                )
+                .len()
+                .try_into()
+                .unwrap_or(u32::MAX),
+            )
+        }
         AbilityCost::Composite { costs } => costs
             .iter()
             .filter_map(|cost| additional_cost_x_max(state, player, source_id, cost))

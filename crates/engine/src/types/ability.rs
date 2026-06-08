@@ -10716,6 +10716,13 @@ pub enum TriggerCondition {
         comparator: Comparator,
         count: u32,
     },
+    /// CR 508.1a: "Whenever ~ and at least N other creatures attack" (minimum form).
+    /// True when combat is active and at least `minimum` other creatures
+    /// controlled by the same player are also attacking.
+    AttackersDeclaredMin { minimum: u32 },
+    /// CR 508.1a: "if none of those creatures targeted you" — intervening-if for
+    /// attack triggers where the defending player was not targeted by any attacker.
+    NoneOfAttackersTargetedYou,
 
     /// CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they] draw in
     /// each of [your|their] draw steps" — the trigger fires for every card-draw

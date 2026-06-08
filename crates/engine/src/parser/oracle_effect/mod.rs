@@ -42746,6 +42746,40 @@ mod tests {
             "\"they own\" must scope ownership to the iterating player, got {typed:#?}",
         );
     }
+
+    #[test]
+    fn each_player_gains_control_of_creatures_they_own_parses_with_ownership() {
+        // Issue #2399: Homeward Path - verify ownership filter is applied to GainControl
+        let def = parse_effect_chain(
+            "Each player gains control of all creatures they own.",
+            AbilityKind::Activated,
+        );
+
+        // Should have player_scope: All for "Each player"
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+
+        // The effect should be GainControl with target filter including ownership
+        let Effect::GainControl { target } = &*def.effect else {
+            panic!("expected GainControl, got {:#?}", def.effect);
+        };
+
+        // Target should be Typed filter with ownership property
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected Typed filter, got {:#?}", target);
+        };
+
+        // Verify ownership filter is present
+        assert!(
+            typed.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::Owned {
+                    controller: ControllerRef::ScopedPlayer
+                }
+            )),
+            "\"they own\" must add ownership filter to GainControl target, got {:#?}",
+            typed
+        );
+    }
 }
 
 /// Snapshot tests locking current `parse_effect_chain` behavior before the

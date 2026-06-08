@@ -255,6 +255,16 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((u32::MAX, counter_type));
     }
+    // CR 601.2b: "X" is a variable cost announced before target selection.
+    // u32::MAX sentinel allows the runtime to resolve X from the chosen value.
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        alt((tag::<_, _, E<'_>>("x "), tag("X "))),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((u32::MAX, counter_type));
+    }
     if let Ok((_, (count, counter_type))) = all_consuming(pair(
         terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
         parse_remove_counter_kind,
@@ -1231,6 +1241,39 @@ mod tests {
         // Trailing non-mana text must cause the helper to return None so the
         // caller can fall through to a more general parser.
         assert!(parse_or_separated_mana_costs("{G} or {W} and pay 1 life").is_none());
+    }
+
+    // Tests for issue #2394: Marath, Will of the Wild - variable X counter removal
+    #[test]
+    fn parse_remove_x_counters_uses_u32_max_sentinel() {
+        let (count, counter_type) = parse_remove_counter_quantity_and_kind("X +1/+1 counters")
+            .expect("should parse X counter removal");
+
+        assert_eq!(count, u32::MAX, "X should be encoded as u32::MAX sentinel");
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
+    #[test]
+    fn parse_remove_numeric_counters_uses_actual_value() {
+        let (count, counter_type) = parse_remove_counter_quantity_and_kind("3 +1/+1 counters")
+            .expect("should parse numeric counter removal");
+
+        assert_eq!(count, 3, "numeric value should be preserved");
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
+    #[test]
+    fn parse_any_number_of_counters_uses_u32_max_sentinel() {
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("any number of +1/+1 counters")
+                .expect("should parse 'any number of' counter removal");
+
+        assert_eq!(
+            count,
+            u32::MAX,
+            "'any number of' should be encoded as u32::MAX sentinel"
+        );
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
     }
 
     #[test]
