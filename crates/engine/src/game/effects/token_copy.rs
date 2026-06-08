@@ -206,6 +206,7 @@ pub fn resolve(
                 values: Box::new(values),
                 display_source: source.display_source,
                 printed_ref: source.printed_ref.clone(),
+                token_image_ref: source.token_image_ref.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -317,6 +318,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         values,
         display_source,
         printed_ref,
+        token_image_ref,
         extra_keywords,
         additional_modifications,
         tapped,
@@ -342,6 +344,9 @@ pub(crate) fn apply_copy_token_after_replacement(
         token.display_source = display_source;
         token.printed_ref = printed_ref.clone();
         token.base_printed_ref = printed_ref.clone();
+        // CR 111.1 + CR 707.2: when copying a true token, carry its exact token
+        // art pointer so the copy resolves the same art (not a name fallback).
+        token.token_image_ref = token_image_ref.clone();
         token.name = values.name.clone();
         token.base_name = values.name.clone();
         token.mana_cost = values.mana_cost.clone();
@@ -410,6 +415,7 @@ pub(crate) fn apply_copy_token_after_replacement(
                             values: values.clone(),
                             display_source,
                             printed_ref: printed_ref.clone(),
+                            token_image_ref: token_image_ref.clone(),
                             extra_keywords: extra_keywords.clone(),
                             additional_modifications: additional_modifications.clone(),
                             tapped,
@@ -480,6 +486,7 @@ pub(crate) fn apply_copy_token_after_replacement(
                                     values: values.clone(),
                                     display_source,
                                     printed_ref: printed_ref.clone(),
+                                    token_image_ref: token_image_ref.clone(),
                                     extra_keywords: extra_keywords.clone(),
                                     additional_modifications: additional_modifications.clone(),
                                     tapped,
