@@ -520,6 +520,10 @@ pub enum GameAction {
     CascadeChoice {
         choice: CastChoice,
     },
+    /// CR 702.60a: Choose to cast a revealed same-named ripple card for free.
+    RippleChoice {
+        choice: CastChoice,
+    },
     /// CR 401.4: Choose top or bottom of library.
     ChooseTopOrBottom {
         top: bool,
@@ -1288,6 +1292,7 @@ impl GameAction {
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
+            | GameAction::RippleChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }

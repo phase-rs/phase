@@ -906,6 +906,9 @@ impl GameObject {
         if self.base_loyalty.is_none() && self.loyalty.is_some() {
             self.base_loyalty = self.loyalty;
         }
+        if self.base_name.is_empty() && !self.name.is_empty() {
+            self.base_name = self.name.clone();
+        }
         if self.base_card_types == CardType::default() && self.card_types != CardType::default() {
             self.base_card_types = self.card_types.clone();
         }

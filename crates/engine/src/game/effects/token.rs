@@ -664,6 +664,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             if has_attrs {
                 obj.power = ch.power;
                 obj.toughness = ch.toughness;
+                obj.base_name = ch.display_name.clone();
                 obj.base_power = ch.power;
                 obj.base_toughness = ch.toughness;
                 obj.card_types = CardType {

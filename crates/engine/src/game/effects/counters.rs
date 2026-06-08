@@ -555,7 +555,12 @@ fn apply_pending_counter_post_action(
             duration,
             exile_tracking,
         } => {
-            super::change_zone::apply_zone_delivery_tail(
+            // CR 614.12a: the delivery tail may surface a Devour as-enters
+            // sacrifice `EffectZoneChoice`. On that pause, return `false` so the
+            // drain stashes the remaining post-actions and pauses; the tail's
+            // post-effect already fired (it surfaced the choice), so the resume
+            // path continues from the EffectZoneChoice resolution.
+            match super::change_zone::apply_zone_delivery_tail(
                 state,
                 object_id,
                 from,
@@ -565,8 +570,10 @@ fn apply_pending_counter_post_action(
                 duration.as_ref(),
                 exile_tracking,
                 events,
-            );
-            true
+            ) {
+                super::change_zone::ZoneDeliveryResult::Done => true,
+                super::change_zone::ZoneDeliveryResult::NeedsChoice(_) => false,
+            }
         }
         PendingCounterPostAction::RecordStationed {
             spacecraft_id,

@@ -689,7 +689,9 @@ pub enum Keyword {
     Provoke,
     Rebound,
     Retrace,
-    Ripple,
+    /// CR 702.60a: Ripple N — when you cast this spell, reveal the top N cards and
+    /// cast same-named cards for free. `u32` is N.
+    Ripple(u32),
     SplitSecond,
     Storm,
     /// CR 702.62a: Suspend N—{cost} — exile from hand with N time counters,
@@ -1149,7 +1151,7 @@ impl Keyword {
             | Keyword::ReadAhead
             | Keyword::Rebound
             | Keyword::Reinforce { .. }
-            | Keyword::Ripple
+            | Keyword::Ripple(_)
             | Keyword::Saddle(_)
             | Keyword::Scavenge(_)
             | Keyword::Soulshift(_)
@@ -2066,7 +2068,7 @@ impl FromStr for Keyword {
             "cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
                 cost: ManaCost::zero(),
             })),
-            "ripple" => Ok(Keyword::Ripple),
+            "ripple" => Ok(Keyword::Ripple(1)),
             "totem" => Ok(Keyword::Totem),
             // Unit keywords added for MTGJSON keyword name recognition
             "bargain" => Ok(Keyword::Bargain),
@@ -2352,7 +2354,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
             cost: ManaCost::zero(),
         })),
-        "Ripple" => Ok(Keyword::Ripple),
+        "Ripple" => Ok(Keyword::Ripple(1)),
         "Totem" => Ok(Keyword::Totem),
         // Parameterized: ManaCost (new keywords)
         "Warp" => Ok(Keyword::Warp(mana(data)?)),
@@ -3438,7 +3440,7 @@ mod tests {
                 cost: ManaCost::zero()
             })
         );
-        assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple);
+        assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple(1));
         assert_eq!(Keyword::from_str("Totem").unwrap(), Keyword::Totem);
         // Warp is now parameterized — bare "Warp" without cost falls through to Unknown
         assert!(matches!(

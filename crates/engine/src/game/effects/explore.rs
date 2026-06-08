@@ -306,6 +306,7 @@ pub fn resolve(
             kept_destination: Some(crate::types::zones::Zone::Library),
             rest_destination: Some(crate::types::zones::Zone::Graveyard),
             source_id: Some(ability.source_id),
+            enter_tapped: false,
         };
 
         events.push(GameEvent::EffectResolved {

@@ -21,6 +21,7 @@ pub fn resolve(
         kept_dest,
         rest_dest,
         is_reveal,
+        enter_tapped,
     ) = match &ability.effect {
         Effect::Dig {
             player,
@@ -31,6 +32,7 @@ pub fn resolve(
             destination,
             rest_destination,
             reveal,
+            enter_tapped,
         } => {
             let resolved_count =
                 resolve_quantity_with_targets(state, count, ability).max(0) as usize;
@@ -50,6 +52,7 @@ pub fn resolve(
                 *destination,
                 *rest_destination,
                 *reveal,
+                *enter_tapped,
             )
         }
         _ => (
@@ -60,6 +63,7 @@ pub fn resolve(
             TargetFilter::Any,
             None,
             None,
+            false,
             false,
         ),
     };
@@ -149,6 +153,7 @@ pub fn resolve(
         kept_destination: kept_dest,
         rest_destination: rest_dest,
         source_id: Some(ability.source_id),
+        enter_tapped,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -184,6 +189,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -264,6 +270,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             },
             vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -314,6 +321,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -364,6 +372,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -432,6 +441,7 @@ mod tests {
             kept_destination: None,
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -502,6 +512,7 @@ mod tests {
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         state.pending_continuation =
             Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
@@ -570,6 +581,7 @@ mod tests {
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
 
         let mut events = Vec::new();
@@ -632,6 +644,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
 
         let mut events = Vec::new();
@@ -691,6 +704,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
 
         let mut events = Vec::new();
@@ -759,6 +773,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -829,6 +844,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -894,6 +910,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -969,6 +986,7 @@ mod tests {
                 filter,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -1162,6 +1180,7 @@ mod tests {
                 filter: filter.clone(),
                 rest_destination: Some(Zone::Library),
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(200),
@@ -1215,6 +1234,7 @@ mod tests {
                 filter: filter_you,
                 rest_destination: Some(Zone::Library),
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(201),
@@ -1280,6 +1300,7 @@ mod tests {
             kept_destination: Some(Zone::Battlefield),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),

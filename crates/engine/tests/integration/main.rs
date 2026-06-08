@@ -41,6 +41,7 @@ mod crossway_troublemakers_attacking_keywords;
 mod cultivate_split_destination;
 mod dalkovan_encampment_attack_trigger;
 mod dark_confidant_upkeep;
+mod devour_co_entry_regression;
 mod devour_intellect_treasure_rider;
 mod doran_attack_block_pump;
 mod double_strike_first_strike_trigger_removes_attacker;

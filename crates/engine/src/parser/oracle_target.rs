@@ -2303,6 +2303,14 @@ fn classify_negation(negated: &str) -> NegationResult {
     {
         return NegationResult::Prop(FilterProp::NonToken);
     }
+    // CR 700.6: "nonhistoric" / "not historic" — historic is a card property,
+    // not a subtype, so it must not fall through to `Non(Subtype("Historic"))`.
+    if tag::<_, _, OracleError<'_>>("historic")
+        .parse(negated)
+        .is_ok_and(|(rest, _)| rest.is_empty())
+    {
+        return NegationResult::Prop(FilterProp::NotHistoric);
+    }
 
     match negated {
         // Color negation — parallel to HasColor
@@ -2565,6 +2573,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::Renowned
             // CR 700.6: "historic [type]" adjective prefix.
             | FilterProp::Historic
+            | FilterProp::NotHistoric
             // CR 303.4 + CR 301.5: "enchanted [type]" / "equipped [type]".
             | FilterProp::EnchantedBy
             | FilterProp::EquippedBy
@@ -4230,6 +4239,10 @@ pub(crate) fn parse_that_clause_suffix(
         return Some(parsed);
     }
 
+    if let Some(parsed) = parse_historic_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
+    }
+
     if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed, ctx) {
         let consumed = trimmed.len() - rest.len();
         return Some((vec![prop], leading_ws + consumed));
@@ -4366,6 +4379,28 @@ fn parse_color_relative_clause_suffix(
     Some((props, consumed))
 }
 
+fn parse_relative_clause_intro(trimmed: &str) -> Option<(&str, usize, bool)> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
+        Some((rest, "that aren't ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
+        Some((rest, "that isn't ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
+        Some((rest, "that's not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are not ").parse(trimmed) {
+        Some((rest, "that are not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
+        Some((rest, "that is not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
+        Some((rest, "that's ".len(), false))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
+        Some((rest, "that is ".len(), false))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
+        Some((rest, "that are ".len(), false))
+    } else {
+        None
+    }
+}
+
 /// CR 205.4a: "that's / that is / that are <supertype>" → `HasSupertype`;
 /// "that aren't / that isn't / that's not / that are not / that is not
 /// <supertype>" → `NotSupertype`. Supertypes are legendary/basic/snow
@@ -4380,27 +4415,7 @@ fn parse_supertype_relative_clause_suffix(
     trimmed: &str,
     leading_ws: usize,
 ) -> Option<(Vec<FilterProp>, usize)> {
-    let (after_intro, intro_len, negated) =
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
-            (rest, "that aren't ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
-            (rest, "that isn't ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
-            (rest, "that's not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are not ").parse(trimmed) {
-            (rest, "that are not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
-            (rest, "that is not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
-            (rest, "that's ".len(), false)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
-            (rest, "that is ".len(), false)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
-            (rest, "that are ".len(), false)
-        } else {
-            return None;
-        };
-
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
     let (rest, supertype) = nom_target::parse_supertype_word(after_intro).ok()?;
     // Word-boundary check: the supertype word must terminate so we don't
     // false-match e.g. "that's basically free" (basic + "ally free").
@@ -4417,6 +4432,33 @@ fn parse_supertype_relative_clause_suffix(
         FilterProp::NotSupertype { value: supertype }
     } else {
         FilterProp::HasSupertype { value: supertype }
+    };
+    Some((vec![prop], consumed))
+}
+
+/// CR 700.6: "that's historic" / "that's not historic" relative clauses on typed
+/// mass-filter subjects (Desynchronization: "nonland permanent that's not historic").
+fn parse_historic_relative_clause_suffix(
+    trimmed: &str,
+    leading_ws: usize,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("historic")
+        .parse(after_intro)
+        .ok()?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    let prop = if negated {
+        FilterProp::NotHistoric
+    } else {
+        FilterProp::Historic
     };
     Some((vec![prop], consumed))
 }

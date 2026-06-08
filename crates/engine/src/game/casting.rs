@@ -1016,6 +1016,10 @@ pub(crate) fn effective_spell_keywords(
     };
 
     let mut keywords = obj.keywords.clone();
+    // CR 702.60b / CR 113.2c: printed duplicate keyword instances are preserved
+    // in `obj.keywords`; granted spell keywords are currently merged by kind here.
+    // A future granted-multi-instance keyword must collect those instances before
+    // this upsert path if its rules require separate triggers.
     for keyword in granted_spell_keywords(state, caster, object_id) {
         upsert_keyword_by_kind(&mut keywords, keyword);
     }

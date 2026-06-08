@@ -559,6 +559,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 702.60a: Ripple — decline as the default; candidates explore casting.
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { .. },
+            ..
+        } => Some(GameAction::RippleChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        }),
         // CR 107.1c: "repeat this process" — stop as the forced-action default;
         // the candidate generator still explores repeating.
         WaitingFor::RepeatDecision { .. } => {

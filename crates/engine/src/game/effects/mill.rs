@@ -8,8 +8,8 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 /// CR 701.17a: Mill N — put the top N cards of a player's library into their graveyard.
-/// When `destination` is set to a zone other than Graveyard (e.g., Exile),
-/// cards are moved there instead -- building block for "exile the top N cards" patterns.
+/// When `destination` is set to a zone other than Graveyard (e.g., Exile or Hand),
+/// cards are moved there instead -- building block for top-of-library move patterns.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,

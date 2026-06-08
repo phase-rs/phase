@@ -77,6 +77,8 @@ cargo fmt --all
 
 After a non-zero `tilt-wait.sh`, fetch details with `tilt logs <resource> --tail 50 --since 2m`. Distinguish your diff's errors from concurrent-agent errors per CLAUDE.md's "Defer to other active agents" guidance.
 
+Confirm the executor's two pre-commit gates came back clean (items 4 and 5 of its report): the **discriminating-test gate** (at least one test drives the real pipeline and would fail if the fix were reverted — AST-shape-only coverage does not count) and the **CR-annotation diff gate** (every added/changed `CR <n>` resolves in `docs/MagicCompRules.txt`). If the executor shipped only shape tests, or any CR annotation came back `UNVERIFIED`, loop back to Step 3 with that as a fix constraint — do not commit shape-only coverage or an unverified CR number.
+
 ### Step 5 — Review implementation until clean (unbounded loop)
 
 Spawn a `general-purpose` agent and instruct it to invoke `/review-impl` against the implementation diff. The reviewer MUST also verify the originally reported bug or requirement is actually fixed via a discriminating runtime test — not just that the code looks clean (`feedback_review_impl_verify_bug_fixed`).

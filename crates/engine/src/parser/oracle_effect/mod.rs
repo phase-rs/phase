@@ -55,6 +55,8 @@ pub(crate) use self::token::parse_token_description;
 use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::OracleError;
+#[cfg(test)]
+use crate::parser::oracle_trigger::parse_trigger_line;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace1};
@@ -6543,18 +6545,22 @@ fn for_each_clause_target_controller_filter(for_each_clause: &str) -> Option<Tar
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 tag("target opponent controls"),
             ),
-            value(TargetFilter::Player, tag("target player controls")),
+            value(
+                TargetFilter::Typed(TypedFilter::default()),
+                tag("target player controls"),
+            ),
         ))
         .parse(input)
     })
 }
 
 fn parsed_for_each_quantity_effect(
-    effect: Effect,
+    mut effect: Effect,
     duration: Option<Duration>,
     reference_target: Option<TargetFilter>,
 ) -> ParsedEffectClause {
     if let Some(target) = reference_target {
+        bind_search_library_for_each_antecedent(&mut effect, &target, "");
         if matches!(
             effect,
             Effect::Draw {
@@ -6587,6 +6593,32 @@ fn parsed_for_each_quantity_effect(
         optional: false,
         unless_pay: None,
     }
+}
+
+fn bind_search_library_for_each_antecedent(
+    effect: &mut Effect,
+    target: &TargetFilter,
+    text_lower: &str,
+) {
+    if let Effect::SearchLibrary { target_player, .. } = effect {
+        if target_player
+            .as_ref()
+            .is_some_and(search_library_target_player_is_for_each_antecedent)
+            || (target_player.is_none()
+                && nom_primitives::scan_contains(text_lower, "search that player's "))
+        {
+            *target_player = Some(target.clone());
+        }
+    }
+}
+
+fn search_library_target_player_is_for_each_antecedent(target: &TargetFilter) -> bool {
+    let TargetFilter::Typed(typed) = target else {
+        return false;
+    };
+    typed.type_filters.is_empty()
+        && typed.properties.is_empty()
+        && typed.controller == Some(ControllerRef::TargetPlayer)
 }
 
 fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
@@ -7075,6 +7107,19 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                     *target = TargetFilter::ExiledBySource;
                     *count = QuantityExpr::Fixed { value: 0 };
                     return clause;
+                }
+                let lower_put = text.to_lowercase();
+                if matches!(*target, TargetFilter::Any | TargetFilter::ParentTarget)
+                    && (nom_primitives::scan_contains(&lower_put, "put them on top")
+                        || nom_primitives::scan_contains(&lower_put, "put the exiled cards on top")
+                        || nom_primitives::scan_contains(&lower_put, "cards exiled this way"))
+                {
+                    *target = TargetFilter::ExiledBySource;
+                    if matches!(*count, QuantityExpr::Fixed { value: 1 }) {
+                        *count = QuantityExpr::Ref {
+                            qty: QuantityRef::CardsExiledBySource,
+                        };
+                    }
                 }
                 let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
                     let lower = text.to_lowercase();
@@ -14993,11 +15038,15 @@ pub(crate) fn parse_effect_chain_ir(
         // `parse_effect_clause` claims it. The generic `for each` strip would
         // otherwise lift the counter-kind iteration into `repeat_for` and drop
         // the target, leaving an Unimplemented "give … counter" body.
-        let (repeat_for, text) = if try_parse_proliferate_target(&text).is_some() {
-            (None, text)
-        } else {
-            strip_for_each_prefix(&text)
-        };
+        let (repeat_for, text, for_each_reference_target) =
+            if try_parse_proliferate_target(&text).is_some() {
+                (None, text, None)
+            } else {
+                let reference_target = for_each_clause_target_controller_filter(&text);
+                let (repeat_for, text) = strip_for_each_prefix(&text);
+                let reference_target = repeat_for.as_ref().and(reference_target);
+                (repeat_for, text, reference_target)
+            };
         let (text_without_where_x, local_where_x_expression) = {
             let text_where_x_lower = text.to_lowercase();
             let (without_where_x, where_x_expression) =
@@ -15527,6 +15576,9 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        if let Some(target) = &for_each_reference_target {
+            bind_search_library_for_each_antecedent(&mut clause.effect, target, &text_no_qty_lower);
+        }
         // CR 608.2: `parse_exile_ast` uses `ScopedPlayer` as the structural
         // marker for "each player's library". Lower it into the same
         // player_scope-driven shape used by Evelyn/Jeleva-class effects:
@@ -17295,9 +17347,10 @@ mod tests {
         ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode,
         Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation, PtStat,
-        PtValue, PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
-        TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
+        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation,
+        PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -21605,6 +21658,38 @@ mod tests {
                 }
             }
             other => panic!("expected counted BounceAll, got {other:?}"),
+        }
+    }
+
+    /// Desynchronization (#2410): "that's not historic" must negate CR 700.6
+    /// historic, not degrade to `Non(Subtype("Historic"))` which matches every
+    /// permanent.
+    #[test]
+    fn effect_bounce_all_nonhistoric_nonland_permanents_desynchronization() {
+        let e =
+            parse_effect("Return each nonland permanent that's not historic to its owner's hand.");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert!(
+                    filter.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land)
+                    )),
+                    "nonland exclusion present, got {:?}",
+                    filter.type_filters
+                );
+                assert!(
+                    filter.properties.contains(&FilterProp::NotHistoric),
+                    "nonhistoric filter must be NotHistoric, got {:?}",
+                    filter.properties
+                );
+            }
+            other => {
+                panic!("expected BounceAll {{ Permanent, Non(Land), NotHistoric }}, got {other:?}")
+            }
         }
     }
 
@@ -29875,6 +29960,7 @@ mod tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Land,
                 additional_filter: None,
+                subtype_filter: None,
             })
         );
         assert!(matches!(
@@ -30067,6 +30153,7 @@ mod tests {
                 assert!(sub.condition == Some(AbilityCondition::RevealedHasCardType {
                     card_type: CoreType::Land,
                     additional_filter: None,
+                    subtype_filter: None,
                 }));
                 assert!(matches!(
                     *sub.effect,
@@ -30175,6 +30262,7 @@ mod tests {
                 condition: Box::new(AbilityCondition::RevealedHasCardType {
                     card_type: CoreType::Land,
                     additional_filter: None,
+                    subtype_filter: None,
                 }),
             })
         );
@@ -35199,6 +35287,7 @@ mod tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Creature,
                 additional_filter: Some(FilterProp::IsChosenCreatureType),
+                subtype_filter: None,
             }),
             "condition should check creature type + chosen type"
         );
@@ -35223,6 +35312,157 @@ mod tests {
         assert!(
             found_change_zone,
             "should have ChangeZone to Hand in sub-ability chain"
+        );
+    }
+
+    #[test]
+    fn scroll_rack_activated_effect_chain() {
+        let chain = parse_effect_chain(
+            "Exile any number of cards from your hand face down. Put that many cards from the top of your library into your hand. Then look at the exiled cards and put them on top of your library in any order.",
+            AbilityKind::Activated,
+        );
+        let mut current = Some(&chain);
+        let mut effects = Vec::new();
+        while let Some(def) = current {
+            effects.push(def.effect.as_ref().clone());
+            current = def.sub_ability.as_deref();
+        }
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Mill {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::CardsExiledBySource,
+                        },
+                        destination: Zone::Hand,
+                        ..
+                    }
+                )
+            }),
+            "expected top-library move to hand tied to CardsExiledBySource, got {effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+            "CR 121.5: Scroll Rack puts cards into hand without drawing them"
+        );
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::PutAtLibraryPosition {
+                        target: TargetFilter::ExiledBySource,
+                        ..
+                    }
+                )
+            }),
+            "expected exiled cards put on library top, got {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::RevealHand {
+                        target: TargetFilter::ExiledBySource,
+                        ..
+                    }
+                )
+            }),
+            "expected private look at exiled cards, got {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "chain must not contain Unimplemented effects"
+        );
+    }
+
+    #[test]
+    fn arachnogenesis_prevent_all_non_spider() {
+        let chain = parse_effect_chain(
+            "Create X 1/2 green Spider creature tokens with reach, where X is the number of creatures attacking you. Prevent all combat damage that would be dealt this turn by non-Spider creatures.",
+            AbilityKind::Spell,
+        );
+        let prevent = chain
+            .sub_ability
+            .as_ref()
+            .map(|s| s.effect.as_ref())
+            .expect("prevent clause sub-ability");
+        match prevent {
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: Some(TargetFilter::Typed(tf)),
+                ..
+            } => {
+                assert!(amount_dynamic.is_none());
+                assert!(tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Subtype(s) if s == "Spider")
+                )));
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kenessos_activated_subtype_or_condition() {
+        let chain = parse_effect_chain(
+            "Look at the top card of your library. If it's a Kraken, Leviathan, Octopus, or Serpent creature card, you may put it onto the battlefield. If you don't put the card onto the battlefield, you may put it on the bottom of your library.",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(*chain.effect, Effect::Dig { .. }));
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("conditional sub after Dig");
+        let Some(AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Creature,
+            subtype_filter: Some(subtype_filter),
+            ..
+        }) = &sub.condition
+        else {
+            panic!(
+                "expected creature subtype Or condition, got {:?}",
+                sub.condition
+            );
+        };
+        let TargetFilter::Or { filters } = subtype_filter.as_ref() else {
+            panic!("expected subtype Or filter, got {subtype_filter:?}");
+        };
+        assert_eq!(filters.len(), 4);
+        let subtypes: Vec<_> = filters
+            .iter()
+            .filter_map(|f| match f {
+                TargetFilter::Typed(tf) => tf.type_filters.iter().find_map(|t| match t {
+                    TypeFilter::Subtype(s) => Some(s.as_str()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        for expected in ["Kraken", "Leviathan", "Octopus", "Serpent"] {
+            assert!(
+                subtypes.iter().any(|s| s.eq_ignore_ascii_case(expected)),
+                "missing subtype {expected} in {subtypes:?}"
+            );
+        }
+        fn has_unimplemented(def: &AbilityDefinition) -> bool {
+            matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+                || def
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|sub| has_unimplemented(sub))
+                || def
+                    .else_ability
+                    .as_ref()
+                    .is_some_and(|sub| has_unimplemented(sub))
+        }
+        assert!(
+            !has_unimplemented(&chain),
+            "chain must not contain Unimplemented fragments"
         );
     }
 
@@ -42564,6 +42804,7 @@ mod snapshot_tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Land,
                 additional_filter: None,
+                subtype_filter: None,
             })
         );
         match &*put_land.effect {
@@ -43775,4 +44016,202 @@ mod snapshot_tests {
             Some(ChoiceType::CardType)
         ));
     }
+}
+
+#[test]
+fn issue_2405_broken_bond_optional_land_from_hand() {
+    let def = parse_effect_chain(
+        "Destroy target artifact or enchantment. You may put a land card from your hand onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    let sub = def.sub_ability.as_ref().expect("land put sub");
+    assert!(sub.optional);
+    let Effect::ChangeZone {
+        origin: Some(Zone::Hand),
+        destination: Zone::Battlefield,
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!(
+            "expected optional hand->battlefield ChangeZone, got {:?}",
+            sub.effect
+        );
+    };
+}
+
+#[test]
+fn issue_2405_planar_genesis_dig_land_enters_tapped() {
+    let def = parse_effect_chain(
+        "Look at the top four cards of your library. You may put a land card from among them onto the battlefield tapped. If you don't, put those cards into your hand. Put the rest on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::Dig {
+        destination: Some(Zone::Battlefield),
+        enter_tapped: true,
+        filter,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected tapped battlefield Dig, got {:?}", def.effect);
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected land filter");
+    };
+    assert_eq!(typed.type_filters, vec![TypeFilter::Land]);
+}
+
+#[test]
+fn issue_2403_sin_spira_tracked_set_copy_after_random_exile() {
+    let def = parse_effect_chain(
+        "Exile a permanent card from your graveyard at random, then create a tapped token that's a copy of that card.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(def.target_selection_mode, TargetSelectionMode::Random);
+    let copy = def.sub_ability.as_ref().expect("copy sub");
+    let Effect::CopyTokenOf { target, tapped, .. } = copy.effect.as_ref() else {
+        panic!("expected CopyTokenOf, got {:?}", copy.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    );
+    assert!(*tapped);
+}
+
+#[test]
+fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
+    let def = parse_effect_chain(
+        "The owner of target permanent shuffles it into their library, then reveals the top card of that library. If it's a permanent card, they put it onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZone {
+        owner_library: true,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected owner-library ChangeZone, got {:?}", def.effect);
+    };
+    let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
+    assert_eq!(
+        shuffle.effect.target_filter(),
+        Some(&TargetFilter::ParentTargetOwner)
+    );
+    let reveal = shuffle
+        .sub_ability
+        .as_ref()
+        .expect("reveal sub")
+        .effect
+        .as_ref();
+    let Effect::RevealTop { player, count: 1 } = reveal else {
+        panic!("expected RevealTop of owner's library, got {reveal:?}");
+    };
+    assert_eq!(*player, TargetFilter::ParentTargetOwner);
+}
+
+#[test]
+fn issue_2402_hazel_copy_target_token_trigger_parses() {
+    let def = parse_trigger_line(
+        "At the beginning of your end step, create a token that's a copy of target token you control. If that token is a Squirrel, instead create two tokens that are copies of it.",
+        "Hazel of the Rootbloom",
+    );
+    let execute = def.execute.as_ref().expect("trigger execute");
+    let Effect::CopyTokenOf { target, .. } = execute.effect.as_ref() else {
+        panic!(
+            "expected CopyTokenOf trigger effect, got {:?}",
+            execute.effect
+        );
+    };
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected typed target token filter, got {target:?}");
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(tf
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::Token)));
+}
+
+#[test]
+fn issue_2400_doubling_chant_repeat_for_member_driven_search() {
+    let def = parse_effect_chain(
+        "For each creature you control, you may search your library for a creature card with the same name as that creature. Put those cards onto the battlefield, then shuffle.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(&*def.effect, Effect::SearchLibrary { .. }));
+    assert!(matches!(
+        def.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { .. }
+        })
+    ));
+    let Effect::SearchLibrary { filter, .. } = def.effect.as_ref() else {
+        panic!("expected SearchLibrary");
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected typed search filter, got {filter:?}");
+    };
+    assert!(
+        typed
+            .properties
+            .contains(&FilterProp::SameNameAsParentTarget),
+        "search must bind same name as per-iteration creature"
+    );
+}
+
+#[test]
+fn dichotomancy_searches_target_players_library_per_iterated_permanent() {
+    let def = parse_effect_chain(
+        "For each tapped nonland permanent target opponent controls, search that player's library for a card with the same name as that permanent and put it onto the battlefield under your control. Then that player shuffles.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(&*def.effect, Effect::SearchLibrary { .. }));
+    let Some(QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount { filter },
+    }) = &def.repeat_for
+    else {
+        panic!("expected ObjectCount repeat_for, got {:?}", def.repeat_for);
+    };
+    let TargetFilter::Typed(repeat_filter) = filter else {
+        panic!("expected typed repeat filter, got {filter:?}");
+    };
+    assert_eq!(repeat_filter.controller, Some(ControllerRef::TargetPlayer));
+
+    let Effect::SearchLibrary {
+        filter,
+        target_player,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected SearchLibrary");
+    };
+    let Some(TargetFilter::Typed(target_player)) = target_player else {
+        panic!("expected target-player scoped library owner");
+    };
+    assert_eq!(target_player.controller, Some(ControllerRef::Opponent));
+    let TargetFilter::Typed(search_filter) = filter else {
+        panic!("expected typed search filter, got {filter:?}");
+    };
+    assert!(
+        search_filter
+            .properties
+            .contains(&FilterProp::SameNameAsParentTarget),
+        "search must bind same name as per-iteration permanent"
+    );
+}
+
+#[test]
+fn for_each_target_player_controls_search_that_players_library_keeps_caster_searcher_shape() {
+    let def = parse_effect_chain(
+        "For each tapped nonland permanent target player controls, search that player's library for a card with the same name as that permanent and put it onto the battlefield under your control.",
+        AbilityKind::Spell,
+    );
+    let Effect::SearchLibrary { target_player, .. } = def.effect.as_ref() else {
+        panic!("expected SearchLibrary");
+    };
+    let Some(TargetFilter::Typed(target_player)) = target_player else {
+        panic!("expected typed target-player library owner, got {target_player:?}");
+    };
+    assert_eq!(target_player.controller, None);
 }

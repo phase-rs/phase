@@ -607,7 +607,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let chain_rounding = ir.chain_rounding;
 
-    // CR 701.20a vs CR 701.16a: Demote reveal-Dig back to RevealTop when no DigFromAmong
+    // CR 701.20a / CR 701.20e: Demote reveal-Dig back to RevealTop when no DigFromAmong
     // continuation patched it. An unpatched Dig { reveal: true, keep_count: None, filter: Any }
     // is a simple "reveal the top N" with no player selection — it must resolve synchronously
     // (via RevealTop) so that sub_ability chains like RevealedHasCardType evaluate inline.
@@ -619,6 +619,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             reveal: true,
             destination,
             rest_destination,
+            player,
             ..
         } = &*def.effect
         {
@@ -630,7 +631,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 _ => 1,
             };
             *def.effect = Effect::RevealTop {
-                player: TargetFilter::Controller,
+                player: player.clone(),
                 count: count_val,
             };
         }
@@ -4772,9 +4773,18 @@ pub(super) fn apply_where_x_effect_expression(
             *power = apply_where_x_expression(power.clone(), where_x_expression);
             *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
         }
-        Effect::PreventDamage { amount_dynamic, .. } => {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            ..
+        } => {
+            // CR 615.7: "prevent all …" must not inherit a sibling clause's
+            // where-X binding (Arachnogenesis: token count uses where-X;
+            // prevention is blanket).
             if let Some(expr) = where_x_expression {
-                *amount_dynamic = parse_where_x_quantity_expression(expr);
+                if !matches!(amount, crate::types::ability::PreventionAmount::All) {
+                    *amount_dynamic = parse_where_x_quantity_expression(expr);
+                }
             }
         }
         // CR 107.3i + CR 118.1: Resolution-time cost amounts (Life / Speed /

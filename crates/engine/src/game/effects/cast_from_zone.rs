@@ -163,6 +163,7 @@ pub fn resolve(
         let cleanup = crate::types::ability::ResolutionCastCleanup {
             exiled_misses: Vec::new(),
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+            success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         };
         state.waiting_for = crate::game::casting::initiate_cast_during_resolution(
             state,

@@ -1883,6 +1883,38 @@ fn ghalta_self_cost_reduction_is_active_from_command_zone() {
 }
 
 #[test]
+fn self_cost_reduction_where_x_distinct_named_lands_uses_static_cost_seam() {
+    let def = parse_static_line(
+        "This spell costs {X} less to cast, where X is the number of differently named lands you control.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount,
+        dynamic_count:
+            Some(QuantityRef::ObjectCountDistinct {
+                filter: TargetFilter::Typed(filter),
+                qualities,
+            }),
+        ..
+    } = def.mode
+    else {
+        panic!("expected dynamic self-spell ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(amount, ManaCost::generic(1));
+    assert!(filter.type_filters.contains(&TypeFilter::Land));
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    assert_eq!(qualities, vec![SharedQuality::Name]);
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        vec![Zone::Hand, Zone::Stack, Zone::Command]
+    );
+}
+
+#[test]
 fn static_this_spell_cost_less_for_each_creature_that_attacked_this_turn() {
     let def = parse_static_line(
         "This spell costs {1} less to cast for each creature that attacked this turn.",

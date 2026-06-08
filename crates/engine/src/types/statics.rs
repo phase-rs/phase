@@ -1398,6 +1398,112 @@ impl Hash for StaticMode {
     }
 }
 
+impl StaticMode {
+    /// Map bare keyword static modes onto their corresponding keyword identity.
+    pub fn as_keyword(&self) -> Option<Keyword> {
+        match self {
+            StaticMode::Indestructible => Some(Keyword::Indestructible),
+            StaticMode::Shroud => Some(Keyword::Shroud),
+            StaticMode::Hexproof => Some(Keyword::Hexproof),
+            StaticMode::Flying => Some(Keyword::Flying),
+            StaticMode::Vigilance => Some(Keyword::Vigilance),
+            StaticMode::Menace => Some(Keyword::Menace),
+            StaticMode::Reach => Some(Keyword::Reach),
+            StaticMode::Trample => Some(Keyword::Trample),
+            StaticMode::Deathtouch => Some(Keyword::Deathtouch),
+            StaticMode::Lifelink => Some(Keyword::Lifelink),
+            StaticMode::Continuous
+            | StaticMode::CantAttack
+            | StaticMode::CantBlock
+            | StaticMode::CantAttackOrBlock
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
+            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeCast { .. }
+            | StaticMode::CantBeActivated { .. }
+            | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::CantCauseSacrificeOrExile { .. }
+            | StaticMode::CastWithFlash
+            | StaticMode::GrantsExtraVote
+            | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CastWithAlternativeCost { .. }
+            | StaticMode::ModifyCost { .. }
+            | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::ModifyActivationLimit { .. }
+            | StaticMode::ActivateAsInstant { .. }
+            | StaticMode::CantPayCost { .. }
+            | StaticMode::CantGainLife
+            | StaticMode::CantLoseLife
+            | StaticMode::PlayerProtection(_)
+            | StaticMode::MustAttack
+            | StaticMode::MustAttackPlayer { .. }
+            | StaticMode::MustBlock
+            | StaticMode::MustBlockAttacker { .. }
+            | StaticMode::CantDraw { .. }
+            | StaticMode::DoubleTriggers { .. }
+            | StaticMode::IgnoreHexproof
+            | StaticMode::ExtraBlockers { .. }
+            | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::GraveyardCastPermission { .. }
+            | StaticMode::TopOfLibraryCastPermission { .. }
+            | StaticMode::CastFromHandFree { .. }
+            | StaticMode::ExileCastPermission { .. }
+            | StaticMode::CantBeCountered
+            | StaticMode::CantBeCopied
+            | StaticMode::CantEnterBattlefieldFrom
+            | StaticMode::CantCastFrom { .. }
+            | StaticMode::CantCastDuring { .. }
+            | StaticMode::CantActivateDuring { .. }
+            | StaticMode::PerTurnCastLimit { .. }
+            | StaticMode::PerTurnDrawLimit { .. }
+            | StaticMode::SuppressTriggers { .. }
+            | StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedExceptBy { .. }
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedByMoreThan { .. }
+            | StaticMode::AttachmentRestriction { .. }
+            | StaticMode::Protection
+            | StaticMode::CantBeDestroyed
+            | StaticMode::CantBeRegenerated
+            | StaticMode::FlashBack
+            | StaticMode::CantTap
+            | StaticMode::CantUntap
+            | StaticMode::MustBeBlocked
+            | StaticMode::MustBeBlockedByAll
+            | StaticMode::Goaded
+            | StaticMode::CantAttackAlone
+            | StaticMode::CantBlockAlone
+            | StaticMode::CantCrew
+            | StaticMode::CrewContribution { .. }
+            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayChooseNotToUntap
+            | StaticMode::AdditionalLandDrop { .. }
+            | StaticMode::EmblemStatic
+            | StaticMode::BlockRestriction
+            | StaticMode::NoMaximumHandSize
+            | StaticMode::MaximumHandSize { .. }
+            | StaticMode::MayPlayAdditionalLand
+            | StaticMode::CantHaveKeyword { .. }
+            | StaticMode::CantWinTheGame
+            | StaticMode::CantLoseTheGame
+            | StaticMode::LegendRuleDoesntApply
+            | StaticMode::SpeedCanIncreaseBeyondFour
+            | StaticMode::DefilerCostReduction { .. }
+            | StaticMode::SkipStep { .. }
+            | StaticMode::SpendManaAsAnyColor
+            | StaticMode::PayLifeAsColoredMana { .. }
+            | StaticMode::StepEndUnspentMana { .. }
+            | StaticMode::CanAttackWithDefender
+            | StaticMode::IgnoreLandwalkForBlocking { .. }
+            | StaticMode::CanActivateAbilitiesAsThoughHaste
+            | StaticMode::AssignNoCombatDamage
+            | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::Other(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for StaticMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2322,6 +2428,27 @@ mod tests {
             StaticMode::from_str("NoMaximumHandSize").unwrap(),
             StaticMode::NoMaximumHandSize
         );
+    }
+
+    #[test]
+    fn static_mode_as_keyword_maps_bare_keyword_modes() {
+        let cases = [
+            (StaticMode::Indestructible, Keyword::Indestructible),
+            (StaticMode::Shroud, Keyword::Shroud),
+            (StaticMode::Hexproof, Keyword::Hexproof),
+            (StaticMode::Flying, Keyword::Flying),
+            (StaticMode::Vigilance, Keyword::Vigilance),
+            (StaticMode::Menace, Keyword::Menace),
+            (StaticMode::Reach, Keyword::Reach),
+            (StaticMode::Trample, Keyword::Trample),
+            (StaticMode::Deathtouch, Keyword::Deathtouch),
+            (StaticMode::Lifelink, Keyword::Lifelink),
+        ];
+        for (mode, keyword) in cases {
+            assert_eq!(mode.as_keyword(), Some(keyword));
+        }
+        assert_eq!(StaticMode::Protection.as_keyword(), None);
+        assert_eq!(StaticMode::CantBeBlocked.as_keyword(), None);
     }
 
     #[test]
