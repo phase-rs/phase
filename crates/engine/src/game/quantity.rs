@@ -1676,16 +1676,6 @@ fn resolve_ref(
                     .as_ref()
                     .and_then(crate::game::targeting::extract_amount_from_event)
             })
-            // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
-            // if it had one or more +1/+1 counters on it, put that many +1/+1
-            // counters on …" look-back (Reyhan, Last of the Abzan) resolves "that
-            // many" to the number of +1/+1 counters the triggering object had as
-            // it left. Counters cease to exist on the zone change (CR 122.2), so
-            // the live object's map is empty — the count comes from the leaving
-            // object's last-known information. Only a battlefield-departure
-            // `ZoneChanged` reaches this fallback (no scalar amount on the event);
-            // damage / draw / die-roll events resolve via the steps above.
-            .or_else(|| event_context_counter_count_from_lki(state))
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -1699,6 +1689,20 @@ fn resolve_ref(
             })
             .or(state.last_effect_count)
             .or(state.last_effect_amount)
+            // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
+            // if it had one or more +1/+1 counters on it, put that many +1/+1
+            // counters on …" look-back (Reyhan, Last of the Abzan) resolves "that
+            // many" to the number of +1/+1 counters the triggering object had as
+            // it left. Counters cease to exist on the zone change (CR 122.2), so
+            // the live object's map is empty — the count comes from the leaving
+            // object's last-known information. This sits LAST in the cascade so a
+            // dies/leaves trigger whose "that many" is produced by a preceding
+            // effect in the same resolution (Whirlpool Drake: "shuffle the cards
+            // from your hand into your library, then draw that many cards") reads
+            // that effect's count via `last_effect_count`/`last_effect_amount`
+            // first; only a bare look-back with no preceding effect (Reyhan)
+            // reaches this LKI fallback.
+            .or_else(|| event_context_counter_count_from_lki(state))
             .unwrap_or(0),
         // CR 608.2c: If an earlier effect in this same resolution captured an
         // explicit object context, use that object before the original trigger

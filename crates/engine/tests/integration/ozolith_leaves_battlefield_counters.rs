@@ -39,6 +39,13 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
 
+/// Whirlpool Drake: a dies trigger whose "draw that many" is produced by a
+/// preceding effect in the same resolution. The `EventContextAmount` look-back
+/// fallback (CR 608.2h) must sit LAST in the cascade so it does not hijack this
+/// count when the dying creature happens to carry +1/+1 counters.
+const WHIRLPOOL_DRAKE_ORACLE: &str =
+    "When this creature dies, shuffle the cards from your hand into your library, then draw that many cards.";
+
 const OZOLITH_ORACLE: &str = "Whenever a creature you control leaves the battlefield, if it had counters on it, put those counters on The Ozolith.\nAt the beginning of combat on your turn, if The Ozolith has counters on it, you may move all counters from The Ozolith onto target creature.";
 
 const REYHAN_ORACLE: &str = "Whenever a creature you control dies, if it had one or more +1/+1 counters on it, you may put that many +1/+1 counters on target creature.\nWhenever a creature you control is put into the command zone from the battlefield, if it had one or more +1/+1 counters on it, you may put that many +1/+1 counters on target creature.";
@@ -230,5 +237,72 @@ fn reyhan_moves_counter_count_from_dying_creature() {
         4,
         "Reyhan must put 4 +1/+1 counters (= the count the dying creature had) \
          on the receiver, read from LKI at death (CR 608.2h)"
+    );
+}
+
+/// Count the cards in a player's hand.
+fn hand_size(runner: &super::rules::GameRunner, player: engine::types::player::PlayerId) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.zone == Zone::Hand && o.controller == player)
+        .count()
+}
+
+/// Regression guard for the `EventContextAmount` cascade ordering (issue #2358
+/// adversarial review). Whirlpool Drake's "When this creature dies, shuffle the
+/// cards from your hand into your library, then draw that many cards" resolves
+/// "that many" to the number of cards SHUFFLED (the preceding effect's count via
+/// `last_effect_count`), NOT the number of +1/+1 counters the Drake carried. The
+/// LKI counter-count fallback must lose to `last_effect_count`/`last_effect_amount`
+/// in the resolution cascade; otherwise a Drake dying with N +1/+1 counters would
+/// draw N cards instead of the size of the shuffled hand.
+#[test]
+fn dies_trigger_draw_uses_shuffled_count_not_plus_counters() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Two cards in hand; library deep enough to satisfy either a correct (2) or
+    // a buggy (3) draw, so the count — not a deck-out — is what the test pins.
+    scenario.with_cards_in_hand(P0, &["Forest", "Island"]);
+    scenario.with_library_top(P0, &["Mountain", "Plains", "Swamp", "Forest", "Island"]);
+
+    let drake = scenario
+        .add_creature_from_oracle(P0, "Whirlpool Drake", 2, 2, WHIRLPOOL_DRAKE_ORACLE)
+        .with_plus_counters(3)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().turn_number = 2;
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+    assert_eq!(hand_size(&runner, P0), 2, "precondition: 2 cards in hand");
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), drake, Zone::Graveyard, &mut events);
+    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+    let mut guard = 0;
+    while matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        guard += 1;
+        assert!(guard < 30, "trigger resolution did not terminate");
+        if hand_size(&runner, P0) != 0 && runner.state().stack.is_empty() {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+    runner.advance_until_stack_empty();
+
+    // Shuffle moved both hand cards to the library (hand → 0), then "draw that
+    // many" draws exactly 2 (the shuffled count), restoring the hand to 2 — not
+    // 3 (the Drake's +1/+1 counter count).
+    assert_eq!(
+        hand_size(&runner, P0),
+        2,
+        "draw count must equal the 2 shuffled cards, not the Drake's 3 +1/+1 counters"
     );
 }
