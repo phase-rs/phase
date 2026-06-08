@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::types::game_state::{GameState, PayCostKind, WaitingFor};
+use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
@@ -371,6 +371,42 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 up_to,
                 constraint: constraint.clone(),
                 source_id,
+            };
+        }
+    }
+
+    // CR 400.2: Hand is a hidden zone. `FreeCastWindow` (Invoke Calamity) is the
+    // first `CastOffer` kind whose `candidates` reference cards in the
+    // controller's HAND (as well as the public graveyard). Exposing the raw
+    // candidate ids to an opponent would leak which of the controller's hand
+    // cards are eligible instant/sorcery spells within the MV budget. Redact the
+    // candidate list to opaque placeholders for viewers who cannot see the
+    // controller's private zones — `remaining_casts`, `remaining_mv_budget`, and
+    // the rider stay public (CR 601.2 + CR 408 — the resolving spell is public).
+    if let WaitingFor::CastOffer {
+        player,
+        kind:
+            CastOfferKind::FreeCastWindow {
+                ref candidates,
+                remaining_casts,
+                remaining_mv_budget,
+                ref filter,
+                ref zones,
+                exile_instead_of_graveyard,
+            },
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::FreeCastWindow {
+                    candidates: candidates.iter().map(|_| ObjectId(0)).collect(),
+                    remaining_casts,
+                    remaining_mv_budget,
+                    filter: filter.clone(),
+                    zones: zones.clone(),
+                    exile_instead_of_graveyard,
+                },
             };
         }
     }
@@ -1743,5 +1779,78 @@ mod tests {
         );
         assert_eq!(opponent_obj.power, Some(2));
         assert_eq!(opponent_obj.toughness, Some(2));
+    }
+
+    /// CR 400.2 — Invoke Calamity's `FreeCastWindow` lists the controller's
+    /// eligible HAND cards as candidates. An opponent viewer must NOT learn which
+    /// hand card ids are eligible; the controller sees the real ids.
+    #[test]
+    fn free_cast_window_hides_hand_candidates_from_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let hand_candidate = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hand Sorcery".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::CastOffer {
+            player: PlayerId(0),
+            kind: CastOfferKind::FreeCastWindow {
+                candidates: vec![hand_candidate],
+                remaining_casts: 2,
+                remaining_mv_budget: Some(6),
+                filter: crate::types::ability::TargetFilter::Any,
+                zones: vec![Zone::Graveyard, Zone::Hand],
+                exile_instead_of_graveyard: true,
+            },
+        };
+
+        // The controller sees the real candidate ids (and the public scalars).
+        let controller_view = filter_state_for_viewer(&state, PlayerId(0));
+        match controller_view.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        remaining_mv_budget,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(candidates, vec![hand_candidate]);
+                assert_eq!(remaining_casts, 2);
+                assert_eq!(remaining_mv_budget, Some(6));
+            }
+            other => panic!("expected FreeCastWindow for controller, got {other:?}"),
+        }
+
+        // An opponent sees opaque placeholders, not the hand candidate id; the
+        // public scalars (count, budget, rider) are preserved.
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        match opponent_view.waiting_for {
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        remaining_mv_budget,
+                        exile_instead_of_graveyard,
+                        ..
+                    },
+                ..
+            } => {
+                assert!(
+                    !candidates.contains(&hand_candidate),
+                    "opponent must not see the controller's hand candidate id"
+                );
+                assert_eq!(candidates, vec![ObjectId(0)]);
+                assert_eq!(remaining_casts, 2);
+                assert_eq!(remaining_mv_budget, Some(6));
+                assert!(exile_instead_of_graveyard);
+            }
+            other => panic!("expected FreeCastWindow for opponent, got {other:?}"),
+        }
     }
 }

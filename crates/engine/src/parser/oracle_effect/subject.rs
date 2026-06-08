@@ -3218,6 +3218,15 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "win",
 ];
 
+fn is_restriction_predicate_verb(token: &str) -> bool {
+    matches!(token, "can't" | "cannot")
+}
+
+fn token_starts_predicate(token: &str) -> bool {
+    is_restriction_predicate_verb(token)
+        || PREDICATE_VERBS.contains(&super::normalize_verb_token(token).as_str())
+}
+
 pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
     let lower = text.to_lowercase();
     let mut word_start = None;
@@ -3226,7 +3235,7 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
         if ch.is_whitespace() {
             if let Some(start) = word_start.take() {
                 let token = &lower[start..idx];
-                if PREDICATE_VERBS.contains(&super::normalize_verb_token(token).as_str()) {
+                if token_starts_predicate(token) {
                     return Some(start);
                 }
             }
@@ -3240,7 +3249,7 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 
     if let Some(start) = word_start {
         let token = &lower[start..];
-        if PREDICATE_VERBS.contains(&super::normalize_verb_token(token).as_str()) {
+        if token_starts_predicate(token) {
             return Some(start);
         }
     }

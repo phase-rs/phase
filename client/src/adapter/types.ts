@@ -1046,7 +1046,16 @@ export type CastOfferKind =
   | { type: "Paradigm"; offers: ObjectId[] }
   | { type: "Cascade"; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number }
   | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number }
-  | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] };
+  | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] }
+  | {
+      type: "FreeCastWindow";
+      candidates: ObjectId[];
+      remaining_casts: number;
+      remaining_mv_budget?: number;
+      filter: TargetFilter;
+      zones: Zone[];
+      exile_instead_of_graveyard?: boolean;
+    };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
@@ -1529,6 +1538,7 @@ export type GameAction =
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "RippleChoice"; data: { choice: CastChoice } }
+  | { type: "FreeCastWindowChoice"; data: { selection?: ObjectId } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   // CR 702.140c + CR 730.2a: answer to MutateMergeChoice — top or bottom.
   | { type: "ChooseMutateMergeSide"; data: { side: "Top" | "Bottom" } }

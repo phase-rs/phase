@@ -1255,6 +1255,16 @@
     "discoverDeclineSuffix": "(colocar o restante no fundo)",
     "cascadeDeclineSuffix": "(embaralhar todas as cartas exiladas no fundo)"
   },
+  "freeCastWindow": {
+    "eyebrow": "Conjuração grátis",
+    "title": "Conjure uma mágica de graça",
+    "subtitle": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)). Valor de mana total restante: {{budget}}.",
+    "subtitleNoBudget": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)).",
+    "castNamed": "Conjurar {{name}}",
+    "castSuffix": "(sem pagar seu custo de mana)",
+    "done": "Concluído",
+    "doneSuffix": "(pare de conjurar mágicas desta forma)"
+  },
   "castingVariant": {
     "eyebrow": "Conjurar",
     "title": "Escolher Conjuração",

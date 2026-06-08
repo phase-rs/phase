@@ -307,6 +307,13 @@ fn is_blocked_by_cant_cast_spells(
     caster: PlayerId,
     spell_obj: Option<&super::game_object::GameObject>,
 ) -> bool {
+    // CR 702.50b: a player who controls a resolved Epic spell can't cast spells
+    // for the rest of the game. Activated/triggered abilities and spell copies
+    // are unaffected — neither routes through this cast-legality gate.
+    if super::effects::epic::is_epic_locked(state, caster) {
+        return true;
+    }
+
     let spell_record = spell_obj.map(spell_record_for_restrictions);
 
     state.restrictions.iter().any(|restriction| {
@@ -1406,6 +1413,32 @@ fn has_graveyard_timed_alt_cost_permission(
         && obj.casting_permissions.iter().any(|permission| {
             exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
         })
+}
+
+/// CR 608.2g: An object carries a *cast-during-resolution* alt-cost permission —
+/// the runtime `ExileWithAltCost` stamped by `initiate_cast_during_resolution`,
+/// identified by `resolution_cleanup.is_some()`. Unlike Cascade/Discover/Suspend
+/// (whose hits are already in exile) and graveyard grants (Emry/Lurrus), a
+/// free-cast window (Invoke Calamity, CR 601.2a "from your graveyard and/or
+/// hand") may drive this cast on a card that is still in the controller's HAND.
+/// The zone-specific gates (`obj.zone == Exile`, `has_graveyard_alt_cost`) do not
+/// cover the hand origin, so the cost-zeroing alt-cost lookup must additionally
+/// recognize this permission regardless of which zone the card is cast from —
+/// otherwise a hand-origin free cast falls through to its printed mana cost.
+fn has_during_resolution_alt_cost_permission(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    obj.casting_permissions.iter().any(|permission| {
+        matches!(
+            permission,
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(_),
+                ..
+            }
+        ) && exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+    })
 }
 
 /// CR 604.3 + CR 601.2a: Find graveyard objects castable via static permission
@@ -2727,6 +2760,13 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
     let has_graveyard_permission = graveyard_permission_src.is_some();
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
+    // CR 608.2g: A free-cast window (Invoke Calamity) may drive a
+    // cast-during-resolution on a card still in the controller's HAND. The
+    // runtime `ExileWithAltCost { resolution_cleanup: Some(_) }` is the
+    // zone-agnostic discriminator for that path; it must zero the mana cost
+    // even when the card is neither in exile nor under a graveyard alt-cost.
+    let has_during_resolution_alt_cost =
+        has_during_resolution_alt_cost_permission(state, obj, player);
 
     // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static permission
     // (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card must be the
@@ -2840,7 +2880,10 @@ fn prepare_spell_cast_with_variant_override_inner(
     // (ExileWithAltAbilityCost) zeroes the mana cost — its `AbilityCost` is
     // routed through `pay_additional_cost` in `check_additional_cost_or_pay`
     // (CR 118.9 + CR 119.4).
-    let alt_cost_from_exile = if obj.zone == Zone::Exile || has_graveyard_alt_cost {
+    let alt_cost_from_exile = if obj.zone == Zone::Exile
+        || has_graveyard_alt_cost
+        || has_during_resolution_alt_cost
+    {
         // CR 611.2a: When a permission carries `granted_to: Some(p)`, only
         // player `p` may consume its cost override. Skip alt-cost permissions
         // bound to a different player so a non-grantee casting from the same
