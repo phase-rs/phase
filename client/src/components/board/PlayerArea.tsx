@@ -84,7 +84,6 @@ export function PlayerArea({
   }
 
   const player = gameState.players[playerId];
-  const hasCommandZoneCards = gameState.format_config?.command_zone === true;
   const hasCommanderDamage = gameState.format_config?.commander_damage_threshold != null;
   const isEliminated = player?.is_eliminated ?? false;
   // CR 702.26-style player phasing: while phased out, dim the player area
@@ -107,7 +106,21 @@ export function PlayerArea({
   // lands at LAND_BASE_SCALE (0.78), which squeezes the creatures row via
   // flex-1. Stacked CommanderDamage entries compound the warp.
   const commanderScale = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
-  const commanderSection = hasCommandZoneCards ? (
+  // Render the commander column only when it has real content — a commander
+  // still in the command zone, or live commander-damage entries. Gating on the
+  // format flag alone reserved an empty column (and its divider) for the whole
+  // game once the commander was cast. These mirror the visibility filters in
+  // CommanderCardZone and CommanderDamage so the wrapper appears iff a child will.
+  const hasCommanderInZone = (gameState.command_zone ?? []).some((id) => {
+    const obj = gameState.objects[id];
+    return obj?.is_commander === true && obj.owner === playerId && obj.zone === "Command";
+  });
+  const hasActiveCommanderDamage =
+    hasCommanderDamage &&
+    Object.values(gameState.derived?.commander_damage_by_attacker ?? {}).some((views) =>
+      views.some((view) => view.victim === playerId && view.damage > 0),
+    );
+  const commanderSection = hasCommanderInZone || hasActiveCommanderDamage ? (
     // No `min-w-0` here: this column holds the commander-damage labels, and
     // allowing it to shrink below its content width lets the adjacent
     // (non-shrinking) planeswalker row collapse it and hide the labels.

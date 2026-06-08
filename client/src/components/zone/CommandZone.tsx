@@ -108,13 +108,17 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
           <div className="relative z-0 flex w-full flex-1 flex-col px-[2px] pb-[2px]">
             <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-[1.5px] border border-black/80 bg-gradient-to-br from-stone-800 via-stone-900 to-black shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)]">
               <span
-                aria-hidden
+                aria-hidden="true"
                 className="absolute font-black leading-none text-amber-500/20"
                 style={{ fontSize: "calc(var(--art-crop-h) * 0.55)" }}
               >
                 ✦
               </span>
-              <p className="relative z-10 line-clamp-4 px-1 text-center text-[8px] leading-tight text-amber-100/90 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]">
+              <p
+                className={`relative z-10 px-1 text-center leading-tight text-amber-100/90 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] ${
+                  isCompactHeight ? "line-clamp-2 text-[6.5px]" : "line-clamp-4 text-[8px]"
+                }`}
+              >
                 {group.description}
               </p>
             </div>
@@ -124,7 +128,11 @@ function EmblemCard({ group, label }: { group: GroupedEmblem; label: string }) {
 
       {/* Count badge (CR 114: identical emblems stacked) */}
       {group.count > 1 && (
-        <div className="absolute -bottom-[3px] -right-[3px] z-20 inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-black/80 bg-amber-600 px-1 text-[10px] font-bold text-black shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+        <div
+          className={`absolute -bottom-[3px] -right-[3px] z-20 inline-flex items-center justify-center rounded-full border border-black/80 bg-amber-600 px-1 font-bold text-black shadow-[0_2px_4px_rgba(0,0,0,0.8)] ${
+            isCompactHeight ? "h-3.5 min-w-3.5 text-[8px]" : "h-5 min-w-5 text-[10px]"
+          }`}
+        >
           ×{group.count}
         </div>
       )}
