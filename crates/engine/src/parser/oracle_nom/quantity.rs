@@ -5797,7 +5797,7 @@ mod tests {
     #[test]
     fn parse_for_each_differently_named_basic() {
         let (rest, q) =
-            parse_for_each_differently_named("differently named dungeon you've completed").unwrap();
+            parse_for_each_differently_named("differently named basic land").unwrap();
         assert_eq!(rest, "");
         match q {
             QuantityRef::ObjectCountDistinct { filter, qualities } => {
@@ -5808,7 +5808,7 @@ mod tests {
         }
     }
 
-    /// Test parse_for_each_differently_named with type phrase.
+    /// Test parse_for_each_differently_named with a simple type phrase.
     #[test]
     fn parse_for_each_differently_named_creature() {
         let (rest, q) = parse_for_each_differently_named("differently named creature").unwrap();
