@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/scryfall-fetch.sh"
 
 DATA_DIR="data/scryfall"
-ORACLE_FILE="$DATA_DIR/oracle-cards.json"
-OUTPUT="client/public/scryfall-data.json"
+ORACLE_FILE="${SCRYFALL_ORACLE_FILE:-$DATA_DIR/oracle-cards.json}"
+OUTPUT="${SCRYFALL_IMAGES_OUTPUT:-client/public/scryfall-data.json}"
 
 echo "=== Scryfall Data Generation ==="
 
@@ -77,6 +77,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
     select(.layout as $l | $exclude | index($l) | not) |
     . as $card |
     ($card.oracle_id // $card.card_faces[0].oracle_id) as $oracle_id |
+    select($oracle_id != null) |
     {
       oracle_id: $oracle_id,
       face_names: (if $card.card_faces then
@@ -98,11 +99,11 @@ jq -c --argjson exclude "$NON_PLAYABLE" "$SCRYFALL_JQ_PRELUDE"'
       cmc: ($card.cmc // $card.card_faces[0].cmc // 0),
       type_line: ($card.type_line // $card.card_faces[0].type_line // ""),
       colors: ($card.colors // $card.card_faces[0].colors // []),
-      color_identity: $card.color_identity,
-      keywords: ($card.keywords // [])
+      color_identity: ($card.color_identity // $card.card_faces[0].color_identity // []),
+      keywords: ($card.keywords // $card.card_faces[0].keywords // [])
     } as $entry |
     (
-      ([$oracle_id | select(. != null) | ascii_downcase]) +
+      ([$oracle_id | ascii_downcase]) +
       [$card.name | js_downcase] +
       if $card.card_faces and ($card.card_faces[0].name != $card.name)
       then [$card.card_faces[0].name | js_downcase]
