@@ -292,6 +292,41 @@ fn detect_optional_you_may(
     if parsed_has_conditional_modal_max(parsed) {
         return;
     }
+    // CR 702.103b: Prototype keyword explanation "(You may cast this spell with
+    // different mana cost, color, and size. It keeps its abilities and types.)"
+    // is keyword reminder text, not an optional effect.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may cast this spell with different mana cost") {
+        return;
+    }
+    // CR 305.2: "you may play additional lands" is encoded as
+    // `StaticMode::MayPlayAdditionalLand`, which is an optional permission
+    // static, not a def-level optional effect.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may play") && cleaned.contains("additional land") {
+        return;
+    }
+    // CR 614.1c: "you may reveal" in ETB replacement effects (e.g., Arsenal
+    // Thresher) is part of the replacement condition, not a separate optional
+    // effect. The reveal choice is captured in the replacement logic.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may reveal") && (cleaned.contains("as this creature enters") || cleaned.contains("as this permanent enters")) {
+        return;
+    }
+    // Die roll result branches (e.g., "1—9 | You may put that card on top of
+    // your library") are conditional effects gated by the die result, not
+    // standalone optional effects. The optionality is conditional on the roll.
+    // Match both "N—N | you may" and "| you may" patterns.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("| you may") {
+        return;
+    }
+    // CR 611.2a: Static abilities that grant triggers with optional effects
+    // (e.g., Arm with Aether granting "you may return target creature")
+    // carry the optionality in the granted trigger, not at the grant site.
+    if any_static_has_granted_trigger_with_optional(parsed) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "Optional_YouMay".into(),
         description: truncate(original, 140).into(),
@@ -566,6 +601,18 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
 
 fn static_definition_has_optional(s: &StaticDefinition) -> bool {
     static_carries_optional_modification(s) || static_mode_is_optional_permission(&s.mode)
+}
+
+/// Check if any static ability in the parsed abilities grants a trigger
+/// that has internal optionality (e.g., Arm with Aether granting a trigger
+/// with "you may return target creature").
+fn any_static_has_granted_trigger_with_optional(parsed: &ParsedAbilities) -> bool {
+    parsed.statics.iter().any(|s| {
+        s.modifications.iter().any(|m| match m {
+            ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_optional(trigger),
+            _ => false,
+        })
+    })
 }
 
 /// Recursive walk: does any def in the tree carry an `Effect::Unimplemented`?
