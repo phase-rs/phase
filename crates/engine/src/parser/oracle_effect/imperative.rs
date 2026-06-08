@@ -3685,34 +3685,47 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         }
     }
 
-    if let Some((
-        Effect::ChangeZone {
-            origin,
-            destination,
-            target,
-            enters_under,
-            enter_tapped,
-            enter_transformed,
-            enters_attacking,
-            up_to,
-            enter_with_counters,
-            ..
-        },
-        choice_count,
-    )) = super::try_parse_put_zone_change_parts(lower, text)
-    {
-        return Some(PutImperativeAst::ZoneChange {
-            origin,
-            destination,
-            target,
-            enters_under,
-            enter_tapped,
-            enter_transformed,
-            enters_attacking,
-            up_to,
-            choice_count: choice_count.map(Box::new),
-            enter_with_counters,
-        });
+    if let Some((effect, choice_count)) = super::try_parse_put_zone_change_parts(lower, text) {
+        return match effect {
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped,
+                ..
+            } => Some(PutImperativeAst::ZoneChangeAll {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped,
+            }),
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped,
+                enter_transformed,
+                enters_attacking,
+                up_to,
+                enter_with_counters,
+                ..
+            } => Some(PutImperativeAst::ZoneChange {
+                origin,
+                destination,
+                target,
+                enters_under,
+                enter_tapped,
+                enter_transformed,
+                enters_attacking,
+                up_to,
+                choice_count: choice_count.map(Box::new),
+                enter_with_counters,
+            }),
+            _ => None,
+        };
     }
 
     None
@@ -3727,6 +3740,20 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             // CR 701.17a: "Put top N into graveyard" is self-mill.
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+        },
+        PutImperativeAst::ZoneChangeAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+        } => Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            enter_tapped,
+            face_down_profile: None,
         },
         PutImperativeAst::ZoneChange {
             origin,
