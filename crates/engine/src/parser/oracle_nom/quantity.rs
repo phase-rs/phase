@@ -8,7 +8,6 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::combinator::{map, opt, value};
-use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -1987,22 +1986,21 @@ pub fn parse_equal_to(input: &str) -> OracleResult<'_, QuantityExpr> {
 
 /// Parse sum expressions like "the number of X and the number of Y".
 /// Used for patterns like "equal to the number of Warriors and Equipment".
-/// Handles N-way sums via separated_list1, but only succeeds for 2+ items.
+/// Parses exactly two summands, both prefixed with "the number of" to avoid
+/// greedy type-list consumption by parse_the_number_of.
 fn parse_equal_to_sum(input: &str) -> OracleResult<'_, QuantityExpr> {
-    let (rest, qty_refs) = separated_list1(tag(" and "), parse_quantity_ref).parse(input)?;
-    // Only wrap in Sum if there are 2+ quantities; single quantities should
-    // fall through to the regular parse_quantity path.
-    if qty_refs.len() < 2 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
-    let exprs: Vec<QuantityExpr> = qty_refs
-        .into_iter()
-        .map(|qty| QuantityExpr::Ref { qty })
-        .collect();
-    Ok((rest, QuantityExpr::Sum { exprs }))
+    let (rest, first_qty) = parse_the_number_of(input)?;
+    let (rest, _) = tag(" and ").parse(rest)?;
+    let (rest, second_qty) = parse_the_number_of(rest)?;
+    Ok((
+        rest,
+        QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref { qty: first_qty },
+                QuantityExpr::Ref { qty: second_qty },
+            ],
+        },
+    ))
 }
 
 /// Parse "for each [type] you control" from Oracle text.
@@ -5788,22 +5786,6 @@ mod tests {
         match expr {
             QuantityExpr::Sum { exprs } => {
                 assert_eq!(exprs.len(), 2);
-            }
-            _ => panic!("expected Sum"),
-        }
-    }
-
-    /// Test parse_equal_to_sum for three-way sum expressions.
-    #[test]
-    fn parse_equal_to_sum_three_way() {
-        let (rest, expr) = parse_equal_to_sum(
-            "the number of creatures and the number of artifacts and the number of enchantments",
-        )
-        .unwrap();
-        assert_eq!(rest, "");
-        match expr {
-            QuantityExpr::Sum { exprs } => {
-                assert_eq!(exprs.len(), 3);
             }
             _ => panic!("expected Sum"),
         }
