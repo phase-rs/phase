@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -266,7 +266,7 @@ export function CardChoiceModal() {
   }
 }
 
-// â”€â”€ Ring-bearer Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Ring-bearer Modal ──────────────────────────────────────────────────────
 
 function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
   const { t } = useTranslation("game");
@@ -329,7 +329,7 @@ function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
   );
 }
 
-// â”€â”€ Search Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Search Modal ─────────────────────────────────────────────────────────────
 
 function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const { t } = useTranslation("game");
@@ -506,7 +506,7 @@ function SearchPartitionModal({ data }: { data: SearchPartitionChoice["data"] })
 /**
  * Stable string key for an `OutsideGameChoiceEntry`. Sideboard and face-up
  * exile entries share the modal's selection state, so their identities must
- * not collide as raw numbers â€” namespacing by source variant keeps the two
+ * not collide as raw numbers — namespacing by source variant keeps the two
  * pools disjoint.
  */
 function entryKey(entry: OutsideGameChoiceEntry): string {
@@ -541,7 +541,7 @@ function entryToSelection(entry: OutsideGameChoiceEntry): OutsideGameSelection {
 function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  // Map keyed by `entryKey(entry)` â†’ number of copies the user has selected.
+  // Map keyed by `entryKey(entry)` → number of copies the user has selected.
   const [selectedCounts, setSelectedCounts] = useState<Map<string, number>>(new Map());
 
   const entriesByKey = useMemo(() => {
@@ -644,7 +644,7 @@ function outsideGameChoiceKey(data: OutsideGameChoice["data"]) {
   return `${data.player}:${data.source_id}:${data.count}:${data.up_to ?? false}:${data.destination}:${choicesKey}`;
 }
 
-// â”€â”€ Choose From Zone Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Choose From Zone Modal ───────────────────────────────────────────────────
 
 function ChooseFromZoneModal({
   data,
@@ -996,7 +996,7 @@ function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice[
   );
 }
 
-// â”€â”€ Sacrifice Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Sacrifice Modal ──────────────────────────────────────────────────────────
 
 function SacrificeModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
@@ -1092,7 +1092,7 @@ function SacrificeForManaAbilityModal({ data }: { data: PayCost["data"] }) {
   );
 }
 
-// â”€â”€ Exile For Mana Ability Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Exile For Mana Ability Modal ──────────────────────────────────────────────
 
 function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone: Zone }) {
   const { t } = useTranslation("game");
@@ -1158,7 +1158,7 @@ function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone:
   );
 }
 
-// â”€â”€ Multi-Target Selection Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Multi-Target Selection Modal ──────────────────────────────────────────────
 
 function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"] }) {
   const { t } = useTranslation("game");
@@ -1226,7 +1226,7 @@ function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"
   );
 }
 
-// â”€â”€ Paradigm Cast Offer Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Paradigm Cast Offer Modal ─────────────────────────────────────────────────
 
 function ParadigmCastOfferModal({
   offers,
@@ -1285,7 +1285,7 @@ function ParadigmCastOfferModal({
   );
 }
 
-// â”€â”€ Pay Mana Ability Mana Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Pay Mana Ability Mana Modal ───────────────────────────────────────────────
 
 function ReturnToHandModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
@@ -1422,7 +1422,7 @@ function PermanentCostModal({
   );
 }
 
-// â”€â”€ Blight Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Blight Modal ─────────────────────────────────────────────────────────────
 
 function BlightModal({ data }: { data: BlightChoice["data"] }) {
   const { t } = useTranslation("game");
@@ -1511,7 +1511,7 @@ function BlightModal({ data }: { data: BlightChoice["data"] }) {
   );
 }
 
-// â”€â”€ Crew Vehicle Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Crew Vehicle Modal ──────────────────────────────────────────────────────
 
 function CrewModal({ data }: { data: CrewVehicle["data"] }) {
   const { t } = useTranslation("game");
@@ -1594,7 +1594,7 @@ function CrewModal({ data }: { data: CrewVehicle["data"] }) {
   );
 }
 
-// â”€â”€ Station Target Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Station Target Modal ────────────────────────────────────────────────────
 // CR 702.184a: Pick exactly one untapped creature you control to tap as the
 // station ability's cost. Charge counters added = that creature's power.
 
@@ -1671,9 +1671,9 @@ function StationTargetModal({ data }: { data: StationTarget["data"] }) {
   );
 }
 
-// â”€â”€ Saddle Mount Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Saddle Mount Modal ──────────────────────────────────────────────────────
 // CR 702.171a: Tap any number of other untapped creatures you control with
-// total power â‰¥ N. Mirrors CrewModal's selection + total-power gate.
+// total power ≥ N. Mirrors CrewModal's selection + total-power gate.
 
 function SaddleModal({ data }: { data: SaddleMount["data"] }) {
   const { t } = useTranslation("game");
@@ -1756,7 +1756,7 @@ function SaddleModal({ data }: { data: SaddleMount["data"] }) {
   );
 }
 
-// â”€â”€ Ward Sacrifice Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Ward Sacrifice Modal ─────────────────────────────────────────────────────
 
 type WardSacrificeChoice = Extract<WaitingFor, { type: "WardSacrificeChoice" }>;
 
@@ -1823,7 +1823,7 @@ function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
   );
 }
 
-// â”€â”€ Unless Bounce Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Unless Bounce Modal ─────────────────────────────────────────────────────
 
 type UnlessBounceChoice = Extract<WaitingFor, { type: "UnlessBounceChoice" }>;
 
@@ -1890,9 +1890,9 @@ function UnlessBounceModal({ data }: { data: UnlessBounceChoice["data"] }) {
   );
 }
 
-// â”€â”€ Exile from Graveyard Modal (Escape cost) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Exile from Graveyard Modal (Escape cost) ────────────────────────────────
 
-// â”€â”€ Shared exile-for-cost modal (graveyard and hand variants share this) â”€â”€â”€â”€â”€
+// ── Shared exile-for-cost modal (graveyard and hand variants share this) ─────
 
 function ExileForCostModal({
   cards,
@@ -2047,7 +2047,7 @@ function BeholdModal({
 }
 
 // CR 118.3 + CR 601.2b + CR 605.3b: single dispatch for the unified `PayCost`
-// state â€” branch on `kind.type` to the matching cost-selection modal. The
+// state — branch on `kind.type` to the matching cost-selection modal. The
 // `key` forces a fresh selection set when the eligible-object list changes.
 function PayCostDispatch({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
@@ -2235,7 +2235,7 @@ function CollectEvidenceModal({ data }: { data: CollectEvidenceChoice["data"] })
   );
 }
 
-// â”€â”€ Discard to Hand Size Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Discard to Hand Size Modal ───────────────────────────────────────────────
 
 function DiscardModal({
   data,
@@ -2286,7 +2286,7 @@ function DiscardModal({
   if (!objects) return null;
 
   // CR 701.9b: "up to N" allows 0..=count; exact requires precisely count.
-  // CR 608.2c: "discard N unless you discard a [type]" â€” accept 1 card OR count cards.
+  // CR 608.2c: "discard N unless you discard a [type]" — accept 1 card OR count cards.
   const isReady = isUpTo
     ? selected.size <= data.count
     : selected.size === data.count || (hasUnlessOption && selected.size === 1);
@@ -2351,7 +2351,7 @@ function DiscardModal({
   );
 }
 
-// â”€â”€ Harmonize Tap Choice Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Harmonize Tap Choice Modal ──────────────────────────────────────────────
 
 function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
   const { t } = useTranslation("game");
@@ -2420,7 +2420,7 @@ function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
   );
 }
 
-// â”€â”€ Legend Choice Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Legend Choice Modal ─────────────────────────────────────────────────────
 
 function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
   const { t } = useTranslation("game");
@@ -2482,7 +2482,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
   );
 }
 
-// â”€â”€ Commander Zone Choice Modal (CR 903.9a) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Commander Zone Choice Modal (CR 903.9a) ───────────────────────────────
 
 function CommanderZoneChoiceModal({ data }: { data: CommanderZoneChoice["data"] }) {
   const { t } = useTranslation("game");
@@ -2529,7 +2529,7 @@ function CommanderZoneChoiceModal({ data }: { data: CommanderZoneChoice["data"] 
   );
 }
 
-// â”€â”€ Reveal Until Kept Choice Modal (CR 701.20a) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Reveal Until Kept Choice Modal (CR 701.20a) ───────────────────────────
 
 function RevealUntilKeptChoiceModal({ data }: { data: RevealUntilKeptChoice["data"] }) {
   const { t } = useTranslation("game");
@@ -2576,7 +2576,7 @@ function RevealUntilKeptChoiceModal({ data }: { data: RevealUntilKeptChoice["dat
   );
 }
 
-// â”€â”€ Repeat Decision Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Repeat Decision Modal ──────────────────────────────────────────────────
 
 function RepeatDecisionModal({ data: _data }: { data: RepeatDecision["data"] }) {
   const { t } = useTranslation("game");
@@ -2601,7 +2601,7 @@ function RepeatDecisionModal({ data: _data }: { data: RepeatDecision["data"] }) 
   );
 }
 
-// â”€â”€ Damage Source Choice Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Damage Source Choice Modal ─────────────────────────────────────────────
 
 function DamageSourceModal({ data }: { data: DamageSourceChoice["data"] }) {
   const { t } = useTranslation("game");
@@ -2646,7 +2646,7 @@ function DamageSourceModal({ data }: { data: DamageSourceChoice["data"] }) {
   );
 }
 
-// â”€â”€ Manifest Dread Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Manifest Dread Modal ─────────────────────────────────────────────────
 
 function ManifestDreadModal({ data }: { data: ManifestDreadChoice["data"] }) {
   const { t } = useTranslation("game");
@@ -2711,7 +2711,7 @@ function ManifestDreadModal({ data }: { data: ManifestDreadChoice["data"] }) {
   );
 }
 
-// â”€â”€ Mana Color Choice Modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Mana Color Choice Modal ────────────────────────────────────────────────
 
 type ChooseManaColor = Extract<WaitingFor, { type: "ChooseManaColor" }>;
 
@@ -2747,7 +2747,7 @@ function ManaColorChoiceModal({ data }: { data: ChooseManaColor["data"] }) {
   // one-of-N colors shape (Treasures, City of Brass, Pit of Offerings).
   // `Combination` is the filter-land prompt (pick one complete multi-mana
   // sequence). `AnyCombination` is a per-mana-slot spell/effect choice
-  // (Manamorphose). All share this single modal â€” the engine dispatches a
+  // (Manamorphose). All share this single modal — the engine dispatches a
   // `ManaChoice` whose shape mirrors the prompt.
   if (data.choice.type === "Combination") {
     return <ManaCombinationChoiceModal options={data.choice.data.options} />;
@@ -2856,7 +2856,7 @@ function ManaSingleColorChoiceModal({
               onClick={() => setCount((c) => Math.max(1, c - 1))}
               className="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 text-xl leading-none text-white transition hover:border-white/40 disabled:opacity-30"
             >
-              âˆ’
+              −
             </button>
             <span className="w-8 text-center text-lg font-semibold tabular-nums text-white">
               {count}
