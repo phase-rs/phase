@@ -17026,9 +17026,9 @@ fn infer_origin_zone(lower: &str) -> Option<Zone> {
         Some(Zone::Exile)
     } else if contains_possessive(lower, "from", "hand") {
         Some(Zone::Hand)
-    } else if scan_contains_phrase(lower, "from the top of your library") {
-        Some(Zone::Library)
-    } else if contains_possessive(lower, "from", "library") {
+    } else if scan_contains_phrase(lower, "from the top of your library")
+        || contains_possessive(lower, "from", "library")
+    {
         Some(Zone::Library)
     } else if scan_contains_phrase(lower, "graveyard") && !scan_contains_phrase(lower, "from") {
         // CR 404.1: Possessive graveyard references without "from" — e.g.,
