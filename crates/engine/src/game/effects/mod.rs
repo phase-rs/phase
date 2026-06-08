@@ -93,6 +93,7 @@ pub mod flip_coin;
 pub mod forage;
 pub mod force_attack;
 pub mod force_block;
+pub mod free_cast_from_zones;
 pub mod gain_control;
 pub mod gift_delivery;
 pub mod goad;
@@ -998,6 +999,13 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::Cascade { .. },
+                ..
+            }
+            // CR 608.2g + CR 608.2c: Invoke Calamity's free-cast window pauses
+            // resolution; its "Exile ~" sub-ability must run only after the
+            // window finishes, so stash it as a continuation here.
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
                 ..
             }
             | WaitingFor::TopOrBottomChoice { .. }
@@ -1961,6 +1969,7 @@ pub fn resolve_effect(
         Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
         Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
+        Effect::FreeCastFromZones { .. } => free_cast_from_zones::resolve(state, ability, events),
         Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
         Effect::CreateDamageReplacement { .. } => {
             create_damage_replacement::resolve(state, ability, events)

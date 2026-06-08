@@ -527,6 +527,33 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 vec![decline, cast]
             }
         }
+        // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — offer
+        // casting each eligible candidate plus a decline to finish the window.
+        // The engine handler re-validates the MV budget and candidate set, so
+        // every candidate plus the decline is a legal action here.
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+        } => {
+            let mut actions: Vec<_> = candidates
+                .iter()
+                .map(|&id| {
+                    candidate(
+                        GameAction::FreeCastWindowChoice {
+                            selection: Some(id),
+                        },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect();
+            actions.push(candidate(
+                GameAction::FreeCastWindowChoice { selection: None },
+                TacticalClass::Selection,
+                Some(*player),
+            ));
+            actions
+        }
         WaitingFor::LearnChoice { player, hand_cards } => {
             let mut actions: Vec<_> = hand_cards
                 .iter()
@@ -2338,6 +2365,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         }
         | WaitingFor::CastOffer {
             kind: CastOfferKind::Ripple { .. },
+            ..
+        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { .. },
             ..
         }
         | WaitingFor::RevealUntilKeptChoice { .. }

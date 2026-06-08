@@ -2180,6 +2180,35 @@ pub enum CastOfferKind {
         remaining_hits: Vec<ObjectId>,
         revealed_misses: Vec<ObjectId>,
     },
+    /// CR 608.2g + CR 601.2 + CR 118.9: Interactive free-cast window opened by
+    /// `Effect::FreeCastFromZones` (Invoke Calamity). The controller repeatedly
+    /// chooses one `candidate` to cast for free (or declines to finish), up to
+    /// `remaining_casts` times, while the chosen spells' running total mana
+    /// value stays within `remaining_mv_budget`. After each successful cast the
+    /// window is re-offered with `remaining_casts` decremented, the budget
+    /// reduced, and `candidates` re-filtered to those still affordable.
+    FreeCastWindow {
+        /// CR 601.2a: Instant/sorcery cards (in the controller's graveyard
+        /// and/or hand) that match the effect's filter and still fit the
+        /// remaining MV budget.
+        candidates: Vec<ObjectId>,
+        /// CR 601.2: Casts still available in this window.
+        remaining_casts: u8,
+        /// CR 202.3: Running-total mana-value budget remaining, or `None` for
+        /// no MV cap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining_mv_budget: Option<u32>,
+        /// CR 601.2a: Filter the candidates must match. Carried so the handler
+        /// can rebuild the post-cast re-offer's candidate set.
+        filter: crate::types::ability::TargetFilter,
+        /// CR 601.2a: Zones searched for candidates (controller's graveyard
+        /// and/or hand).
+        zones: Vec<crate::types::zones::Zone>,
+        /// CR 614.1a: Whether spells cast this way are exiled instead of going
+        /// to their owner's graveyard.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exile_instead_of_graveyard: bool,
+    },
 }
 
 /// CR 701.56a: Which half of a time-travel choice is currently being

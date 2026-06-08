@@ -432,6 +432,7 @@ fn redundancy_delta(
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
         | Effect::PreventDamage { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
