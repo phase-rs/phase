@@ -1053,6 +1053,7 @@ pub(super) fn handle_resolution_choice(
                 selectable_cards,
                 kept_destination,
                 rest_destination,
+                enter_tapped,
                 ..
             },
             GameAction::SelectCards { cards: kept },
@@ -1119,6 +1120,11 @@ pub(super) fn handle_resolution_choice(
             }
             for &obj_id in &kept {
                 zones::move_to_zone(state, obj_id, kept_zone, events);
+                if enter_tapped && kept_zone == Zone::Battlefield {
+                    if let Some(obj) = state.objects.get_mut(&obj_id) {
+                        obj.tapped = true;
+                    }
+                }
             }
             // CR 701.33 + CR 701.18: Publish the kept (revealed) cards as a
             // tracked set so downstream sub_abilities can route them by type

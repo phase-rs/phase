@@ -539,6 +539,13 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // spells you cast" — opt-in alternative-mana-cost permission
             // (Rooftop Storm, Fist of Suns, Jodah), structurally optional.
             | StaticMode::CastWithAlternativeCost { .. }
+            // CR 118.9 + CR 702.29a + CR 702.122a: AlternativeKeywordCost is an
+            // opt-in substitution — "you may" is the permission itself
+            // (New Perspectives, Heart of Kiran, Gavi Nest Warden).
+            | StaticMode::AlternativeKeywordCost { .. }
+            // CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than
+            // pay that mana." K'rrik class — per-payment substitution is opt-in.
+            | StaticMode::PayLifeAsColoredMana { .. }
             // CR 602.5e: "You may activate [abilities] any time you could
             // cast an instant" is an activation-timing permission, not an
             // optional effect to execute during resolution.
@@ -1395,6 +1402,23 @@ fn detect_dynamic_qty(
     if cleaned_dynamic_is_only_vote_tally(cleaned) && json_has_any(ast_json, &["\"type\":\"Vote\""])
     {
         return;
+    }
+    // CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than
+    // pay that mana." — the "for each {" phrase is a per-payment-substitution
+    // using an inline mana symbol, NOT a QuantityExpr carrier. Suppress when
+    // the parsed AST already contains PayLifeAsColoredMana and every "for each"
+    // marker is the mana-symbol form (immediately followed by `{`).
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("for each {") {
+        // allow-noncombinator: swallow detector marker scan on classified text
+        let all_for_each_are_mana_subst = !cleaned.contains("for each ")
+            || cleaned
+                // allow-noncombinator: swallow detector marker scan on classified text
+                .match_indices("for each ")
+                .all(|(idx, _)| cleaned[idx + "for each ".len()..].starts_with('{'));
+        if all_for_each_are_mana_subst && json_has_any(ast_json, &["PayLifeAsColoredMana"]) {
+            return;
+        }
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "DynamicQty".into(),

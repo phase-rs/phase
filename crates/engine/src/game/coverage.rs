@@ -8420,6 +8420,7 @@ mod tests {
     };
     use crate::types::card_type::CardType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::KeywordKind;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
@@ -10021,6 +10022,39 @@ mod tests {
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(keyword.supported);
+    }
+
+    #[test]
+    fn alternative_keyword_cost_static_remains_runtime_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some("You may pay {0} rather than pay cycling costs.".to_string());
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::AlternativeKeywordCost {
+                keyword: KeywordKind::Cycling,
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::generic(0),
+                },
+                frequency: None,
+            })
+            .description("You may pay {0} rather than pay cycling costs.".to_string()),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.iter()
+                .any(|gap| gap == "Static:AlternativeKeywordCost(Cycling)"),
+            "runtime-deferred AlternativeKeywordCost must remain a coverage gap: {gaps:?}"
+        );
+
+        let parse_details = build_parse_details_for_face(&face);
+        let static_item = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Static)
+            .expect("static parse item");
+        assert!(
+            !static_item.supported,
+            "runtime-deferred AlternativeKeywordCost must not be marked supported"
+        );
     }
 
     /// Regression: cards with a concrete `AdditionalCost` + one spell ability

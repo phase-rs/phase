@@ -1896,6 +1896,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         filter: _,
         rest_destination: prev_rest,
         reveal: prev_reveal,
+        enter_tapped: _,
     } = &*prev.effect
     else {
         return None;
@@ -1950,6 +1951,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         filter: alt_filter,
         destination: alt_destination,
         rest_destination: alt_rest,
+        enter_tapped: alt_enter_tapped,
         ..
     } = alt_continuation
     else {
@@ -1982,6 +1984,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
         reveal: *prev_reveal,
+        enter_tapped: alt_enter_tapped,
     };
 
     let mut result = AbilityDefinition::new(kind, alt_effect);
