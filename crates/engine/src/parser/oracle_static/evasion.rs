@@ -705,7 +705,7 @@ pub(crate) fn try_split_and_doesnt_untap(text: &str) -> Option<Vec<StaticDefinit
 /// conjunct's static(s) plus a `CantAttack` static sharing the same `affected`
 /// (and any `condition`).
 ///
-/// CR 508.1a / CR 509.1b: Decompose `"<continuous grant or restriction> and
+/// CR 508.1c / CR 509.1b: Decompose `"<continuous grant or restriction> and
 /// can't attack or block"` into the first conjunct's static(s) plus a
 /// `CantAttackOrBlock` static sharing the same `affected` set (and any
 /// shared condition).

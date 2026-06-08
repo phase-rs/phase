@@ -304,7 +304,7 @@ fn cant_attack_split_declines_scoped_restrictions() {
     );
 }
 
-/// CR 508.1a / CR 509.1b: A grant followed by "and can't attack or block"
+/// CR 508.1c / CR 509.1b: A grant followed by "and can't attack or block"
 /// (Immovable Rod, Fog on the Barrow-Downs) must produce both the leading
 /// clause's static(s) and a companion `CantAttackOrBlock` static sharing the
 /// same affected set.
@@ -325,7 +325,7 @@ fn cant_attack_or_block_splits_from_loses_all_abilities() {
     );
 }
 
-/// CR 508.1a / CR 509.1b: A type-change "is a [type]" followed by "and can't
+/// CR 508.1c / CR 509.1b: A type-change "is a [type]" followed by "and can't
 /// attack or block" also splits, with the CantAttackOrBlock companion sharing
 /// the enchanted-creature subject.
 #[test]
@@ -347,7 +347,7 @@ fn cant_attack_or_block_splits_from_type_change() {
     );
 }
 
-/// CR 508.1a / CR 509.1b: The bare "can't attack" and "can't block" split
+/// CR 508.1c / CR 509.1b: The bare "can't attack" and "can't block" split
 /// functions must still fire unaffected — the new "attack or block" handler
 /// must not over-match and suppress them.
 #[test]

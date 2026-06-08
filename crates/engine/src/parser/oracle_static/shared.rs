@@ -632,7 +632,7 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
-    // CR 508.1a / CR 509.1b: "<grant or restriction> and can't attack or block"
+    // CR 508.1c / CR 509.1b: "<grant or restriction> and can't attack or block"
     // pairs a first clause with a full combat lockout under one subject (Immovable
     // Rod, Fog on the Barrow-Downs). Split so the CantAttackOrBlock clause is not
     // dropped. Registered before the bare-attack splitter so the combined phrase is
