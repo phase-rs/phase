@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { commanderDamageEntriesFor, commandersInZone } from "../../viewmodel/commanderColumn.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
@@ -84,7 +85,6 @@ export function PlayerArea({
   }
 
   const player = gameState.players[playerId];
-  const hasCommanderDamage = gameState.format_config?.commander_damage_threshold != null;
   const isEliminated = player?.is_eliminated ?? false;
   // CR 702.26-style player phasing: while phased out, dim the player area
   // to mirror the engine-side exclusion (targeting/damage/attack/SBA). Use
@@ -109,17 +109,11 @@ export function PlayerArea({
   // Render the commander column only when it has real content — a commander
   // still in the command zone, or live commander-damage entries. Gating on the
   // format flag alone reserved an empty column (and its divider) for the whole
-  // game once the commander was cast. These mirror the visibility filters in
-  // CommanderCardZone and CommanderDamage so the wrapper appears iff a child will.
-  const hasCommanderInZone = (gameState.command_zone ?? []).some((id) => {
-    const obj = gameState.objects[id];
-    return obj?.is_commander === true && obj.owner === playerId && obj.zone === "Command";
-  });
-  const hasActiveCommanderDamage =
-    hasCommanderDamage &&
-    Object.values(gameState.derived?.commander_damage_by_attacker ?? {}).some((views) =>
-      views.some((view) => view.victim === playerId && view.damage > 0),
-    );
+  // game once the commander was cast. These go through the same selectors
+  // CommanderCardZone and CommanderDamage render from, so the wrapper appears
+  // iff a child will (single source of truth in viewmodel/commanderColumn).
+  const hasCommanderInZone = commandersInZone(gameState, playerId).length > 0;
+  const hasActiveCommanderDamage = commanderDamageEntriesFor(gameState, playerId).length > 0;
   const commanderSection = hasCommanderInZone || hasActiveCommanderDamage ? (
     // No `min-w-0` here: this column holds the commander-damage labels, and
     // allowing it to shrink below its content width lets the adjacent
@@ -129,7 +123,7 @@ export function PlayerArea({
       style={zoneStyle(commanderScale)}
     >
       <CommanderCardZone playerId={playerId} />
-      {hasCommanderDamage && <CommanderDamage playerId={playerId} />}
+      <CommanderDamage playerId={playerId} />
     </div>
   ) : null;
   const supportExtras = (
@@ -143,8 +137,13 @@ export function PlayerArea({
   const supportSection = hasSupportExtras ? (
     <>
       <div className="mx-2 h-3/4 w-px shrink-0 bg-white/20" />
+      {/* No `min-w-0`: the support track is justify-end, so letting this
+          wrapper collapse below its content width pushes the right-rail cards
+          (emblems/commander) off the right edge of the screen. Holding its
+          intrinsic width clamps the right edge to the track and grows the
+          cluster leftward on-screen instead. */}
       <div
-        className="flex min-w-0 items-center gap-2"
+        className="flex items-center gap-2"
         style={zoneStyle(isCompactHeight ? OTHER_BASE_SCALE_COMPACT : OTHER_BASE_SCALE)}
       >
         {supportExtras}
