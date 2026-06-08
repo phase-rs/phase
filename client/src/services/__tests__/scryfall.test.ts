@@ -193,6 +193,51 @@ describe("fetchCardImageUrl", () => {
   });
 });
 
+describe("fetchCardImageAssetByOracleId — reversible cards (issue #2031)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("resolves front and back face art keyed by face oracle_id", async () => {
+    const oracleId = "ea9709b6-4c37-4d5a-b04d-cd4c42e4f9dd";
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          [oracleId]: {
+            oracle_id: oracleId,
+            face_names: ["propaganda", "propaganda"],
+            faces: [
+              {
+                normal: "https://img.example/propaganda-front.jpg",
+                art_crop: "https://img.example/propaganda-front-art.jpg",
+              },
+              {
+                normal: "https://img.example/propaganda-back.jpg",
+                art_crop: "https://img.example/propaganda-back-art.jpg",
+              },
+            ],
+            layout: "reversible_card",
+            name: "Propaganda // Propaganda",
+            mana_cost: "{2}{U}",
+            cmc: 3,
+            type_line: "Enchantment",
+            colors: ["U"],
+            color_identity: ["U"],
+            keywords: [],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const { fetchCardImageAssetByOracleId } = await loadScryfallModule();
+    const asset = await fetchCardImageAssetByOracleId(oracleId, "Propaganda", "normal");
+
+    expect(asset.src).toBe("https://img.example/propaganda-front.jpg");
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("fetchTokenImageUrl — ability-aware printing selection (issue #502)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
