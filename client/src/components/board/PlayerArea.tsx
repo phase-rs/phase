@@ -108,8 +108,11 @@ export function PlayerArea({
   // flex-1. Stacked CommanderDamage entries compound the warp.
   const commanderScale = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
   const commanderSection = hasCommandZoneCards ? (
+    // No `min-w-0` here: this column holds the commander-damage labels, and
+    // allowing it to shrink below its content width lets the adjacent
+    // (non-shrinking) planeswalker row collapse it and hide the labels.
     <div
-      className="flex min-w-0 flex-col items-end gap-1"
+      className="flex flex-col items-end gap-1"
       style={zoneStyle(commanderScale)}
     >
       <CommanderCardZone playerId={playerId} />
@@ -118,7 +121,7 @@ export function PlayerArea({
   ) : null;
   const supportExtras = (
     <>
-      <BattlefieldRow groups={partitioned?.planeswalkers ?? []} rowType="support" />
+      <BattlefieldRow groups={partitioned?.planeswalkers ?? []} rowType="planeswalkers" />
       <CommandZone playerId={playerId} />
       {commanderSection}
     </>
