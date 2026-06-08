@@ -297,20 +297,28 @@ fn detect_optional_you_may(
     // is keyword reminder text, not an optional effect.
     // allow-noncombinator: swallow detector marker scan on classified text
     if cleaned.contains("you may cast this spell with different mana cost") {
+        // allow-noncombinator: swallow detector marker scan on classified text
         return;
     }
     // CR 305.2: "you may play additional lands" is encoded as
     // `StaticMode::MayPlayAdditionalLand`, which is an optional permission
     // static, not a def-level optional effect.
     // allow-noncombinator: swallow detector marker scan on classified text
-    if cleaned.contains("you may play") && cleaned.contains("additional land") {
+    if cleaned.contains("you may play") // allow-noncombinator: swallow detector marker scan on classified text
+        && cleaned.contains("additional land")
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
         return;
     }
     // CR 614.1c: "you may reveal" in ETB replacement effects (e.g., Arsenal
     // Thresher) is part of the replacement condition, not a separate optional
     // effect. The reveal choice is captured in the replacement logic.
     // allow-noncombinator: swallow detector marker scan on classified text
-    if cleaned.contains("you may reveal") && (cleaned.contains("as this creature enters") || cleaned.contains("as this permanent enters")) {
+    if cleaned.contains("you may reveal") // allow-noncombinator: swallow detector marker scan on classified text
+        && (cleaned.contains("as this creature enters") // allow-noncombinator: swallow detector marker scan on classified text
+            || cleaned.contains("as this permanent enters"))
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
         return;
     }
     // Die roll result branches (e.g., "1—9 | You may put that card on top of
@@ -318,7 +326,9 @@ fn detect_optional_you_may(
     // standalone optional effects. The optionality is conditional on the roll.
     // Match both "N—N | you may" and "| you may" patterns.
     // allow-noncombinator: swallow detector marker scan on classified text
-    if cleaned.contains("| you may") {
+    if cleaned.contains("| you may")
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
         return;
     }
     // CR 611.2a: Static abilities that grant triggers with optional effects
