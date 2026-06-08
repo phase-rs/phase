@@ -1987,9 +1987,17 @@ pub fn parse_equal_to(input: &str) -> OracleResult<'_, QuantityExpr> {
 
 /// Parse sum expressions like "the number of X and the number of Y".
 /// Used for patterns like "equal to the number of Warriors and Equipment".
-/// Handles N-way sums via separated_list1.
+/// Handles N-way sums via separated_list1, but only succeeds for 2+ items.
 fn parse_equal_to_sum(input: &str) -> OracleResult<'_, QuantityExpr> {
     let (rest, qty_refs) = separated_list1(tag(" and "), parse_quantity_ref).parse(input)?;
+    // Only wrap in Sum if there are 2+ quantities; single quantities should
+    // fall through to the regular parse_quantity path.
+    if qty_refs.len() < 2 {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
     let exprs: Vec<QuantityExpr> = qty_refs
         .into_iter()
         .map(|qty| QuantityExpr::Ref { qty })
