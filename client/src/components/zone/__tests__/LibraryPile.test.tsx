@@ -138,7 +138,14 @@ function playLandAction(objectId: number): GameAction {
   } as unknown as GameAction;
 }
 
-function setOpponentLibraryTop(topCardName: string) {
+function setOpponentLibraryTop(
+  topCardName: string,
+  reveal: {
+    revealedCards?: number[];
+    privateLookPlayer?: number;
+    privateLookIds?: number[];
+  } = {},
+) {
   const topCardId = 77;
   const top = makeObject(topCardId, topCardName);
   const gameState = {
@@ -176,7 +183,9 @@ function setOpponentLibraryTop(topCardName: string) {
     exile: [],
     stack: [],
     combat: null,
-    revealed_cards: [],
+    revealed_cards: reveal.revealedCards ?? [],
+    private_look_player: reveal.privateLookPlayer,
+    private_look_ids: reveal.privateLookIds ?? [],
     waiting_for: { type: "Priority", data: { player: 0 } },
   } as unknown as GameState;
 
@@ -245,12 +254,35 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
   });
 
   it("shows opponent library top after a private look peek (Mishra's Bauble)", () => {
-    setOpponentLibraryTop("Lightning Bolt");
+    // CR 701.20e: I (player 0) privately look at the opponent's (player 1) top.
+    // The engine records the look in private_look_player/ids; the pile shows it.
+    setOpponentLibraryTop("Lightning Bolt", { privateLookPlayer: 0, privateLookIds: [77] });
     render(<LibraryPile playerId={1} />);
     const button = screen.getByRole("button", { name: /library \(1 card\)/i });
     expect(button).toBeInTheDocument();
     // Peeked tops use the cyan border; card-back alt text is hidden.
     expect(button.className).toContain("border-cyan-600");
+    expect(screen.queryByAltText("Library")).not.toBeInTheDocument();
+  });
+
+  it("keeps an opponent library top hidden when nothing reveals it (no leak)", () => {
+    // Regression guard (#2631): single-player renders the raw, unredacted state,
+    // so the opponent's top carries a real name. With NO reveal set membership it
+    // must stay a card-back — never inferred visible from the name.
+    setOpponentLibraryTop("Lightning Bolt");
+    render(<LibraryPile playerId={1} />);
+    const button = screen.getByRole("button", { name: /library \(1 card\)/i });
+    expect(button.className).toContain("border-gray-600");
+    expect(screen.getByAltText("Library")).toBeInTheDocument();
+  });
+
+  it("shows an opponent library top that is publicly revealed (revealed_cards)", () => {
+    // CR 701.20b: opponent's own public reveal (Oracle of Mul Daya) — visible to
+    // all players via revealed_cards, so the pile shows it with the amber border.
+    setOpponentLibraryTop("Lightning Bolt", { revealedCards: [77] });
+    render(<LibraryPile playerId={1} />);
+    const button = screen.getByRole("button", { name: /library \(1 card\)/i });
+    expect(button.className).toContain("border-amber-500");
     expect(screen.queryByAltText("Library")).not.toBeInTheDocument();
   });
 

@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { HIDDEN_CARD_NAME, type ObjectId } from "../../adapter/types.ts";
+import type { ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
@@ -12,6 +12,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
 import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
+import { isLibraryCardRevealedToViewer } from "../../viewmodel/gameStateView.ts";
 
 interface LibraryPileProps {
   playerId: number;
@@ -69,14 +70,14 @@ export function LibraryPile({ playerId, size, onView }: LibraryPileProps) {
     const peek =
       playerId === myId &&
       (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false);
-    const revealed = s.gameState?.revealed_cards?.includes(topObjectId) ?? false;
-    const name = s.gameState?.objects[topObjectId]?.name ?? null;
-    // Engine viewer filtering exposes opponent library tops for private looks
-    // (CR 701.20e) and other visibility windows; masked tops stay hidden.
-    const opponentVisibleTop =
-      playerId !== myId && name != null && name !== HIDDEN_CARD_NAME;
-    if (!peek && !revealed && !opponentVisibleTop) return null;
-    return name;
+    // Gate visibility on the engine's reveal sets (mirrors OpponentHand), never
+    // on name redaction: single-player renders the raw, unredacted state, so the
+    // top card name is present even for an opponent's hidden top. CR 701.20b
+    // (public reveal) and CR 701.20e (private look, e.g. Mishra's Bauble) are
+    // the only windows that expose an opponent's top.
+    const revealedToMe = isLibraryCardRevealedToViewer(s.gameState ?? null, topObjectId, myId);
+    if (!peek && !revealedToMe) return null;
+    return s.gameState?.objects[topObjectId]?.name ?? null;
   });
 
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);

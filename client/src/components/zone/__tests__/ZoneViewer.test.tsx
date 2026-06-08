@@ -146,11 +146,11 @@ describe("ZoneViewer", () => {
     );
   });
 
-  it("renders revealed library tops face-up and unrevealed cards as backs", () => {
-    // CR 701.20b: a RevealTop / Oracle of Mul Daya look surfaces the top card's
-    // identity; the rest of the library arrives redacted (`Hidden Card`). The
-    // library viewer shows the revealed card face-up and the remainder as
-    // card-backs, top-first.
+  it("shows only the engine-revealed library cards, omitting unrevealed ones", () => {
+    // CR 701.20b: a RevealTop / "play with top revealed" surfaces specific top
+    // cards via `revealed_cards`. Visibility is gated on that engine set, NOT on
+    // the card name — single-player renders the raw, unredacted state, so the
+    // unrevealed cards below carry real names yet must NOT appear in the viewer.
     const revealed = makeObject({
       id: 20,
       zone: "Library",
@@ -158,14 +158,16 @@ describe("ZoneViewer", () => {
       keywords: [],
       base_keywords: [],
     });
-    const hiddenA = makeObject({ id: 21, zone: "Library", name: "Hidden Card", face_down: true });
-    const hiddenB = makeObject({ id: 22, zone: "Library", name: "Hidden Card", face_down: true });
+    // Real names, but absent from revealed_cards → must be filtered out.
+    const unrevealedA = makeObject({ id: 21, zone: "Library", name: "Black Lotus" });
+    const unrevealedB = makeObject({ id: 22, zone: "Library", name: "Mox Sapphire" });
     const base = makeState(revealed);
     const gameState = {
       ...base,
-      objects: { [revealed.id]: revealed, [hiddenA.id]: hiddenA, [hiddenB.id]: hiddenB },
+      objects: { [revealed.id]: revealed, [unrevealedA.id]: unrevealedA, [unrevealedB.id]: unrevealedB },
+      revealed_cards: [revealed.id],
       players: [
-        { ...base.players[0], graveyard: [], library: [revealed.id, hiddenA.id, hiddenB.id] },
+        { ...base.players[0], graveyard: [], library: [revealed.id, unrevealedA.id, unrevealedB.id] },
         base.players[1],
       ],
     } as unknown as GameState;
@@ -182,12 +184,12 @@ describe("ZoneViewer", () => {
 
     render(<ZoneViewer zone="library" playerId={0} onClose={vi.fn()} />);
 
-    // All three cards render; only the revealed one carries a real name. The two
-    // hidden cards render via the hook-free FaceDownCard (mocked CardImage with
-    // an empty name).
-    expect(screen.getAllByTestId("card-image")).toHaveLength(3);
+    // Only the one revealed card renders; the unrevealed real-named cards are
+    // omitted (no card-backs) — the leak-safe "just the revealed" behavior.
+    expect(screen.getAllByTestId("card-image")).toHaveLength(1);
     expect(screen.getByLabelText("Llanowar Elves")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Hidden Card")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Black Lotus")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Mox Sapphire")).not.toBeInTheDocument();
   });
 
   it("dispatches the engine-surfaced play-from-top action for a revealed library top", () => {
@@ -202,14 +204,15 @@ describe("ZoneViewer", () => {
       keywords: [],
       base_keywords: [],
     });
-    const hidden = makeObject({ id: 31, zone: "Library", name: "Hidden Card", face_down: true });
+    const unrevealed = makeObject({ id: 31, zone: "Library", name: "Sol Ring" });
     const action = makeCastAction(revealed.id);
     const base = makeState(revealed);
     const gameState = {
       ...base,
-      objects: { [revealed.id]: revealed, [hidden.id]: hidden },
+      objects: { [revealed.id]: revealed, [unrevealed.id]: unrevealed },
+      revealed_cards: [revealed.id],
       players: [
-        { ...base.players[0], graveyard: [], library: [revealed.id, hidden.id] },
+        { ...base.players[0], graveyard: [], library: [revealed.id, unrevealed.id] },
         base.players[1],
       ],
     } as unknown as GameState;
@@ -233,13 +236,68 @@ describe("ZoneViewer", () => {
     );
   });
 
-  it("shows an opponent's revealed library top face-up with no castable affordance", () => {
-    // CR 701.20b: an opponent's library top revealed to all players (e.g. an
-    // Oracle of Mul Daya the opponent controls, or a public RevealTop) is
-    // visible to this viewer, but the viewer has NO play permission on the
-    // opponent's library — so legalActionsByObject is empty and clicking the
-    // revealed card must not dispatch. The rest of the opponent's library stays
-    // redacted and renders as backs.
+  it("shows the owner's own top under a continuous look (Future Sight) and keeps it castable", () => {
+    // Future Sight / Bolas's Citadel / Oracle of Mul Daya grant
+    // `can_look_at_top_of_library` — a continuous static that exposes the OWNER's
+    // top WITHOUT adding it to revealed_cards/private_look. The modal must still
+    // show that top (and the engine-surfaced play action), mirroring the pile.
+    const top = makeObject({
+      id: 50,
+      zone: "Library",
+      name: "Future Sight Top",
+      keywords: [],
+      base_keywords: [],
+    });
+    const buried = makeObject({ id: 51, zone: "Library", name: "Buried Secret" });
+    const action = makeCastAction(top.id);
+    const base = makeState(top);
+    const gameState = {
+      ...base,
+      objects: { [top.id]: top, [buried.id]: buried },
+      revealed_cards: [],
+      players: [
+        {
+          ...base.players[0],
+          graveyard: [],
+          library: [top.id, buried.id],
+          can_look_at_top_of_library: true,
+        },
+        base.players[1],
+      ],
+    } as unknown as GameState;
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [action],
+      legalActionsByObject: { [String(top.id)]: [action] },
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="library" playerId={0} onClose={vi.fn()} />);
+
+    // Only the looked-at top renders; the buried card (real name, not visible to
+    // the viewer) is omitted.
+    expect(screen.getAllByTestId("card-image")).toHaveLength(1);
+    expect(screen.getByLabelText("Future Sight Top")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Buried Secret")).not.toBeInTheDocument();
+
+    // The engine-surfaced play-from-top action stays reachable through the modal.
+    fireEvent.click(screen.getByLabelText("Future Sight Top"));
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "CastSpell" }),
+    );
+  });
+
+  it("shows an opponent's publicly-revealed library top with no castable affordance, hiding the rest", () => {
+    // CR 701.20b: an opponent's library top revealed to all players (their own
+    // Oracle of Mul Daya / a public RevealTop) is visible to this viewer via
+    // `revealed_cards`, but the viewer has NO play permission — legalActionsByObject
+    // is empty and clicking is inert. The rest of the opponent's library is NOT
+    // in revealed_cards, so it must not leak even though raw state carries names.
     const revealed = makeObject({
       id: 40,
       owner: 1,
@@ -249,21 +307,21 @@ describe("ZoneViewer", () => {
       keywords: [],
       base_keywords: [],
     });
-    const hidden = makeObject({
+    const unrevealed = makeObject({
       id: 41,
       owner: 1,
       controller: 1,
       zone: "Library",
-      name: "Hidden Card",
-      face_down: true,
+      name: "Lightning Bolt",
     });
     const base = makeState(revealed);
     const gameState = {
       ...base,
-      objects: { [revealed.id]: revealed, [hidden.id]: hidden },
+      objects: { [revealed.id]: revealed, [unrevealed.id]: unrevealed },
+      revealed_cards: [revealed.id],
       players: [
         { ...base.players[0], graveyard: [] },
-        { ...base.players[1], graveyard: [], library: [revealed.id, hidden.id] },
+        { ...base.players[1], graveyard: [], library: [revealed.id, unrevealed.id] },
       ],
     } as unknown as GameState;
 
@@ -279,9 +337,11 @@ describe("ZoneViewer", () => {
 
     render(<ZoneViewer zone="library" playerId={1} onClose={vi.fn()} />);
 
-    expect(screen.getAllByTestId("card-image")).toHaveLength(2);
+    // Only the publicly-revealed card shows; the unrevealed opponent card (real
+    // name in raw state) is filtered out — no leak.
+    expect(screen.getAllByTestId("card-image")).toHaveLength(1);
     expect(screen.getByLabelText("Courser of Kruphix")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Hidden Card")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Lightning Bolt")).not.toBeInTheDocument();
 
     // No play permission → clicking the revealed opponent card is inert.
     fireEvent.click(screen.getByLabelText("Courser of Kruphix"));

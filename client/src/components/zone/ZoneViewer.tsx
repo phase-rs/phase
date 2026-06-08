@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { HIDDEN_CARD_NAME, type GameAction, type GameObject } from "../../adapter/types.ts";
+import type { GameAction, GameObject } from "../../adapter/types.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
 import { ScrollableCardStrip } from "../modal/ChoiceOverlay.tsx";
@@ -9,9 +9,13 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
-import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import {
+  getPlayerZoneIds,
+  getWaitingForObjectChoiceIds,
+  isLibraryCardRevealedToViewer,
+} from "../../viewmodel/gameStateView.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
 import { playOrCastActionsForObject, resolveSingleActionDispatch } from "../../viewmodel/cardActionChoice.ts";
 
@@ -44,6 +48,7 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const dispatchAction = useGameDispatch();
   const canActForWaitingState = useCanActForWaitingState();
+  const viewerId = usePlayerId();
   const zoneIds = useMemo(
     () => getPlayerZoneIds(gameState, zone, playerId),
     [gameState, playerId, zone],
@@ -51,8 +56,31 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
 
   const cards = useMemo(() => {
     if (!objects) return [];
-    return zoneIds.map((id) => objects[id]).filter(Boolean);
-  }, [objects, zoneIds]);
+    const resolved = zoneIds.map((id) => objects[id]).filter(Boolean) as GameObject[];
+    // CR 701.20: the library viewer shows only the cards the engine has revealed
+    // to this viewer (top-of-library reveals + private looks), top-first.
+    // Unrevealed cards are omitted entirely — visibility is gated on the engine's
+    // reveal sets, never inferred from name redaction (single-player renders the
+    // raw, unredacted state).
+    if (zone === "library") {
+      // The "look at the top card of your library" capability (Future Sight,
+      // Bolas's Citadel, Oracle of Mul Daya) is a continuous static that exposes
+      // the OWNER's own top card without adding it to revealed_cards/private_look
+      // — mirror LibraryPile's `peek` clause so that top still shows (and stays
+      // castable) through the modal.
+      const ownTopId =
+        viewerId === playerId &&
+        (gameState?.players[playerId]?.can_look_at_top_of_library ?? false)
+          ? gameState?.players[playerId]?.library?.[0]
+          : undefined;
+      return resolved.filter(
+        (obj) =>
+          isLibraryCardRevealedToViewer(gameState, obj.id, viewerId) ||
+          obj.id === ownTopId,
+      );
+    }
+    return resolved;
+  }, [objects, zoneIds, zone, gameState, viewerId, playerId]);
 
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
@@ -105,13 +133,6 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
             innerClassName="flex items-center gap-2 lg:gap-3"
           >
             {cards.map((obj) => {
-              // CR 701.20b: A library card the engine hasn't revealed to this
-              // viewer arrives redacted (`Hidden Card`, face_down). Render it as
-              // a non-interactive card-back — it has no identity to inspect,
-              // target, or play. Only revealed top cards carry a real name.
-              if (zone === "library" && obj.name === HIDDEN_CARD_NAME) {
-                return <FaceDownCard key={obj.id} />;
-              }
               // CR 702.81a + CR 702.143a + CR 715.3a + CR 702.62a + CR 702.170d + CR 702.185a:
               // Engine surfaces a CastSpell-family action for every legally
               // castable graveyard/exile card (Retrace, Adventure, Foretell,
@@ -149,17 +170,6 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
         )}
       </div>
     </ModalPanelShell>
-  );
-}
-
-// A non-revealed library card. Deliberately hook-free (no inspect/long-press
-// subscriptions) so a full-size library of mostly-hidden cards stays cheap to
-// render — only revealed cards pay for the interactive ZoneCard.
-function FaceDownCard() {
-  return (
-    <div className="relative inline-flex shrink-0 rounded-lg">
-      <CardImage cardName="" faceDown size="normal" />
-    </div>
   );
 }
 
