@@ -1634,6 +1634,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 }
             }
             Phase::CombatDamage => {
+                // CR 510.1a + CR 613.4c: Combat damage equals a creature's power as determined
+                // by the layer system (layer 7c applies P/T counters). Flush here so
+                // combat_damage_amount reads evaluated power, not stale base power. commit_attackers
+                // (combat.rs) marks layers dirty; the post-action pipeline flush runs after
+                // resolve_combat_damage returns — too late without this pre-flush.
+                super::layers::flush_layers(state);
                 // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
                 // resolve_combat_damage may pause for interactive assignment (2+ blockers).
                 if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
