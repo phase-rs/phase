@@ -128,7 +128,10 @@ import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
-import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
+import {
+  getCastableZoneViewerTarget,
+  getWaitingForObjectChoiceIds,
+} from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 
 type ZoneRailStyle = CSSProperties & {
@@ -708,6 +711,7 @@ function GamePageContent({
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const players = useGameStore((s) => s.gameState?.players);
   const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
@@ -874,7 +878,9 @@ function GamePageContent({
     }
   }, []);
 
-  // Auto-open graveyard/exile viewer when the engine is waiting for an object choice in that zone.
+  // Auto-open graveyard/exile viewer when the engine is waiting for an object
+  // choice in that zone, or when Priority surfaces cast/play actions on cards
+  // in a single graveyard/exile pile (Retrace, Flashback, etc.).
   useEffect(() => {
     if (!objects) return;
     const wf = engineWaitingFor;
@@ -896,8 +902,18 @@ function GamePageContent({
     // zone control glow prompts the user to pick.
     if (groups.size === 1 && firstHit) {
       setViewingZone(firstHit);
+      return;
     }
-  }, [canActForWaitingState, engineWaitingFor, objects]);
+
+    const castableTarget = getCastableZoneViewerTarget(
+      wf,
+      objects,
+      legalActionsByObject,
+    );
+    if (castableTarget) {
+      setViewingZone(castableTarget);
+    }
+  }, [canActForWaitingState, engineWaitingFor, legalActionsByObject, objects]);
 
   const handleDeclareCompanion = useCallback(
     (cardIndex: number | null) => {
@@ -1315,14 +1331,6 @@ function GamePageContent({
       <DebugPanel />
       <ResolutionProgressOverlay />
 
-      {viewingZone && (
-        <ZoneViewer
-          zone={viewingZone.zone}
-          playerId={viewingZone.playerId}
-          onClose={() => setViewingZone(null)}
-        />
-      )}
-
       {preferencesOpen && (
         <PreferencesModal
           onClose={() => setPreferencesOpen(null)}
@@ -1476,6 +1484,16 @@ function GamePageContent({
             <ActivationCostOneOfChoiceModal />
           )}
       </DialogHost>
+
+      {/* Graveyard/exile viewer mounts after DialogHost so its z-[60] shell
+          paints above prompt overlays (issue #2387: retrace / graveyard cast). */}
+      {viewingZone && (
+        <ZoneViewer
+          zone={viewingZone.zone}
+          playerId={viewingZone.playerId}
+          onClose={() => setViewingZone(null)}
+        />
+      )}
 
       {waitingFor?.type === "CompanionReveal" &&
         waitingFor.data.player === playerId && (
