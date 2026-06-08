@@ -2824,17 +2824,20 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             .unwrap_or(before_of);
 
         // Delegate to nom combinator (input already lowercase from lower).
-        let quantity =
-            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
-                nom_primitives::parse_number
-                    .parse(rest)
-                    .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
-            } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
-                PutCount::Exactly(n)
-            } else {
-                // "a/an" or unrecognized → treat as up_to 1
-                PutCount::Up(1)
-            };
+        let quantity = if let Ok((_rest, _)) =
+            tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
+        {
+            PutCount::All
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
+            nom_primitives::parse_number
+                .parse(rest)
+                .map_or(PutCount::Up(1), |(_, n)| PutCount::Up(n))
+        } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_put) {
+            PutCount::Exactly(n)
+        } else {
+            // "a/an" or unrecognized → treat as up_to 1
+            PutCount::Up(1)
+        };
 
         // Detect rest destination from "and the rest on the bottom/into graveyard" suffix.
         let rest_destination = parse_of_them_rest_destination(lower);

@@ -40,6 +40,16 @@ pub(crate) fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter
         // like Spellweaver Volute ("Enchant instant card in a graveyard").
         value(TypeFilter::Instant, tag("instant")),
         value(TypeFilter::Sorcery, tag("sorcery")),
+        // CR 205.3m + CR 702.5a: Artifact subtypes. Used by
+        // "enchant creature or Food" (Sugar Coat).
+        value(TypeFilter::Subtype("Food".to_string()), tag("food")),
+        value(TypeFilter::Subtype("Treasure".to_string()), tag("treasure")),
+        value(TypeFilter::Subtype("Clue".to_string()), tag("clue")),
+        value(
+            TypeFilter::Subtype("Equipment".to_string()),
+            tag("equipment"),
+        ),
+        value(TypeFilter::Subtype("Vehicle".to_string()), tag("vehicle")),
         // CR 205.3i + CR 702.5a: Basic land subtypes. Used by
         // "enchant Forest you control" (Old-Growth Troll, Harold and Bob).
         value(TypeFilter::Subtype("Forest".to_string()), tag("forest")),
