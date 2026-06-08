@@ -170,7 +170,7 @@ describe("getCastableZoneViewerTarget", () => {
     const objects = { 7: makeGraveyardObject(7) };
     expect(
       getCastableZoneViewerTarget(
-        { type: "CastingVariantChoice", data: { player: 0, object_id: 7, options: [] } },
+        { type: "CastingVariantChoice", data: { player: 0, object_id: 7, card_id: 700, options: [] } },
         objects,
         { "7": [castAction] },
       ),
