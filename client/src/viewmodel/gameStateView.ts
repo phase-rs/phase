@@ -101,6 +101,7 @@ export function getWaitingForObjectChoiceIds(
 export type ZoneViewerTarget = {
   zone: "graveyard" | "exile";
   playerId: PlayerId;
+  objectIds: ObjectId[];
 };
 
 /**
@@ -121,6 +122,7 @@ export function getCastableZoneViewerTarget(
 
   const groups = new Set<string>();
   let firstHit: ZoneViewerTarget | null = null;
+  const objectIds: ObjectId[] = [];
 
   for (const key of Object.keys(legalActionsByObject)) {
     const objectId = Number(key) as ObjectId;
@@ -134,9 +136,11 @@ export function getCastableZoneViewerTarget(
     const zone: ZoneViewerTarget["zone"] =
       obj.zone === "Graveyard" ? "graveyard" : "exile";
     groups.add(`${zone}:${obj.owner}`);
-    if (!firstHit) firstHit = { zone, playerId: obj.owner };
+    objectIds.push(objectId);
+    if (!firstHit) firstHit = { zone, playerId: obj.owner, objectIds };
   }
 
+  objectIds.sort((a, b) => a - b);
   return groups.size === 1 ? firstHit : null;
 }
 

@@ -132,6 +132,7 @@ import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts
 import {
   getCastableZoneViewerTarget,
   getWaitingForObjectChoiceIds,
+  type ZoneViewerTarget,
 } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 
@@ -139,6 +140,10 @@ type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
   "--card-h": string;
 };
+
+function castableZoneViewerAutoOpenKey(target: ZoneViewerTarget): string {
+  return `${target.zone}:${target.playerId}:${target.objectIds.join(",")}`;
+}
 
 /**
  * i18n keys for user-facing messages keyed by
@@ -752,7 +757,9 @@ function GamePageContent({
   const [viewingZone, setViewingZone] = useState<{
     zone: "graveyard" | "exile";
     playerId: number;
+    autoOpenKey?: string;
   } | null>(null);
+  const dismissedCastableZoneViewerKeyRef = useRef<string | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState<
     null | { tab?: SettingsTabId; highlight?: SettingsHighlight }
   >(null);
@@ -883,9 +890,15 @@ function GamePageContent({
   // choice in that zone, or when Priority surfaces cast/play actions on cards
   // in a single graveyard/exile pile (Retrace, Flashback, etc.).
   useEffect(() => {
-    if (!objects) return;
+    if (!objects) {
+      dismissedCastableZoneViewerKeyRef.current = null;
+      return;
+    }
     const wf = engineWaitingFor;
-    if (!canActForWaitingState) return;
+    if (!canActForWaitingState) {
+      dismissedCastableZoneViewerKeyRef.current = null;
+      return;
+    }
 
     // Collect distinct (zone, owner) groupings so we don't trap the user in one
     // graveyard when the effect can target either player's graveyard (e.g. Soul-Guide Lantern).
@@ -902,6 +915,7 @@ function GamePageContent({
     // Only auto-open when there's a single zone+owner to open. Otherwise the
     // zone control glow prompts the user to pick.
     if (groups.size === 1 && firstHit) {
+      dismissedCastableZoneViewerKeyRef.current = null;
       setViewingZone(firstHit);
       return;
     }
@@ -912,9 +926,26 @@ function GamePageContent({
       legalActionsByObject,
     );
     if (castableTarget) {
-      setViewingZone(castableTarget);
+      const autoOpenKey = castableZoneViewerAutoOpenKey(castableTarget);
+      if (dismissedCastableZoneViewerKeyRef.current !== autoOpenKey) {
+        setViewingZone({
+          zone: castableTarget.zone,
+          playerId: castableTarget.playerId,
+          autoOpenKey,
+        });
+      }
+      return;
     }
+
+    dismissedCastableZoneViewerKeyRef.current = null;
   }, [canActForWaitingState, engineWaitingFor, legalActionsByObject, objects]);
+
+  const handleZoneViewerClose = useCallback(() => {
+    if (viewingZone?.autoOpenKey) {
+      dismissedCastableZoneViewerKeyRef.current = viewingZone.autoOpenKey;
+    }
+    setViewingZone(null);
+  }, [viewingZone]);
 
   const handleDeclareCompanion = useCallback(
     (cardIndex: number | null) => {
@@ -1493,7 +1524,7 @@ function GamePageContent({
         <ZoneViewer
           zone={viewingZone.zone}
           playerId={viewingZone.playerId}
-          onClose={() => setViewingZone(null)}
+          onClose={handleZoneViewerClose}
         />
       )}
 

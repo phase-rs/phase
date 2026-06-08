@@ -146,7 +146,24 @@ describe("getCastableZoneViewerTarget", () => {
           "8": [{ ...castAction, data: { ...castAction.data, object_id: 8 } }],
         },
       ),
-    ).toEqual({ zone: "graveyard", playerId: 0 });
+    ).toEqual({ zone: "graveyard", playerId: 0, objectIds: [7, 8] });
+  });
+
+  it("returns stable object ids for castable pile identity", () => {
+    const objects = {
+      7: makeGraveyardObject(7),
+      8: makeGraveyardObject(8),
+    };
+    expect(
+      getCastableZoneViewerTarget(
+        { type: "Priority", data: { player: 0 } },
+        objects,
+        {
+          "8": [{ ...castAction, data: { ...castAction.data, object_id: 8 } }],
+          "7": [castAction],
+        },
+      )?.objectIds,
+    ).toEqual([7, 8]);
   });
 
   it("returns null when castable cards span multiple zone piles", () => {
