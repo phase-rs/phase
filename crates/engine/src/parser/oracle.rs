@@ -4689,6 +4689,26 @@ mod tests {
         );
     }
 
+    /// Issue #2385 MED — `Effect::FreeCastFromZones` is a *free* cast. A
+    /// hypothetical "cast up to N ... from your graveyard and/or hand" that omits
+    /// the "without paying their mana cost(s)" clause (the controller still pays)
+    /// must NOT be lowered to the free-cast window (CR 118.9). The recognizer
+    /// requires the without-paying clause before emitting the effect.
+    #[test]
+    fn pay_required_cast_up_to_n_is_not_free_cast() {
+        let text = "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand. Exile this spell.";
+        let result = parse(text, "Pay Required Calamity", &[], &["Instant"], &[]);
+
+        assert!(
+            !result
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::FreeCastFromZones { .. })),
+            "a pay-required cast clause must not lower to a free-cast window, got {:?}",
+            result.abilities
+        );
+    }
+
     /// CR 508.1a + CR 508.6: "During any turn you attacked with <filter>, you
     /// may play that card" must gate the play permission on a (filtered)
     /// AttackedThisTurn condition instead of dropping the clause to

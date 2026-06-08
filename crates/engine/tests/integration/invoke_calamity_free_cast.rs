@@ -218,3 +218,102 @@ fn invoke_calamity_opens_free_cast_window_and_exiles_cast_spells() {
          when it resolves (CR 614.1a)",
     );
 }
+
+/// Regression for issue #2385 BLOCKER — free-casting the HAND candidate must be
+/// genuinely free (CR 118.9 / CR 608.2g). Before the fix the free-cast handler
+/// drove the cast through the normal pipeline, where a hand-origin card got
+/// `CastingVariant::Normal` and was charged its printed mana cost — the
+/// cost-zeroing alt-cost path only fired for exile/graveyard origins. With an
+/// empty mana pool (Invoke Calamity's own {1} already spent), the pre-fix code
+/// could not put the printed-{3} hand sorcery on the stack at all; post-fix the
+/// runtime `ExileWithAltCost { resolution_cleanup }` zeroes the cost regardless
+/// of origin zone, so the spell lands on the stack with zero mana spent.
+#[test]
+fn invoke_calamity_free_casts_hand_spell_for_zero_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let invoke_id = scenario
+        .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, INVOKE_CALAMITY_TEXT)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+
+    // The only free-cast candidate is a sorcery in P0's HAND (MV 3). Its printed
+    // mana cost is {3}, which P0 cannot afford after spending its only mana on
+    // Invoke Calamity — so if the free cast is not actually free, the cast either
+    // fails or charges mana, and the spell never lands on the stack at zero cost.
+    let hand_sorcery = scenario
+        .add_spell_to_hand(P0, "Hand Divination", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .from_oracle_text("Draw a card.")
+        .id();
+
+    // Exactly {1} — consumed casting Invoke Calamity, leaving an empty pool for
+    // the free cast.
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+
+    let mut runner = scenario.build();
+    let invoke_card_id = runner.state().objects[&invoke_id].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: invoke_id,
+            card_id: invoke_card_id,
+            targets: vec![],
+        })
+        .expect("casting Invoke Calamity must succeed");
+
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+
+    // The window opens with the hand sorcery as the sole candidate. Invoke
+    // Calamity's {1} is already spent, so the pool is empty here.
+    match runner.state().waiting_for.clone() {
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+        } => {
+            assert_eq!(player, P0);
+            assert_eq!(
+                candidates,
+                vec![hand_sorcery],
+                "the hand sorcery must be the sole free-cast candidate"
+            );
+        }
+        other => panic!("expected FreeCastWindow to open, got {other:?}"),
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "Invoke Calamity's own {{1}} must already be spent before the free cast",
+    );
+
+    // Free-cast the HAND sorcery. It has no targets, so it goes straight onto the
+    // stack during resolution — at ZERO cost.
+    runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(hand_sorcery),
+        })
+        .expect("free-casting the hand sorcery must succeed");
+
+    // CR 118.9 / CR 608.2g: the hand spell is on the stack and NO mana was spent.
+    assert_eq!(
+        runner.state().objects[&hand_sorcery].zone,
+        Zone::Stack,
+        "the free-cast hand sorcery must be on the stack",
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "free-casting from HAND must not consume any mana (the pool was already \
+         empty; a non-free cast would have failed or charged mana)",
+    );
+}

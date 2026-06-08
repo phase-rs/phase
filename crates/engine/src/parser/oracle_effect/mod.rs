@@ -11305,6 +11305,18 @@ fn try_parse_free_cast_from_zones(lower: &str, full_lower: &str) -> Option<Effec
     // a single-zone variant. Parse the zone set from the remainder.
     let zones = parse_free_cast_zone_tail(rest)?;
 
+    // CR 118.9: `Effect::FreeCastFromZones` is a *free* cast — only lower a
+    // "cast up to N ... from graveyard/hand" clause to it when the spell actually
+    // grants the cast without its mana cost. A hypothetical pay-required
+    // "cast up to N from your graveyard" (the controller still pays) must NOT be
+    // treated as free, so require the "without paying their mana cost(s)" clause
+    // (singular for a single-cast variant, plural for "up to N") in this clause.
+    if !nom_primitives::scan_contains(rest, "without paying their mana cost")
+        && !nom_primitives::scan_contains(rest, "without paying its mana cost")
+    {
+        return None;
+    }
+
     // CR 614.1a: the "exile them instead" rider lives in a later sentence of the
     // same card text; detect it across the full lowered text.
     let exile_instead_of_graveyard = nom_primitives::scan_contains(
