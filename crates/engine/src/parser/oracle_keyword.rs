@@ -3395,11 +3395,11 @@ mod tests {
         );
     }
 
-    /// CR 702.5a: Other named artifact token subtypes (Treasure, Clue, Blood,
-    /// Map, Gold) must also parse as enchant target legs.
+    /// CR 702.5a: Artifact subtypes must parse as enchant target legs through
+    /// the canonical subtype classifier, not a hand-maintained token subset.
     #[test]
-    fn extract_enchant_artifact_token_subtypes() {
-        for subtype in &["Treasure", "Clue", "Blood", "Map", "Gold"] {
+    fn extract_enchant_artifact_subtypes() {
+        for subtype in crate::types::card_type::ARTIFACT_SUBTYPES {
             let line = format!("Enchant creature or {subtype}");
             let kw = super::try_parse_multi_type_enchant(&line)
                 .unwrap_or_else(|| panic!("\"{}\" should parse", line));
@@ -3407,7 +3407,19 @@ mod tests {
                 panic!("expected Or for {subtype}");
             };
             assert_eq!(filters.len(), 2);
+            let TargetFilter::Typed(tf) = &filters[1] else {
+                panic!("expected Typed artifact subtype leg for {subtype}");
+            };
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Subtype((*subtype).to_string())]
+            );
         }
+
+        assert!(
+            super::try_parse_multi_type_enchant("Enchant creature or Goblin").is_none(),
+            "creature subtypes must not be accepted as artifact enchant target legs"
+        );
     }
 
     // ── Cumulative upkeep display (CR 702.24a) ──
