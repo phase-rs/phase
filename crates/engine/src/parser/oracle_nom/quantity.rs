@@ -5780,8 +5780,10 @@ mod tests {
     /// Test parse_equal_to_sum for two-way sum expressions.
     #[test]
     fn parse_equal_to_sum_two_way() {
-        let (rest, expr) =
-            parse_equal_to_sum("the number of creatures and the number of artifacts").unwrap();
+        let (rest, expr) = parse_equal_to_sum(
+            "the number of creatures you control and the number of artifacts you control",
+        )
+        .unwrap();
         assert_eq!(rest, "");
         match expr {
             QuantityExpr::Sum { exprs } => {
