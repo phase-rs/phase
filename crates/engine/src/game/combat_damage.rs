@@ -285,21 +285,22 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
                 .unwrap_or(state.active_player);
 
             // CR 702.22j: During the combat damage step, if an attacking creature
-            // is being blocked by a creature with banding, the DEFENDING player
-            // (rather than the active player) chooses how the attacking
-            // creature's damage is assigned. We reach this branch whenever an
-            // interactive assignment is required — both the multi-blocker case
-            // (2+ blockers, a genuine division per CR 510.1c) and the single
-            // banded-blocker-with-trample case (the attacker must still choose
-            // how much excess tramples through past the blocker). Keyed on LIVE
-            // banding at damage time (CR 702.22a static ability).
-            // CR 702.22j: bands-with-other arm deferred (no Keyword::BandsWithOther).
+            // is being blocked by a creature with banding or a qualifying "bands
+            // with other" relation, the DEFENDING player (rather than the active
+            // player) chooses how the attacking creature's damage is assigned.
+            // We reach this branch whenever an interactive assignment is required
+            // — both the multi-blocker case and the single banded-blocker-with-
+            // trample case.
             let blocked_by_banding = combat
                 .blocker_assignments
                 .get(&attacker_info.object_id)
                 .into_iter()
                 .flatten()
-                .any(|&bid| crate::game::combat::has_banding(state, bid));
+                .any(|&bid| crate::game::combat::has_banding(state, bid))
+                || crate::game::combat::has_bands_with_other_damage_assignment_group(
+                    state,
+                    &blocker_ids,
+                );
             if blocked_by_banding {
                 controller = attacker_info.defending_player;
             }
@@ -413,17 +414,18 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
         }
 
         // CR 702.22k: During the combat damage step, if a blocking creature is
-        // blocking a creature with banding, the ACTIVE player (rather than the
-        // defending player) chooses how the blocking creature's damage is
-        // divided among the attackers it's blocking. This only matters when the
-        // blocker is blocking 2+ attackers (a sole blocked attacker leaves no
-        // choice — CR 510.1d). Keyed on the ATTACKER's LIVE banding, NOT the
-        // blocker's own banding.
-        // CR 702.22k: bands-with-other arm deferred (no Keyword::BandsWithOther).
+        // blocking a creature with banding or a qualifying "bands with other"
+        // relation, the ACTIVE player (rather than the defending player) chooses
+        // how the blocking creature's damage is divided among the attackers it's
+        // blocking. This only matters when the blocker is blocking 2+ attackers.
         let active_player_divides = attacker_ids.len() >= 2
-            && attacker_ids
+            && (attacker_ids
                 .iter()
-                .any(|&aid| crate::game::combat::has_banding(state, aid));
+                .any(|&aid| crate::game::combat::has_banding(state, aid))
+                || crate::game::combat::has_bands_with_other_damage_assignment_group(
+                    state,
+                    attacker_ids,
+                ));
 
         if active_player_divides {
             return Some(WaitingFor::AssignBlockerDamage {
@@ -1111,6 +1113,26 @@ mod tests {
         state.combat = Some(combat);
     }
 
+    fn add_wolf_subtype(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Wolf".to_string());
+    }
+
+    fn grant_bands_with_other_wolves(state: &mut GameState, id: ObjectId) {
+        add_wolf_subtype(state, id);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
+            .push(Keyword::BandsWithOther("Wolf".to_string()));
+    }
+
     /// Drive `resolve_combat_damage` and, whenever it pauses on an
     /// `AssignCombatDamage` prompt (now reachable for single-blocker trample with
     /// excess per CR 702.19b, as well as the existing 2+ blocker case), submit the
@@ -1687,6 +1709,62 @@ mod tests {
         assert_eq!(state.objects[&blocker2].damage_marked, 0);
         // No damage to player
         assert_eq!(state.players[1].life, 20);
+    }
+
+    #[test]
+    fn bands_with_other_blocker_reroutes_attacker_damage_assignment() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 5, 5);
+        let blocker1 = create_creature(&mut state, PlayerId(1), "Wolf Blocker", 2, 2);
+        let blocker2 = create_creature(&mut state, PlayerId(1), "Plain Wolf Blocker", 2, 2);
+        grant_bands_with_other_wolves(&mut state, blocker1);
+        add_wolf_subtype(&mut state, blocker2);
+        setup_combat(
+            &mut state,
+            vec![attacker],
+            vec![(attacker, vec![blocker1, blocker2])],
+        );
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+        match waiting {
+            Some(WaitingFor::AssignCombatDamage { player, .. }) => {
+                assert_eq!(
+                    player,
+                    PlayerId(1),
+                    "CR 702.22j: defending player assigns attacker damage"
+                );
+            }
+            other => panic!("expected AssignCombatDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bands_with_other_attackers_reroute_blocker_damage_assignment() {
+        let mut state = setup();
+        let attacker1 = create_creature(&mut state, PlayerId(0), "Wolf A", 2, 2);
+        let attacker2 = create_creature(&mut state, PlayerId(0), "Wolf B", 2, 2);
+        let blocker = create_creature(&mut state, PlayerId(1), "Guard", 3, 3);
+        grant_bands_with_other_wolves(&mut state, attacker1);
+        add_wolf_subtype(&mut state, attacker2);
+        setup_combat(
+            &mut state,
+            vec![attacker1, attacker2],
+            vec![(attacker1, vec![blocker]), (attacker2, vec![blocker])],
+        );
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+        match waiting {
+            Some(WaitingFor::AssignBlockerDamage { player, .. }) => {
+                assert_eq!(
+                    player,
+                    PlayerId(0),
+                    "CR 702.22k: active player assigns blocker damage"
+                );
+            }
+            other => panic!("expected AssignBlockerDamage, got {other:?}"),
+        }
     }
 
     #[test]

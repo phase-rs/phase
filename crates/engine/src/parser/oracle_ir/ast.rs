@@ -302,6 +302,10 @@ pub(crate) enum ContinuationAst {
         /// Cyberman artifact creatures."). `None` = normal face-up entry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<FaceDownProfile>,
+        /// CR 614.1 / CR 110.5b: "onto the battlefield tapped" on the
+        /// from-among put-step.
+        #[serde(default)]
+        enter_tapped: bool,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.
@@ -368,11 +372,13 @@ pub(crate) enum ContinuationAst {
 
 /// CR 701.20e / CR 701.17c: How many cards a "from among [set]" continuation
 /// takes. `All` is the mass quantifier ("put all creature cards milled this
-/// way ...") that lowers to a `ChangeZoneAll`; the bounded forms lower to a
+/// way ...") that lowers to a `ChangeZoneAll`; `AnyNumber` is an unbounded
+/// player choice ("put any number of ..."), and the bounded forms lower to a
 /// singular `ChangeZone` (`Up` → up_to, `Exactly` → fixed count).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum PutCount {
     All,
+    AnyNumber,
     Up(u32),
     Exactly(u32),
 }
@@ -1000,6 +1006,15 @@ pub(crate) enum PutImperativeAst {
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+    },
+    /// CR 400.7 + CR 110.2a: Mass put effects ("put all creature cards from all
+    /// graveyards onto the battlefield") lower to `Effect::ChangeZoneAll`.
+    ZoneChangeAll {
+        origin: Option<Zone>,
+        destination: Zone,
+        target: TargetFilter,
+        enters_under: Option<ControllerRef>,
+        enter_tapped: bool,
     },
     TopOfLibrary,
     BottomOfLibrary,

@@ -190,6 +190,8 @@ pub(crate) fn open_copy_target_selection(
         player: controller,
         copy_id,
         target_slots,
+        effect_kind: crate::types::ability::EffectKind::CopySpell,
+        effect_source_id: Some(copy_id),
         current_slot: 0,
     };
     Ok(true)

@@ -532,8 +532,12 @@ pub fn parse_target_with_syntax<'a>(
         tag("all cards exiled with it"),
         tag("all cards they own exiled with ~"),
         tag("all cards they own exiled with it"),
+        tag("card they own exiled with ~"),
+        tag("card they own exiled with it"),
         tag("cards they own exiled with ~"),
         tag("cards they own exiled with it"),
+        tag("card exiled with ~"),
+        tag("card exiled with it"),
         tag("cards exiled with ~"),
         tag("cards exiled with it"),
     ))
@@ -957,8 +961,12 @@ pub fn parse_target_with_syntax<'a>(
         tag("all cards exiled with it"),
         tag("all cards they own exiled with ~"),
         tag("all cards they own exiled with it"),
+        tag("card they own exiled with ~"),
+        tag("card they own exiled with it"),
         tag("cards they own exiled with ~"),
         tag("cards they own exiled with it"),
+        tag("card exiled with ~"),
+        tag("card exiled with it"),
         tag("cards exiled with ~"),
         tag("cards exiled with it"),
     ))
@@ -974,6 +982,16 @@ pub fn parse_target_with_syntax<'a>(
         tag::<_, _, OracleError<'_>>("each card exiled with this ").parse(lower.as_str())
     {
         // Skip the type word after "this " to consume "each card exiled with this artifact"
+        let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
+        return (
+            TargetFilter::ExiledBySource,
+            &text[text.len() - after_type.len()..],
+            syntax,
+        );
+    }
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("card exiled with this ").parse(lower.as_str())
+    {
         let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
         return (
             TargetFilter::ExiledBySource,
@@ -5056,13 +5074,21 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
                 tag("each player's "),
             )),
         ),
-        // CR 400.7: Adjective-qualified zone references — "a single graveyard" /
-        // "a random graveyard" — share the indefinite-article semantics with
-        // bare "a "/"the " for origin-zone tracking (the modifier constrains
+        // CR 400.7: Adjective- and quantity-qualified zone references — "all
+        // graveyards", "each graveyard", "a single graveyard", "a random
+        // graveyard" — share the indefinite-article semantics with bare
+        // "a "/"the " for origin-zone tracking (the modifier constrains
         // which instance, not which zone). Longest-match-first ordering.
         value(
             ZoneQual::Plain,
-            alt((tag("a single "), tag("a random "), tag("a "), tag("the "))),
+            alt((
+                tag("all "),
+                tag("each "),
+                tag("a single "),
+                tag("a random "),
+                tag("a "),
+                tag("the "),
+            )),
         ),
         // Bare form (e.g., "from exile"): zero-width match so the zone_word combinator runs next.
         value(ZoneQual::Plain, tag("")),
@@ -7682,6 +7708,13 @@ mod tests {
     #[test]
     fn each_card_exiled_with_this_artifact_produces_exiled_by_source() {
         let (f, rest) = parse_target("each card exiled with this artifact");
+        assert_eq!(f, TargetFilter::ExiledBySource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn card_exiled_with_this_artifact_produces_exiled_by_source() {
+        let (f, rest) = parse_target("card exiled with this artifact");
         assert_eq!(f, TargetFilter::ExiledBySource);
         assert_eq!(rest, "");
     }

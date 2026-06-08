@@ -1,11 +1,12 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useDraftStore } from "../../stores/draftStore";
+import type { DraftCardInstance } from "../../adapter/draft-adapter";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
 interface ManaCurveProps {
+  pool: DraftCardInstance[];
   cards: string[];
 }
 
@@ -16,11 +17,8 @@ const MAX_BAR_HEIGHT = 100;
 
 // ── Component ───────────────────────────────────────────────────────────
 
-const EMPTY_POOL: never[] = [];
-
-export function ManaCurve({ cards }: ManaCurveProps) {
+export function ManaCurve({ pool, cards }: ManaCurveProps) {
   const { t } = useTranslation("draft");
-  const pool = useDraftStore((s) => s.view?.pool) ?? EMPTY_POOL;
 
   const counts = useMemo(() => {
     const cmcByName = new Map<string, number>();
@@ -52,7 +50,15 @@ export function ManaCurve({ cards }: ManaCurveProps) {
       </div>
       <div className="flex items-end gap-1.5" style={{ height: MAX_BAR_HEIGHT + 24 }}>
         {counts.map(({ label, count }) => (
-          <div key={label} className="flex flex-1 flex-col items-center gap-0.5">
+          <div
+            key={label}
+            role="meter"
+            aria-label={t("manaCurve.bucketLabel", { bucket: label })}
+            aria-valuemin={0}
+            aria-valuemax={maxCount}
+            aria-valuenow={count}
+            className="flex flex-1 flex-col items-center gap-0.5"
+          >
             <span className="h-4 text-[10px] leading-4 text-white/50">
               {count > 0 ? count : ""}
             </span>

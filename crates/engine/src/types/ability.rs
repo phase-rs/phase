@@ -4434,6 +4434,11 @@ pub enum ParsedCondition {
         zone: crate::types::zones::Zone,
         count: usize,
     },
+    ZoneCoreTypeCardCountAtLeast {
+        zone: crate::types::zones::Zone,
+        core_type: CoreType,
+        count: usize,
+    },
     ZoneSubtypeCardCountAtLeast {
         zone: crate::types::zones::Zone,
         subtype: String,
@@ -5975,7 +5980,10 @@ pub enum Effect {
         /// Kept-card destination override (None = Hand).
         #[serde(default)]
         destination: Option<Zone>,
-        /// How many cards to keep (None = 1).
+        /// How many cards to keep. `None` is the default single keep unless the
+        /// Dig is in all-seen reorder mode. Parser-generated unbounded "all" /
+        /// "any number" continuations use `u32::MAX`, clamped by the resolver
+        /// to the number of seen cards.
         #[serde(default)]
         keep_count: Option<u32>,
         /// True = select 0..=keep_count ("up to N"), false = exactly keep_count.
@@ -5990,6 +5998,10 @@ pub enum Effect {
         /// CR 701.20a vs CR 701.16a: True = cards are revealed (public), false = looked at (private).
         #[serde(default)]
         reveal: bool,
+        /// CR 614.1 / CR 110.5b: Kept cards routed to the battlefield enter
+        /// tapped when true (Planar Genesis — "onto the battlefield tapped").
+        #[serde(default)]
+        enter_tapped: bool,
     },
     GainControl {
         #[serde(default = "default_target_filter_any")]
@@ -6214,6 +6226,16 @@ pub enum Effect {
         /// sibling copy effect.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copier: Option<ControllerRef>,
+    },
+    /// CR 702.50a + CR 707.10: Epic's recurring upkeep copy. Carries a snapshot
+    /// of the Epic spell's resolved ability captured when the Epic spell
+    /// resolved; resolving this effect puts a copy of that spell (minus its epic
+    /// ability) onto the stack under the controller. Created by
+    /// `game::effects::epic::arm_epic` as the body of a recurring delayed
+    /// triggered ability, so it fires at the beginning of each of the
+    /// controller's upkeeps for the rest of the game.
+    EpicCopy {
+        spell: Box<ResolvedAbility>,
     },
     /// CR 707.12: Create a copy of a card/object in its zone and cast that
     /// copy while the resolving spell or ability continues resolving.
@@ -8510,6 +8532,9 @@ impl Effect {
             // (`collect_target_slots` / `collect_target_slot_specs`), mirroring
             // `MoveCounters`/`Attach`; all other forms host on the controller or
             // source and declare no target.
+            // CR 702.50a: EpicCopy carries its targets inside the snapshotted
+            // spell ability, not in a top-level `target` field.
+            | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. } => None,
             // CR 701.23a: SearchLibrary has an optional player target for opponent search.
             Effect::SearchLibrary { target_player, .. } => target_player.as_ref(),
@@ -8576,6 +8601,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
+        Effect::EpicCopy { .. } => "EpicCopy",
         Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
@@ -8771,6 +8797,7 @@ pub enum EffectKind {
     SeparateIntoPiles,
     SwitchPT,
     CopySpell,
+    EpicCopy,
     CastCopyOfCard,
     CopyTokenOf,
     Myriad,
@@ -8963,6 +8990,7 @@ impl From<&Effect> for EffectKind {
             Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,
+            Effect::EpicCopy { .. } => EffectKind::EpicCopy,
             Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
