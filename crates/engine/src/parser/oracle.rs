@@ -4622,6 +4622,73 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
+    /// Issue #2385 — Invoke Calamity must parse its resolution text to a real
+    /// interactive `Effect::FreeCastFromZones` (the free-cast window), NOT get
+    /// swallowed into a `GraveyardCastPermission` static with an empty `abilities`
+    /// list (which resolved to no effect). Verifies the whole-card recognizer
+    /// produces the count, MV budget, instant/sorcery filter, graveyard+hand
+    /// zones, and the CR 614.1a exile rider — plus the trailing "Exile ~"
+    /// self-exile as a chained sub-ability.
+    #[test]
+    fn invoke_calamity_parses_free_cast_window_effect() {
+        let text = "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.";
+        let result = parse(text, "Invoke Calamity", &[], &["Instant"], &[]);
+
+        assert!(
+            result.statics.is_empty(),
+            "must NOT classify as a GraveyardCastPermission static, got {:?}",
+            result.statics
+        );
+        assert_eq!(
+            result.abilities.len(),
+            1,
+            "the spell must have a single resolution ability, got {:?}",
+            result.abilities
+        );
+        let ability = &result.abilities[0];
+        match &*ability.effect {
+            Effect::FreeCastFromZones {
+                count,
+                max_total_mv,
+                filter,
+                zones,
+                exile_instead_of_graveyard,
+            } => {
+                assert_eq!(*count, 2);
+                assert_eq!(*max_total_mv, Some(6));
+                assert!(*exile_instead_of_graveyard);
+                assert_eq!(zones, &vec![Zone::Graveyard, Zone::Hand]);
+                assert_eq!(
+                    *filter,
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    }
+                );
+            }
+            other => panic!("expected FreeCastFromZones, got {other:?}"),
+        }
+        // CR 608.2c: "Exile ~" chains as the sub-ability and runs after the
+        // window closes.
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("Exile ~ self-exile must chain as sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "trailing self-exile must lower to a ChangeZone→Exile, got {:?}",
+            sub.effect
+        );
+    }
+
     /// CR 508.1a + CR 508.6: "During any turn you attacked with <filter>, you
     /// may play that card" must gate the play permission on a (filtered)
     /// AttackedThisTurn condition instead of dropping the clause to

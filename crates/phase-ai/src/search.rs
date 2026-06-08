@@ -566,6 +566,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         } => Some(GameAction::RippleChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — finish the
+        // window (cast nothing) as the conservative default; the candidate
+        // generator still explores casting each eligible spell.
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { .. },
+            ..
+        } => Some(GameAction::FreeCastWindowChoice { selection: None }),
         // CR 107.1c: "repeat this process" — stop as the forced-action default;
         // the candidate generator still explores repeating.
         WaitingFor::RepeatDecision { .. } => {

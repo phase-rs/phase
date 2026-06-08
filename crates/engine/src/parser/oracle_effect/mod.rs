@@ -11245,6 +11245,136 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
     }))
 }
 
+/// CR 608.2g + CR 601.2 + CR 118.9 + CR 202.3: Parse the Invoke Calamity class —
+/// "you may cast up to N [instant and/or sorcery] spells [with total mana value
+/// M or less] from your graveyard and/or hand without paying their mana costs".
+///
+/// Lowers to `Effect::FreeCastFromZones`, the interactive multi-cast window with
+/// a shared running-MV budget. The "If those spells would be put into your
+/// graveyard, exile them instead" rider (CR 614.1a) — when present anywhere in
+/// the same clause text — sets `exile_instead_of_graveyard`.
+///
+/// Built from composed nom combinators: a fixed "you may cast up to " prefix,
+/// `parse_number` for the count, an `alt()` over the candidate type phrase, an
+/// optional "with total mana value M or less" budget, and the
+/// graveyard-and/or-hand zone tail. Distinct from `try_parse_cast_effect` (which
+/// grants a `CastFromZone` permission on a single targeted/anaphoric card).
+fn try_parse_free_cast_from_zones(lower: &str, full_lower: &str) -> Option<Effect> {
+    type E<'a> = OracleError<'a>;
+
+    // CR 601.2: "you may cast up to N " — fixed prefix + count.
+    let (rest, _) = tag::<_, _, E>("you may cast up to ").parse(lower).ok()?;
+    let (rest, count) = nom_primitives::parse_number.parse(rest).ok()?;
+    let count = count as u8;
+    // `parse_number` leaves the trailing word boundary; consume the space
+    // before the candidate type phrase.
+    let (rest, _) = tag::<_, _, E>(" ").parse(rest).ok()?;
+
+    // CR 601.2a: candidate type phrase. Compose the union over the published
+    // surface forms ("instant and/or sorcery", "instant or sorcery") plus the
+    // single-type variants, so the class covers more than Invoke Calamity.
+    let (rest, filter) = parse_free_cast_candidate_filter(rest)?;
+
+    // CR 601.2a: " spell"/" spells" noun, then the optional MV budget.
+    let rest = alt((
+        tag::<_, _, E>(" spells"),
+        tag(" spell"),
+        tag(" cards"),
+        tag(" card"),
+    ))
+    .parse(rest)
+    .map(|(r, _)| r)
+    .unwrap_or(rest);
+
+    // CR 202.3: optional "with total mana value M or less" running-total budget.
+    let (rest, max_total_mv) = match tag::<_, _, E>(" with total mana value ").parse(rest) {
+        Ok((after, _)) => {
+            let (after, (comparator, value)) =
+                search::parse_total_mana_value_comparator(after).ok()?;
+            // CR 202.3: only the "or less" (LE) budget form is meaningful for a
+            // free-cast cap; reject the "or greater" shape rather than mis-parse.
+            if comparator != Comparator::LE {
+                return None;
+            }
+            (after, Some(value.max(0) as u32))
+        }
+        Err(_) => (rest, None),
+    };
+
+    // CR 601.2a: zone tail — "from your graveyard and/or hand" (either order) or
+    // a single-zone variant. Parse the zone set from the remainder.
+    let zones = parse_free_cast_zone_tail(rest)?;
+
+    // CR 614.1a: the "exile them instead" rider lives in a later sentence of the
+    // same card text; detect it across the full lowered text.
+    let exile_instead_of_graveyard = nom_primitives::scan_contains(
+        full_lower,
+        "would be put into your graveyard, exile them instead",
+    ) || nom_primitives::scan_contains(
+        full_lower,
+        "would be put into your graveyard, exile it instead",
+    );
+
+    Some(Effect::FreeCastFromZones {
+        count,
+        max_total_mv,
+        filter,
+        zones,
+        exile_instead_of_graveyard,
+    })
+}
+
+/// CR 601.2a: Candidate filter for the free-cast window — the spell types the
+/// controller may cast this way. A single `alt()` composes the union surface
+/// forms (longest-first so the two-type unions win over the single types) so the
+/// class is not Invoke-Calamity-only.
+fn parse_free_cast_candidate_filter(input: &str) -> Option<(&str, TargetFilter)> {
+    type E<'a> = OracleError<'a>;
+    let instant = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant));
+    let sorcery = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery));
+    let both = || TargetFilter::Or {
+        filters: vec![instant(), sorcery()],
+    };
+
+    alt((
+        value(both(), tag::<_, _, E>("instant and/or sorcery")),
+        value(both(), tag("instant or sorcery")),
+        value(both(), tag("sorcery and/or instant")),
+        value(both(), tag("sorcery or instant")),
+        value(instant(), tag("instant")),
+        value(sorcery(), tag("sorcery")),
+    ))
+    .parse(input)
+    .ok()
+}
+
+/// CR 601.2a: Parse the "from <zones>" tail of a free-cast window, returning the
+/// controller-owned zones to draw candidates from. Accepts the graveyard/hand
+/// union in either order plus the single-zone variants.
+fn parse_free_cast_zone_tail(input: &str) -> Option<Vec<Zone>> {
+    let graveyard_and_hand = vec![Zone::Graveyard, Zone::Hand];
+    // Try the union forms first (longest-first) before the single-zone tails.
+    let union_forms = [
+        " from your graveyard and/or hand",
+        " from your graveyard and/or your hand",
+        " from your hand and/or graveyard",
+        " from your hand and/or your graveyard",
+    ];
+    if union_forms
+        .iter()
+        .any(|form| nom_primitives::scan_contains(input, form))
+    {
+        return Some(graveyard_and_hand);
+    }
+    if nom_primitives::scan_contains(input, " from your graveyard") {
+        return Some(vec![Zone::Graveyard]);
+    }
+    if nom_primitives::scan_contains(input, " from your hand") {
+        return Some(vec![Zone::Hand]);
+    }
+    None
+}
+
 /// 1. Anaphoric — "cast it", "cast that spell", "cast those cards" — target is
 ///    `ParentTarget` (refers to the cards exiled / chosen by a prior effect).
 /// 2. Constrained — "cast a [type-phrase] [from <zone>] [with mana value <bound>]
@@ -13690,6 +13820,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_invoke_calamity_free_cast(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
@@ -13714,6 +13847,9 @@ pub(crate) fn parse_effect_chain_with_context(
         return def;
     }
     if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
+        return def;
+    }
+    if let Some(def) = try_parse_invoke_calamity_free_cast(text, kind) {
         return def;
     }
     let ir = parse_effect_chain_ir(text, kind, ctx);
@@ -13838,6 +13974,56 @@ fn try_parse_for_each_attacker_copy_blocker(
             },
         )));
     }
+    Some(def)
+}
+
+/// CR 608.2g + CR 601.2 + CR 118.9 + CR 614.1a: Whole-card recognizer for the
+/// Invoke Calamity class — "You may cast up to N [instant and/or sorcery] spells
+/// with total mana value M or less from your graveyard and/or hand without
+/// paying their mana costs. If those spells would be put into your graveyard,
+/// exile them instead. Exile ~."
+///
+/// Lowers the first sentence to `Effect::FreeCastFromZones` (the interactive
+/// multi-cast window), folds the "exile them instead" rider (CR 614.1a) into the
+/// effect's `exile_instead_of_graveyard` flag, and delegates any trailing
+/// sentence ("Exile ~") to the generic chain parser as a `sub_ability` so the
+/// resolving spell exiles itself after the window finishes. Runs in
+/// `parse_effect_chain` ahead of the generic pipeline because the per-clause
+/// dispatcher would otherwise mis-route the first sentence to a
+/// `GraveyardCastPermission` static (issue #2385).
+fn try_parse_invoke_calamity_free_cast(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+    let lower = text.to_ascii_lowercase();
+
+    // CR 608.2c: Split into sentences so the free-cast instruction, the exile
+    // rider, and the trailing self-exile are handled separately.
+    let mut sentences = lower
+        .split(". ")
+        .map(|s| s.trim().trim_end_matches('.').trim())
+        .filter(|s| !s.is_empty());
+    let first = sentences.next()?;
+
+    // CR 601.2: The first sentence must be the free-cast window itself.
+    let effect = try_parse_free_cast_from_zones(first, &lower)?;
+
+    // CR 614.1a + CR 608.2c: Consume the optional "if those spells would be put
+    // into your graveyard, exile them instead" rider sentence (its meaning is
+    // already captured in `exile_instead_of_graveyard` via the full-text scan),
+    // then collect any remaining sentences (the "Exile ~" self-exile).
+    let remaining: Vec<&str> = sentences
+        .filter(|s| !nom_primitives::scan_contains(s, "would be put into your graveyard"))
+        .collect();
+
+    let mut def = AbilityDefinition::new(kind, effect);
+
+    // CR 608.2c: Chain the trailing self-exile (and any other follow-up) through
+    // the generic chain parser so "Exile ~" lowers the same way it does on a
+    // plain spell. The self-reference is already `~`-normalized by the caller.
+    if !remaining.is_empty() {
+        let tail = format!("{}.", remaining.join(". "));
+        let sub = parse_effect_chain(&tail, kind);
+        def.sub_ability = Some(Box::new(sub));
+    }
+
     Some(def)
 }
 
