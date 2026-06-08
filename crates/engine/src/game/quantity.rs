@@ -1690,19 +1690,18 @@ fn resolve_ref(
             .or(state.last_effect_count)
             .or(state.last_effect_amount)
             // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
-            // if it had one or more +1/+1 counters on it, put that many +1/+1
-            // counters on …" look-back (Reyhan, Last of the Abzan) resolves "that
-            // many" to the number of +1/+1 counters the triggering object had as
-            // it left. Counters cease to exist on the zone change (CR 122.2), so
-            // the live object's map is empty — the count comes from the leaving
-            // object's last-known information. This sits LAST in the cascade so a
-            // dies/leaves trigger whose "that many" is produced by a preceding
-            // effect in the same resolution (Whirlpool Drake: "shuffle the cards
-            // from your hand into your library, then draw that many cards") reads
-            // that effect's count via `last_effect_count`/`last_effect_amount`
-            // first; only a bare look-back with no preceding effect (Reyhan)
-            // reaches this LKI fallback.
-            .or_else(|| event_context_counter_count_from_lki(state))
+            // if it had one or more <X> counters on it, put that many <X> counters
+            // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
+            // the count of `<X>` counters the triggering object had as it left
+            // (kind taken from the resolving counter effect). Counters cease to
+            // exist on the zone change (CR 122.2), so the live object's map is
+            // empty — the count comes from the leaving object's last-known
+            // information. Sits LAST and fires only for counter-placing effects:
+            // a dies/leaves trigger whose "that many" is produced by a preceding
+            // effect (Whirlpool Drake: "shuffle the cards from your hand into your
+            // library, then draw that many cards") is a non-counter effect, so it
+            // resolves via `last_effect_count`/`last_effect_amount` above.
+            .or_else(|| event_context_counter_count_from_lki(state, ability))
             .unwrap_or(0),
         // CR 608.2c: If an earlier effect in this same resolution captured an
         // explicit object context, use that object before the original trigger
@@ -2636,16 +2635,35 @@ pub(crate) fn distinct_counter_kinds_among(
 }
 
 /// CR 603.10 + CR 608.2h + CR 122.2: For a battlefield-departure look-back
-/// trigger ("Whenever a creature you control dies/leaves the battlefield, if it
-/// had one or more +1/+1 counters on it, put that many +1/+1 counters on …"),
-/// resolve "that many" to the number of +1/+1 counters the triggering object
-/// had as it left, read from its last-known information (the live object's
-/// counter map is empty per CR 122.2). Returns `Some` only when the current
-/// trigger event is a `ZoneChanged` leaving the battlefield and the leaving
-/// object's LKI snapshot recorded at least one +1/+1 counter — so the
-/// `EventContextAmount` cascade keeps falling through for every other event
-/// family and for departures of counterless permanents.
-fn event_context_counter_count_from_lki(state: &GameState) -> Option<i32> {
+/// counter effect ("Whenever a creature you control dies/leaves the battlefield,
+/// if it had one or more <X> counters on it, put that many <X> counters on …" —
+/// Reyhan, Last of the Abzan), resolve "that many" to the number of `<X>`
+/// counters the triggering object had as it left, read from its last-known
+/// information (the live object's counter map is empty per CR 122.2).
+///
+/// The counter kind `<X>` is taken from the *resolving effect* — a "put that
+/// many <X> counters" effect counts the `<X>` counters it had, so charge /
+/// −1/−1 / +1/+1 each resolve to their own kind rather than a hardcoded one.
+/// Returns `Some` only when (a) the resolving effect actually places counters
+/// (`AddCounter`/`PutCounter`/`PutCounterAll`), (b) the current trigger event is
+/// a `ZoneChanged` leaving the battlefield, and (c) the leaving object's LKI
+/// snapshot recorded at least one counter of that kind. A non-counter effect
+/// whose "that many" comes from the event or a preceding effect — "draw that
+/// many cards" (Whirlpool Drake) — never reaches this branch, so the
+/// `EventContextAmount` cascade resolves it via `last_effect_count` instead.
+fn event_context_counter_count_from_lki(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<i32> {
+    use crate::types::ability::Effect;
+    let counter_type = match ability.map(|a| &a.effect) {
+        Some(
+            Effect::AddCounter { counter_type, .. }
+            | Effect::PutCounter { counter_type, .. }
+            | Effect::PutCounterAll { counter_type, .. },
+        ) => counter_type,
+        _ => return None,
+    };
     let crate::types::events::GameEvent::ZoneChanged {
         object_id,
         from: Some(crate::types::zones::Zone::Battlefield),
@@ -2655,7 +2673,7 @@ fn event_context_counter_count_from_lki(state: &GameState) -> Option<i32> {
         return None;
     };
     let lki = state.lki_cache.get(object_id)?;
-    let count = counter_count_from_map(&lki.counters, Some(&CounterType::Plus1Plus1));
+    let count = counter_count_from_map(&lki.counters, Some(counter_type));
     (count > 0).then_some(count)
 }
 

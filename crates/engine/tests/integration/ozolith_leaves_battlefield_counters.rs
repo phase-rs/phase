@@ -306,3 +306,76 @@ fn dies_trigger_draw_uses_shuffled_count_not_plus_counters() {
         "draw count must equal the 2 shuffled cards, not the Drake's 3 +1/+1 counters"
     );
 }
+
+const MINUS_COUNTER_REYHAN_ORACLE: &str = "Whenever a creature you control dies, if it had one or more -1/-1 counters on it, you may put that many -1/-1 counters on target creature.";
+
+/// The LKI counter look-back must use the kind named by the resolving effect, not
+/// a hardcoded +1/+1 (issue #2358 Gemini [HIGH] / adversarial review). A
+/// Reyhan-class trigger that moves -1/-1 counters reads the -1/-1 count the dying
+/// creature had. With the old hardcoded `Plus1Plus1`, the look-back would find no
+/// +1/+1 counters and place 0 — this test fails on that path and passes once the
+/// kind is parameterized from the `PutCounter` effect.
+#[test]
+fn dies_trigger_put_counter_respects_effect_counter_type() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario
+        .add_creature_from_oracle(P0, "Abzan Falconer", 4, 3, MINUS_COUNTER_REYHAN_ORACLE)
+        .as_legendary();
+
+    // 5/5 base with two -1/-1 counters → 3/3 on the battlefield (survives SBAs),
+    // so the look-back has two -1/-1 counters to read from LKI at death.
+    let dying = scenario
+        .add_creature_from_oracle(P0, "Counter Bearer", 5, 5, "")
+        .with_minus_counters(2)
+        .id();
+
+    let receiver = scenario.add_creature(P0, "Receiver", 4, 4).id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().turn_number = 2;
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), dying, Zone::Graveyard, &mut events);
+    engine::game::triggers::process_triggers(runner.state_mut(), &events);
+
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        assert!(guard < 40, "trigger resolution did not terminate");
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(receiver)),
+                    })
+                    .expect("ChooseTarget should succeed");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept optional trigger");
+            }
+            WaitingFor::Priority { .. } => {
+                if counters(&runner, receiver, &CounterType::Minus1Minus1) > 0
+                    || runner.act(GameAction::PassPriority).is_err()
+                {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        counters(&runner, receiver, &CounterType::Minus1Minus1),
+        2,
+        "the look-back must count the 2 -1/-1 counters named by the effect, not \
+         hardcoded +1/+1 (which would place 0)"
+    );
+}
