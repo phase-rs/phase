@@ -17,6 +17,7 @@ use super::token::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
+use crate::parser::oracle_quantity;
 use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -56,7 +57,7 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         rest = stripped;
     }
 
-    // CR 107.3a: "X/X where X is ~'s power" — X is bound to a dynamic quantity
+    // CR 107.3c: "X/X where X is ~'s power" — X is bound to a dynamic quantity
     // (source's power), NOT the cost paid. This pattern must be detected BEFORE
     // the X-cost activation path (parse_cost_x_become_pt_prefix) to avoid the
     // false match that would emit CostXPaid (which evaluates to 0 for triggers).
@@ -66,47 +67,12 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         let before_where = rest[..where_x_pos].trim_end_matches(',').trim();
         let after_where = &rest[where_x_pos + "where x is ".len()..];
         let after_where_lower = after_where.to_lowercase();
-        // Try nom quantity ref combinator first for common patterns
-        if let Ok((_rem, qty)) = nom_quantity::parse_quantity_ref.parse(&after_where_lower) {
-            let dynamic_qty = QuantityExpr::Ref { qty };
-            spec.dynamic_power = Some(dynamic_qty.clone());
-            spec.dynamic_toughness = Some(dynamic_qty);
-            // Strip the X/X prefix from the descriptor so type parsing works
-            if let Some(after_x_x) = parse_cost_x_become_pt_prefix(before_where) {
-                rest = after_x_x;
-            } else {
-                rest = before_where;
-            }
-        } else if nom_primitives::scan_contains(&after_where_lower, "power") {
-            // Fallback to keyword-based matching for "~'s power" patterns
-            let dynamic_qty = QuantityExpr::Ref {
-                qty: QuantityRef::Power {
-                    scope: crate::types::ability::ObjectScope::Source,
-                },
-            };
-            spec.dynamic_power = Some(dynamic_qty.clone());
-            spec.dynamic_toughness = Some(dynamic_qty);
-            // Strip the X/X prefix from the descriptor so type parsing works
-            if let Some(after_x_x) = parse_cost_x_become_pt_prefix(before_where) {
-                rest = after_x_x;
-            } else {
-                rest = before_where;
-            }
-        } else if nom_primitives::scan_contains(&after_where_lower, "toughness") {
-            let dynamic_qty = QuantityExpr::Ref {
-                qty: QuantityRef::Toughness {
-                    scope: crate::types::ability::ObjectScope::Source,
-                },
-            };
-            spec.dynamic_power = Some(dynamic_qty.clone());
-            spec.dynamic_toughness = Some(dynamic_qty);
-            // Strip the X/X prefix from the descriptor so type parsing works
-            if let Some(after_x_x) = parse_cost_x_become_pt_prefix(before_where) {
-                rest = after_x_x;
-            } else {
-                rest = before_where;
-            }
-        }
+        rest = parse_cost_x_become_pt_prefix(before_where).unwrap_or(before_where);
+
+        let qty = oracle_quantity::parse_quantity_ref(&after_where_lower)?;
+        let dynamic_qty = QuantityExpr::Ref { qty };
+        spec.dynamic_power = Some(dynamic_qty.clone());
+        spec.dynamic_toughness = Some(dynamic_qty);
     }
 
     if let Some((power, toughness, after_pt)) = parse_fixed_become_pt_prefix(rest) {
@@ -1320,7 +1286,7 @@ mod test_den_bugbear {
         );
     }
 
-    /// CR 107.3a: "X/X where X is ~'s power" — X is bound to the source's power,
+    /// CR 107.3c: "X/X where X is ~'s power" — X is bound to the source's power,
     /// NOT the cost paid. This pattern must be detected before the X-cost activation
     /// path to avoid the false match that would emit CostXPaid.
     /// Covers Obuun, Mul Daya Ancestor and similar patterns.

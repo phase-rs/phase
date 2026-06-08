@@ -4619,10 +4619,11 @@ fn resolve_chain_body(
                     // sub), NOT `sub.sub_link` (the gated sub's link to its parent =
                     // ContinuationStep).
                     //
-                    // For multi-branch chains like Omnath (n=1, n=2, n=3), we must
-                    // walk through ALL SequentialSibling siblings when a condition
-                    // fails, not just check the immediate next one. This allows the
-                    // chain to find the matching branch for the current resolution.
+                    // For multi-branch chains like Omnath (n=1, n=2, n=3), find the
+                    // next SequentialSibling whose condition can actually resolve.
+                    // A false no-op sibling is skipped, but once a live sibling is
+                    // selected, its own chain is resolved by `resolve_ability_chain`;
+                    // continuing this outer walk would double-resolve later siblings.
                     let mut current = Some(next);
                     while let Some(ref sibling) = current {
                         if sibling.sub_link == SubAbilityLink::SequentialSibling {
@@ -4635,7 +4636,19 @@ fn resolve_chain_body(
                                 ability,
                                 effect_context_object.as_ref(),
                             );
+                            if sibling_resolved
+                                .condition
+                                .as_ref()
+                                .is_some_and(|condition| {
+                                    !evaluate_condition(condition, state, &sibling_resolved)
+                                        && sibling_resolved.else_ability.is_none()
+                                })
+                            {
+                                current = sibling.sub_ability.as_ref();
+                                continue;
+                            }
                             resolve_ability_chain(state, &sibling_resolved, events, depth + 1)?;
+                            break;
                         }
                         current = sibling.sub_ability.as_ref();
                     }
@@ -14065,6 +14078,75 @@ mod tests {
             state.ability_resolutions_this_turn[&(source_id, 0)],
             3,
             "counter must be bumped exactly once per top-level resolution"
+        );
+    }
+
+    #[test]
+    fn sequential_sibling_failure_walk_resolves_selected_chain_once() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+
+        // Branch 3 is also true on the first resolution. It should resolve once
+        // as branch 2's child, not a second time from the failure-path sibling walk.
+        let mut branch3 = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        branch3.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 1 });
+        branch3.sub_link = SubAbilityLink::SequentialSibling;
+
+        let mut branch2 = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        branch2.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 1 });
+        branch2.sub_link = SubAbilityLink::SequentialSibling;
+        branch2.sub_ability = Some(Box::new(branch3));
+
+        let mut branch1 = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 100 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        branch1.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        branch1.sub_link = SubAbilityLink::SequentialSibling;
+        branch1.sub_ability = Some(Box::new(branch2));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+        .sub_ability(branch1);
+        ability.ability_index = Some(0);
+
+        let start_life = state.players[0].life;
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].life,
+            start_life + 1 + 2 + 4,
+            "branch 3 must not be double-resolved by the failure-path sibling walk"
         );
     }
 
