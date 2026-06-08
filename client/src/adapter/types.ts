@@ -1827,6 +1827,11 @@ export interface GameState {
   outside_game_cards_brought_in?: OutsideGameCardUse[];
   sideboard_submitted?: PlayerId[];
   revealed_cards?: ObjectId[];
+  /** CR 701.20e: ids the looker is privately peeking during a look-at-top
+   * window (Mishra's Bauble, scry looks). Visible only to `private_look_player`. */
+  private_look_ids?: ObjectId[];
+  /** CR 701.20e: the player to whom `private_look_ids` is visible (the looker). */
+  private_look_player?: PlayerId;
   restrictions?: GameRestriction[];
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;

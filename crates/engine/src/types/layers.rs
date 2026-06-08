@@ -237,7 +237,9 @@ mod tests {
                     replacement_definitions: Default::default(),
                     static_definitions: Default::default(),
                 }),
+                display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
+                token_image_ref: None,
             }
             .layer(),
             Layer::Copy

@@ -10,7 +10,7 @@ use crate::types::ability::{
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
-use crate::types::counter::CounterType;
+use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
 use crate::types::game_state::{AttackDeclarationRecord, GameState, LKISnapshot};
 use crate::types::identifiers::{CardId, ObjectId};
@@ -334,6 +334,7 @@ pub struct GameObject {
     pub pair_controller: Option<PlayerId>,
 
     // Counters
+    #[serde(with = "counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
 
     // Characteristics

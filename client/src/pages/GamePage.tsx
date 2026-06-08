@@ -746,7 +746,7 @@ function GamePageContent({
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
-    zone: "graveyard" | "exile";
+    zone: "graveyard" | "exile" | "library";
     playerId: number;
   } | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState<
@@ -1099,7 +1099,11 @@ function GamePageContent({
               size={pileSize}
               onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
             />
-            <LibraryPile playerId={activeOpponentId} size={pileSize} />
+            <LibraryPile
+              playerId={activeOpponentId}
+              size={pileSize}
+              onView={() => setViewingZone({ zone: "library", playerId: activeOpponentId })}
+            />
             <GraveyardPile
               playerId={activeOpponentId}
               size={pileSize}
@@ -1137,7 +1141,11 @@ function GamePageContent({
                 size={pileSize}
                 onClick={() => setViewingZone({ zone: "graveyard", playerId: perspectivePlayerId })}
               />
-              <LibraryPile playerId={perspectivePlayerId} size={pileSize} />
+              <LibraryPile
+                playerId={perspectivePlayerId}
+                size={pileSize}
+                onView={() => setViewingZone({ zone: "library", playerId: perspectivePlayerId })}
+              />
             </div>
           </div>
           <div
