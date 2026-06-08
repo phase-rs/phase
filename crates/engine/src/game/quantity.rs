@@ -1676,6 +1676,16 @@ fn resolve_ref(
                     .as_ref()
                     .and_then(crate::game::targeting::extract_amount_from_event)
             })
+            // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
+            // if it had one or more +1/+1 counters on it, put that many +1/+1
+            // counters on …" look-back (Reyhan, Last of the Abzan) resolves "that
+            // many" to the number of +1/+1 counters the triggering object had as
+            // it left. Counters cease to exist on the zone change (CR 122.2), so
+            // the live object's map is empty — the count comes from the leaving
+            // object's last-known information. Only a battlefield-departure
+            // `ZoneChanged` reaches this fallback (no scalar amount on the event);
+            // damage / draw / die-roll events resolve via the steps above.
+            .or_else(|| event_context_counter_count_from_lki(state))
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -2619,6 +2629,30 @@ pub(crate) fn distinct_counter_kinds_among(
     let mut kinds: Vec<CounterType> = seen.into_iter().collect();
     kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
     kinds
+}
+
+/// CR 603.10 + CR 608.2h + CR 122.2: For a battlefield-departure look-back
+/// trigger ("Whenever a creature you control dies/leaves the battlefield, if it
+/// had one or more +1/+1 counters on it, put that many +1/+1 counters on …"),
+/// resolve "that many" to the number of +1/+1 counters the triggering object
+/// had as it left, read from its last-known information (the live object's
+/// counter map is empty per CR 122.2). Returns `Some` only when the current
+/// trigger event is a `ZoneChanged` leaving the battlefield and the leaving
+/// object's LKI snapshot recorded at least one +1/+1 counter — so the
+/// `EventContextAmount` cascade keeps falling through for every other event
+/// family and for departures of counterless permanents.
+fn event_context_counter_count_from_lki(state: &GameState) -> Option<i32> {
+    let crate::types::events::GameEvent::ZoneChanged {
+        object_id,
+        from: Some(crate::types::zones::Zone::Battlefield),
+        ..
+    } = state.current_trigger_event.as_ref()?
+    else {
+        return None;
+    };
+    let lki = state.lki_cache.get(object_id)?;
+    let count = counter_count_from_map(&lki.counters, Some(&CounterType::Plus1Plus1));
+    (count > 0).then_some(count)
 }
 
 pub(crate) fn counter_count_from_map(
