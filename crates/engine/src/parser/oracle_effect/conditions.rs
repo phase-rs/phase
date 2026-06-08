@@ -1958,9 +1958,11 @@ pub(super) fn try_parse_dig_instead_alternative(
         return None;
     };
     // CR 701.20e: Map the typed `PutCount` onto the Dig's keep_count/up_to.
-    // `All` has no fixed cap (route every kept card → `keep_count = None`).
+    // `u32::MAX` is an unbounded parser sentinel; the Dig resolver clamps it
+    // to the number of seen cards.
     let (alt_keep_count, alt_up_to) = match alt_quantity {
-        crate::parser::oracle_ir::ast::PutCount::All => (None, false),
+        crate::parser::oracle_ir::ast::PutCount::All => (Some(u32::MAX), false),
+        crate::parser::oracle_ir::ast::PutCount::AnyNumber => (Some(u32::MAX), true),
         crate::parser::oracle_ir::ast::PutCount::Up(n) => (Some(n), true),
         crate::parser::oracle_ir::ast::PutCount::Exactly(n) => (Some(n), false),
     };

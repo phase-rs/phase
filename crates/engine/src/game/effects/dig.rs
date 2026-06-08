@@ -15,7 +15,7 @@ pub fn resolve(
     let (
         library_owner_filter,
         dig_num,
-        keep_num,
+        raw_keep_num,
         is_up_to,
         filter,
         kept_dest,
@@ -87,13 +87,13 @@ pub fn resolve(
         .take(count)
         .copied()
         .collect::<Vec<_>>();
-    let keep_count = keep_num.min(cards.len());
+    let raw_keep_count = raw_keep_num.min(cards.len());
 
     // CR 701.20e: Pure-peek pattern (keep_count = 0): "look at the top card" with no
     // player selection — the sub_ability condition decides whether to take it. Set
     // last_revealed_ids so RevealedHasCardType can evaluate, then return without
     // creating a DigChoice interaction.
-    if keep_count == 0 && !is_reveal {
+    if raw_keep_count == 0 && !is_reveal {
         state.last_revealed_ids = cards.clone();
         // CR 701.20e: "look at" privately reveals the cards to the looking
         // player. The looker is the ability controller (e.g. Delver of Secrets'
@@ -141,6 +141,11 @@ pub fn resolve(
             .filter(|&&card_id| matches_target_filter(state, card_id, &filter, &ctx))
             .copied()
             .collect()
+    };
+    let keep_count = if raw_keep_num == u32::MAX as usize {
+        selectable_cards.len()
+    } else {
+        raw_keep_count
     };
 
     state.waiting_for = WaitingFor::DigChoice {
@@ -1071,6 +1076,77 @@ mod tests {
             } => {
                 // Selectable set should be exactly the CMC-1 and CMC-3 creatures.
                 assert_eq!(selectable_cards.len(), 2);
+            }
+            other => panic!("Expected DigChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dig_unbounded_exact_count_clamps_to_selectable_cards() {
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let creature_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Library,
+        );
+        let creature_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature B".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Instant".to_string(),
+            Zone::Library,
+        );
+        for id in [creature_a, creature_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: Some(Zone::Hand),
+                keep_count: Some(u32::MAX),
+                up_to: false,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                rest_destination: None,
+                reveal: false,
+                enter_tapped: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DigChoice {
+                selectable_cards,
+                keep_count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(selectable_cards, &vec![creature_a, creature_b]);
+                assert_eq!(*keep_count, 2);
+                assert!(!*up_to);
             }
             other => panic!("Expected DigChoice, got {:?}", other),
         }

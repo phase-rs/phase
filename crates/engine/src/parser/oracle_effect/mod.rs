@@ -17139,7 +17139,10 @@ fn origin_is_your_zone(lower: &str, zone: Zone) -> bool {
     match zone {
         Zone::Graveyard => scan_contains_phrase(lower, "from your graveyard"),
         Zone::Hand => scan_contains_phrase(lower, "from your hand"),
-        Zone::Library => scan_contains_phrase(lower, "from your library"),
+        Zone::Library => {
+            scan_contains_phrase(lower, "from your library")
+                || scan_contains_phrase(lower, "from the top of your library")
+        }
         Zone::Exile => scan_contains_phrase(lower, "from your exile"),
         _ => false,
     }
@@ -17390,6 +17393,35 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaExpiry};
     use crate::types::player::PlayerCounterKind;
+
+    #[test]
+    fn infer_origin_zone_handles_top_of_your_library() {
+        assert_eq!(
+            infer_origin_zone("exile target card from the top of your library"),
+            Some(Zone::Library)
+        );
+    }
+
+    #[test]
+    fn inferred_top_of_your_library_origin_adds_owner_constraint() {
+        let filter = add_inferred_origin_constraints_to_target(
+            TargetFilter::Typed(TypedFilter::card()),
+            Some(Zone::Library),
+            "exile target card from the top of your library",
+        );
+
+        match filter {
+            TargetFilter::Typed(typed) => {
+                assert!(typed.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Library
+                }));
+                assert!(typed.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You
+                }));
+            }
+            other => panic!("expected typed filter, got {other:?}"),
+        }
+    }
 
     fn target_filter_contains_nonland(filter: &TargetFilter) -> bool {
         match filter {
