@@ -14093,12 +14093,15 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
 /// pass walks the `sub_ability` chain and rewrites `ChangeSpeed →
 /// Unimplemented(floor sentence)` into a single floored `ChangeSpeed`.
 pub(crate) fn fold_speed_floor_sentences(def: &mut AbilityDefinition) {
-    /// Parse "this effect can't reduce <their|its> speed below N" → N.
+    /// Parse "[this effect ]can't reduce <their|its> speed below N" → N.
     fn parse_floor_sentence(text: &str) -> Option<u8> {
         let lower = text.to_lowercase();
         let lower = lower.trim_end_matches('.').trim();
-        let (rest, _) = tag::<_, _, OracleError<'_>>("this effect can't reduce ")
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>("this effect "))
             .parse(lower)
+            .ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("can't reduce ")
+            .parse(rest)
             .ok()?;
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("their speed below "),

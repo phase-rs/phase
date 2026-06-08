@@ -626,25 +626,31 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // and toughness N/N" — the restriction conjunct precedes the base-PT conjunct.
     // `extract_keyword_clause` only recovers the trailing conjunct, so scan the
     // leading restriction explicitly (Atomic Microsizer).
-    for split_needle in [" and has base power", " and have base power"] {
-        if let Some(pos) = unquoted_lower.find(split_needle) {
-            let restriction_text = unquoted_lower[..pos].trim();
-            if let Some(modes) = parse_restriction_modes(restriction_text) {
-                for mode in modes {
-                    if static_mode_needs_grant_propagation(&mode)
-                        && !modifications.iter().any(|existing| {
-                            matches!(
-                                existing,
-                                ContinuousModification::AddStaticMode { mode: existing_mode }
-                                    if *existing_mode == mode
-                            )
-                        })
-                    {
-                        modifications.push(ContinuousModification::AddStaticMode { mode });
-                    }
+    if let Some((restriction_text, _)) =
+        nom_primitives::scan_split_at_phrase(&unquoted_lower, |i| {
+            (
+                tag("and "),
+                alt((tag("has"), tag("have"))),
+                tag(" base power"),
+            )
+                .parse(i)
+        })
+    {
+        let restriction_text = restriction_text.trim();
+        if let Some(modes) = parse_restriction_modes(restriction_text) {
+            for mode in modes {
+                if static_mode_needs_grant_propagation(&mode)
+                    && !modifications.iter().any(|existing| {
+                        matches!(
+                            existing,
+                            ContinuousModification::AddStaticMode { mode: existing_mode }
+                                if *existing_mode == mode
+                        )
+                    })
+                {
+                    modifications.push(ContinuousModification::AddStaticMode { mode });
                 }
             }
-            break;
         }
     }
 

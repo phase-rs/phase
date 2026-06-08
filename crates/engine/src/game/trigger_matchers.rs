@@ -2971,7 +2971,7 @@ pub(super) fn match_excess_damage_all(
         ..
     } = event
     {
-        if *excess <= 0 {
+        if *excess == 0 {
             return false;
         }
         match trigger.damage_kind {
