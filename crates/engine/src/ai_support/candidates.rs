@@ -3278,6 +3278,13 @@ fn attacker_actions(
     // so a must-attacker that also can't attack the chosen target could still
     // yield an illegal forced candidate. That over-constraint axis is a
     // pre-existing gap (independent of goad) and is not addressed here.
+    // Likewise, a *requirements conflict* — a creature with MustAttackPlayer{P}
+    // that is also goaded by P — has no legal declaration at all: the CR 508.1b
+    // gate demands attacking P while the CR 701.15b redirect forbids it (a
+    // non-goading target exists). The engine validator enforces both
+    // requirements independently rather than obeying the CR 508.1d maximum, so
+    // no target this builder picks can survive filtering. Fixing that is a
+    // validator concern (CR 508.1d max-satisfaction), not a generator one.
     let forced: Vec<(ObjectId, AttackTarget)> = valid_attacker_ids
         .iter()
         .copied()
