@@ -749,7 +749,7 @@ fn parse_devour_keyword_line(line: &str) -> Option<Keyword> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("devour ").parse(text).ok()?;
     let (rem, n) = nom_primitives::parse_number.parse(rest.trim()).ok()?;
     if rem.is_empty() {
-        Some(Keyword::Devour(n as u32))
+        Some(Keyword::Devour(n))
     } else {
         None
     }
