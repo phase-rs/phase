@@ -6,6 +6,9 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
+// Engine masking sentinel emitted at the client boundary for hidden card faces.
+export const HIDDEN_CARD_NAME = "Hidden Card";
+
 // ── Attachment Target ────────────────────────────────────────────────────
 // Mirrors `engine::game::game_object::AttachTarget`. Auras may attach to a
 // permanent (`Object`) or to a player (`Player`, e.g. Curse cycle); Equipment
@@ -325,7 +328,7 @@ export type CoreType =
   | "Dungeon";
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
-export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise";
+export type ConvokeMode = "Convoke" | "Waterbend" | "Improvise" | "Delve";
 export type RoomDoor = "Left" | "Right";
 
 /**
@@ -418,6 +421,7 @@ export type CastingVariant =
   | { type: "Escape" }
   | { type: "Retrace" }
   | { type: "Harmonize" }
+  | { type: "Mayhem" }
   | { type: "Flashback" }
   | { type: "Aftermath" }
   | {
@@ -442,7 +446,8 @@ export type CastingVariant =
   | { type: "Bestow" }
   | { type: "Awaken" }
   | { type: "Cleave" }
-  | { type: "MoreThanMeetsTheEye" };
+  | { type: "MoreThanMeetsTheEye" }
+  | { type: "Fuse" };
 
 export interface CastingVariantChoiceOption {
   variant: CastingVariant;
@@ -1040,7 +1045,8 @@ export type CastOfferKind =
   | { type: "Madness"; object_id: ObjectId; cost: ManaCost }
   | { type: "Paradigm"; offers: ObjectId[] }
   | { type: "Cascade"; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number }
-  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number };
+  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number }
+  | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
@@ -1100,10 +1106,11 @@ export type WaitingFor =
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
+  | { type: "SpliceOffer"; data: { player: PlayerId; pending_cast: PendingCast; eligible: ObjectId[] } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Mutate" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Dash" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Mutate" } | { type: "Blitz" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
@@ -1154,7 +1161,7 @@ export type WaitingFor =
   // to pay (or declines all). Drives Tergrid's Lantern and the broader
   // "unless they X or Y" punisher class.
   | { type: "UnlessPaymentChooseCost"; data: { player: PlayerId; costs: UnlessCost[]; pending_effect: unknown; trigger_event?: unknown; effect_description?: string } }
-  | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown } }
+  | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown; remaining: number; filter?: unknown } }
   | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
@@ -1202,6 +1209,9 @@ export type WaitingFor =
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ProliferateChoice"; data: { player: PlayerId; eligible: TargetRef[] } }
+  | { type: "TimeTravelChoice"; data: { player: PlayerId; eligible: TargetRef[]; phase: "Remove" | "Add" } }
+  | { type: "AssistChoosePlayer"; data: { player: PlayerId; candidates: PlayerId[]; max_generic: number; convoke_mode?: ConvokeMode } }
+  | { type: "AssistPayment"; data: { caster: PlayerId; chosen: PlayerId; max_generic: number; convoke_mode?: ConvokeMode } }
   | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; trigger_event?: GameEvent } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
@@ -1478,6 +1488,7 @@ export type GameAction =
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
   | { type: "SelectModes"; data: { indices: number[] } }
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
+  | { type: "RespondToSpliceOffer"; data: { card: ObjectId | null } }
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
   | { type: "ChooseAlternativeCast"; data: { choice: { type: "Normal" } | { type: "Alternative" } } }
@@ -1517,12 +1528,15 @@ export type GameAction =
   | { type: "CompanionToHand" }
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
+  | { type: "RippleChoice"; data: { choice: CastChoice } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   // CR 702.140c + CR 730.2a: answer to MutateMergeChoice — top or bottom.
   | { type: "ChooseMutateMergeSide"; data: { side: "Top" | "Bottom" } }
   // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
   | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
+  | { type: "ChooseAssistPlayer"; data: { player: PlayerId | null } }
+  | { type: "CommitAssistPayment"; data: { generic: number } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: Phase[] } }
@@ -1972,6 +1986,17 @@ export interface SubmitResult {
 }
 
 /** Bundles legal actions with the engine's auto-pass recommendation. */
+/**
+ * Engine-owned non-fatal diagnostic (an engine-level progress wedge, not a
+ * rules outcome): an owed decision has no legal action for any authorized
+ * submitter, i.e. a wedged game. Display-only — the frontend surfaces it as a
+ * toast so a hung game informs the user.
+ */
+export interface StuckDecisionDiagnostic {
+  waitingForKind: string;
+  stuckPlayers: number[];
+}
+
 export interface LegalActionsResult {
   actions: GameAction[];
   autoPassRecommended: boolean;
@@ -1984,6 +2009,8 @@ export interface LegalActionsResult {
    * availability from objects.
    */
   legalActionsByObject?: Record<string, GameAction[]>;
+  /** Engine progress-wedge diagnostic: present only when the current decision is wedged. */
+  stuckDiagnostic?: StuckDecisionDiagnostic;
 }
 
 /**
@@ -2000,6 +2027,14 @@ export interface ViewerSnapshot {
   autoPassRecommended: boolean;
   spellCosts?: Record<string, ManaCost>;
   legalActionsByObject?: Record<string, GameAction[]>;
+  /**
+   * Engine progress-wedge diagnostic, mirrored from `LegalActionsResult` for
+   * shape parity. Currently inert on this path: the store's `stuckDiagnostic`
+   * slice is fed exclusively via `legalResultState` (the `LegalActionsResult`
+   * path), and the P2P broadcast wire format (`LegalActionsWire`) does not
+   * carry this field, so the snapshot copy is a deliberate parity placeholder.
+   */
+  stuckDiagnostic?: StuckDecisionDiagnostic;
 }
 
 export interface BatchResolveResult {

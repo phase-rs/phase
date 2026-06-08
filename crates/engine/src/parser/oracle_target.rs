@@ -1279,37 +1279,93 @@ fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> 
     }
 }
 
-/// CR 201.2: Scan `name_text` (the lowercase text after "named ") for the
-/// first word boundary where a conjugated verb begins, indicating the card
-/// name has ended and a verb phrase follows. Returns the byte offset of the
-/// space preceding the verb, or `None` if no verb boundary is found.
+/// CR 201.2: Match a clause boundary that ends a card name in a board-filter
+/// "X named <CardName> …" phrase, scanned at word boundaries (most arms begin
+/// with a space; the comma arm begins with ","). A bare comma or " and " is NOT
+/// a terminator on its own — card names embed both ("Bruna, the Fading Light";
+/// "Gisa and Geralf") — so the name is never split on internal punctuation. The
+/// name ends only at a *clause-joining* connective: the controller suffix
+/// ("… you control"), a relative pronoun ("… that has flying"), the predicate
+/// verb that opens the enclosing relative clause ("… draws a card", "… loses 3
+/// life"), or a comma that introduces a *referential* clause about the named
+/// object ("…, it gains", "…, they draw"). The comma arm is pronoun-guarded:
+/// a legendary epithet after a comma is a noun phrase ("…, the Fading Light"),
+/// never a bare referential pronoun, so comma-bearing names stay whole while
+/// "Falkenrath Gorger, it gains" still terminates at "Falkenrath Gorger". This
+/// mirrors `oracle_effect::search::parse_name_terminator` (the search-zone
+/// analogue) but covers the board-filter predicate verbs rather than search
+/// follow-up actions.
 ///
-/// Delegates to `nom_primitives::scan_split_at_phrase` for word-boundary
-/// scanning with nom `tag()` combinators.
-fn find_verb_boundary_in_named(name_text: &str) -> Option<usize> {
-    // Conjugated 3rd-person verbs that commonly follow a card name in
-    // "each player who controls a permanent named X [verb]" patterns.
-    // Only verbs that do NOT appear in real MTG card names are included.
-    // Excluded: "gains" (Ill-Gotten Gains), "deals" (Orzhova, the Church
-    // of Deals), "gets" (Bird Gets the Worm), "has"/"is"/"are"/"enters"
-    // (too generic and appear in card names).
-    nom_primitives::scan_split_at_phrase(name_text, |i| {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("draws ")),
-            value((), tag("loses ")),
-            value((), tag("creates ")),
-            value((), tag("destroys ")),
-            value((), tag("discards ")),
-            value((), tag("exiles ")),
-            value((), tag("mills ")),
-            value((), tag("puts ")),
-            value((), tag("reveals ")),
-            value((), tag("sacrifices ")),
-            value((), tag("searches ")),
-        ))
-        .parse(i)
-    })
-    .map(|(prefix, _)| prefix.len().saturating_sub(1))
+/// The verb arms are third-person singular/plural present forms because the
+/// enclosing subject is a singular "permanent/creature named X" or the
+/// per-player iteration of "each player who controls a permanent named X"
+/// (issue #2016, Bonder's Ornament). They are kept as a single composable
+/// `alt()` over the predicate lead so the boundary covers the class, not one
+/// card.
+fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        // Controller-scope suffixes (CR 109.4). Longest-match-first.
+        value((), tag(" you don't control")),
+        value((), tag(" you control")),
+        value((), tag(" you own")),
+        value((), tag(" an opponent controls")),
+        value((), tag(" your opponents control")),
+        // Relative-pronoun clause leads (CR 201.2 descriptive clauses).
+        value((), tag(" that ")),
+        value((), tag(" with ")),
+        value((), tag(" without ")),
+        // Copular / state predicates opening a relative clause.
+        value((), tag(" is ")),
+        value((), tag(" are ")),
+        value((), tag(" has ")),
+        value((), tag(" have ")),
+        // Per-player / per-permanent action predicates (issue #2016 class:
+        // "… draws a card", "… loses N life", "… sacrifices a permanent").
+        // Excludes conjugated verbs that occur verbatim inside real card
+        // names — matching them would truncate the name: "gains" (Ill-Gotten
+        // Gains), "gets" (Bird Gets the Worm), "deals" (Orzhova, the Church of
+        // Deals). Plural/modal board-filter predicates ("get", "can't") are
+        // split upstream by the static parser before this terminator sees them.
+        value(
+            (),
+            (
+                tag(" "),
+                alt((
+                    tag("draws "),
+                    tag("loses "),
+                    tag("sacrifices "),
+                    tag("discards "),
+                    tag("creates "),
+                    tag("mills "),
+                    tag("destroys "),
+                    tag("exiles "),
+                    tag("puts "),
+                    tag("reveals "),
+                    tag("searches "),
+                )),
+            ),
+        ),
+        // CR 201.2: A comma that opens a referential clause about the named
+        // object ("Falkenrath Gorger, it gains"). Pronoun-guarded so a
+        // name-internal comma followed by an epithet noun phrase ("Bruna, the
+        // Fading Light") is preserved — legendary epithets never begin with a
+        // bare referential pronoun.
+        value(
+            (),
+            (
+                tag(", "),
+                alt((
+                    tag("it "),
+                    tag("they "),
+                    tag("he "),
+                    tag("she "),
+                    tag("you "),
+                    tag("its "),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
@@ -2078,6 +2134,14 @@ pub fn parse_type_phrase_with_ctx<'a>(
             .is_ok()
         {
             pos += choice_offset + suffix.len();
+            // CR 601.2c + CR 603.3d: a TARGETED "of their choice" whose target filter
+            // is controlled by the phase-trigger active player ("destroy target X that
+            // player controls of their choice") announces its target at stack placement —
+            // the chooser is that scoped player. Distinct from CR 608.2d resolution-time
+            // sacrifices (controller not ScopedPlayer → stays None).
+            if controller.as_ref() == Some(&ControllerRef::ScopedPlayer) {
+                ctx.target_chooser = Some(TargetFilter::ScopedPlayer);
+            }
             break;
         }
     }
@@ -2087,12 +2151,28 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let remaining_named = lower[pos..].trim_start();
     let named_offset = lower[pos..].len() - remaining_named.len();
     if let Ok((name_text, _)) = tag::<_, _, OracleError<'_>>("named ").parse(remaining_named) {
-        // Name extends to end-of-clause markers: comma, period, conjugated
-        // verb at a word boundary (CR 201.2), or end-of-input.
-        let punct_end = name_text.find([',', '.']).unwrap_or(name_text.len());
-        let name_end = find_verb_boundary_in_named(name_text)
-            .unwrap_or(punct_end)
-            .min(punct_end);
+        // CR 201.2: The card name runs to the earliest *clause* boundary, NOT to
+        // the first comma/period. Card names legitimately contain commas and the
+        // word "and" ("Bruna, the Fading Light"; "Gisa and Geralf"), so splitting
+        // on bare punctuation truncates them, while scanning to end-of-string
+        // over-consumes the trailing relative-clause predicate. Issue #2016:
+        // "each player who controls a permanent named Bonder's Ornament draws a
+        // card" produced `Named { name: "Bonder's Ornament draws a card" }` — the
+        // predicate verb was swallowed into the name, so the controls-predicate
+        // matched nobody and the whole "who controls …" scope was dropped, making
+        // *every* player draw. Scan word boundaries (spaces, and commas for the
+        // pronoun-guarded comma-clause arm) and stop at the first clause-joining
+        // terminator (see `parse_named_filter_terminator`), which preserves
+        // comma/and-bearing names while ending the name at the controller
+        // suffix, relative pronoun, predicate verb, or referential comma clause.
+        let name_end = name_text
+            .char_indices()
+            .filter(|&(_, c)| c == ' ' || c == ',')
+            .find(|&(idx, _)| parse_named_filter_terminator(&name_text[idx..]).is_ok())
+            .map_or_else(
+                || name_text.find(['.', ':', ';']).unwrap_or(name_text.len()),
+                |(idx, _)| idx,
+            );
         let raw_name = name_text[..name_end].trim();
         if !raw_name.is_empty() {
             // Reconstruct original-case name from the same position in `text`
@@ -2222,6 +2302,14 @@ fn classify_negation(negated: &str) -> NegationResult {
         .is_ok_and(|(rest, _)| rest.is_empty())
     {
         return NegationResult::Prop(FilterProp::NonToken);
+    }
+    // CR 700.6: "nonhistoric" / "not historic" — historic is a card property,
+    // not a subtype, so it must not fall through to `Non(Subtype("Historic"))`.
+    if tag::<_, _, OracleError<'_>>("historic")
+        .parse(negated)
+        .is_ok_and(|(rest, _)| rest.is_empty())
+    {
+        return NegationResult::Prop(FilterProp::NotHistoric);
     }
 
     match negated {
@@ -2485,6 +2573,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::Renowned
             // CR 700.6: "historic [type]" adjective prefix.
             | FilterProp::Historic
+            | FilterProp::NotHistoric
             // CR 303.4 + CR 301.5: "enchanted [type]" / "equipped [type]".
             | FilterProp::EnchantedBy
             | FilterProp::EquippedBy
@@ -2811,9 +2900,10 @@ fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
     Some((prop, text.len() - rest.len()))
 }
 
-/// CR 509.1h / CR 302.6: Parse status prefixes from type phrases.
+/// CR 509.1h / CR 302.6 / CR 701.60b: Parse status prefixes from type phrases.
 /// Called in a loop to consume multiple prefixes (e.g. "unblocked attacking ").
-/// Handles combat status (attacking, unblocked) and tap status (tapped, untapped).
+/// Handles combat status (attacking, unblocked), tap status (tapped, untapped),
+/// and designation status (suspected — CR 701.60b).
 ///
 /// Delegates to `nom_filter::parse_property_filter` for the common property keywords,
 /// then handles "face-down " (hyphenated variant not in the nom combinator).
@@ -2829,6 +2919,9 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::Tapped
                 | FilterProp::Untapped
                 | FilterProp::FaceDown
+                // CR 701.60b: "suspected" is a battlefield designation that appears
+                // as an adjective prefix in type phrases ("suspected creatures").
+                | FilterProp::Suspected
         ) {
             // Must be followed by space (prefix, not standalone)
             if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
@@ -3723,6 +3816,39 @@ fn parse_ownership_or_controller_suffix(
             return own_ctrl_offset + phrase.len();
         }
     }
+    // CR 108.3 + CR 109.4: anaphoric ownership suffix, composed as subject ×
+    // action so the whole class is one combinator rather than a per-phrase tag.
+    // Each subject `tag` maps directly to its owner scope:
+    //   "that player owns" → the player chosen as the enclosing ability's target
+    //     (Oblivion Sower: "target opponent exiles ... then you may put any
+    //     number of land cards that player owns from exile ..."), resolved at
+    //     runtime against the first `TargetRef::Player` in `ability.targets`, so
+    //     the pool is the cards the *target* player owns — not every card, and
+    //     not the controller's own;
+    //   "they own"        → the iterating player in each-player effects.
+    // Actions are matched longest-first ("own and control" before "owns" before
+    // "own"); the trailing "and control" maps to `true` and additionally pins
+    // the resolved player as the `*controller` of the filtered objects.
+    let subject = alt((
+        tag("that player").map(|_| ControllerRef::TargetPlayer),
+        tag("they").map(|_| ControllerRef::ScopedPlayer),
+    ));
+    let action = alt((
+        tag("own and control").map(|_| true),
+        tag("owns").map(|_| false),
+        tag("own").map(|_| false),
+    ));
+    let parsed: nom::IResult<&str, (ControllerRef, &str, bool), OracleError<'_>> =
+        (subject, space1, action).parse(own_ctrl);
+    if let Ok((rest, (owner, _, also_control))) = parsed {
+        properties.push(FilterProp::Owned {
+            controller: owner.clone(),
+        });
+        if also_control {
+            *controller = Some(owner);
+        }
+        return own_ctrl_offset + (own_ctrl.len() - rest.len());
+    }
 
     let (ctrl, ctrl_len) =
         parse_controller_suffix(text, ctx).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
@@ -4113,6 +4239,10 @@ pub(crate) fn parse_that_clause_suffix(
         return Some(parsed);
     }
 
+    if let Some(parsed) = parse_historic_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
+    }
+
     if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed, ctx) {
         let consumed = trimmed.len() - rest.len();
         return Some((vec![prop], leading_ws + consumed));
@@ -4249,6 +4379,28 @@ fn parse_color_relative_clause_suffix(
     Some((props, consumed))
 }
 
+fn parse_relative_clause_intro(trimmed: &str) -> Option<(&str, usize, bool)> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
+        Some((rest, "that aren't ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
+        Some((rest, "that isn't ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
+        Some((rest, "that's not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are not ").parse(trimmed) {
+        Some((rest, "that are not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
+        Some((rest, "that is not ".len(), true))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
+        Some((rest, "that's ".len(), false))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
+        Some((rest, "that is ".len(), false))
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
+        Some((rest, "that are ".len(), false))
+    } else {
+        None
+    }
+}
+
 /// CR 205.4a: "that's / that is / that are <supertype>" → `HasSupertype`;
 /// "that aren't / that isn't / that's not / that are not / that is not
 /// <supertype>" → `NotSupertype`. Supertypes are legendary/basic/snow
@@ -4263,27 +4415,7 @@ fn parse_supertype_relative_clause_suffix(
     trimmed: &str,
     leading_ws: usize,
 ) -> Option<(Vec<FilterProp>, usize)> {
-    let (after_intro, intro_len, negated) =
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
-            (rest, "that aren't ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
-            (rest, "that isn't ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
-            (rest, "that's not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are not ").parse(trimmed) {
-            (rest, "that are not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
-            (rest, "that is not ".len(), true)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
-            (rest, "that's ".len(), false)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
-            (rest, "that is ".len(), false)
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
-            (rest, "that are ".len(), false)
-        } else {
-            return None;
-        };
-
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
     let (rest, supertype) = nom_target::parse_supertype_word(after_intro).ok()?;
     // Word-boundary check: the supertype word must terminate so we don't
     // false-match e.g. "that's basically free" (basic + "ally free").
@@ -4300,6 +4432,33 @@ fn parse_supertype_relative_clause_suffix(
         FilterProp::NotSupertype { value: supertype }
     } else {
         FilterProp::HasSupertype { value: supertype }
+    };
+    Some((vec![prop], consumed))
+}
+
+/// CR 700.6: "that's historic" / "that's not historic" relative clauses on typed
+/// mass-filter subjects (Desynchronization: "nonland permanent that's not historic").
+fn parse_historic_relative_clause_suffix(
+    trimmed: &str,
+    leading_ws: usize,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("historic")
+        .parse(after_intro)
+        .ok()?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    let prop = if negated {
+        FilterProp::NotHistoric
+    } else {
+        FilterProp::Historic
     };
     Some((vec![prop], consumed))
 }
@@ -4811,6 +4970,22 @@ pub(crate) fn parse_zone_suffix(
     Some((props, ctrl, leading_ws + consumed))
 }
 
+/// CR 601.2a: The zones a spell can be cast from, excluding the named allowed
+/// zone. Used for "from anywhere other than <zone>" cast-origin predicates.
+pub(crate) fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
+    const CAST_CAPABLE_ZONES: [Zone; 5] = [
+        Zone::Hand,
+        Zone::Graveyard,
+        Zone::Library,
+        Zone::Exile,
+        Zone::Command,
+    ];
+    CAST_CAPABLE_ZONES
+        .into_iter()
+        .filter(|zone| *zone != allowed)
+        .collect()
+}
+
 fn parse_zone_suffix_nom(
     i: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>)> {
@@ -4953,6 +5128,50 @@ mod tests {
             TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
             _ => None,
         }
+    }
+
+    /// CR 201.2 (issue #2016): the "named <CardName>" suffix must terminate the
+    /// card name at the enclosing clause boundary instead of swallowing the
+    /// trailing predicate or controller suffix. Tests the boundary class, not a
+    /// single card: predicate verb, controller suffix, and relative pronoun all
+    /// terminate the name, while a comma-bearing legendary name is preserved.
+    #[test]
+    fn named_filter_terminates_at_clause_boundary() {
+        fn named_of(text: &str) -> (String, String) {
+            let mut ctx = ParseContext::default();
+            let (filter, rest) = parse_type_phrase_with_ctx(text, &mut ctx);
+            let name = typed_leg(&filter)
+                .and_then(|tf| {
+                    tf.properties.iter().find_map(|p| match p {
+                        FilterProp::Named { name } => Some(name.clone()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_else(|| panic!("expected a Named property in {filter:?}"));
+            (name, rest.to_string())
+        }
+
+        // Predicate verb terminates the name (Bonder's Ornament class).
+        let (name, rest) = named_of("a permanent named Bonder's Ornament draws a card");
+        assert_eq!(name, "Bonder's Ornament");
+        assert_eq!(rest, " draws a card");
+
+        // Controller suffix terminates the name.
+        let (name, _) = named_of("a creature named Storm Crow you control");
+        assert_eq!(name, "Storm Crow");
+
+        // Relative pronoun terminates the name.
+        let (name, _) = named_of("a creature named Storm Crow that has flying");
+        assert_eq!(name, "Storm Crow");
+
+        // A comma-bearing legendary name is preserved (no split on internal
+        // punctuation) when no clause boundary follows.
+        let (name, _) = named_of("a creature named Bruna, the Fading Light");
+        assert_eq!(name, "Bruna, the Fading Light");
+
+        // Period still ends the name.
+        let (name, _) = named_of("a creature named Storm Crow.");
+        assert_eq!(name, "Storm Crow");
     }
 
     fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
@@ -5405,6 +5624,23 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::Attacking])
+            )
+        );
+        assert_eq!(rest, "");
+    }
+
+    // CR 701.60b: "suspected" is a battlefield designation usable as a type-phrase
+    // prefix, parallel to "attacking"/"tapped". Covers Clandestine Meddler, Frantic
+    // Scapegoat, Deadly Complication, and the broader suspected-creature filter class.
+    #[test]
+    fn suspected_creatures_you_control() {
+        let (f, rest) = parse_type_phrase("suspected creatures you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Suspected])
             )
         );
         assert_eq!(rest, "");

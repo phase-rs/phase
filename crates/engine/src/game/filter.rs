@@ -18,11 +18,12 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CounterAddedRecord, DamageRecord, GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord,
+    AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
+    SpellCastRecord, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
-use crate::types::mana::ManaColor;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
 use crate::types::zones::Zone;
@@ -147,6 +148,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::Unblocked
         | FilterProp::Tapped
         | FilterProp::Untapped
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::WithKeyword { .. }
         | FilterProp::HasKeywordKind { .. }
         | FilterProp::WithoutKeyword { .. }
@@ -177,6 +179,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ToughnessGTPower
         | FilterProp::Modified
         | FilterProp::Historic
+        | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
@@ -336,6 +339,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::Unblocked
         | FilterProp::Tapped
         | FilterProp::Untapped
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::WithKeyword { .. }
         | FilterProp::HasKeywordKind { .. }
         | FilterProp::WithoutKeyword { .. }
@@ -366,6 +370,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ToughnessGTPower
         | FilterProp::Modified
         | FilterProp::Historic
+        | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
@@ -845,6 +850,49 @@ pub fn matches_target_filter_on_counter_added_record(
     obj.keywords = record.keywords.clone();
     obj.color = record.colors.clone();
     obj.counters = record.counters.clone();
+
+    filter_inner_for_object(
+        state,
+        &obj,
+        record.object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.recipient_id,
+        ControllerLookup::LiveOrLki,
+    )
+}
+
+/// CR 508.1a + CR 608.2c: Check whether an attacker declaration snapshot
+/// matches a target filter using declaration-time characteristics.
+pub fn matches_target_filter_on_attack_declaration_record(
+    state: &GameState,
+    record: &AttackDeclarationRecord,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let mut obj = GameObject::new(
+        record.object_id,
+        CardId(0),
+        record.lki.owner,
+        record.lki.name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = record.lki.controller;
+    obj.power = record.lki.power;
+    obj.toughness = record.lki.toughness;
+    obj.base_power = record.lki.base_power;
+    obj.base_toughness = record.lki.base_toughness;
+    obj.card_types.core_types = record.lki.card_types.clone();
+    obj.card_types.subtypes = record.lki.subtypes.clone();
+    obj.card_types.supertypes = record.lki.supertypes.clone();
+    obj.mana_cost = ManaCost::generic(record.lki.mana_value);
+    obj.keywords = record.lki.keywords.clone();
+    obj.color = record.lki.colors.clone();
+    obj.counters = record.lki.counters.clone();
+    obj.is_token = record.is_token;
+    obj.is_commander = record.is_commander;
 
     filter_inner_for_object(
         state,
@@ -1858,7 +1906,10 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
         subtypes: spell_obj.card_types.subtypes.clone(),
         keywords: spell_obj.keywords.clone(),
         colors: spell_obj.color.clone(),
-        mana_value: spell_obj.mana_cost.mana_value(),
+        // CR 202.3e: While on the stack, X equals the announced value, not 0.
+        mana_value: spell_obj
+            .mana_cost
+            .mana_value_with_x(spell_obj.zone, spell_obj.cost_x_paid),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
         cast_variant: crate::types::game_state::CastingVariant::Normal,
@@ -2072,6 +2123,32 @@ fn spell_object_matches_property(
             ctx.spell_object_id
                 .is_some_and(|spell_id| spell_id != ctx.source_id)
         }),
+        // CR 601.2f: Spell cost modifiers may require the spell share a quality
+        // (e.g., card type) with a reference object such as an imprinted card.
+        FilterProp::SharesQuality {
+            quality,
+            reference,
+            relation,
+        } => {
+            let Some(context) = context else {
+                return false;
+            };
+            let Some(spell_id) = context.spell_object_id else {
+                return false;
+            };
+            let Some(spell_obj) = context.state.objects.get(&spell_id) else {
+                return false;
+            };
+            let source = source_context_from_spell_filter(context);
+            evaluate_shares_quality(
+                context.state,
+                spell_obj,
+                quality,
+                reference,
+                relation,
+                &source,
+            )
+        }
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -2141,6 +2218,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
                 || record.core_types.contains(&CoreType::Artifact)
                 || record.subtypes.iter().any(|s| s == "Saga")
         }
+        FilterProp::NotHistoric => !spell_record_matches_property(record, &FilterProp::Historic),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
         }
@@ -2188,6 +2266,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Unblocked
         | FilterProp::Tapped
         | FilterProp::Untapped
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::Counters { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
@@ -2446,16 +2525,10 @@ fn matches_filter_prop(
     source: &SourceContext<'_>,
 ) -> bool {
     match prop {
-        // CR 111.1: Token identity of the live object.
-        FilterProp::Token => state
-            .objects
-            .get(&object_id)
-            .is_some_and(|obj| obj.is_token),
-        // CR 111.1: Nontoken identity of the live object.
-        FilterProp::NonToken => state
-            .objects
-            .get(&object_id)
-            .is_some_and(|obj| !obj.is_token),
+        // CR 111.1: Token identity of the matched object or event-time snapshot.
+        FilterProp::Token => obj.is_token,
+        // CR 111.1: Nontoken identity of the matched object or event-time snapshot.
+        FilterProp::NonToken => !obj.is_token,
         FilterProp::Attacking => state.combat.as_ref().is_some_and(|combat| {
             combat
                 .attackers
@@ -2493,6 +2566,12 @@ fn matches_filter_prop(
         FilterProp::Tapped => obj.tapped,
         // CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
         FilterProp::Untapped => !obj.tapped,
+        // CR 302.6 + CR 702.10b + CR 702.154a: Enlist may tap a creature only
+        // if it has haste or has been controlled continuously since turn began.
+        FilterProp::HasHasteOrControlledSinceTurnBegan => {
+            obj.card_types.core_types.contains(&CoreType::Creature)
+                && !combat::has_summoning_sickness(obj)
+        }
         FilterProp::WithKeyword { value } => obj.has_keyword(value),
         FilterProp::CanEnchant { target } => obj.keywords.iter().any(|keyword| {
             let Keyword::Enchant(enchant_filter) = keyword else {
@@ -2538,8 +2617,9 @@ fn matches_filter_prop(
         // CR 202.3: Mana value threshold comparisons. Dynamic thresholds
         // (`QuantityRef::Variable { "X" }`) resolve against the ability's
         // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
+        // CR 202.3e: For on-stack objects, X equals the announced value, not 0.
         FilterProp::Cmc { comparator, value } => {
-            let cmc = obj.mana_cost.mana_value() as i32;
+            let cmc = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid) as i32;
             comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
         }
         // CR 202.1: Compare exact printed mana cost, not mana value (CR 202.3).
@@ -2925,6 +3005,9 @@ fn matches_filter_prop(
                 || obj.card_types.core_types.contains(&CoreType::Artifact)
                 || obj.card_types.subtypes.iter().any(|s| s == "Saga")
         }
+        FilterProp::NotHistoric => {
+            !matches_filter_prop(&FilterProp::Historic, state, obj, object_id, source)
+        }
         // CR 510.1c: Match creatures whose toughness exceeds their power.
         FilterProp::ToughnessGTPower => {
             let power = obj.power.unwrap_or(0);
@@ -2951,30 +3034,7 @@ fn matches_filter_prop(
             quality,
             reference,
             relation,
-        } => {
-            let shares = reference.as_ref().is_none_or(|reference_filter| {
-                object_shares_quality_with_reference_filter(
-                    state,
-                    obj,
-                    quality,
-                    reference_filter,
-                    source,
-                )
-            });
-            match relation {
-                SharedQualityRelation::Shares => shares,
-                SharedQualityRelation::DoesNotShare => {
-                    !shares
-                        && (!matches!(quality, SharedQuality::Name)
-                            || !object_shared_quality_values(
-                                obj,
-                                quality,
-                                &state.all_creature_types,
-                            )
-                            .is_empty())
-                }
-            }
-        }
+        } => evaluate_shares_quality(state, obj, quality, reference, relation, source),
         // CR 120.6 + CR 120.9: "Was dealt damage this turn" is a historical fact,
         // not a query against current marked damage. CR 120.6 removes marked damage
         // when a permanent regenerates and during the cleanup step, so reading
@@ -3075,6 +3135,9 @@ fn zone_change_record_matches_property(
             record.supertypes.contains(&Supertype::Legendary)
                 || record.core_types.contains(&CoreType::Artifact)
                 || record.subtypes.iter().any(|s| s == "Saga")
+        }
+        FilterProp::NotHistoric => {
+            !zone_change_record_matches_property(&FilterProp::Historic, state, record, source)
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
@@ -3274,6 +3337,7 @@ fn zone_change_record_matches_property(
         }),
         FilterProp::Tapped
         | FilterProp::Untapped
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::AttackedThisTurn
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
@@ -3509,7 +3573,8 @@ fn object_shared_quality_values(
             name: &obj.name,
             power: obj.power,
             toughness: obj.toughness,
-            mana_value: obj.mana_cost.mana_value(),
+            // CR 202.3e: For on-stack objects, X equals the announced value, not 0.
+            mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
             core_types: &obj.card_types.core_types,
             subtypes: &obj.card_types.subtypes,
             colors: &obj.color,
@@ -3601,6 +3666,47 @@ fn parent_target_shared_quality_values(
                     lki_shared_quality_values(&snapshot.lki, quality, &state.all_creature_types)
                 })
         })
+}
+
+fn evaluate_shares_quality(
+    state: &GameState,
+    obj: &GameObject,
+    quality: &SharedQuality,
+    reference: &Option<Box<TargetFilter>>,
+    relation: &SharedQualityRelation,
+    source: &SourceContext<'_>,
+) -> bool {
+    let shares = reference.as_ref().is_none_or(|reference_filter| {
+        object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source)
+    });
+    match relation {
+        SharedQualityRelation::Shares => shares,
+        SharedQualityRelation::DoesNotShare => {
+            !shares
+                && (!matches!(quality, SharedQuality::Name)
+                    || !object_shared_quality_values(obj, quality, &state.all_creature_types)
+                        .is_empty())
+        }
+    }
+}
+
+fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceContext<'_> {
+    let source_obj = context.state.objects.get(&context.source_id);
+    SourceContext {
+        id: context.source_id,
+        controller: Some(context.source_controller),
+        attached_to: source_obj.and_then(|o| o.attached_to),
+        source_is_aura: source_obj
+            .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Aura")),
+        source_is_equipment: source_obj
+            .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Equipment")),
+        chosen_creature_type: source_obj.and_then(|o| o.chosen_creature_type()),
+        chosen_attributes: source_obj
+            .map(|o| o.chosen_attributes.as_slice())
+            .unwrap_or(&[]),
+        ability: None,
+        recipient_id: None,
+    }
 }
 
 fn object_shares_quality_with_reference_filter(
@@ -3912,7 +4018,7 @@ mod tests {
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
         Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
         PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
-        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -3985,6 +4091,41 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    #[test]
+    fn cmc_filter_treats_retained_x_as_zero_off_stack() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let x_creature = add_creature(&mut state, PlayerId(0), "Endless One");
+        {
+            let obj = state.objects.get_mut(&x_creature).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            };
+            // CR 107.3m: X paid survives stack -> battlefield for ETB
+            // replacement/trigger logic, but CR 202.3e still treats X as 0
+            // once the object is no longer on the stack.
+            obj.cost_x_paid = Some(4);
+        }
+
+        let mana_value_four_or_more =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }]));
+
+        assert!(
+            !matches_target_filter(&state, x_creature, &mana_value_four_or_more, source),
+            "battlefield X permanent retains cost_x_paid for ETB logic, but its mana value is 0"
+        );
+
+        state.objects.get_mut(&x_creature).unwrap().zone = Zone::Stack;
+        assert!(
+            matches_target_filter(&state, x_creature, &mana_value_four_or_more, source),
+            "the same X object on the stack must include the announced X value"
+        );
     }
 
     #[test]
@@ -4238,6 +4379,42 @@ mod tests {
             },
         ]));
         assert!(matches_target_filter(&state, bird, &filter, bird));
+    }
+
+    #[test]
+    fn has_haste_or_controlled_since_turn_began_matches_enlist_eligibility() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Enlister");
+        let established = add_creature(&mut state, PlayerId(0), "Established");
+        let sick = add_creature(&mut state, PlayerId(0), "Fresh");
+        let hasty = add_creature(&mut state, PlayerId(0), "Hasty");
+        let land = add_creature(&mut state, PlayerId(0), "Animated Land");
+
+        state.objects.get_mut(&sick).unwrap().summoning_sick = true;
+        {
+            let obj = state.objects.get_mut(&hasty).unwrap();
+            obj.summoning_sick = true;
+            obj.keywords.push(Keyword::Haste);
+        }
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::HasHasteOrControlledSinceTurnBegan]),
+        );
+
+        assert!(matches_target_filter(&state, established, &filter, source));
+        assert!(
+            !matches_target_filter(&state, sick, &filter, source),
+            "summoning-sick creature without haste is not eligible for Enlist"
+        );
+        assert!(
+            matches_target_filter(&state, hasty, &filter, source),
+            "haste satisfies CR 702.154a even when the creature entered this turn"
+        );
+        assert!(
+            !matches_target_filter(&state, land, &filter, source),
+            "predicate is creature-specific when used without an outer creature filter"
+        );
     }
 
     /// CR 120.6 + CR 120.9 (audit H2): "Was dealt damage this turn" must consult

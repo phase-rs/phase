@@ -5,7 +5,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
+    AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, QuantityExpr, QuantityRef,
+    TargetFilter,
 };
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
@@ -508,6 +509,11 @@ pub enum TriggerCause {
     /// to `Graveyard` for an object whose snapshot included `Creature` in
     /// its core types.
     CreatureDying,
+    /// CR 603.2d + CR 120.3: Trigger was caused by a creature you control
+    /// being dealt damage (Wayta, Trainer Prodigy-class). Matches
+    /// `GameEvent::DamageDealt` whose target is a creature controlled by the
+    /// doubler's controller.
+    ControlledCreatureDealtDamage,
 }
 
 impl fmt::Display for TriggerCause {
@@ -520,6 +526,9 @@ impl fmt::Display for TriggerCause {
             }
             TriggerCause::CreatureAttacking => write!(f, "CreatureAttacking"),
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
+            TriggerCause::ControlledCreatureDealtDamage => {
+                write!(f, "ControlledCreatureDealtDamage")
+            }
         }
     }
 }
@@ -552,6 +561,25 @@ pub enum CostModifyMode {
     /// Floor — cost cannot fall below `amount` after all Reduce/Raise settle.
     /// CR 601.2f last-step floor. Trinisphere class.
     Minimum,
+}
+
+/// CR 702.122c: How a creature's contributed power is modified when it crews a
+/// Vehicle, saddles a Mount, or stations a permanent. See [`StaticMode::CrewContribution`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrewContributionKind {
+    /// "as though its power were N greater" — contribute `power + delta`.
+    PowerDelta { delta: i32 },
+    /// "using its toughness rather than its power" — contribute `toughness`.
+    ToughnessInsteadOfPower,
+}
+
+/// The keyword action being performed. `StaticMode::CrewContribution` stores the
+/// exact named actions it modifies. CR 702.122 / 702.171 / 702.184.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrewAction {
+    Crew,
+    Saddle,
+    Station,
 }
 
 /// All static ability modes from Forge's static ability registry.
@@ -647,16 +675,19 @@ pub enum StaticMode {
         keyword: Keyword,
     },
     /// CR 118.9 + CR 601.2f: A permanent grants its controller a wholesale
-    /// alternative MANA cost for spells matching `StaticDefinition::affected`
-    /// that the controller casts — they may pay `cost` rather than the spell's
-    /// mana cost. Parallel to `CastWithKeyword`. Distinct from
-    /// `ModifyCost { mode: Reduce, .. }` (subtractive, CR 601.2f) — this REPLACES
-    /// the mana cost wholesale
-    /// (CR 118.9) and is mutually exclusive with other alternative costs
-    /// (CR 118.9a). Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
-    /// ({WUBRG}, any spell), Jodah (MV 5+).
+    /// alternative cost for spells matching `StaticDefinition::affected` that
+    /// the controller casts — they may pay `cost` rather than the spell's mana
+    /// cost. Parallel to `CastWithKeyword`. Distinct from
+    /// `ModifyCost { mode: Reduce, .. }` (subtractive, CR 601.2f) — this
+    /// REPLACES the mana cost wholesale (CR 118.9) and is mutually exclusive
+    /// with other alternative costs (CR 118.9a). Rooftop Storm ({0}, Zombie
+    /// creature spells), Fist of Suns ({WUBRG}, any spell), Jodah (MV 5+),
+    /// Primal Prayers ({E}, creature MV ≤ 3, with an alternative-cost timing
+    /// permission).
     CastWithAlternativeCost {
-        cost: ManaCost,
+        cost: AbilityCost,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timing_permission: Option<CastTimingPermission>,
     },
     /// CR 601.2f: Modifies the mana cost of spells matching `spell_filter`
     /// (or all spells when `None`) by `amount`, in the direction described by `mode`.
@@ -1090,6 +1121,15 @@ pub enum StaticMode {
     CantBlockAlone,
     /// CR 702.122c: This creature can't crew Vehicles.
     CantCrew,
+    /// CR 702.122c / CR 702.171a / CR 702.184a: This creature contributes to a
+    /// crew/saddle/station cost as though its power were modified (Reckoner
+    /// Bankbuster: "as though its power were 2 greater") or using its toughness
+    /// instead of its power (Giant Ox). `actions` records which keyword actions
+    /// the modifier applies to, since a card may name only some of them.
+    CrewContribution {
+        kind: CrewContributionKind,
+        actions: Vec<CrewAction>,
+    },
     MayLookAtTopOfLibrary,
 
     // -- Tier 3: Parser-produced statics --
@@ -1273,6 +1313,10 @@ impl Hash for StaticMode {
             StaticMode::ActivateAsInstant { cost_category } => {
                 cost_category.hash(state);
             }
+            StaticMode::CrewContribution { kind, actions } => {
+                kind.hash(state);
+                actions.hash(state);
+            }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
             StaticMode::MustAttackPlayer { player } => player.hash(state),
@@ -1354,6 +1398,112 @@ impl Hash for StaticMode {
     }
 }
 
+impl StaticMode {
+    /// Map bare keyword static modes onto their corresponding keyword identity.
+    pub fn as_keyword(&self) -> Option<Keyword> {
+        match self {
+            StaticMode::Indestructible => Some(Keyword::Indestructible),
+            StaticMode::Shroud => Some(Keyword::Shroud),
+            StaticMode::Hexproof => Some(Keyword::Hexproof),
+            StaticMode::Flying => Some(Keyword::Flying),
+            StaticMode::Vigilance => Some(Keyword::Vigilance),
+            StaticMode::Menace => Some(Keyword::Menace),
+            StaticMode::Reach => Some(Keyword::Reach),
+            StaticMode::Trample => Some(Keyword::Trample),
+            StaticMode::Deathtouch => Some(Keyword::Deathtouch),
+            StaticMode::Lifelink => Some(Keyword::Lifelink),
+            StaticMode::Continuous
+            | StaticMode::CantAttack
+            | StaticMode::CantBlock
+            | StaticMode::CantAttackOrBlock
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
+            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeCast { .. }
+            | StaticMode::CantBeActivated { .. }
+            | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::CantCauseSacrificeOrExile { .. }
+            | StaticMode::CastWithFlash
+            | StaticMode::GrantsExtraVote
+            | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CastWithAlternativeCost { .. }
+            | StaticMode::ModifyCost { .. }
+            | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::ModifyActivationLimit { .. }
+            | StaticMode::ActivateAsInstant { .. }
+            | StaticMode::CantPayCost { .. }
+            | StaticMode::CantGainLife
+            | StaticMode::CantLoseLife
+            | StaticMode::PlayerProtection(_)
+            | StaticMode::MustAttack
+            | StaticMode::MustAttackPlayer { .. }
+            | StaticMode::MustBlock
+            | StaticMode::MustBlockAttacker { .. }
+            | StaticMode::CantDraw { .. }
+            | StaticMode::DoubleTriggers { .. }
+            | StaticMode::IgnoreHexproof
+            | StaticMode::ExtraBlockers { .. }
+            | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::GraveyardCastPermission { .. }
+            | StaticMode::TopOfLibraryCastPermission { .. }
+            | StaticMode::CastFromHandFree { .. }
+            | StaticMode::ExileCastPermission { .. }
+            | StaticMode::CantBeCountered
+            | StaticMode::CantBeCopied
+            | StaticMode::CantEnterBattlefieldFrom
+            | StaticMode::CantCastFrom { .. }
+            | StaticMode::CantCastDuring { .. }
+            | StaticMode::CantActivateDuring { .. }
+            | StaticMode::PerTurnCastLimit { .. }
+            | StaticMode::PerTurnDrawLimit { .. }
+            | StaticMode::SuppressTriggers { .. }
+            | StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedExceptBy { .. }
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedByMoreThan { .. }
+            | StaticMode::AttachmentRestriction { .. }
+            | StaticMode::Protection
+            | StaticMode::CantBeDestroyed
+            | StaticMode::CantBeRegenerated
+            | StaticMode::FlashBack
+            | StaticMode::CantTap
+            | StaticMode::CantUntap
+            | StaticMode::MustBeBlocked
+            | StaticMode::MustBeBlockedByAll
+            | StaticMode::Goaded
+            | StaticMode::CantAttackAlone
+            | StaticMode::CantBlockAlone
+            | StaticMode::CantCrew
+            | StaticMode::CrewContribution { .. }
+            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayChooseNotToUntap
+            | StaticMode::AdditionalLandDrop { .. }
+            | StaticMode::EmblemStatic
+            | StaticMode::BlockRestriction
+            | StaticMode::NoMaximumHandSize
+            | StaticMode::MaximumHandSize { .. }
+            | StaticMode::MayPlayAdditionalLand
+            | StaticMode::CantHaveKeyword { .. }
+            | StaticMode::CantWinTheGame
+            | StaticMode::CantLoseTheGame
+            | StaticMode::LegendRuleDoesntApply
+            | StaticMode::SpeedCanIncreaseBeyondFour
+            | StaticMode::DefilerCostReduction { .. }
+            | StaticMode::SkipStep { .. }
+            | StaticMode::SpendManaAsAnyColor
+            | StaticMode::PayLifeAsColoredMana { .. }
+            | StaticMode::StepEndUnspentMana { .. }
+            | StaticMode::CanAttackWithDefender
+            | StaticMode::IgnoreLandwalkForBlocking { .. }
+            | StaticMode::CanActivateAbilitiesAsThoughHaste
+            | StaticMode::AssignNoCombatDamage
+            | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::Other(_) => None,
+        }
+    }
+}
+
 impl fmt::Display for StaticMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1383,7 +1533,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
             }
-            StaticMode::CastWithAlternativeCost { cost } => {
+            StaticMode::CastWithAlternativeCost { cost, .. } => {
                 write!(f, "CastWithAlternativeCost({cost:?})")
             }
             StaticMode::ModifyCost { mode, .. } => match mode {
@@ -1558,6 +1708,10 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
             StaticMode::CantCrew => write!(f, "CantCrew"),
+            // Debug format, one-way (mirrors CantBeBlockedBy). No from_str reconstruction.
+            StaticMode::CrewContribution { kind, actions } => {
+                write!(f, "CrewContribution({kind:?},{actions:?})")
+            }
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),
@@ -2277,6 +2431,27 @@ mod tests {
     }
 
     #[test]
+    fn static_mode_as_keyword_maps_bare_keyword_modes() {
+        let cases = [
+            (StaticMode::Indestructible, Keyword::Indestructible),
+            (StaticMode::Shroud, Keyword::Shroud),
+            (StaticMode::Hexproof, Keyword::Hexproof),
+            (StaticMode::Flying, Keyword::Flying),
+            (StaticMode::Vigilance, Keyword::Vigilance),
+            (StaticMode::Menace, Keyword::Menace),
+            (StaticMode::Reach, Keyword::Reach),
+            (StaticMode::Trample, Keyword::Trample),
+            (StaticMode::Deathtouch, Keyword::Deathtouch),
+            (StaticMode::Lifelink, Keyword::Lifelink),
+        ];
+        for (mode, keyword) in cases {
+            assert_eq!(mode.as_keyword(), Some(keyword));
+        }
+        assert_eq!(StaticMode::Protection.as_keyword(), None);
+        assert_eq!(StaticMode::CantBeBlocked.as_keyword(), None);
+    }
+
+    #[test]
     fn parse_unknown_static_mode() {
         assert_eq!(
             StaticMode::from_str("FakeMode").unwrap(),
@@ -2435,19 +2610,25 @@ mod tests {
             StaticMode::GrantsExtraVote,
             // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
             StaticMode::CastWithAlternativeCost {
-                cost: ManaCost::zero(),
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                },
+                timing_permission: None,
             },
             StaticMode::CastWithAlternativeCost {
-                cost: ManaCost::Cost {
-                    shards: vec![
-                        super::super::mana::ManaCostShard::White,
-                        super::super::mana::ManaCostShard::Blue,
-                        super::super::mana::ManaCostShard::Black,
-                        super::super::mana::ManaCostShard::Red,
-                        super::super::mana::ManaCostShard::Green,
-                    ],
-                    generic: 0,
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![
+                            super::super::mana::ManaCostShard::White,
+                            super::super::mana::ManaCostShard::Blue,
+                            super::super::mana::ManaCostShard::Black,
+                            super::super::mana::ManaCostShard::Red,
+                            super::super::mana::ManaCostShard::Green,
+                        ],
+                        generic: 0,
+                    },
                 },
+                timing_permission: None,
             },
             StaticMode::Other("Custom".to_string()),
         ];

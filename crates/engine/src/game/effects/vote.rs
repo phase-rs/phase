@@ -233,6 +233,7 @@ pub fn resolve_tally(
             controller,
             original_controller: None,
             scoped_player: None,
+            target_chooser: None,
             kind: per_choice_effect[idx].kind,
             sub_ability: per_choice_effect[idx]
                 .sub_ability
@@ -298,6 +299,7 @@ fn resolved_from_def(
         controller,
         original_controller: None,
         scoped_player: None,
+        target_chooser: None,
         kind: def.kind,
         sub_ability: def
             .sub_ability
@@ -448,6 +450,7 @@ mod tests {
             controller,
             original_controller: None,
             scoped_player: None,
+            target_chooser: None,
             kind: AbilityKind::Spell,
             sub_ability: None,
             else_ability: None,
@@ -539,6 +542,7 @@ mod tests {
             controller,
             original_controller: None,
             scoped_player: None,
+            target_chooser: None,
             kind: AbilityKind::Spell,
             sub_ability: None,
             else_ability: None,
@@ -831,6 +835,7 @@ mod tests {
             controller,
             original_controller: None,
             scoped_player: None,
+            target_chooser: None,
             kind: AbilityKind::Spell,
             sub_ability: None,
             else_ability: None,
@@ -979,6 +984,7 @@ mod tests {
             controller,
             original_controller: None,
             scoped_player: None,
+            target_chooser: None,
             kind: AbilityKind::Spell,
             sub_ability: None,
             else_ability: None,

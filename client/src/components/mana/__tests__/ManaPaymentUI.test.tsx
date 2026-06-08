@@ -147,9 +147,12 @@ describe("ManaPaymentUI", () => {
       });
     });
 
-    render(<ManaPaymentUI />);
+    const { container } = render(<ManaPaymentUI />);
 
     expect(screen.getByText("Tap creatures to help pay.")).toBeInTheDocument();
+    const outerShell = container.querySelector(".pointer-events-none.fixed");
+    expect(outerShell).not.toBeNull();
+    expect(outerShell?.querySelector(".pointer-events-auto")).not.toBeNull();
   });
 
   // CR 107.4f + CR 601.2f: When the engine reports PhyrexianPayment, clicking Pay

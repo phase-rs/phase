@@ -236,7 +236,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     vi.useRealTimers();
   });
 
-  it("rejects construction with playerCount outside 2-4", () => {
+  it("rejects construction with playerCount outside 2-6", () => {
     const { peer, onGuestConnected } = createFakePeer();
     const hostDeck = {
       player: { main_deck: [], sideboard: [] },
@@ -245,10 +245,10 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     };
     expect(
       () => new P2PHostAdapter(hostDeck, peer as unknown as Peer, onGuestConnected, 1),
-    ).toThrow("P2P supports 2-4 players");
+    ).toThrow("P2P supports 2-6 players");
     expect(
-      () => new P2PHostAdapter(hostDeck, peer as unknown as Peer, onGuestConnected, 5),
-    ).toThrow("P2P supports 2-4 players");
+      () => new P2PHostAdapter(hostDeck, peer as unknown as Peer, onGuestConnected, 7),
+    ).toThrow("P2P supports 2-6 players");
   });
 
   it("enables multiplayer-mode enforcement on the engine at init time", async () => {

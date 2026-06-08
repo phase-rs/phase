@@ -65,6 +65,18 @@ pub enum EvokeCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.30a: Echo cost — either a mana cost (Urza-block / errata cards, e.g.
+/// Orcish Hellraiser "Echo {R}") or a non-mana cost ("Echo—Discard a card" on
+/// Rakdos Headliner, Deepcavern Imp). Mirrors `EvokeCost`/`BuybackCost`/
+/// `CyclingCost`/`FlashbackCost` so non-mana costs compose through the existing
+/// `AbilityCost` unless-pay pipeline in `build_echo_trigger`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EchoCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -113,6 +125,7 @@ pub enum KeywordKind {
     Graft,
     Annihilator,
     Bushido,
+    Frenzy,
     Tribute,
     Soulbond,
     Unearth,
@@ -171,6 +184,7 @@ pub enum KeywordKind {
     Dash,
     Craft,
     Harmonize,
+    Mayhem,
     Warp,
     Devour,
     Offspring,
@@ -188,6 +202,8 @@ pub enum KeywordKind {
     JumpStart,
     Cipher,
     Transmute,
+    /// CR 702.71: Transfigure — see `Keyword::Transfigure`.
+    Transfigure,
     Cleave,
     Undaunted,
     Station,
@@ -218,6 +234,8 @@ pub enum KeywordKind {
     Escalate,
     /// CR 702.59: Recover — see `Keyword::Recover`.
     Recover,
+    /// CR 702.102: Fuse — see `Keyword::Fuse`.
+    Fuse,
     Unknown,
 }
 
@@ -460,6 +478,8 @@ pub enum Keyword {
     Fabricate(u32),
     Annihilator(u32),
     Bushido(u32),
+    /// CR 702.68a: Frenzy N — "Whenever this creature attacks and isn't blocked, it gets +N/+0 until end of turn." CR 702.68b: each instance triggers separately.
+    Frenzy(u32),
     Tribute(u32),
     Soulbond,
     Unearth(ManaCost),
@@ -551,6 +571,8 @@ pub enum Keyword {
     /// `CastingVariant::Miracle` with the miracle mana cost.
     Miracle(ManaCost),
     Dash(ManaCost),
+    /// CR 702.119a-c: Emerge is an alternative cost paid by sacrificing a
+    /// creature and reducing the emerge cost by that creature's mana value.
     Emerge(ManaCost),
     /// CR 702.138: Escape — cast from graveyard for an alternative cost,
     /// exiling N other cards from your graveyard as an additional cost.
@@ -561,6 +583,11 @@ pub enum Keyword {
     /// CR 702.180: Harmonize {cost} — cast from graveyard for harmonize cost,
     /// tap up to one creature to reduce cost by its power, exile on resolution.
     Harmonize(ManaCost),
+    /// CR 702.187b: Mayhem {cost} — "As long as you discarded this card this
+    /// turn, you may cast it from your graveyard by paying [cost] rather than
+    /// paying its mana cost." Unlike Flashback/Harmonize, the spell is NOT
+    /// exiled on resolution — it resolves normally (like Escape).
+    Mayhem(ManaCost),
     /// CR 702.74a + CR 118.9: see `EvokeCost` for the mana / non-mana split.
     /// Pure-mana evoke (Lorwyn cycle) is `EvokeCost::Mana`; MH2 Incarnations
     /// (Solitude et al.) carry `EvokeCost::NonMana(AbilityCost::Exile { .. })`.
@@ -580,7 +607,11 @@ pub enum Keyword {
     /// CR 702.153a: Casualty N — as an additional cost, you may sacrifice a creature
     /// with power N or greater. When you do, copy this spell.
     Casualty(u32),
-    Echo(ManaCost),
+    /// CR 702.30a: see `EchoCost` for the mana / non-mana split. Urza-block /
+    /// errata cards (e.g. Orcish Hellraiser "Echo {R}") use `EchoCost::Mana`;
+    /// "Echo—Discard a card" cards (Rakdos Headliner, Deepcavern Imp) carry
+    /// `EchoCost::NonMana(AbilityCost::Discard { .. })`.
+    Echo(EchoCost),
     /// CR 702.42a: Entwine — pay additional cost to choose all modes of a modal spell.
     Entwine(ManaCost),
     Outlast(ManaCost),
@@ -658,7 +689,9 @@ pub enum Keyword {
     Provoke,
     Rebound,
     Retrace,
-    Ripple,
+    /// CR 702.60a: Ripple N — when you cast this spell, reveal the top N cards and
+    /// cast same-named cards for free. `u32` is N.
+    Ripple(u32),
     SplitSecond,
     Storm,
     /// CR 702.62a: Suspend N—{cost} — exile from hand with N time counters,
@@ -739,9 +772,13 @@ pub enum Keyword {
     /// Firebending N — produces N {R} when this creature attacks (Avatar crossover).
     Firebending(QuantityExpr),
 
-    /// CR 702.46a: Splice onto [type] — reveal from hand and pay splice cost while casting
-    /// a spell of the specified type to add this card's effects to that spell.
-    Splice(String),
+    /// CR 702.47a: Splice onto [type] [cost] — reveal this card from hand and pay
+    /// its splice cost as you cast a spell of the specified type to copy this
+    /// card's text box onto that spell.
+    Splice {
+        subtype: String,
+        cost: ManaCost,
+    },
     /// CR 702.166a: Bargain — you may sacrifice an artifact, enchantment, or token
     /// as an additional cost to cast this spell.
     Bargain,
@@ -775,9 +812,16 @@ pub enum Keyword {
     /// CR 702.99a: Cipher — exile this spell encoded on a creature you control;
     /// whenever that creature deals combat damage to a player, cast a copy.
     Cipher,
-    /// CR 702.52a: Transmute {cost} — discard this card and pay {cost} to search
-    /// your library for a card with the same mana value.
+    /// CR 702.53a: Transmute {cost} — "[Cost], Discard this card: Search your
+    /// library for a card with the same mana value as the discarded card, reveal
+    /// it, put it into your hand, then shuffle. Activate only as a sorcery."
+    /// Runtime: `synthesize_transmute` (database/synthesis.rs).
     Transmute(ManaCost),
+    /// CR 702.71a: Transfigure {cost} — "[Cost], Sacrifice this permanent: Search
+    /// your library for a creature card with the same mana value as this permanent
+    /// and put it onto the battlefield. Then shuffle your library. Activate only as
+    /// a sorcery." Runtime: `synthesize_transfigure` (database/synthesis.rs).
+    Transfigure(ManaCost),
     /// CR 702.120a: Escalate [cost] — additional cost for each mode chosen beyond the first
     /// on a modal spell.
     Escalate(AbilityCost),
@@ -959,6 +1003,7 @@ impl Keyword {
             Keyword::Fabricate(_) => KeywordKind::Fabricate,
             Keyword::Annihilator(_) => KeywordKind::Annihilator,
             Keyword::Bushido(_) => KeywordKind::Bushido,
+            Keyword::Frenzy(_) => KeywordKind::Frenzy,
             Keyword::Tribute(_) => KeywordKind::Tribute,
             Keyword::Soulbond => KeywordKind::Soulbond,
             Keyword::Unearth(_) => KeywordKind::Unearth,
@@ -1017,10 +1062,11 @@ impl Keyword {
             Keyword::Dash(_) => KeywordKind::Dash,
             Keyword::Craft { .. } => KeywordKind::Craft,
             Keyword::Harmonize(_) => KeywordKind::Harmonize,
+            Keyword::Mayhem(_) => KeywordKind::Mayhem,
             Keyword::Warp(_) => KeywordKind::Warp,
             Keyword::Devour(_) => KeywordKind::Devour,
             Keyword::Offspring(_) => KeywordKind::Offspring,
-            Keyword::Splice(_) => KeywordKind::Splice,
+            Keyword::Splice { .. } => KeywordKind::Splice,
             Keyword::Bargain => KeywordKind::Bargain,
             Keyword::Sunburst => KeywordKind::Sunburst,
             Keyword::Champion(_) => KeywordKind::Champion,
@@ -1031,6 +1077,7 @@ impl Keyword {
             Keyword::JumpStart => KeywordKind::JumpStart,
             Keyword::Cipher => KeywordKind::Cipher,
             Keyword::Transmute(_) => KeywordKind::Transmute,
+            Keyword::Transfigure(_) => KeywordKind::Transfigure,
             Keyword::Cleave(_) => KeywordKind::Cleave,
             Keyword::Undaunted => KeywordKind::Undaunted,
             Keyword::Station => KeywordKind::Station,
@@ -1046,6 +1093,9 @@ impl Keyword {
             Keyword::Offering(_) => KeywordKind::Offering,
             Keyword::Escalate(_) => KeywordKind::Escalate,
             Keyword::Recover(_) => KeywordKind::Recover,
+            // CR 702.102: Fuse — the runtime cast layer reads this kind to offer
+            // the fuse casting variant for split cards in hand.
+            Keyword::Fuse => KeywordKind::Fuse,
             Keyword::Unknown(_) => KeywordKind::Unknown,
             // Variants whose KeywordKind axis is currently the catch-all `Unknown`
             // because the AI/coverage layer that consumes `KeywordKind` does not
@@ -1078,7 +1128,6 @@ impl Keyword {
             | Keyword::Epic
             | Keyword::Evoke(_)
             | Keyword::Fortify(_)
-            | Keyword::Fuse
             | Keyword::Gravestorm
             | Keyword::Haunt
             | Keyword::Hideaway(_)
@@ -1102,7 +1151,7 @@ impl Keyword {
             | Keyword::ReadAhead
             | Keyword::Rebound
             | Keyword::Reinforce { .. }
-            | Keyword::Ripple
+            | Keyword::Ripple(_)
             | Keyword::Saddle(_)
             | Keyword::Scavenge(_)
             | Keyword::Soulshift(_)
@@ -1275,6 +1324,31 @@ fn parse_keyword_mana_cost(s: &str) -> ManaCost {
 
 /// CR 702.41a: Parse the text from "Affinity for [text]" into the permanents
 /// counted for the cost reduction.
+/// CR 205.2: Map a single (possibly plural) card-type word to its `TypeFilter`.
+/// Used by `parse_affinity_type` to recognize "affinity for planeswalkers" /
+/// "affinity for artifact creatures" as card types rather than subtypes. Returns
+/// `None` for any word that is not a card type (e.g. a creature subtype), so a
+/// multi-word phrase only becomes a type conjunction when every word is a type.
+fn affinity_card_type_word(word: &str) -> Option<super::ability::TypeFilter> {
+    use super::ability::TypeFilter;
+    // Singularize: "sorceries" → "sorcery"; otherwise strip a trailing plural 's'.
+    let singular = word
+        .strip_suffix("ies")
+        .map(|stem| format!("{stem}y"))
+        .unwrap_or_else(|| word.strip_suffix('s').unwrap_or(word).to_string());
+    Some(match singular.as_str() {
+        "artifact" => TypeFilter::Artifact,
+        "creature" => TypeFilter::Creature,
+        "land" => TypeFilter::Land,
+        "enchantment" => TypeFilter::Enchantment,
+        "planeswalker" => TypeFilter::Planeswalker,
+        "instant" => TypeFilter::Instant,
+        "sorcery" => TypeFilter::Sorcery,
+        "battle" => TypeFilter::Battle,
+        _ => return None,
+    })
+}
+
 fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
     use super::ability::TypeFilter;
     // MTGJSON provides "Affinity for artifacts" — FromStr splits on first ':' giving
@@ -1291,11 +1365,30 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
             Some(TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()))
         }
         _ => {
-            // CR 702.41a + CR 205.3: "Affinity for [text]" counts permanents
-            // matching the text. Unknown names are subtypes, but not always
-            // land subtypes ("Daleks", "Cats", "Birds"). Keep this as a bare
-            // subtype constraint so it covers land, artifact, enchantment, and
-            // creature subtype affinity without adding a false type conjunct.
+            // CR 205.2 + CR 702.41a: "Affinity for <card type(s)>" — a card type
+            // ("planeswalkers", Tomik, Wielder of Law) or a type combination
+            // ("artifact creatures", Urza, Chief Artificer). Tokenize and map each
+            // singularized word to a card type; if EVERY word is a card type, build
+            // a conjunctive type filter (CR 205: all type constraints must match),
+            // not a bogus multi-word subtype. Otherwise fall through to subtype.
+            if let Some(types) = lower
+                .split_whitespace()
+                .map(affinity_card_type_word)
+                .collect::<Option<Vec<TypeFilter>>>()
+            {
+                if let Some((first, rest)) = types.split_first() {
+                    let mut filter = TypedFilter::new(first.clone());
+                    for ty in rest {
+                        filter = filter.with_type(ty.clone());
+                    }
+                    return Some(filter);
+                }
+            }
+            // CR 702.41a + CR 205.3: otherwise the text is a subtype. Unknown names
+            // are subtypes, but not always land subtypes ("Daleks", "Cats",
+            // "Birds"). Keep this as a bare subtype constraint so it covers land,
+            // artifact, enchantment, and creature subtype affinity without adding a
+            // false type conjunct.
             let capitalized = format!("{}{}", &s[..1].to_uppercase(), &s[1..]);
             // Strip trailing 's' for plural subtype words (e.g., "Daleks" →
             // "Dalek", "Islands" → "Island"; "Plains" stays "Plains").
@@ -1580,6 +1673,7 @@ impl FromStr for Keyword {
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
                 "rampage" => return Ok(Keyword::Rampage(p.parse().unwrap_or(1))),
                 "bushido" => return Ok(Keyword::Bushido(p.parse().unwrap_or(1))),
+                "frenzy" => return Ok(Keyword::Frenzy(p.parse().unwrap_or(1))),
                 "absorb" => return Ok(Keyword::Absorb(p.parse().unwrap_or(1))),
                 "fading" => return Ok(Keyword::Fading(p.parse().unwrap_or(0))),
                 "vanishing" => return Ok(Keyword::Vanishing(p.parse().unwrap_or(0))),
@@ -1615,6 +1709,9 @@ impl FromStr for Keyword {
                 "dash" => return Ok(Keyword::Dash(parse_keyword_mana_cost(p))),
                 "emerge" => return Ok(Keyword::Emerge(parse_keyword_mana_cost(p))),
                 "harmonize" => return Ok(Keyword::Harmonize(parse_keyword_mana_cost(p))),
+                // CR 702.187b: Mayhem {cost} — cast from graveyard if discarded
+                // this turn for the mayhem (mana) cost.
+                "mayhem" => return Ok(Keyword::Mayhem(parse_keyword_mana_cost(p))),
                 "escape" => {
                     return Ok(Keyword::Escape {
                         cost: parse_keyword_mana_cost(p),
@@ -1650,7 +1747,7 @@ impl FromStr for Keyword {
                     }
                     // Fall through to Unknown for unrecognized affinity types
                 }
-                "echo" => return Ok(Keyword::Echo(parse_keyword_mana_cost(p))),
+                "echo" => return Ok(Keyword::Echo(EchoCost::Mana(parse_keyword_mana_cost(p)))),
                 "outlast" => return Ok(Keyword::Outlast(parse_keyword_mana_cost(p))),
                 "scavenge" => return Ok(Keyword::Scavenge(parse_keyword_mana_cost(p))),
                 "reinforce" => {
@@ -1787,12 +1884,18 @@ impl FromStr for Keyword {
                     // Strip "onto " prefix if present (e.g., "onto arcane {w}" → "arcane {w}")
                     let after_onto = p.strip_prefix("onto ").unwrap_or(p);
                     // Separate type name from cost — cost starts with '{'
-                    let type_str = match after_onto.find('{') {
-                        Some(brace_idx) => after_onto[..brace_idx].trim(),
-                        None => after_onto.trim(),
+                    let (type_str, cost_str) = match after_onto.find('{') {
+                        Some(brace_idx) => {
+                            (after_onto[..brace_idx].trim(), &after_onto[brace_idx..])
+                        }
+                        None => (after_onto.trim(), ""),
                     };
                     let capitalized = capitalize_first(type_str);
-                    return Ok(Keyword::Splice(capitalized));
+                    let cost = parse_keyword_mana_cost(cost_str);
+                    return Ok(Keyword::Splice {
+                        subtype: capitalized,
+                        cost,
+                    });
                 }
                 // CR 702.72a: Champion a [type]
                 "champion" => {
@@ -1804,8 +1907,10 @@ impl FromStr for Keyword {
                     let capitalized = capitalize_first(type_str);
                     return Ok(Keyword::Champion(capitalized));
                 }
-                // CR 702.52a: Transmute {cost}
+                // CR 702.53a: Transmute {cost}
                 "transmute" => return Ok(Keyword::Transmute(parse_keyword_mana_cost(p))),
+                // CR 702.71a: Transfigure {cost}
+                "transfigure" => return Ok(Keyword::Transfigure(parse_keyword_mana_cost(p))),
                 // CR 702.120a: Escalate [cost]
                 "escalate" => {
                     return Ok(Keyword::Escalate(AbilityCost::Mana {
@@ -1874,6 +1979,7 @@ impl FromStr for Keyword {
             "wither" => Ok(Keyword::Wither),
             "infect" => Ok(Keyword::Infect),
             "afflict" => Ok(Keyword::Afflict(1)),
+            "frenzy" => Ok(Keyword::Frenzy(1)),
             "prowess" => Ok(Keyword::Prowess),
             "undying" => Ok(Keyword::Undying),
             "persist" => Ok(Keyword::Persist),
@@ -1962,7 +2068,7 @@ impl FromStr for Keyword {
             "cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
                 cost: ManaCost::zero(),
             })),
-            "ripple" => Ok(Keyword::Ripple),
+            "ripple" => Ok(Keyword::Ripple(1)),
             "totem" => Ok(Keyword::Totem),
             // Unit keywords added for MTGJSON keyword name recognition
             "bargain" => Ok(Keyword::Bargain),
@@ -2248,7 +2354,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
             cost: ManaCost::zero(),
         })),
-        "Ripple" => Ok(Keyword::Ripple),
+        "Ripple" => Ok(Keyword::Ripple(1)),
         "Totem" => Ok(Keyword::Totem),
         // Parameterized: ManaCost (new keywords)
         "Warp" => Ok(Keyword::Warp(mana(data)?)),
@@ -2309,6 +2415,9 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.138: MTGJSON provides bare "Escape" with no structured cost data.
         // Placeholder values — the Oracle parser overwrites with real cost/exile_count.
         "Harmonize" => Ok(Keyword::Harmonize(mana(data)?)),
+        // CR 702.187b: MTGJSON may provide bare "Mayhem"; the Oracle parser
+        // overwrites with the real mana cost extracted from reminder text.
+        "Mayhem" => Ok(Keyword::Mayhem(mana(data)?)),
         "Escape" => Ok(Keyword::Escape {
             cost: ManaCost::default(),
             exile_count: 0,
@@ -2362,7 +2471,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
                 serde_json::from_value(data.clone()).map_err(|e| format!("Affinity: {e}"))?;
             Ok(Keyword::Affinity(tf))
         }
-        "Echo" => Ok(Keyword::Echo(mana(data)?)),
+        // CR 702.30a: accept both legacy ManaCost format and new EchoCost tagged format.
+        "Echo" => {
+            if let Ok(echo_cost) = serde_json::from_value::<EchoCost>(data.clone()) {
+                Ok(Keyword::Echo(echo_cost))
+            } else {
+                Ok(Keyword::Echo(EchoCost::Mana(mana(data)?)))
+            }
+        }
         "Outlast" => Ok(Keyword::Outlast(mana(data)?)),
         "Scavenge" => Ok(Keyword::Scavenge(mana(data)?)),
         // CR 702.77a: Reinforce N—[cost]. Data is { "count": N, "cost": "..." }.
@@ -2480,6 +2596,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Fabricate" => Ok(Keyword::Fabricate(uint(data))),
         "Annihilator" => Ok(Keyword::Annihilator(uint(data))),
         "Bushido" => Ok(Keyword::Bushido(uint(data))),
+        "Frenzy" => Ok(Keyword::Frenzy(uint(data))),
         "Tribute" => Ok(Keyword::Tribute(uint(data))),
         "Afterlife" => Ok(Keyword::Afterlife(uint(data))),
         "Fading" => Ok(Keyword::Fading(uint(data))),
@@ -2588,8 +2705,29 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             })
         }
         // CR 702.47a / CR 702.166a / CR 702.43a / CR 702.72a / CR 702.149a
-        // CR 702.132a / CR 702.133a / CR 702.99a / CR 702.52a / CR 702.148a / CR 702.125a
-        "Splice" => Ok(Keyword::Splice(data.as_str().unwrap_or("").to_string())),
+        // CR 702.132a / CR 702.133a / CR 702.99a / CR 702.53a / CR 702.148a / CR 702.125a
+        "Splice" => {
+            // Struct form `{ "subtype": "Arcane", "cost": {..} }` (mirrors Typecycling).
+            // A bare string is treated as a costless legacy subtype.
+            if let Some(subtype) = data.as_str() {
+                return Ok(Keyword::Splice {
+                    subtype: subtype.to_string(),
+                    cost: ManaCost::zero(),
+                });
+            }
+            let obj = data
+                .as_object()
+                .ok_or("Splice: expected object or string")?;
+            let cost: ManaCost =
+                serde_json::from_value(obj.get("cost").cloned().unwrap_or_default())
+                    .map_err(|e| format!("Splice cost: {e}"))?;
+            let subtype = obj
+                .get("subtype")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(Keyword::Splice { subtype, cost })
+        }
         "Bargain" => Ok(Keyword::Bargain),
         "Sunburst" => Ok(Keyword::Sunburst),
         "Champion" => Ok(Keyword::Champion(data.as_str().unwrap_or("").to_string())),
@@ -2599,6 +2737,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "JumpStart" => Ok(Keyword::JumpStart),
         "Cipher" => Ok(Keyword::Cipher),
         "Transmute" => Ok(Keyword::Transmute(mana(data)?)),
+        // CR 702.71a: Transfigure {cost}
+        "Transfigure" => Ok(Keyword::Transfigure(mana(data)?)),
         "Cleave" => Ok(Keyword::Cleave(mana(data)?)),
         "Undaunted" => Ok(Keyword::Undaunted),
         // CR 702.184a: Station — fixed activated ability keyword.
@@ -2724,6 +2864,14 @@ mod tests {
             assert_eq!(shards.len(), 2); // BB
         }
 
+        // CR 702.187b: Mayhem carries a plain mana cost.
+        let mayhem = Keyword::from_str("Mayhem:1R").unwrap();
+        assert!(matches!(mayhem, Keyword::Mayhem(ManaCost::Cost { .. })));
+        if let Keyword::Mayhem(ManaCost::Cost { generic, shards }) = &mayhem {
+            assert_eq!(*generic, 1);
+            assert_eq!(shards.len(), 1); // R
+        }
+
         let ward = Keyword::from_str("Ward:2").unwrap();
         assert!(matches!(
             ward,
@@ -2758,6 +2906,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_affinity_for_card_type_and_type_combination() {
+        // CR 205.2: Tomik, Wielder of Law — "affinity for planeswalkers" is a card
+        // TYPE, not a subtype. (Regression: previously parsed as Subtype("Planeswalker").)
+        let Keyword::Affinity(pw) = Keyword::from_str("Affinity for planeswalkers").unwrap() else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            pw.type_filters,
+            vec![TypeFilter::Planeswalker],
+            "affinity for planeswalkers is the Planeswalker card type"
+        );
+
+        // CR 205: Urza, Chief Artificer — "affinity for artifact creatures" is a
+        // type COMBINATION (conjunction), not the bogus Subtype("Artifact creature").
+        let Keyword::Affinity(ac) = Keyword::from_str("Affinity for artifact creatures").unwrap()
+        else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            ac.type_filters,
+            vec![TypeFilter::Artifact, TypeFilter::Creature],
+            "affinity for artifact creatures is Artifact AND Creature"
+        );
+
+        // Regression guard: a genuine subtype still falls through to Subtype, not a
+        // type conjunction (only words that are ALL card types build a conjunction).
+        let Keyword::Affinity(citizens) = Keyword::from_str("Affinity for Citizens").unwrap()
+        else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            citizens.type_filters,
+            vec![TypeFilter::Subtype("Citizen".to_string())],
+            "a non-type word remains a subtype"
+        );
+    }
+
+    #[test]
     fn parse_numeric_keywords_unchanged() {
         assert_eq!(
             Keyword::from_str("Crew:3").unwrap(),
@@ -2767,6 +2953,16 @@ mod tests {
             }
         );
         assert_eq!(Keyword::from_str("Rampage:2").unwrap(), Keyword::Rampage(2));
+    }
+
+    #[test]
+    fn parse_frenzy_colon_and_bare() {
+        // CR 702.68a: colon-form carries N.
+        assert_eq!(Keyword::from_str("Frenzy:2").unwrap(), Keyword::Frenzy(2));
+        // CR 702.68a: bare MTGJSON keyword-list form defaults to Frenzy(1),
+        // mirroring the bare `afflict` arm — must NOT fall to Unknown.
+        assert_eq!(Keyword::from_str("frenzy").unwrap(), Keyword::Frenzy(1));
+        assert_eq!(Keyword::from_str("Frenzy").unwrap(), Keyword::Frenzy(1));
     }
 
     #[test]
@@ -3244,7 +3440,7 @@ mod tests {
                 cost: ManaCost::zero()
             })
         );
-        assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple);
+        assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple(1));
         assert_eq!(Keyword::from_str("Totem").unwrap(), Keyword::Totem);
         // Warp is now parameterized — bare "Warp" without cost falls through to Unknown
         assert!(matches!(

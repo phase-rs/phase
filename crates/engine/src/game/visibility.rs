@@ -158,19 +158,38 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     }
 
     // CR 406.3: A card exiled face down can't be examined by any player
-    // except when an instruction allows it. Foretell is the only modeled
-    // face-down-exile look permission today; other face-down exile classes
-    // (Necropotence / Asmodeus by default, Bomat-style look permissions until
-    // their static is modeled) fail closed and redact the card for every
-    // viewer.
+    // except when an instruction allows it. Two modeled look-permission classes:
+    // Foretell (the owner may look, CR 702.143e) and Hideaway (CR 702.75a — the
+    // controller of the permanent that exiled the card may look, keyed on the
+    // dedicated `ExileLinkKind::HideawayLookable` link). Every other face-down
+    // exile class — including plain `TrackedBySource` exiles that grant no
+    // look-permission (Bomat Courier's "(You can't look at it.)", Necropotence,
+    // Asmodeus) — fails closed and redacts the card for every viewer.
     let hidden_facedown_exile_ids: Vec<ObjectId> = filtered
         .exile
         .iter()
         .copied()
         .filter(|obj_id| {
             state.objects.get(obj_id).is_some_and(|obj| {
-                let viewer_can_examine = obj.foretold && can_view_private_for_player(obj.owner);
-                obj.face_down && !viewer_can_examine
+                if !obj.face_down {
+                    return false;
+                }
+                // CR 702.143e: foretold card — its owner may look.
+                let foretell_ok = obj.foretold && can_view_private_for_player(obj.owner);
+                // CR 702.75a + CR 607.2a: the controller of the permanent that
+                // exiled this card under Hideaway may look at it. Keyed on the
+                // dedicated `HideawayLookable` link kind so plain
+                // `TrackedBySource` face-down exiles that grant no look-permission
+                // (Bomat Courier, Necropotence, Asmodeus) stay redacted.
+                let hideaway_lookable_by_viewer = state.exile_links.iter().any(|link| {
+                    link.exiled_id == *obj_id
+                        && link.kind == crate::types::game_state::ExileLinkKind::HideawayLookable
+                        && state
+                            .objects
+                            .get(&link.source_id)
+                            .is_some_and(|src| can_view_private_for_player(src.controller))
+                });
+                !(foretell_ok || hideaway_lookable_by_viewer)
             })
         })
         .collect();
@@ -183,28 +202,34 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // permanents controlled by another player." Face-down objects on the
     // battlefield (manifest / morph / disguise / cloak) and any future modeled
     // face-down stack spells keep their real identity in `back_face`. That
-    // hidden identity is look-permission of the *controller* alone — strip
+    // hidden identity is look-permission of the *controller* alone. Strip
     // `back_face` for every viewer who is not the controller so the underlying
     // card never leaks to opponents over the wire. The controller (turn-control
-    // aware, matching the rest of this filter) retains it so their client can
-    // show them the face. DFC back faces (`face_down == false`) are public
-    // information and are intentionally left untouched.
-    let leaked_facedown_object_ids: Vec<ObjectId> = filtered
+    // aware, matching the rest of this filter) retains it and gets only display
+    // identity projected onto the filtered object; CR 708.2 face-down rules
+    // characteristics stay intact. DFC back faces (`face_down == false`) are
+    // public information and are intentionally left untouched.
+    let facedown_object_ids: Vec<ObjectId> = filtered
         .battlefield
         .iter()
         .copied()
         .chain(filtered.stack.iter().map(|entry| entry.id))
         .filter(|obj_id| {
-            state.objects.get(obj_id).is_some_and(|obj| {
-                obj.face_down
-                    && obj.back_face.is_some()
-                    && !can_view_private_for_player(obj.controller)
-            })
+            state
+                .objects
+                .get(obj_id)
+                .is_some_and(|obj| obj.face_down && obj.back_face.is_some())
         })
         .collect();
-    for obj_id in leaked_facedown_object_ids {
-        if let Some(obj) = filtered.objects.get_mut(&obj_id) {
-            obj.back_face = None;
+    for obj_id in facedown_object_ids {
+        if let Some(source) = state.objects.get(&obj_id) {
+            if let Some(obj) = filtered.objects.get_mut(&obj_id) {
+                if can_view_private_for_player(source.controller) {
+                    reveal_face_down_identity_to_controller(obj);
+                } else {
+                    redact_face_down_identity_from_observer(obj);
+                }
+            }
         }
     }
 
@@ -227,6 +252,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         kept_destination,
         rest_destination,
         source_id,
+        enter_tapped,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -240,6 +266,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 kept_destination,
                 rest_destination,
                 source_id,
+                enter_tapped,
             };
         }
     }
@@ -584,6 +611,23 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
     }
 }
 
+fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::GameObject) {
+    if let Some(back_face) = &obj.back_face {
+        obj.name = back_face.name.clone();
+        obj.base_name = back_face.name.clone();
+        obj.printed_ref = back_face.printed_ref.clone();
+        obj.base_printed_ref = back_face.printed_ref.clone();
+    }
+}
+
+fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::GameObject) {
+    obj.name = "Hidden Card".to_string();
+    obj.base_name = "Hidden Card".to_string();
+    obj.printed_ref = None;
+    obj.base_printed_ref = None;
+    obj.back_face = None;
+}
+
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its
 /// controller's ordering choice may carry private data —
 /// the firing `GameEvent` can reference hidden-zone objects
@@ -670,6 +714,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            assist_state: crate::types::game_state::AssistState::NotOffered,
         })
     }
 
@@ -1676,6 +1721,9 @@ mod tests {
         let controller_view = filter_state_for_viewer(&state, controller);
         let controller_obj = controller_view.objects.get(&secret).unwrap();
         assert!(controller_obj.face_down);
+        assert_eq!(controller_obj.name, "Secret Manifest");
+        assert_eq!(controller_obj.power, Some(2));
+        assert_eq!(controller_obj.toughness, Some(2));
         let controller_back = controller_obj
             .back_face
             .as_ref()
@@ -1688,6 +1736,7 @@ mod tests {
         let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
         let opponent_obj = opponent_view.objects.get(&secret).unwrap();
         assert!(opponent_obj.face_down);
+        assert_eq!(opponent_obj.name, "Hidden Card");
         assert!(
             opponent_obj.back_face.is_none(),
             "opponent must not see the manifested card's hidden identity"

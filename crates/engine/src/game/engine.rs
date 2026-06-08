@@ -6,8 +6,9 @@ use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode, CostResume, GameState,
-    PayCostKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
+    CostResume, GameState, LandPlayRecord, PayCostKind, RetargetScope, StackEntry, StackEntryKind,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -43,6 +44,7 @@ use super::public_state::{
     mark_public_state_from_events, sync_waiting_for,
 };
 use super::sba;
+use super::splice;
 use super::triggers;
 use super::turn_control;
 use super::turns;
@@ -988,6 +990,7 @@ mod auto_pass_decision_tests {
             Effect::CopySpell {
                 target: TargetFilter::Any,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
             Vec::new(),
             copy_id,
@@ -1823,6 +1826,50 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                AlternativeCastKeyword::Emerge => {
+                    casting::handle_emerge_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::Dash => {
+                    casting::handle_dash_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::Blitz => {
+                    casting::handle_blitz_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::Spectacle => {
+                    casting::handle_spectacle_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
                 AlternativeCastKeyword::Overload => {
                     casting::handle_overload_cost_choice_with_payment_mode(
                         state,
@@ -2022,6 +2069,31 @@ fn apply_action(
         )?,
         (
             WaitingFor::OptionalCostChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 702.47a–e: Splice — caster reveals a card to splice onto the spell
+        // (re-offering for the rest), or declines to finish and proceed to targets.
+        (
+            WaitingFor::SpliceOffer {
+                player,
+                pending_cast,
+                eligible,
+            },
+            GameAction::RespondToSpliceOffer { card },
+        ) => splice::resolve_offer(
+            state,
+            *player,
+            *pending_cast.clone(),
+            eligible.clone(),
+            card,
+            &mut events,
+        )?,
+        (
+            WaitingFor::SpliceOffer {
                 player,
                 pending_cast,
                 ..
@@ -2720,6 +2792,115 @@ fn apply_action(
             casting::apply_post_x_cost_modifiers(state, player, object_id);
             casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
         }
+        // CR 702.132a: Assist — caster chooses another player to help pay generic,
+        // or declines. `assist_state` was set to `Offered` when the offer was made,
+        // so both branches simply (re)enter the payment step from where they resume.
+        (
+            WaitingFor::AssistChoosePlayer {
+                player,
+                candidates,
+                max_generic,
+                convoke_mode,
+            },
+            GameAction::ChooseAssistPlayer { player: chosen },
+        ) => {
+            let caster = *player;
+            let convoke_mode = *convoke_mode;
+            match chosen {
+                None => {
+                    // CR 702.132a: declining proceeds to normal payment by the caster.
+                    casting_costs::enter_payment_step(state, caster, convoke_mode, &mut events)?
+                }
+                Some(p) => {
+                    if !candidates.contains(&p) {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Player {p:?} is not an eligible assist helper"
+                        )));
+                    }
+                    WaitingFor::AssistPayment {
+                        caster,
+                        chosen: p,
+                        max_generic: *max_generic,
+                        convoke_mode,
+                    }
+                }
+            }
+        }
+        (WaitingFor::AssistChoosePlayer { player, .. }, GameAction::CancelCast) => {
+            let player = *player;
+            match state.pending_cast.take() {
+                Some(pending) => {
+                    engine_casting::cancel_pending_cast(state, player, &pending, &mut events)
+                }
+                None => WaitingFor::Priority { player },
+            }
+        }
+        (WaitingFor::AssistChoosePlayer { .. }, GameAction::PassPriority) => {
+            return Err(EngineError::ActionNotAllowed(
+                "Must choose an assisting player or decline with ChooseAssistPlayer { player: None }, or CancelCast."
+                    .to_string(),
+            ));
+        }
+        // CR 702.132a: Assist — the chosen player commits how much generic mana to
+        // pay. The caster's owed generic is reduced now, and the commitment is
+        // recorded on the pending cast; the helper's sources are tapped only at
+        // `finalize_cast` (the non-cancellable commit), so a later CancelCast can
+        // never leak the helper's lands or spent mana.
+        (
+            WaitingFor::AssistPayment {
+                caster,
+                chosen,
+                max_generic,
+                convoke_mode,
+            },
+            GameAction::CommitAssistPayment { generic },
+        ) => {
+            let caster = *caster;
+            let chosen = *chosen;
+            let max_generic = *max_generic;
+            let convoke_mode = *convoke_mode;
+            if generic > max_generic {
+                return Err(EngineError::InvalidAction(format!(
+                    "Assist contribution {generic} exceeds the maximum {max_generic}"
+                )));
+            }
+            if generic > 0 {
+                use crate::types::mana::ManaCost;
+                // CR 702.132a: validate the helper can actually produce the committed
+                // generic (simulated auto-tap on a clone) before reducing the
+                // caster's cost. No real taps happen here — see `apply_committed_assist`.
+                let probe = ManaCost::Cost {
+                    shards: Vec::new(),
+                    generic,
+                };
+                let mut sim = state.clone();
+                let mut sink = Vec::new();
+                casting_costs::auto_tap_mana_sources(&mut sim, chosen, &probe, &mut sink, None);
+                let feasible = sim
+                    .players
+                    .iter()
+                    .find(|p| p.id == chosen)
+                    .is_some_and(|p| mana_payment::can_pay(&p.mana_pool, &probe));
+                if !feasible {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Assisting player cannot produce {generic} generic mana"
+                    )));
+                }
+                // Reduce the caster's owed generic and record the commitment; the
+                // helper actually taps/spends at finalize.
+                let pending = state.pending_cast.as_mut().ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast for assist".to_string())
+                })?;
+                if let ManaCost::Cost { generic: owed, .. } = &mut pending.cost {
+                    *owed = owed.saturating_sub(generic);
+                }
+                pending.assist_state = AssistState::Committed {
+                    helper: chosen,
+                    generic,
+                };
+            }
+            casting_costs::enter_payment_step(state, caster, convoke_mode, &mut events)?
+        }
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
         // that both this branch and the auto-pay path in `enter_payment_step` share.
         (WaitingFor::ManaPayment { player, .. }, GameAction::PassPriority) => {
@@ -2980,6 +3161,8 @@ fn apply_action(
                 ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
                 ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
                 ConvokeMode::Improvise => obj.is_improvise_eligible(*player),
+                // CR 702.66a: delve has a dedicated handler arm below (exile, not tap).
+                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
             if !is_eligible {
                 return Err(EngineError::ActionNotAllowed(
@@ -3013,6 +3196,7 @@ fn apply_action(
                 ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
                 // CR 702.126a: Improvise pays generic mana only — always colorless.
                 ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
+                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
             // Tap the permanent (no summoning sickness check — CR 702.51a + CR 302.6)
             if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -3038,6 +3222,7 @@ fn apply_action(
                 ConvokeMode::Improvise => {
                     crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
                 }
+                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
             if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
                 p.mana_pool.add(unit);
@@ -3069,6 +3254,42 @@ fn apply_action(
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: Some(mode),
+            }
+        }
+        // CR 702.66a: Delve — exile a card from the caster's graveyard to pay one
+        // generic mana. Unlike convoke/improvise (which tap a permanent), the
+        // source is a graveyard card that is exiled. The contribution is a
+        // generic-only colorless marker (like Improvise) that can't leak into the
+        // pool. (Tracking which cards were exiled — for Murktide Regent's "+1/+1
+        // for each card exiled with it" — is a follow-up that also needs the
+        // QuantityRef/parser wiring; the core payment is independent of it.)
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode: Some(ConvokeMode::Delve),
+            },
+            GameAction::TapForConvoke { object_id, .. },
+        ) => {
+            let player = *player;
+            let eligible = state
+                .objects
+                .get(&object_id)
+                .is_some_and(|o| o.zone == Zone::Graveyard && o.owner == player);
+            if !eligible {
+                return Err(EngineError::ActionNotAllowed(
+                    "Can only delve a card from your own graveyard".to_string(),
+                ));
+            }
+            zones::move_to_zone(state, object_id, Zone::Exile, &mut events);
+            if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
+                p.mana_pool.add(crate::types::mana::ManaUnit::convoke_payment(
+                    crate::types::mana::ManaType::Colorless,
+                    object_id,
+                ));
+            }
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode: Some(ConvokeMode::Delve),
             }
         }
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
@@ -4032,7 +4253,13 @@ fn apply_action(
                     ));
                 }
             }
-            effects::proliferate::apply_proliferate(state, p, &targets, &mut events);
+            if !effects::proliferate::apply_proliferate(state, p, &targets, &mut events) {
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                });
+            }
             events.push(GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::Proliferate,
                 source_id: ObjectId(0), // Source not tracked through choice state
@@ -4046,6 +4273,65 @@ fn apply_action(
             state.priority_player = p;
             effects::drain_pending_continuation(state, &mut events);
             state.waiting_for.clone()
+        }
+        // CR 701.56a: Time travel — player selected objects for the current phase
+        // (remove a time counter, then add). Validate against the eligible set,
+        // apply the per-object counter change, then advance to the add phase or
+        // finish. Counter changes drive the existing suspend/vanishing triggers.
+        (
+            WaitingFor::TimeTravelChoice {
+                player,
+                eligible,
+                phase,
+            },
+            GameAction::SelectTargets { targets },
+        ) => {
+            let p = *player;
+            let phase = *phase;
+            let eligible_set = eligible.clone();
+            for t in &targets {
+                if !eligible_set.contains(t) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected object not eligible for time travel".to_string(),
+                    ));
+                }
+            }
+            effects::time_travel::apply_phase(state, p, &targets, phase, &mut events);
+
+            if phase == crate::types::game_state::TimeTravelPhase::Remove {
+                // CR 701.56a: after the remove phase, offer the add phase over the
+                // still-eligible objects, excluding any just chosen to remove.
+                let add_eligible: Vec<_> = effects::time_travel::eligible_objects(state, p)
+                    .into_iter()
+                    .filter(|t| !targets.contains(t))
+                    .collect();
+                if !add_eligible.is_empty() {
+                    state.waiting_for = WaitingFor::TimeTravelChoice {
+                        player: p,
+                        eligible: add_eligible,
+                        phase: crate::types::game_state::TimeTravelPhase::Add,
+                    };
+                    state.waiting_for.clone()
+                } else {
+                    events.push(GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::TimeTravel,
+                        source_id: ObjectId(0),
+                    });
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    state.priority_player = p;
+                    effects::drain_pending_continuation(state, &mut events);
+                    state.waiting_for.clone()
+                }
+            } else {
+                events.push(GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::TimeTravel,
+                    source_id: ObjectId(0),
+                });
+                state.waiting_for = WaitingFor::Priority { player: p };
+                state.priority_player = p;
+                effects::drain_pending_continuation(state, &mut events);
+                state.waiting_for.clone()
+            }
         }
         // CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
         // battlefield-permanent selection. Publish a fresh tracked set so the
@@ -4590,7 +4876,13 @@ pub(super) fn begin_pending_trigger_target_selection(
     }
 
     let ability = trigger.ability.clone();
-    let player = trigger.controller;
+    // CR 601.2c + CR 603.3d + CR 109.5: a targeted "of their choice" trigger routes
+    // target selection to the scoped (upkeep) player, not the source's controller.
+    let player = ability
+        .target_chooser
+        .as_ref()
+        .and_then(|f| crate::game::targeting::resolve_effect_player_ref(state, &ability, f))
+        .unwrap_or(trigger.controller);
     let source_id = trigger.source_id;
     let target_constraints = trigger.target_constraints.clone();
     let description = trigger.description.clone();
@@ -4716,6 +5008,20 @@ fn mark_land_played_from_zone(state: &mut GameState, object_id: ObjectId, zone: 
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.played_from_zone = Some(zone);
     }
+}
+
+fn record_land_played_from_zone(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    zone: Zone,
+) {
+    mark_land_played_from_zone(state, object_id, zone);
+    state
+        .lands_played_this_turn_by_player
+        .entry(player)
+        .or_default()
+        .push_back(LandPlayRecord { from_zone: zone });
 }
 
 fn handle_play_land(
@@ -4947,12 +5253,14 @@ fn handle_play_land(
                     }
                 }
                 // CR 614.1c: Apply counters from replacement pipeline.
-                engine_replacement::apply_etb_counters(
+                if !engine_replacement::apply_etb_counters(
                     state,
                     object_id,
                     &enter_with_counters,
                     events,
-                );
+                ) {
+                    return Ok(state.waiting_for.clone());
+                }
                 // CR 614.1c: Apply pending ETB counters from delayed triggers
                 // (e.g., "that creature enters with an additional +1/+1 counter").
                 let pending: Vec<_> = state
@@ -4962,7 +5270,9 @@ fn handle_play_land(
                     .map(|(_, ct, n)| (ct.clone(), *n))
                     .collect();
                 if !pending.is_empty() {
-                    engine_replacement::apply_etb_counters(state, object_id, &pending, events);
+                    if !engine_replacement::apply_etb_counters(state, object_id, &pending, events) {
+                        return Ok(state.waiting_for.clone());
+                    }
                     state
                         .pending_etb_counters
                         .retain(|(oid, _, _)| *oid != object_id);
@@ -4986,7 +5296,7 @@ fn handle_play_land(
                     )
                 {
                     state.lands_played_this_turn += 1;
-                    mark_land_played_from_zone(state, object_id, origin_zone);
+                    record_land_played_from_zone(state, player, object_id, origin_zone);
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     record_exile_play_permission(state, exile_permission_source);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
@@ -5014,7 +5324,7 @@ fn handle_play_land(
             // Increment counters now — the land play is committed, only the ETB
             // effect is pending.
             state.lands_played_this_turn += 1;
-            mark_land_played_from_zone(state, object_id, origin_zone);
+            record_land_played_from_zone(state, player, object_id, origin_zone);
             // CR 604.2: Record once-per-turn graveyard play permission usage.
             record_graveyard_play_permission(state, gy_permission_source, object_id);
             record_exile_play_permission(state, exile_permission_source);
@@ -5038,7 +5348,7 @@ fn handle_play_land(
 
     // Increment land counter
     state.lands_played_this_turn += 1;
-    mark_land_played_from_zone(state, object_id, origin_zone);
+    record_land_played_from_zone(state, player, object_id, origin_zone);
     // CR 604.2: Record once-per-turn graveyard play permission usage.
     record_graveyard_play_permission(state, gy_permission_source, object_id);
     record_exile_play_permission(state, exile_permission_source);
@@ -5416,11 +5726,18 @@ fn handle_crew_activation(
         })
         .collect();
 
-    // Validate total power of all eligible creatures can meet the threshold
+    // Validate total power of all eligible creatures can meet the threshold.
+    // CR 702.122c: a creature's contribution may be modified ("as though its
+    // power were N greater" / "using its toughness rather than its power").
     let total_power: i32 = eligible_creatures
         .iter()
-        .filter_map(|id| state.objects.get(id))
-        .map(|o| o.power.unwrap_or(0).max(0))
+        .map(|&id| {
+            super::static_abilities::object_crew_power_contribution(
+                state,
+                id,
+                crate::types::statics::CrewAction::Crew,
+            )
+        })
         .sum();
 
     if total_power < crew_power as i32 {
@@ -5524,7 +5841,12 @@ fn handle_crew_announcement(
                 "Creature can't crew Vehicles".to_string(),
             ));
         }
-        total_power += obj.power.unwrap_or(0).max(0);
+        // CR 702.122c: apply any crew power-contribution modifier.
+        total_power += super::static_abilities::object_crew_power_contribution(
+            state,
+            cid,
+            crate::types::statics::CrewAction::Crew,
+        );
     }
 
     // CR 702.122a: Total power must meet threshold
@@ -5694,10 +6016,15 @@ fn handle_station_announcement(
 
     // CR 702.184a + CR 113.7a: Snapshot the creature's power BEFORE tapping —
     // the counter count is determined at cost-payment time and survives the
-    // creature leaving the battlefield before resolution. CR 702.184c lets
-    // static abilities modify the characteristic read; this implementation
-    // reads `power`, which is the default per the rule.
-    let snapshot_power = creature.power.unwrap_or(0).max(0);
+    // creature leaving the battlefield before resolution. CR 702.184c +
+    // CR 702.122c: static abilities may modify the contributed value ("stations
+    // permanents as though its power were N greater"); the helper applies any
+    // such modifier and otherwise reads `power`, the default per the rule.
+    let snapshot_power = super::static_abilities::object_crew_power_contribution(
+        state,
+        creature_id,
+        crate::types::statics::CrewAction::Station,
+    );
 
     // CR 701.26a: Tap the creature as cost payment.
     if let Some(obj) = state.objects.get_mut(&creature_id) {
@@ -5790,10 +6117,16 @@ fn handle_saddle_activation(
         })
         .collect();
 
+    // CR 702.171a + CR 702.122c: a creature's saddle contribution may be modified.
     let total_power: i32 = eligible_creatures
         .iter()
-        .filter_map(|id| state.objects.get(id))
-        .map(|o| o.power.unwrap_or(0).max(0))
+        .map(|&id| {
+            super::static_abilities::object_crew_power_contribution(
+                state,
+                id,
+                crate::types::statics::CrewAction::Saddle,
+            )
+        })
         .sum();
 
     if total_power < saddle_power as i32 {
@@ -5860,7 +6193,12 @@ fn handle_saddle_announcement(
                 "Creature is no longer eligible for saddling".to_string(),
             ));
         }
-        total_power += obj.power.unwrap_or(0).max(0);
+        // CR 702.122c: apply any saddle power-contribution modifier.
+        total_power += super::static_abilities::object_crew_power_contribution(
+            state,
+            cid,
+            crate::types::statics::CrewAction::Saddle,
+        );
     }
 
     if total_power < saddle_power as i32 {
@@ -10861,6 +11199,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            assist_state: AssistState::NotOffered,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -11243,6 +11582,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            assist_state: AssistState::NotOffered,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -15513,6 +15853,137 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
     }
 
     #[test]
+    fn rakdos_headliner_non_mana_echo_reaches_discard_payment() {
+        // CR 702.30a: "Echo—Discard a card." is a *non-mana* echo cost. On
+        // origin/main the parser drops the Echo keyword entirely for the em-dash
+        // (non-mana) form, so synthesis never installs the upkeep trigger and the
+        // permanent is never on the hook for a discard. This drives the real
+        // pipeline (parse -> synthesize_echo -> battlefield with echo due ->
+        // controller upkeep) and asserts the engine reaches the discard payment.
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let headliner = create_object(
+            &mut state,
+            CardId(1982),
+            PlayerId(0),
+            "Rakdos Headliner".to_string(),
+            Zone::Battlefield,
+        );
+
+        // A spare card in P0's hand so the discard cost has an eligible target
+        // (the engine surfaces the choice rather than auto-failing the payment).
+        let _spare = create_object(
+            &mut state,
+            CardId(1983),
+            PlayerId(0),
+            "Spare Card".to_string(),
+            Zone::Hand,
+        );
+
+        let oracle = "Haste\n\
+Echo—Discard a card. (At the beginning of your upkeep, if this came under your control since the beginning of your last upkeep, sacrifice it unless you pay its echo cost.)";
+        let parsed = parse_oracle_text(
+            oracle,
+            "Rakdos Headliner",
+            &[],
+            &["Creature".to_string()],
+            &["Devil".to_string()],
+        );
+
+        // Discriminating assertion: on origin/main the non-mana echo keyword is
+        // dropped, so this `Echo(NonMana(Discard))` is absent.
+        assert!(
+            parsed.extracted_keywords.iter().any(|kw| matches!(
+                kw,
+                Keyword::Echo(crate::types::keywords::EchoCost::NonMana(
+                    AbilityCost::Discard { .. }
+                ))
+            )),
+            "Rakdos Headliner must parse Echo(NonMana(Discard)) — got {:?}",
+            parsed.extracted_keywords
+        );
+
+        let mut face = CardFace {
+            keywords: parsed.extracted_keywords.clone(),
+            triggers: parsed.triggers.clone(),
+            ..CardFace::default()
+        };
+        crate::database::synthesis::synthesize_echo(&mut face);
+
+        {
+            let obj = state.objects.get_mut(&headliner).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Devil".to_string());
+            obj.power = Some(3);
+            obj.toughness = Some(1);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(1);
+            obj.keywords = face.keywords.clone();
+            obj.base_keywords = obj.keywords.clone();
+            for trigger in face.triggers.clone() {
+                obj.trigger_definitions.push(trigger);
+            }
+            obj.base_trigger_definitions =
+                Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+            // CR 702.30a: the next controller-upkeep echo payment is due.
+            obj.echo_due = true;
+        }
+
+        let mut events = Vec::new();
+        crate::game::turns::auto_advance(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(
+            !state.stack.is_empty(),
+            "echo trigger must be on the stack at the beginning of upkeep"
+        );
+
+        events.clear();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // CR 702.30a: the echo trigger resolves to an unless-payment carrying the
+        // *non-mana* discard cost (not mana). On origin/main the Echo keyword is
+        // dropped for the em-dash form, so no echo trigger exists and this
+        // UnlessPayment-with-Discard never appears — the discriminating proof
+        // that the non-mana echo cost flowed through synthesis into the payment
+        // pipeline.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::UnlessPayment {
+                    player: PlayerId(0),
+                    cost: AbilityCost::Discard { .. },
+                    ..
+                }
+            ),
+            "non-mana echo must surface an UnlessPayment carrying a Discard cost — got {:?}",
+            state.waiting_for
+        );
+
+        // CR 701.9: choosing to pay routes the discard cost through
+        // `handle_unless_payment`, which surfaces the discard-card choice — a
+        // discard cost, not a mana payment.
+        apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::WardDiscardChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "paying the non-mana echo must reach the discard-choice payment — got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
     fn attack_trigger_resolves_before_combat_damage_and_only_once() {
         let mut state = new_game(42);
         state.turn_number = 5;
@@ -19692,9 +20163,9 @@ mod crew_tests {
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{CrewAction, CrewContributionKind, StaticMode};
     use crate::types::zones::Zone;
-    use crate::types::StaticDefinition;
+    use crate::types::{StaticDefinition, TargetFilter};
 
     fn setup_game_at_main_phase() -> GameState {
         let mut state = new_game(42);
@@ -19955,6 +20426,84 @@ mod crew_tests {
         );
 
         assert!(result.is_err());
+    }
+
+    /// CR 702.122c: a creature with "crews Vehicles as though its power were N
+    /// greater" (Reckoner Bankbuster) contributes its modified power, letting an
+    /// otherwise-insufficient creature pay the crew cost alone.
+    #[test]
+    fn crew_contribution_power_delta_lets_low_power_creature_crew() {
+        let (mut state, vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
+        // creature_b is 2/2; the Vehicle needs Crew 3, so it cannot crew alone
+        // (see `test_crew_fails_insufficient_power`). Grant it the +2 modifier.
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CrewContribution {
+                    kind: CrewContributionKind::PowerDelta { delta: 2 },
+                    actions: vec![CrewAction::Crew],
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_b],
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "power 2 + delta 2 = 4 should satisfy Crew 3: {result:?}"
+        );
+    }
+
+    /// CR 702.122c: "using its toughness rather than its power" (Giant Ox)
+    /// substitutes toughness for power, and the modifier applies only to the
+    /// named keyword actions (crew-only here, not saddle).
+    #[test]
+    fn crew_contribution_toughness_substitution_and_action_scope() {
+        let (mut state, _vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.power = Some(0);
+            obj.toughness = Some(4);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CrewContribution {
+                    kind: CrewContributionKind::ToughnessInsteadOfPower,
+                    actions: vec![CrewAction::Crew],
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+        // Crew: contributes toughness (4) instead of power (0).
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                creature_b,
+                CrewAction::Crew
+            ),
+            4
+        );
+        // Saddle: the modifier is crew-only, so the base power (0) is contributed.
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                creature_b,
+                CrewAction::Saddle
+            ),
+            0
+        );
     }
 
     #[test]

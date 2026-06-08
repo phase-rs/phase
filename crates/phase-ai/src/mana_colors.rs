@@ -82,6 +82,7 @@ pub(crate) fn collect_mana_production_colors(
         | ManaProduction::ChoiceAmongExiledColors { .. }
         | ManaProduction::AnyInCommandersColorIdentity { .. }
         | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::AnyOneColorAmongPermanents { .. }
         | ManaProduction::TriggerEventManaType => {}
     }
 }

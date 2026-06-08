@@ -1863,6 +1863,34 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
+    // CR 406.6 + CR 607.1 + CR 614.1c: "[type phrase] card(s) exiled with it/~"
+    // -- a count of the linked-exile set (cards exiled with this source, e.g.
+    // via Delve) restricted to a type phrase. Murktide Regent's ETB counter
+    // "for each instant and sorcery card exiled with it". `ExiledBySource`
+    // reports `extract_in_zone() == Exile`, so the resulting `ObjectCount` scans
+    // the exile zone and `matches_target_filter` intersects the type phrase with
+    // the linked-exile set. Runs after the `nom_quantity` attempt so the bare
+    // "card exiled with it" form keeps its existing `CardsExiledBySource` lower.
+    for exiled_suffix in [" exiled with it", " exiled with ~"] {
+        if let Ok((after, prefix)) = terminated(
+            take_until::<_, _, OracleError<'_>>(exiled_suffix),
+            tag::<_, _, OracleError<'_>>(exiled_suffix),
+        )
+        .parse(clause)
+        {
+            if after.trim().is_empty() {
+                let (type_filter, type_rest) = parse_type_phrase(prefix);
+                if type_rest.trim().is_empty() && !matches!(type_filter, TargetFilter::Any) {
+                    return Some(QuantityRef::ObjectCount {
+                        filter: TargetFilter::And {
+                            filters: vec![type_filter, TargetFilter::ExiledBySource],
+                        },
+                    });
+                }
+            }
+        }
+    }
+
     // CR 106.1 + CR 109.1: "color among [type-phrase]" — distinct colors among
     // matching objects. Used by Faeburrow Elder's "+1/+1 for each color among
     // permanents you control" and by the Converge mechanic adjacent class.
@@ -2127,7 +2155,7 @@ fn parse_for_each_clause_with_they_controller(
     .parse(clause)
     {
         if rest.is_empty() {
-            return Some(QuantityRef::AttackedThisTurn);
+            return Some(QuantityRef::AttackedThisTurn { filter: None });
         }
     }
 
@@ -2614,13 +2642,13 @@ mod tests {
     }
 
     /// Collision guard: "creature you attacked WITH this turn" (the source-
-    /// referential attacked-with form) must stay `QuantityRef::AttackedThisTurn`
+    /// referential attacked-with form) must stay `QuantityRef::AttackedThisTurn { filter: None }`
     /// — the " with" subject distinguishes it from the player-population
     /// "opponents you attacked" phrase.
     #[test]
     fn creature_you_attacked_with_this_turn_stays_attacked_this_turn() {
         let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
-        assert_eq!(qty, QuantityRef::AttackedThisTurn);
+        assert_eq!(qty, QuantityRef::AttackedThisTurn { filter: None });
     }
 
     #[test]
@@ -2639,7 +2667,7 @@ mod tests {
     #[test]
     fn for_each_creature_you_attacked_with_this_turn_counts_attacking_creatures() {
         let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
-        assert_eq!(qty, QuantityRef::AttackedThisTurn);
+        assert_eq!(qty, QuantityRef::AttackedThisTurn { filter: None });
     }
 
     #[test]
@@ -5114,6 +5142,32 @@ mod tests {
             },
             other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
         }
+    }
+
+    /// CR 406.6 + CR 614.1c: "for each instant and sorcery card exiled with it"
+    /// (Murktide Regent's Delve ETB counter). The type-phrase prefix intersects
+    /// the linked-exile set; `ExiledBySource.extract_in_zone()` is Exile, so the
+    /// `ObjectCount` scans the exile zone rather than the battlefield default.
+    /// Building-block test: any "<type> exiled with it" for-each count uses this
+    /// path.
+    #[test]
+    fn for_each_typed_card_exiled_with_it_counts_linked_exile() {
+        let qty =
+            parse_for_each_clause("instant and sorcery card exiled with it").expect("must parse");
+        let QuantityRef::ObjectCount { filter } = qty else {
+            panic!("expected ObjectCount, got {qty:?}");
+        };
+        let TargetFilter::And { filters } = filter else {
+            panic!("expected And filter, got {filter:?}");
+        };
+        assert!(
+            filters.contains(&TargetFilter::ExiledBySource),
+            "And must include ExiledBySource: {filters:?}"
+        );
+        assert!(
+            filters.iter().any(|f| matches!(f, TargetFilter::Or { .. })),
+            "instant-and-sorcery type union should be an Or branch: {filters:?}"
+        );
     }
 
     #[test]

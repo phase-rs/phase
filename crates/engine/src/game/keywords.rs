@@ -99,6 +99,19 @@ pub fn effective_escape_data(state: &GameState, object_id: ObjectId) -> Option<(
     }
 }
 
+/// CR 702.187b: Effective Mayhem alt-cost for a card in the graveyard, honoring
+/// off-zone characteristic grants (e.g. Green Goblin's "Each nonland card in
+/// your graveyard has mayhem. The mayhem cost is equal to its mana cost.") in
+/// addition to a printed Mayhem keyword. The availability gate ("discarded this
+/// turn") is checked separately by the caster, not here.
+pub fn effective_mayhem_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Mayhem)?;
+    match keyword {
+        Keyword::Mayhem(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
 /// CR 702.190a: Effective Sneak alt-cost for an object, honoring off-zone characteristic
 /// grants (e.g., Ninja Teen's "creature cards in your graveyard have sneak {cost}").
 pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {

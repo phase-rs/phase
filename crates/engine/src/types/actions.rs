@@ -166,6 +166,18 @@ pub enum GameAction {
     ChooseClashOpponent {
         opponent: PlayerId,
     },
+    /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
+    /// `Some(p)` chooses player `p` (one of the prompt's `candidates`) to help pay
+    /// the generic mana; `None` declines and proceeds to normal payment.
+    ChooseAssistPlayer {
+        player: Option<PlayerId>,
+    },
+    /// CR 702.132a: Assist — the chosen player's answer to `WaitingFor::AssistPayment`.
+    /// `generic` is how much of the spell's generic mana they pay (0 = nothing),
+    /// capped at the prompt's `max_generic`.
+    CommitAssistPayment {
+        generic: u32,
+    },
     /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
     /// prompt. See [`MulliganChoice`] for the three branches.
     MulliganDecision {
@@ -426,6 +438,13 @@ pub enum GameAction {
     DecideOptionalEffect {
         accept: bool,
     },
+    /// CR 702.47a–e: Respond to a `WaitingFor::SpliceOffer`. `Some(card)` splices
+    /// that card from hand onto the spell being cast (re-presenting the offer for
+    /// any remaining eligible cards, CR 702.47e); `None` declines/finishes
+    /// splicing and proceeds to target selection.
+    RespondToSpliceOffer {
+        card: Option<ObjectId>,
+    },
     DecideOptionalEffectAndRemember {
         choice: AutoMayChoice,
     },
@@ -499,6 +518,10 @@ pub enum GameAction {
     },
     /// CR 702.85a: Choose to cast the cascaded card without paying its mana cost.
     CascadeChoice {
+        choice: CastChoice,
+    },
+    /// CR 702.60a: Choose to cast a revealed same-named ripple card for free.
+    RippleChoice {
         choice: CastChoice,
     },
     /// CR 401.4: Choose top or bottom of library.
@@ -1249,6 +1272,7 @@ impl GameAction {
             | GameAction::ChooseBranch { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }
+            | GameAction::RespondToSpliceOffer { .. }
             | GameAction::ChooseAdventureFace { .. }
             | GameAction::ChooseModalFace { .. }
             | GameAction::ChooseAlternativeCast { .. }
@@ -1268,10 +1292,13 @@ impl GameAction {
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
+            | GameAction::RippleChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChooseAssistPlayer { .. }
+            | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass

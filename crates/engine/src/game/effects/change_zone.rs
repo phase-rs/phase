@@ -9,7 +9,10 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, WaitingFor};
+use crate::types::game_state::{
+    ExileLink, ExileLinkKind, GameState, PendingCounterPostAction, WaitingFor,
+    ZoneDeliveryExileTracking,
+};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
@@ -60,7 +63,7 @@ fn enters_with_additional_counters_for_entry(
     additional
 }
 
-/// CR 401.3: Shuffle a player's library using the game's seeded RNG.
+/// CR 701.24a: Shuffle a player's library using the game's seeded RNG.
 /// Reusable helper for auto-shuffle after zone moves to Library.
 pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
     let GameState { players, rng, .. } = state;
@@ -154,6 +157,117 @@ pub(crate) enum ZoneMoveResult {
     NeedsAuraAttachmentChoice,
 }
 
+pub(crate) enum ZoneDeliveryResult {
+    Done,
+    NeedsChoice(PlayerId),
+}
+
+fn append_effect_resolved_after_counter_pause(
+    state: &mut GameState,
+    kind: EffectKind,
+    source_id: ObjectId,
+) {
+    super::counters::append_pending_counter_post_actions(
+        state,
+        vec![PendingCounterPostAction::EmitEffectResolved { kind, source_id }],
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_zone_delivery_tail_after_counter_pause(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+    cause: Option<ObjectId>,
+    source_id: Option<ObjectId>,
+    duration: Option<&Duration>,
+    exile_tracking: ZoneDeliveryExileTracking,
+    clear_pending_etb_counters: Option<ObjectId>,
+) -> ZoneDeliveryResult {
+    let mut actions = Vec::new();
+    if let Some(object_id) = clear_pending_etb_counters {
+        actions.push(PendingCounterPostAction::ClearPendingEtbCounters { object_id });
+    }
+    actions.push(PendingCounterPostAction::ContinueZoneDeliveryTail {
+        object_id,
+        from,
+        to,
+        cause,
+        source_id,
+        duration: duration.cloned(),
+        exile_tracking,
+    });
+    super::counters::append_pending_counter_post_actions(state, actions);
+    replacement_pause_delivery_result(state)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_zone_delivery_tail(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+    cause: Option<ObjectId>,
+    source_id: Option<ObjectId>,
+    duration: Option<&Duration>,
+    exile_tracking: ZoneDeliveryExileTracking,
+    events: &mut Vec<GameEvent>,
+) -> ZoneDeliveryResult {
+    // CR 701.24a: To shuffle a library, randomize the cards within it so that
+    // no player knows their order.
+    if to == Zone::Library {
+        let owner = state.objects.get(&object_id).map(|o| o.owner);
+        if let Some(owner) = owner {
+            shuffle_library(state, owner, events);
+        }
+    }
+    // Track cards exiled by the source. Some linked exiles return when the
+    // source leaves; others are just remembered as "exiled with" the source.
+    if to == Zone::Exile {
+        if let Some(source_id) = cause.or(source_id) {
+            let kind = match duration {
+                Some(Duration::UntilHostLeavesPlay) => {
+                    ExileLinkKind::UntilSourceLeaves { return_zone: from }
+                }
+                _ if matches!(exile_tracking, ZoneDeliveryExileTracking::TrackBySource) => {
+                    ExileLinkKind::TrackedBySource
+                }
+                _ => return ZoneDeliveryResult::Done,
+            };
+            state.exile_links.push(ExileLink {
+                exiled_id: object_id,
+                source_id,
+                kind,
+            });
+        }
+    }
+    // CR 614.12a: Drain mandatory replacement post-effects after the zone
+    // change completes. This shared delivery path covers effect-driven moves
+    // (`ChangeZone`) in the same way stack resolution and land play already
+    // do, so as-enters work such as "enters prepared" or persisted choices
+    // applies before triggers and priority.
+    //
+    // CR 614.12a: A Devour as-enters sacrifice surfaces its own interactive
+    // `EffectZoneChoice` here. Surface that pause to the caller via
+    // `NeedsChoice` so the mass/single zone-change loop stashes the remaining
+    // co-entering members and resumes after the choice (instead of dropping
+    // them, issue #535 class).
+    if state.post_replacement_continuation.is_some() {
+        let waiting_for = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            state,
+            Some(object_id),
+            None,
+            Some(crate::types::replacements::ReplacementEvent::Moved),
+            events,
+        );
+        if matches!(waiting_for, Some(WaitingFor::EffectZoneChoice { .. })) {
+            return replacement_pause_delivery_result(state);
+        }
+    }
+    ZoneDeliveryResult::Done
+}
+
 fn aura_enchant_filter(state: &GameState, object_id: ObjectId) -> Option<TargetFilter> {
     let obj = state.objects.get(&object_id)?;
     if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
@@ -226,7 +340,7 @@ pub(crate) fn deliver_replaced_zone_change(
     duration: Option<&Duration>,
     track_exiled_by_source: bool,
     events: &mut Vec<GameEvent>,
-) {
+) -> ZoneDeliveryResult {
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
@@ -241,6 +355,12 @@ pub(crate) fn deliver_replaced_zone_change(
         ..
     } = event
     {
+        let exile_tracking = if track_exiled_by_source {
+            ZoneDeliveryExileTracking::TrackBySource
+        } else {
+            ZoneDeliveryExileTracking::None
+        };
+
         // CR 614.1c: Static replacement effects that modify how an object enters
         // must already be functioning before that object enters. Snapshot the
         // definitions before `move_to_zone` so a newly-entered permanent cannot
@@ -258,6 +378,16 @@ pub(crate) fn deliver_replaced_zone_change(
         } else {
             Vec::new()
         };
+
+        // CR 614.12a + CR 614.13a: snapshot the pre-entry eligible pool the instant
+        // before the FIRST co-entering devourer enters; persisted (is_none gate) so all
+        // co-entering devourers share it. Excludes self + every co-arriver.
+        if to == Zone::Battlefield
+            && state.devour_eligible_snapshot.is_none()
+            && crate::game::engine_replacement::object_has_devour_replacement(state, object_id)
+        {
+            state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
+        }
 
         zones::move_to_zone(state, object_id, to, events);
         if to == Zone::Battlefield || from == Zone::Battlefield {
@@ -341,12 +471,7 @@ pub(crate) fn deliver_replaced_zone_change(
         // CR 614.1c: Apply counters from replacement pipeline (e.g., saga lore counters,
         // planeswalker intrinsic loyalty, battle intrinsic defense).
         if to == Zone::Battlefield {
-            crate::game::engine_replacement::apply_etb_counters(
-                state,
-                object_id,
-                &enter_with_counters,
-                events,
-            );
+            let mut counters_to_apply = enter_with_counters;
             // CR 614.1c + CR 122.1: Apply additional counters from continuous
             // "[scope] creatures you control enter with an additional [counter]
             // counter on them" statics (Kalain, Bard Class, Gorma the Gullet,
@@ -359,14 +484,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 object_id,
                 &enters_with_additional_counter_statics,
             );
-            if !additional.is_empty() {
-                crate::game::engine_replacement::apply_etb_counters(
-                    state,
-                    object_id,
-                    &additional,
-                    events,
-                );
-            }
+            counters_to_apply.extend(additional);
             // CR 614.1c: Apply pending ETB counters from delayed triggers
             // (e.g., "that creature enters with an additional +1/+1 counter").
             let pending: Vec<_> = state
@@ -375,10 +493,33 @@ pub(crate) fn deliver_replaced_zone_change(
                 .filter(|(oid, _, _)| *oid == object_id)
                 .map(|(_, ct, n)| (ct.clone(), *n))
                 .collect();
-            if !pending.is_empty() {
-                crate::game::engine_replacement::apply_etb_counters(
-                    state, object_id, &pending, events,
+            let pending_etb_cleanup = if pending.is_empty() {
+                None
+            } else {
+                Some(object_id)
+            };
+            counters_to_apply.extend(pending);
+            if !counters_to_apply.is_empty()
+                && !crate::game::engine_replacement::apply_etb_counters(
+                    state,
+                    object_id,
+                    &counters_to_apply,
+                    events,
+                )
+            {
+                return append_zone_delivery_tail_after_counter_pause(
+                    state,
+                    object_id,
+                    from,
+                    to,
+                    cause,
+                    source_id,
+                    duration,
+                    exile_tracking,
+                    pending_etb_cleanup,
                 );
+            }
+            if pending_etb_cleanup.is_some() {
                 state
                     .pending_etb_counters
                     .retain(|(oid, _, _)| *oid != object_id);
@@ -390,53 +531,48 @@ pub(crate) fn deliver_replaced_zone_change(
             // shared single-authority resolver so counter-doubling
             // replacements (Doubling Season, Hardened Scales) and
             // event emission stay consistent.
-            crate::game::engine_replacement::apply_etb_counters(
+            if !crate::game::engine_replacement::apply_etb_counters(
                 state,
                 object_id,
                 &enter_with_counters,
                 events,
-            );
-        }
-        // CR 401.3: If an object is put into a library (not at a specific
-        // position), that library is shuffled afterward.
-        if to == Zone::Library {
-            let owner = state.objects.get(&object_id).map(|o| o.owner);
-            if let Some(owner) = owner {
-                shuffle_library(state, owner, events);
-            }
-        }
-        // Track cards exiled by the source. Some linked exiles return when the
-        // source leaves; others are just remembered as "exiled with" the source.
-        if to == Zone::Exile {
-            if let Some(source_id) = cause.or(source_id) {
-                let kind = match duration {
-                    Some(Duration::UntilHostLeavesPlay) => {
-                        ExileLinkKind::UntilSourceLeaves { return_zone: from }
-                    }
-                    _ if track_exiled_by_source => ExileLinkKind::TrackedBySource,
-                    _ => return,
-                };
-                state.exile_links.push(ExileLink {
-                    exiled_id: object_id,
+            ) {
+                return append_zone_delivery_tail_after_counter_pause(
+                    state,
+                    object_id,
+                    from,
+                    to,
+                    cause,
                     source_id,
-                    kind,
-                });
+                    duration,
+                    exile_tracking,
+                    None,
+                );
             }
         }
-        // CR 614.12a: Drain mandatory replacement post-effects after the zone
-        // change completes. This shared delivery path covers effect-driven moves
-        // (`ChangeZone`) in the same way stack resolution and land play already
-        // do, so as-enters work such as "enters prepared" or persisted choices
-        // applies before triggers and priority.
-        if state.post_replacement_continuation.is_some() {
-            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                state,
-                Some(object_id),
-                None,
-                Some(crate::types::replacements::ReplacementEvent::Moved),
-                events,
-            );
-        }
+        return apply_zone_delivery_tail(
+            state,
+            object_id,
+            from,
+            to,
+            cause,
+            source_id,
+            duration,
+            exile_tracking,
+            events,
+        );
+    }
+    ZoneDeliveryResult::Done
+}
+
+fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
+    match &state.waiting_for {
+        WaitingFor::ReplacementChoice { player, .. } => ZoneDeliveryResult::NeedsChoice(*player),
+        // CR 614.12a: a Devour as-enters sacrifice surfaced its own
+        // `EffectZoneChoice`; carry its chooser so the caller's `park_waiting_for`
+        // doesn't clobber the already-surfaced prompt.
+        WaitingFor::EffectZoneChoice { player, .. } => ZoneDeliveryResult::NeedsChoice(*player),
+        _ => ZoneDeliveryResult::NeedsChoice(state.active_player),
     }
 }
 
@@ -599,14 +735,19 @@ pub(crate) fn execute_zone_move(
                 }
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
-                deliver_replaced_zone_change(
+                match deliver_replaced_zone_change(
                     state,
                     event,
                     Some(source_id),
                     duration,
                     track_exiled_by_source,
                     events,
-                );
+                ) {
+                    ZoneDeliveryResult::Done => {}
+                    ZoneDeliveryResult::NeedsChoice(player) => {
+                        return ZoneMoveResult::NeedsChoice(player);
+                    }
+                }
                 state.waiting_for = WaitingFor::ReturnAsAuraTarget {
                     player: controller,
                     source_id,
@@ -624,14 +765,19 @@ pub(crate) fn execute_zone_move(
                 };
                 return ZoneMoveResult::NeedsAuraAttachmentChoice;
             }
-            deliver_replaced_zone_change(
+            match deliver_replaced_zone_change(
                 state,
                 event,
                 Some(source_id),
                 duration,
                 track_exiled_by_source,
                 events,
-            );
+            ) {
+                ZoneDeliveryResult::Done => {}
+                ZoneDeliveryResult::NeedsChoice(player) => {
+                    return ZoneMoveResult::NeedsChoice(player);
+                }
+            }
             ZoneMoveResult::Done
         }
         ReplacementResult::Prevented => ZoneMoveResult::Done,
@@ -914,13 +1060,28 @@ pub fn resolve(
                     }
                 }
                 ZoneMoveResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    // CR 614.12a: single-pick branch (Random single / single-eligible)
+                    // has NO stash/drain, so KEEP the counter-pause EffectResolved
+                    // append — it is the ONLY resume-path EffectResolved emit (the
+                    // synchronous Done-branch emit below does NOT run on the pause
+                    // path). Only the wait-state setter changes to `park_waiting_for`
+                    // so a Devour as-enters sacrifice `EffectZoneChoice` already
+                    // surfaced by the move isn't clobbered.
+                    append_effect_resolved_after_counter_pause(
+                        state,
+                        EffectKind::from(&ability.effect),
+                        ability.source_id,
+                    );
+                    crate::game::replacement::park_waiting_for(state, player);
                     return Ok(());
                 }
                 ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
             }
 
+            // CR 614.13a: single-pick entry completed (Done branch) — clear the
+            // pre-entry Devour snapshot (its lifetime = this entry event). The
+            // pause arm above returned before reaching here.
+            let _ = state.devour_eligible_snapshot.take();
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -963,13 +1124,28 @@ pub fn resolve(
                     }
                 }
                 ZoneMoveResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    // CR 614.12a: single-pick branch (Random single / single-eligible)
+                    // has NO stash/drain, so KEEP the counter-pause EffectResolved
+                    // append — it is the ONLY resume-path EffectResolved emit (the
+                    // synchronous Done-branch emit below does NOT run on the pause
+                    // path). Only the wait-state setter changes to `park_waiting_for`
+                    // so a Devour as-enters sacrifice `EffectZoneChoice` already
+                    // surfaced by the move isn't clobbered.
+                    append_effect_resolved_after_counter_pause(
+                        state,
+                        EffectKind::from(&ability.effect),
+                        ability.source_id,
+                    );
+                    crate::game::replacement::park_waiting_for(state, player);
                     return Ok(());
                 }
                 ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
             }
 
+            // CR 614.13a: single-pick entry completed (Done branch) — clear the
+            // pre-entry Devour snapshot (its lifetime = this entry event). The
+            // pause arm above returned before reaching here.
+            let _ = state.devour_eligible_snapshot.take();
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1014,6 +1190,19 @@ pub fn resolve(
         track_exiled_by_source,
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
+
+    // CR 614.12a + CR 614.13a: same pre-loop snapshot as the mass path, for a
+    // targeted multi-`ChangeZone` co-entry that brings in one or more devourers.
+    // Captured before any member enters so every co-arriver (and the devourers
+    // themselves) is excluded regardless of iteration order.
+    if dest_zone == Zone::Battlefield
+        && state.devour_eligible_snapshot.is_none()
+        && targeted_objects
+            .iter()
+            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
+    {
+        state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
+    }
 
     for (i, obj_id) in targeted_objects.iter().enumerate() {
         if dest_zone == Zone::Exile {
@@ -1075,14 +1264,19 @@ pub fn resolve(
                         track_exiled_by_source: ctx.track_exiled_by_source,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
-                state.waiting_for =
-                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
+                // may already have surfaced its own `EffectZoneChoice`.
+                crate::game::replacement::park_waiting_for(state, player);
                 // EffectResolved is emitted by the drain after the loop completes —
                 // do NOT emit here.
                 return Ok(());
             }
         }
     }
+
+    // CR 614.13a: targeted multi-ChangeZone co-entry completed without pausing —
+    // clear the pre-entry Devour snapshot (its lifetime = this entry event).
+    let _ = state.devour_eligible_snapshot.take();
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -1363,9 +1557,27 @@ pub fn resolve_all(
         state.tracked_object_sets.remove(id);
     }
 
+    // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers
+    // simultaneously, snapshot the eligible pool BEFORE any co-entering member
+    // enters — `state.objects` is unordered, so an ordinary co-arriver may be
+    // processed before the devourer; capturing at devourer-entry time would then
+    // wrongly include that already-entered co-arriver. Capture pre-loop (when the
+    // battlefield is still the pre-entry set) so every co-arriver is excluded.
+    // `is_none`-gated so a nested/resumed pass doesn't re-capture; cleared on the
+    // event-completion paths below.
+    if dest_zone == Zone::Battlefield
+        && state.devour_eligible_snapshot.is_none()
+        && matching
+            .iter()
+            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
+    {
+        state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
+    }
+
     let mut moved_count: i32 = 0;
     let mut departed: Vec<ObjectId> = Vec::new();
-    for obj_id in matching {
+    for (i, obj_id) in matching.iter().enumerate() {
+        let obj_id = *obj_id;
         // CR 400.3: Each object's actual current zone is the source zone for the
         // move. Single-zone callers pass `origin_zones = [zone]`; multi-zone
         // callers (e.g. "search graveyard, hand, and library") let each object's
@@ -1422,13 +1634,55 @@ pub fn resolve_all(
                 }
             }
             ZoneMoveResult::NeedsChoice(player) => {
-                state.waiting_for =
-                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                // CR 614.12a + CR 614.13: a Devour as-enters sacrifice surfaced its
+                // own `EffectZoneChoice` (or a counter-pause replacement choice).
+                // Stash the unprocessed co-entering members so
+                // `drain_pending_change_zone_iteration` resumes the mass move after
+                // the player resolves this choice — without the stash, every member
+                // after the first NeedsChoice would be silently dropped (issue #535
+                // class). The drain owns the single trailing EffectResolved, so we do
+                // NOT emit it here (mirrors the targeted loop's contract).
+                //
+                // NOTE (pre-existing face_down residual, extended not regressed):
+                // `process_one_zone_move` (the drain's mover) hardcodes
+                // `face_down=None`, while this mass loop passes
+                // `face_down_profile.as_ref()`. Resumed members of a face-down mass
+                // entry (the Cyber-Controller class) therefore lose their face-down
+                // profile. This carrier gap predates this change.
+                state.pending_change_zone_iteration =
+                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                        remaining: matching[i + 1..].to_vec(),
+                        source_id: ability.source_id,
+                        controller: ability.controller,
+                        origin: None,
+                        destination: dest_zone,
+                        enter_transformed: false,
+                        enter_tapped,
+                        enters_under_player,
+                        enters_attacking: false,
+                        enter_with_counters: vec![],
+                        duration: ability.duration.clone(),
+                        track_exiled_by_source,
+                        effect_kind: EffectKind::from(&ability.effect),
+                    });
+                crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
             }
-            ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
+            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                // CR 614.13a: this terminal early-exit ends the mass-entry event
+                // (no stash/resume), so the pre-entry Devour snapshot's lifetime is
+                // over — clear it so it can't leak into a later sacrifice.
+                let _ = state.devour_eligible_snapshot.take();
+                return Ok(());
+            }
         }
     }
+
+    // CR 614.13a: the whole co-entry event completed without pausing — clear the
+    // pre-entry Devour snapshot (its lifetime = this one ChangeZone-to-battlefield
+    // event). NOT cleared on the NeedsChoice pause above (the paused devourer's
+    // sacrifice + remaining co-entering members still need it).
+    let _ = state.devour_eligible_snapshot.take();
 
     // CR 603.10a + CR 608.2f: Every battlefield-origin object that left did so as
     // part of the same mass zone-change event, so leaves-the-battlefield observers
@@ -2532,7 +2786,7 @@ mod tests {
 
     #[test]
     fn auto_shuffle_after_library_destination() {
-        // CR 401.3: Moving an object to a library should shuffle that library afterward
+        // CR 701.24a: Moving an object to a library should shuffle that library afterward.
         let mut state = GameState::new_two_player(42);
         // Add some cards to player 0's library so we can detect shuffle
         for i in 0..5 {

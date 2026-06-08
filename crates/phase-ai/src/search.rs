@@ -4,6 +4,7 @@ use engine::ai_support::build_decision_context;
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{CastOfferKind, CostResume, GameState, WaitingFor};
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
@@ -14,6 +15,7 @@ use crate::planner::{
     apply_candidate, build_continuation_planner, PlannerServices, RankedCandidate, SearchBudget,
 };
 use crate::policies::context::PolicyContext;
+use crate::policies::copy_value::score_legend_rule_keep;
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
 use crate::policies::{PolicyId, PolicyRegistry, PolicyVerdict};
 use crate::tactical_gate::gate_candidates;
@@ -67,6 +69,19 @@ const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 /// flashback + recast, Eternal Witness reanimate chain) while preventing the
 /// thousands-of-iterations pathology observed in #563.
 const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
+
+fn pick_lowest_value_sacrifices(
+    state: &GameState,
+    cards: &[ObjectId],
+    count: usize,
+) -> Vec<ObjectId> {
+    let mut scored: Vec<_> = cards
+        .iter()
+        .map(|&id| (id, evaluate_card_value(state, id)))
+        .collect();
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().take(count).map(|(id, _)| id).collect()
+}
 
 /// Choose the best action for the AI player given the current game state.
 ///
@@ -327,6 +342,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseTarget { target: None })
         }
 
+        // CR 701.21a: Mandatory spell-effect sacrifices (Deadly Brew, Edict
+        // riders) must pick a legal permanent — an empty SelectCards fails
+        // validation when `count > 0` and `up_to` is false.
+        WaitingFor::EffectZoneChoice {
+            cards,
+            count,
+            up_to,
+            effect_kind: engine::types::ability::EffectKind::Sacrifice,
+            ..
+        } if !cards.is_empty() && !*up_to && *count > 0 => Some(GameAction::SelectCards {
+            cards: pick_lowest_value_sacrifices(state, cards, *count),
+        }),
+
         // Selection states: empty selection is a valid "choose nothing".
         WaitingFor::ScryChoice { .. }
         | WaitingFor::DigChoice { .. }
@@ -531,6 +559,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 702.60a: Ripple — decline as the default; candidates explore casting.
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Ripple { .. },
+            ..
+        } => Some(GameAction::RippleChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        }),
         // CR 107.1c: "repeat this process" — stop as the forced-action default;
         // the candidate generator still explores repeating.
         WaitingFor::RepeatDecision { .. } => {
@@ -684,9 +719,14 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             choice_text.map(|choice| GameAction::ChooseOption { choice })
         }
 
-        // Legend choice: pick the first candidate.
+        // CR 704.5j: keep the commander / original over ephemeral copy tokens.
         WaitingFor::ChooseLegend { candidates, .. } => candidates
-            .first()
+            .iter()
+            .max_by(|&&left, &&right| {
+                score_legend_rule_keep(state, left)
+                    .partial_cmp(&score_legend_rule_keep(state, right))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|&keep| GameAction::ChooseLegend { keep }),
 
         // Battle protector: pick the first candidate.
@@ -698,6 +738,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ProliferateChoice { .. } => Some(GameAction::SelectTargets {
             targets: Vec::new(),
         }),
+
+        // CR 701.56a: Time travel — default to changing nothing this phase
+        // (an empty selection is legal: "choose any number").
+        WaitingFor::TimeTravelChoice { .. } => Some(GameAction::SelectTargets {
+            targets: Vec::new(),
+        }),
+
+        // CR 702.132a: Assist — default to not seeking help (decline the offer)
+        // and, if asked to contribute, contribute nothing.
+        WaitingFor::AssistChoosePlayer { .. } => {
+            Some(GameAction::ChooseAssistPlayer { player: None })
+        }
+        WaitingFor::AssistPayment { .. } => Some(GameAction::CommitAssistPayment { generic: 0 }),
 
         // ChooseObjectsIntoTrackedSet: default to declining (empty selection).
         WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
@@ -939,6 +992,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // for exhaustive match. ManaPayment is a pending-cast state.
         WaitingFor::ManaPayment { .. }
         | WaitingFor::OptionalCostChoice { .. }
+        | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PayCost {
             resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
@@ -1426,6 +1480,25 @@ pub(crate) fn deterministic_choice(
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         if let Some((best, _)) = scored.first() {
             return Some(GameAction::SelectCards { cards: vec![*best] });
+        }
+    }
+
+    if let WaitingFor::EffectZoneChoice {
+        cards,
+        count,
+        up_to,
+        effect_kind,
+        ..
+    } = &state.waiting_for
+    {
+        if matches!(effect_kind, engine::types::ability::EffectKind::Sacrifice)
+            && !cards.is_empty()
+            && !*up_to
+            && *count > 0
+        {
+            return Some(GameAction::SelectCards {
+                cards: pick_lowest_value_sacrifices(state, cards, *count),
+            });
         }
     }
 

@@ -12,19 +12,22 @@ use crate::types::ability::{
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
     AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration,
-    Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost,
-    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
-    StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::format::DeckCopyLimit;
-use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
+use crate::types::keywords::{
+    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, Keyword, PartnerType,
+};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerCounterKind;
@@ -229,6 +232,9 @@ impl KeywordTriggerInstaller {
             // CR 702.39a: Provoke — attacks trigger that may untap a creature the
             // defending player controls and force it to block this attacker.
             Keyword::Provoke => vec![build_provoke_trigger()],
+            // CR 702.154a: Enlist — optional attacks trigger that taps an
+            // untapped creature you control and pumps the attacker by its power.
+            Keyword::Enlist => vec![build_enlist_trigger()],
             Keyword::Renown(n) => vec![build_renown_trigger(*n)],
             Keyword::Mentor => vec![build_mentor_trigger()],
             // CR 702.58a + CR 604.1: granted Graft installs only the
@@ -247,6 +253,10 @@ impl KeywordTriggerInstaller {
                 build_bushido_trigger(TriggerMode::Blocks, *n),
                 build_bushido_trigger(TriggerMode::BecomesBlocked, *n),
             ],
+            // CR 702.68a: Frenzy N — whenever this creature attacks and isn't
+            // blocked, it gets +N/+0 until end of turn. CR 702.68b: each instance
+            // triggers separately; one trigger per `Frenzy`.
+            Keyword::Frenzy(n) => vec![build_frenzy_trigger(*n)],
             // CR 702.91a: Battle cry — whenever this creature attacks, each
             // other attacking creature gets +1/+0 until end of turn. CR 702.91b:
             // each instance triggers separately; one trigger per `Battlecry`.
@@ -340,6 +350,7 @@ impl KeywordTriggerInstaller {
             Keyword::Soulshift(n) => is_soulshift_trigger_for_value(trigger, *n),
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
             Keyword::Provoke => is_provoke_attack_trigger(trigger),
+            Keyword::Enlist => is_enlist_trigger(trigger),
             Keyword::Renown(_) => is_renown_trigger(trigger),
             Keyword::Mentor => is_mentor_trigger(trigger),
             // CR 702.58a + CR 604.1: symmetric removal — `RemoveKeyword`
@@ -347,6 +358,7 @@ impl KeywordTriggerInstaller {
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
             Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
+            Keyword::Frenzy(n) => is_frenzy_trigger(trigger, *n),
             Keyword::Battlecry => is_battlecry_trigger(trigger),
             Keyword::Rampage(n) => is_rampage_trigger(trigger, *n),
             Keyword::Melee => is_melee_trigger(trigger),
@@ -483,6 +495,40 @@ pub fn synthesize_equip(face: &mut CardFace) {
         .collect();
 
     face.abilities.extend(equip_abilities);
+}
+
+/// CR 702.67a: Fortify — "[Cost]: Attach this Fortification to target land you
+/// control. Activate only as a sorcery." Mirrors `synthesize_equip` exactly,
+/// except the attach target is a land you control (CR 702.67a) rather than a
+/// creature. Without this, a Fortification (e.g. Darksteel Garrison) parses its
+/// `Keyword::Fortify(cost)` but synthesizes no ability, so it can never attach.
+pub fn synthesize_fortify(face: &mut CardFace) {
+    let fortify_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            if let Keyword::Fortify(cost) = kw {
+                Some(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Attach {
+                            attachment: TargetFilter::SelfRef,
+                            target: TargetFilter::Typed(
+                                TypedFilter::land().controller(ControllerRef::You),
+                            ),
+                        },
+                    )
+                    .cost(AbilityCost::Mana { cost: cost.clone() })
+                    // CR 702.67a: "Activate only as a sorcery."
+                    .sorcery_speed(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    face.abilities.extend(fortify_abilities);
 }
 
 /// CR 702.151a: Reconfigure represents two activated abilities —
@@ -638,7 +684,8 @@ pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
 // - `stack.rs::resolve_top` creates a delayed exile trigger on resolution
 
 /// Synthesize Mobilize N trigger: when this creature attacks, create N 1/1 red
-/// Warrior creature tokens tapped and attacking. Sacrifice them at end of combat.
+/// Warrior creature tokens tapped and attacking. Sacrifice them at the beginning
+/// of the next end step (CR 702.181a).
 pub fn synthesize_mobilize(face: &mut CardFace) {
     use crate::types::ability::PtValue;
     use crate::types::triggers::TriggerMode;
@@ -674,11 +721,27 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
                 enter_with_counters: vec![],
             };
 
+            let sacrifice_at_end_step = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                    effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Sacrifice {
+                            target: TargetFilter::LastCreated,
+                            count: qty.clone(),
+                            min_count: 0,
+                        },
+                    )),
+                    uses_tracked_set: false,
+                },
+            );
+
             face.triggers.push(
                 TriggerDefinition::new(TriggerMode::Attacks)
                     .execute(
                         AbilityDefinition::new(AbilityKind::Spell, token_effect)
-                            .duration(Duration::UntilEndOfCombat),
+                            .sub_ability(sacrifice_at_end_step),
                     )
                     .description(
                         "Mobilize — create Warrior tokens tapped and attacking".to_string(),
@@ -956,6 +1019,28 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
                 .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+                .cda(),
+        );
+    }
+}
+
+/// CR 702.114a + CR 604.3: Devoid is a characteristic-defining ability —
+/// "This object is colorless." Synthesize a SelfRef color-overriding CDA
+/// (`SetColor { colors: [] }`, Layer 5 / CR 613.1e), mirroring
+/// `synthesize_changeling_cda`. This drives the on-battlefield color computation;
+/// a later "becomes [color]" effect (higher timestamp) can still override it.
+///
+/// CR 604.3 also requires Devoid to function in **all** zones, even outside the
+/// game. Off-battlefield color is read from the object's stored `color` /
+/// `base_color` rather than recomputed through layers, so the all-zones half is
+/// handled where those base characteristics are derived (`printed_cards.rs`
+/// builds a devoid face colorless), not here.
+pub fn synthesize_devoid_cda(face: &mut CardFace) {
+    if face.keywords.iter().any(|k| matches!(k, Keyword::Devoid)) {
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetColor { colors: vec![] }])
                 .cda(),
         );
     }
@@ -1373,6 +1458,13 @@ fn specialize_discard_filter() -> TargetFilter {
 /// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
 /// on this permanent. Activate only as a sorcery."
 pub fn synthesize_level_up(face: &mut CardFace) {
+    // CR 711.4 / CR 711.5: strip keywords printed inside {LEVEL} striations out of
+    // the base list before reading `face.keywords` — they belong to the level-gated
+    // statics, not the unconditional base abilities. Single call site fixes both the
+    // production and scenario pipelines, which reach here via `synthesize_all` after
+    // `keywords` + `static_abilities` are populated.
+    strip_level_gated_keywords(face);
+
     let level_up_abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
@@ -1632,6 +1724,197 @@ pub fn synthesize_cycling(face: &mut CardFace) {
     face.abilities.extend(cycling_abilities);
 }
 
+/// CR 702.53a: Synthesize Transmute into an activated ability that functions
+/// only while the card is in a player's hand. "Transmute [cost]" means
+/// "[Cost], Discard this card: Search your library for a card with the same mana
+/// value as the discarded card, reveal that card, and put it into your hand.
+/// Then shuffle your library. Activate only as a sorcery."
+///
+/// Mirrors `synthesize_cycling`'s Typecycling arm (discard-self + mana cost →
+/// `SearchLibrary` → put the found card to hand → shuffle, activatable from
+/// hand), swapping the subtype filter for a same-mana-value filter and adding the
+/// sorcery-speed restriction. Unlike Cycling/Typecycling it carries no
+/// `AbilityTag::Cycling` — transmute is not a cycling ability (CR 702.29).
+pub fn synthesize_transmute(face: &mut CardFace) {
+    let transmute_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Transmute(cost) => {
+                // CR 702.53a + CR 601.2b/f–h: "[Cost], Discard this card".
+                let composite_cost = AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana { cost: cost.clone() },
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            random: false,
+                            self_ref: true,
+                        },
+                    ],
+                };
+                let filter = transmute_same_mana_value_filter();
+                // CR 702.53a: "Then shuffle your library."
+                let shuffle_def = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Shuffle {
+                        target: TargetFilter::Controller,
+                    },
+                );
+                // CR 702.53a: "reveal that card, and put it into your hand."
+                let mut put_in_hand_def = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Library),
+                        destination: Zone::Hand,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: false,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                );
+                put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
+                // CR 702.53a: "Search your library for a card with the same mana
+                // value as the discarded card ... Activate only as a sorcery."
+                let mut def = AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::SearchLibrary {
+                        filter,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        reveal: true,
+                        target_player: None,
+                        selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
+                        source_zones: vec![crate::types::zones::Zone::Library],
+                    },
+                )
+                .cost(composite_cost)
+                .sorcery_speed();
+                // CR 702.53b: the ability functions only while the card is in hand.
+                def.activation_zone = Some(Zone::Hand);
+                def.sub_ability = Some(Box::new(put_in_hand_def));
+                Some(def)
+            }
+            _ => None,
+        })
+        .collect();
+
+    face.abilities.extend(transmute_abilities);
+}
+
+/// CR 702.71a: Synthesize Transfigure into an activated ability on the card.
+///
+/// "Transfigure [cost]" means "[Cost], Sacrifice this permanent: Search your
+/// library for a creature card with the same mana value as this permanent and
+/// put it onto the battlefield. Then shuffle your library. Activate only as a
+/// sorcery." Mirrors `synthesize_transmute`, but (1) the cost sacrifices the
+/// source permanent instead of discarding it, (2) the same-mana-value filter
+/// reads the *source* permanent's mana value (`ObjectScope::Source`, not
+/// `CostPaidObject` — a Sacrifice cost never stamps `cost_paid_object`), (3) the
+/// found card is a creature and goes to the battlefield (not hand), and (4) the
+/// ability functions on the battlefield (default `activation_zone`, unlike
+/// Transmute's hand-only).
+pub fn synthesize_transfigure(face: &mut CardFace) {
+    let transfigure_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Transfigure(cost) = kw else {
+                return None;
+            };
+            // CR 702.71a: Composite cost — pay mana, then sacrifice this permanent.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    },
+                ],
+            };
+            // CR 702.71a: "a creature card with the same mana value as this
+            // permanent." ObjectScope::Source reads the (sacrificed) source's
+            // printed mana value (zone-stable, LKI-backed) — NOT CostPaidObject.
+            let filter =
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                ]));
+            // CR 702.71a: "Then shuffle your library."
+            let shuffle_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            );
+            // CR 702.71a: "put it onto the battlefield" — Library→Battlefield.
+            let mut put_on_battlefield_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            );
+            put_on_battlefield_def.sub_ability = Some(Box::new(shuffle_def));
+            // CR 702.71a: "Search your library ... Activate only as a sorcery."
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::SearchLibrary {
+                    filter,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
+                },
+            )
+            .cost(composite_cost)
+            .sorcery_speed();
+            def.sub_ability = Some(Box::new(put_on_battlefield_def));
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(transfigure_abilities);
+}
+
+/// CR 702.53a: "a card with the same mana value as the discarded card." The
+/// discarded card is the transmute card itself, paid as the discard cost, so the
+/// filter compares a library card's mana value to the cost-paid object's mana
+/// value via `ObjectScope::CostPaidObject` — the same scope the parser emits for
+/// "with the same mana value as that card".
+fn transmute_same_mana_value_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+        comparator: Comparator::EQ,
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            },
+        },
+    }]))
+}
+
 /// CR 702.97a: Synthesize Scavenge into an activated ability on the card.
 ///
 /// Scavenge is an activated ability that functions only while the card with scavenge is
@@ -1820,6 +2103,7 @@ pub fn casualty_copy_ability_definition() -> AbilityDefinition {
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
         },
     )
     .condition(AbilityCondition::additional_cost_paid_any())
@@ -1909,6 +2193,7 @@ pub fn replicate_copy_ability_definition() -> AbilityDefinition {
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
         },
     )
     // CR 702.56a: "if a replicate cost was paid for it". With zero payments the
@@ -2016,6 +2301,223 @@ pub fn synthesize_replicate(face: &mut CardFace) {
     );
 }
 
+/// CR 702.144a: The `AbilityDefinition` produced by a Demonstrate trigger — an
+/// optional self-copy ("you may copy it ... and you may choose new targets")
+/// whose sub-ability copies the spell for a chosen opponent ("if you copy the
+/// spell, choose an opponent; that player copies the spell and may choose new
+/// targets for that copy").
+///
+/// The opponent's copy is a `sub_ability` so it only happens when the controller
+/// accepts the optional copy (CR 702.144a "if you copy the spell"); the existing
+/// chain resolver sequences it after the controller's copy (and its retarget)
+/// via `pending_continuation`. The opponent is routed through the new
+/// `Effect::CopySpell { copier: Some(Opponent) }` axis, which `copy_spell::resolve`
+/// turns into an opponent-controlled copy (CR 707.10).
+pub fn demonstrate_copy_ability_definition() -> AbilityDefinition {
+    let opponent_copy = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: Some(ControllerRef::Opponent),
+        },
+    )
+    .description(
+        "CR 702.144a: Demonstrate — the chosen opponent copies the spell and may choose new \
+         targets for that copy"
+            .to_string(),
+    );
+
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
+        },
+    )
+    .optional()
+    .sub_ability(opponent_copy)
+    .description(
+        "CR 702.144a: Demonstrate — you may copy this spell (you may choose new targets); if you \
+         do, a chosen opponent also copies it"
+            .to_string(),
+    )
+}
+
+/// CR 702.144a: Identity predicate for a synthesized Demonstrate copy-on-cast
+/// trigger — an optional `SpellCast` self-copy whose sub-ability is an
+/// opponent-`copier` copy. Used for idempotent synthesis.
+fn is_demonstrate_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.trigger_zones.contains(&Zone::Stack)
+        && t.execute.as_deref().is_some_and(|a| {
+            a.optional
+                && matches!(
+                    &*a.effect,
+                    Effect::CopySpell {
+                        target: TargetFilter::SelfRef,
+                        copier: None,
+                        ..
+                    }
+                )
+                && a.sub_ability.as_deref().is_some_and(|sub| {
+                    matches!(
+                        &*sub.effect,
+                        Effect::CopySpell {
+                            copier: Some(ControllerRef::Opponent),
+                            ..
+                        }
+                    )
+                })
+        })
+}
+
+/// CR 702.144a: Synthesize Demonstrate into a "when you cast this spell" copy
+/// trigger that functions on the stack: you may copy the spell, and if you do, a
+/// chosen opponent also copies it. Both copies may choose new targets (CR
+/// 707.10c).
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Demonstrate`, so every
+/// printed Demonstrate spell flows through this one synthesizer. Idempotent
+/// across repeated invocations.
+pub fn synthesize_demonstrate(face: &mut CardFace) {
+    if !face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Demonstrate))
+    {
+        return;
+    }
+    if face.triggers.iter().any(is_demonstrate_trigger) {
+        return;
+    }
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Stack])
+            .execute(demonstrate_copy_ability_definition())
+            .description(
+                "CR 702.144a: Demonstrate — when you cast this spell, you may copy it; if you do, \
+                 a chosen opponent also copies it."
+                    .to_string(),
+            ),
+    );
+}
+
+/// CR 702.78a: Conspire — "As an additional cost to cast this spell, you may tap
+/// two untapped creatures you control that each share a color with it" and "When
+/// you cast this spell, if its conspire cost was paid, copy it. If the spell has
+/// any targets, you may choose new targets for the copy." Mirrors
+/// `synthesize_replicate`: an optional additional cast cost plus a copy-on-cast
+/// trigger gated on that cost having been paid.
+pub fn synthesize_conspire(face: &mut CardFace) {
+    let count = face
+        .keywords
+        .iter()
+        .filter(|k| matches!(k, Keyword::Conspire))
+        .count();
+    if count == 0 {
+        return;
+    }
+
+    // CR 702.78b: multiple Conspire instances are paid and trigger separately. The
+    // engine tracks a single aggregate additional-cost-paid flag, so defer the
+    // multi-instance case rather than miscount copies (mirrors Replicate's
+    // CR 702.56b multi-instance deferral).
+    if count > 1 {
+        defer_synthesis(
+            face,
+            "conspire_multiple_instances",
+            "CR 702.78b: multiple Conspire instances require per-instance payment tracking"
+                .to_string(),
+        );
+        return;
+    }
+
+    // CR 702.78a + CR 601.2b: the optional additional cost — tap two untapped
+    // creatures you control that each share a color with the spell.
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::TapCreatures {
+                count: 2,
+                filter: conspire_tap_filter(),
+            },
+            repeatable: false,
+        });
+    }
+
+    // CR 702.78a: "When you cast this spell, if its conspire cost was paid, copy
+    // it." Idempotent against re-synthesis.
+    if !face.triggers.iter().any(is_conspire_copy_trigger) {
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_card(TargetFilter::SelfRef)
+                .trigger_zones(vec![Zone::Stack])
+                .execute(conspire_copy_ability_definition())
+                .description(
+                    "CR 702.78a: Conspire — when you cast this spell, if its conspire cost was \
+                     paid, copy it; you may choose new targets for the copy."
+                        .to_string(),
+                ),
+        );
+    }
+}
+
+/// CR 702.78a: "creature you control that shares a color with it [the spell]".
+/// `SharesQuality`'s `reference` resolves `SelfRef` to the cost's source — the
+/// cast spell — so each candidate must share a color with the spell being cast
+/// (the color-comparison the engine already performs for Intimidate).
+pub fn conspire_tap_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::SharesQuality {
+                quality: crate::types::ability::SharedQuality::Color,
+                reference: Some(Box::new(TargetFilter::SelfRef)),
+                relation: crate::types::ability::SharedQualityRelation::Shares,
+            }]),
+    )
+}
+
+/// CR 702.78a: "copy it" — once, with optional new targets, gated on the conspire
+/// cost having been paid. No `repeat_for`: Conspire copies exactly once, unlike
+/// Replicate (which copies per payment).
+pub fn conspire_copy_ability_definition() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
+        },
+    )
+    .condition(AbilityCondition::additional_cost_paid_any())
+}
+
+/// CR 702.78a: Idempotency-shape predicate for the Conspire copy-on-cast
+/// trigger. Distinct from Replicate/Gravestorm copy triggers by the absence of
+/// `repeat_for` (Conspire copies once, not per-count).
+///
+/// This AST shape is intentionally shared with Casualty's once-copy trigger.
+/// No printed card currently has both Casualty and Conspire; if one appears,
+/// add a structural discriminator rather than matching trigger description text.
+fn is_conspire_copy_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.trigger_zones.contains(&Zone::Stack)
+        && t.execute.as_deref().is_some_and(|a| {
+            matches!(
+                &*a.effect,
+                Effect::CopySpell {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ) && a.repeat_for.is_none()
+        })
+}
+
 /// CR 702.69a: The `AbilityDefinition` produced by a Gravestorm trigger — a
 /// self-referential `CopySpell` repeated once for each permanent put into a
 /// graveyard from the battlefield this turn. Mirrors
@@ -2030,6 +2532,7 @@ pub fn gravestorm_copy_ability_definition() -> AbilityDefinition {
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
         },
     );
     // CR 702.69a: "copy it for each permanent that was put into a graveyard from
@@ -2057,6 +2560,7 @@ fn is_gravestorm_trigger(t: &TriggerDefinition) -> bool {
                 Effect::CopySpell {
                     target: TargetFilter::SelfRef,
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
                 }
             ) && a.repeat_for.as_ref().is_some_and(|repeat_for| {
                 matches!(
@@ -2195,6 +2699,96 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
             );
         face.triggers.push(trigger);
     }
+}
+
+/// CR 702.52a: Dredge — "As long as you have at least N cards in your library,
+/// if you would draw a card, you may instead mill N cards and return this card
+/// from your graveyard to your hand." Synthesized as an optional `Draw`
+/// replacement whose execute mills N then returns this card from the graveyard
+/// to hand.
+///
+/// The replacement functions while the card is in the graveyard. Two pieces make
+/// that work: (1) the draw-replacement default player-scope follows the dredge
+/// card's effective source player (CR 109.4 + CR 108.4a), so a graveyard card
+/// applies on its owner's draw — no `valid_player`/`valid_card` needed (and
+/// `valid_card: SelfRef` would not match a `Draw`, which has no affected object);
+/// (2) `find_applicable_replacements` includes graveyard dredge cards on that
+/// player's draw, gated on library size >= N (CR 702.52b enforced at offer time).
+pub fn synthesize_dredge(face: &mut CardFace) {
+    let Some(n) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Dredge(n) => Some(*n),
+        _ => None,
+    }) else {
+        return;
+    };
+    if face.replacements.iter().any(is_dredge_draw_replacement) {
+        return;
+    }
+
+    // CR 702.52a: "return this card from your graveyard to your hand."
+    let return_to_hand = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+        },
+    );
+    // CR 702.52a: "mill N cards", then return — `TargetFilter::Controller`
+    // resolves through the replacement source player, which is the graveyard
+    // card's owner under CR 109.4 + CR 108.4a.
+    let mut mill = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: n as i32 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        },
+    );
+    mill.sub_ability = Some(Box::new(return_to_hand));
+
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw);
+    replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
+    replacement.description = Some(
+        "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
+         card from your graveyard to your hand."
+            .to_string(),
+    );
+    replacement.execute = Some(Box::new(mill));
+    face.replacements.push(replacement);
+}
+
+/// Idempotency-shape predicate for the synthesized Dredge draw-replacement — a
+/// `Draw` replacement whose execute mills then returns `SelfRef` from the
+/// graveyard to hand.
+fn is_dredge_draw_replacement(r: &ReplacementDefinition) -> bool {
+    matches!(r.event, ReplacementEvent::Draw)
+        && matches!(
+            r.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Mill { .. })
+        )
+        && r.execute
+            .as_deref()
+            .and_then(|a| a.sub_ability.as_deref())
+            .is_some_and(|sub| {
+                matches!(
+                    &*sub.effect,
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Graveyard),
+                        destination: Zone::Hand,
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            })
 }
 
 /// CR 702.74a: Evoke is a static ability granting an alternative cost plus a
@@ -2676,6 +3270,67 @@ pub fn synthesize_riot(face: &mut CardFace) {
         .collect();
     for filter in static_grants {
         add_riot_replacements(face, filter, 1);
+    }
+}
+
+/// CR 702.64a: Absorb N — "If a source would deal damage to this creature,
+/// prevent N of that damage." A continuous, self-recipient damage replacement:
+/// `DamageModification::Minus { value: N }` saturating-subtracts N from each
+/// damage event whose recipient is this creature (`valid_card: SelfRef`). It is
+/// NOT a consumed shield, so it re-applies to every source and every event
+/// independently (CR 702.64b). No new variant — mirrors the continuous
+/// damage-prevention statics (Benevolent Unicorn class) and the self-scoped
+/// `valid_card(SelfRef)` damage replacements (persistent prevention shields).
+fn build_absorb_replacement(n: u32) -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .valid_card(TargetFilter::SelfRef)
+        .damage_modification(DamageModification::Minus { value: n })
+        .description(format!(
+            "CR 702.64a: Absorb {n} — if a source would deal damage to this creature, \
+             prevent {n} of that damage."
+        ))
+}
+
+/// CR 702.64a: Identity predicate for an Absorb `n` replacement — a self-recipient
+/// `DamageDone` replacement that subtracts `n` from the damage. Parameterized by
+/// `n` for count-based idempotency and so a granted-then-removed Absorb strips
+/// exactly its own replacement.
+fn is_absorb_replacement(r: &ReplacementDefinition, n: u32) -> bool {
+    matches!(r.event, ReplacementEvent::DamageDone)
+        && matches!(r.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            r.damage_modification,
+            Some(DamageModification::Minus { value }) if value == n
+        )
+}
+
+/// CR 702.64a/c: Synthesize Absorb into a continuous self-recipient damage
+/// replacement. CR 702.64c: multiple instances apply separately, so one
+/// replacement is installed per `Keyword::Absorb` instance (grouped by N).
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Absorb(n)`, so every printed
+/// Absorb creature and every creature granted Absorb at runtime gets identical
+/// prevention. Idempotent across repeated invocations via per-N count matching
+/// (mirrors `add_riot_replacements`).
+pub fn synthesize_absorb(face: &mut CardFace) {
+    let mut counts: Vec<(u32, usize)> = Vec::new();
+    for kw in &face.keywords {
+        if let Keyword::Absorb(n) = kw {
+            match counts.iter_mut().find(|(value, _)| value == n) {
+                Some((_, c)) => *c += 1,
+                None => counts.push((*n, 1)),
+            }
+        }
+    }
+    for (n, desired) in counts {
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_absorb_replacement(r, n))
+            .count();
+        for _ in existing..desired {
+            face.replacements.push(build_absorb_replacement(n));
+        }
     }
 }
 
@@ -3358,6 +4013,14 @@ pub fn synthesize_bushido(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Bushido(_)));
 }
 
+/// CR 702.68a: Frenzy N — "Whenever this creature attacks and isn't blocked, it
+/// gets +N/+0 until end of turn." One self-trigger per instance. CR 702.68b: each
+/// instance triggers separately, so one trigger is synthesized per
+/// `Keyword::Frenzy`.
+pub fn synthesize_frenzy(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Frenzy(_)));
+}
+
 /// CR 702.91a: Battle cry — "whenever this creature attacks, each other
 /// attacking creature gets +1/+0 until end of turn." CR 702.91b: each instance
 /// triggers separately, so one trigger is synthesized per `Keyword::Battlecry`.
@@ -3379,6 +4042,14 @@ pub fn synthesize_rampage(face: &mut CardFace) {
 /// `Keyword::Melee` instance.
 pub fn synthesize_melee(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Melee));
+}
+
+/// CR 702.154a: Enlist — install the optional attacks trigger that taps an
+/// untapped creature you control and pumps this creature by that creature's
+/// power. CR 702.154 is a single static+triggered ability; one trigger is
+/// synthesized per `Keyword::Enlist`.
+pub fn synthesize_enlist(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Enlist));
 }
 
 /// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
@@ -3704,7 +4375,7 @@ fn build_double_team_trigger() -> TriggerDefinition {
         )
 }
 
-fn build_echo_trigger(cost: ManaCost) -> TriggerDefinition {
+fn build_echo_trigger(cost: EchoCost) -> TriggerDefinition {
     let sac = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Sacrifice {
@@ -3723,7 +4394,13 @@ fn build_echo_trigger(cost: ManaCost) -> TriggerDefinition {
                 .to_string(),
         );
     trigger.unless_pay = Some(UnlessPayModifier {
-        cost: AbilityCost::Mana { cost },
+        // CR 702.30a: echo cost may be mana (errata/Urza-block) or non-mana
+        // ("Echo—Discard a card"). Map both to the general AbilityCost the
+        // unless-pay interceptor + handle_unless_payment already understand.
+        cost: match cost {
+            EchoCost::Mana(c) => AbilityCost::Mana { cost: c },
+            EchoCost::NonMana(c) => c,
+        },
         payer: TargetFilter::Controller,
     });
     trigger
@@ -3927,6 +4604,108 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
     )
 }
 
+/// CR 702.154a: Enlist — "As this creature attacks, you may tap up to one
+/// untapped creature you control that you didn't choose to attack with and that
+/// either has haste or has been under your control continuously since this turn
+/// began. When you do, this creature gets +X/+0 until end of turn, where X is the
+/// tapped creature's power."
+///
+/// Synthesized as an optional `Attacks` trigger (the Provoke shape): the optional
+/// parent body taps an eligible creature; the reflexive sub-ability pumps the
+/// attacker (`SelfRef`) by that creature's power, read anaphorically — the
+/// just-tapped permanent is captured as the resolution's "that creature" referent
+/// (CR 608.2c) and reached via `QuantityRef::Power { scope: Anaphoric }`.
+///
+fn build_enlist_trigger() -> TriggerDefinition {
+    let tap_target = enlist_tap_target_filter();
+
+    // CR 702.154a: "this creature gets +X/+0 until end of turn, where X is the
+    // tapped creature's power." `Power { scope: Anaphoric }` reads the
+    // just-tapped creature (the chain's `effect_context_object` referent).
+    let pump = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Pump {
+            power: PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Anaphoric,
+                },
+            }),
+            toughness: PtValue::Fixed(0),
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description(
+        "CR 702.154a: Enlist — this creature gets +X/+0 until end of turn, where X \
+         is the tapped creature's power"
+            .to_string(),
+    );
+
+    // CR 702.154a: "you may tap … when you do, [pump]." The optional parent taps
+    // the eligible creature; the reflexive pump rides as its sub-ability.
+    let execute = AbilityDefinition::new(AbilityKind::Spell, Effect::Tap { target: tap_target })
+        .optional()
+        .sub_ability(pump)
+        .description(
+            "Enlist — you may tap an untapped creature you control; if you do, this \
+             creature gets +X/+0 where X is that creature's power"
+                .to_string(),
+        );
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(
+            "CR 702.154a: Enlist — as this creature attacks, you may tap an untapped \
+             creature you control; this creature gets +X/+0 until end of turn, where X \
+             is the tapped creature's power."
+                .to_string(),
+        )
+}
+
+fn enlist_tap_target_filter() -> TargetFilter {
+    // CR 702.154a-c: the enlisted creature must be another untapped creature you
+    // control, must not be a creature you chose to attack with, and must either
+    // have haste or have been controlled continuously since turn began.
+    TargetFilter::And {
+        filters: vec![
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::Another,
+                        FilterProp::Untapped,
+                        FilterProp::HasHasteOrControlledSinceTurnBegan,
+                    ]),
+            ),
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Attacking]),
+                )),
+            },
+        ],
+    }
+}
+
+/// CR 702.154a: Identity predicate for a synthesized Enlist trigger — an optional
+/// `Attacks` self-trigger whose body taps a creature and whose reflexive
+/// sub-ability is a `Pump`. Used for idempotent synthesis / symmetric removal.
+fn is_enlist_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::Attacks)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    execute.optional
+        && matches!(&*execute.effect, Effect::Tap { .. })
+        && execute
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| matches!(&*sub.effect, Effect::Pump { .. }))
+}
+
 /// CR 702.39a: Provoke — "Whenever this creature attacks, you may have target
 /// creature defending player controls untap and block it this turn if able."
 ///
@@ -4107,6 +4886,51 @@ fn is_bushido_trigger(t: &TriggerDefinition, n: u32) -> bool {
                 toughness: PtValue::Fixed(tough),
                 target: TargetFilter::SelfRef,
             }) if *p == n as i32 && *tough == n as i32
+        )
+}
+
+/// CR 702.68a: Frenzy N self-trigger — "whenever this creature attacks and isn't
+/// blocked, it gets +N/+0 until end of turn." Scoped via `valid_card` SelfRef, pumps
+/// SelfRef. No duration override — `Effect::Pump` defaults to `UntilEndOfTurn`
+/// (CR 702.68a). Mirrors the single-trigger Battle cry builder (Frenzy is one
+/// trigger, unlike Bushido's two block events). The `AttackerUnblocked` mode fires
+/// on `BlockersDeclared` when the source attacked and is unblocked — the exact
+/// "attacks and isn't blocked" timing.
+fn build_frenzy_trigger(n: u32) -> TriggerDefinition {
+    let pump = Effect::Pump {
+        power: PtValue::Fixed(n as i32),
+        // CR 702.68a: +N/+0 — toughness is unchanged.
+        toughness: PtValue::Fixed(0),
+        target: TargetFilter::SelfRef,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(format!(
+        "CR 702.68a: Frenzy {n} — +{n}/+0 until end of turn"
+    ));
+    TriggerDefinition::new(TriggerMode::AttackerUnblocked)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.68a: Frenzy {n} — whenever this creature attacks and isn't \
+             blocked, it gets +{n}/+0 until end of turn."
+        ))
+}
+
+/// CR 702.68a: A Frenzy `n` trigger — a self-scoped (`valid_card: SelfRef`)
+/// attacker-unblocked trigger that pumps the source creature +n/+0. Used by
+/// `RemoveKeyword` symmetric removal so a granted-then-removed `Frenzy(n)` strips
+/// exactly its own trigger — parameterized by `n` (and asserting `valid_card`) so
+/// it never matches a different Frenzy level or a coincidental printed
+/// attacker-unblocked pump on the same face.
+fn is_frenzy_trigger(t: &TriggerDefinition, n: u32) -> bool {
+    matches!(t.mode, TriggerMode::AttackerUnblocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Fixed(p),
+                toughness: PtValue::Fixed(tough),
+                target: TargetFilter::SelfRef,
+            }) if *p == n as i32 && *tough == 0
         )
 }
 
@@ -7097,6 +7921,165 @@ fn is_devour_etb_replacement(replacement: &ReplacementDefinition, expected_n: u3
     *count == expected_count
 }
 
+/// CR 702.38a: Amplify N — "As this permanent enters, reveal any number of
+/// cards from your hand that share a creature type with it. This permanent
+/// enters with N +1/+1 counters on it for each card revealed this way. You
+/// can't reveal this card or any other cards that are entering the battlefield
+/// at the same time as this card."
+///
+/// CR 614.1c: an "as [this permanent] enters" clause is a replacement effect,
+/// so Amplify is synthesized as a `ReplacementEvent::Moved` replacement on
+/// `SelfRef` whose execute is a `PutCounter` of N +1/+1 counters per qualifying
+/// card — the same ETB-with-counters shape as `synthesize_bloodthirst`. CR
+/// 702.38b: because the counters are added by the enter replacement, they are
+/// present as the permanent enters (counting for ETB triggers and combat).
+///
+/// Count modeling (deterministic reveal-all): the rules let the controller
+/// reveal *any number* of qualifying cards, but in the engine revealing is
+/// strictly beneficial — each revealed card only adds counters, with no modeled
+/// cost to revealing — so optimal play always reveals every qualifying card.
+/// The count is therefore resolved deterministically as `N x (cards in your
+/// hand that share a creature type with this permanent)` via
+/// `QuantityRef::ObjectCount` over a `SharesQuality { CreatureType, reference:
+/// SelfRef }` hand filter — the same shared-creature-type comparison the engine
+/// already performs (cf. `conspire_tap_filter`'s shared-color filter). This
+/// produces the counter outcome of optimal play without a speculative
+/// interactive hand-reveal choice; a future interactive reveal (to model the
+/// rare choice to reveal fewer cards) is a contained follow-up. It is a
+/// documented approximation in the spirit of Suspend's "doesn't use the stack".
+///
+/// CR 702.38b: each Amplify instance functions independently and is cumulative;
+/// one replacement is emitted per `Keyword::Amplify(n)` instance, grouped by N.
+/// Per-N idempotency (`is_amplify_etb_replacement`) emits only the delta so
+/// re-running synthesis is a no-op.
+pub fn synthesize_amplify(face: &mut CardFace) {
+    let amplify_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Amplify(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if amplify_values.is_empty() {
+        return;
+    }
+
+    for &n in &amplify_values {
+        let needed = amplify_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_amplify_etb_replacement(r, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+
+        let put_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: amplify_counter_quantity(n),
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!(
+            "This permanent enters with {n} +1/+1 counter{} for each card in \
+             your hand that shares a creature type with it.",
+            if n == 1 { "" } else { "s" }
+        ));
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(put_counters)),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some(format!(
+                "CR 702.38a + CR 614.1c: Amplify {n} — as this creature enters, \
+                 reveal any number of cards from your hand that share a creature \
+                 type with it; it enters with {n} +1/+1 counter{} for each card \
+                 revealed this way.",
+                if n == 1 { "" } else { "s" }
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+}
+
+/// CR 702.38a: "cards from your hand that share a creature type with it" — cards
+/// in the controller's hand whose creature types intersect the entering
+/// permanent's. `FilterProp::Another` excludes this card itself from hand-entry
+/// paths; `SharesQuality`'s `reference` resolves `SelfRef` to the
+/// replacement source (the entering permanent), mirroring `conspire_tap_filter`.
+/// `TypedFilter::card()` (not `creature()`) so a non-creature card with a
+/// creature type (e.g. a Tribal instant) can qualify, exactly as the rule reads.
+fn amplify_revealable_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::card()
+            .controller(ControllerRef::You)
+            .properties(vec![
+                FilterProp::InZone { zone: Zone::Hand },
+                FilterProp::Another,
+                FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::SelfRef)),
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                },
+            ]),
+    )
+}
+
+/// CR 702.38a + CR 122.1: N +1/+1 counters for each qualifying revealed card.
+/// `QuantityRef::ObjectCount` counts the qualifying hand cards; for N > 1 it is
+/// scaled by `factor: n` ("N counters per card"). Mirrors the
+/// `bloodthirst_counter_quantity` / Devour quantity shape so the synthesizer and
+/// the idempotency predicate share one source of truth.
+fn amplify_counter_quantity(n: u32) -> QuantityExpr {
+    let object_count = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: amplify_revealable_filter(),
+        },
+    };
+    if n == 1 {
+        object_count
+    } else {
+        QuantityExpr::Multiply {
+            factor: n as i32,
+            inner: Box::new(object_count),
+        }
+    }
+}
+
+/// Idempotency-shape predicate for `synthesize_amplify`'s ETB replacement. True
+/// iff `replacement` is a `Moved` replacement on `SelfRef` whose execute is a
+/// `PutCounter` of `expected_n` P1P1 counters on `SelfRef` with the Amplify
+/// per-card quantity for `expected_n`.
+///
+/// `expected_n` is load-bearing: the `Multiply` factor (N > 1) / bare
+/// `ObjectCount` (N == 1) discriminates the count, so a card carrying both a
+/// printed enters-with-K replacement and `Keyword::Amplify(N != K)` does not
+/// dedupe.
+fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        target: TargetFilter::SelfRef,
+    } = &*execute.effect
+    else {
+        return false;
+    };
+    *counter_type == CounterType::Plus1Plus1 && *count == amplify_counter_quantity(expected_n)
+}
+
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
@@ -7312,12 +8295,107 @@ pub fn synthesize_plot(face: &mut CardFace) {
     }
 }
 
+/// CR 702.155a-b + CR 714.3b: Read Ahead — a Saga with read ahead lets its
+/// controller choose which chapter it enters at. Replace the default Saga
+/// "enters with one lore counter" replacement (CR 714.3a, installed by
+/// `parse_saga_chapters`) with "as it enters, choose a number between one and
+/// this Saga's final chapter number; it enters with that many lore counters."
+///
+/// The choose-and-enter-with-N execute reuses the interactive-ETB-replacement
+/// pattern (Devour: a choice effect with a `PutCounter` sub-ability) and the
+/// `Effect::Choose { NumberRange, persist }` → `QuantityRef::ChosenNumber`
+/// number-choice primitive (Talion). `final` is the greatest chapter threshold
+/// among the Saga's parsed chapter triggers (CR 714.2d). The CR 702.155a
+/// suppression half — chapters 1..N-1 don't trigger the turn it enters at N —
+/// is enforced in `match_counter_added` (an exact-count gate for read-ahead
+/// Sagas that entered this turn), since the chapter triggers are
+/// `CounterAdded` + threshold and entering at N crosses thresholds 1..N at once.
+///
+/// CR 702.155c: multiple instances are redundant — this swaps the single ETB
+/// replacement once regardless of instance count, and is idempotent (the
+/// already-swapped replacement no longer matches `is_default_saga_lore_etb`).
+pub fn synthesize_read_ahead(face: &mut CardFace) {
+    if !face.keywords.contains(&Keyword::ReadAhead) {
+        return;
+    }
+    // CR 714.2d: final chapter number = greatest lore-counter threshold among
+    // this Saga's chapter triggers. No chapter abilities → nothing to read ahead to.
+    let Some(final_chapter) = face
+        .triggers
+        .iter()
+        .filter_map(|t| t.counter_filter.as_ref())
+        .filter(|f| f.counter_type == CounterType::Lore)
+        .filter_map(|f| f.threshold)
+        .max()
+    else {
+        return;
+    };
+
+    let read_ahead_execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        // CR 702.155b: "choose a number between one and this Saga's final
+        // chapter number"; the chosen value is persisted on the entering Saga
+        // so the `PutCounter` sub-ability can read it via `ChosenNumber`.
+        Effect::Choose {
+            choice_type: ChoiceType::NumberRange {
+                min: 1,
+                max: final_chapter.min(u8::MAX as u32) as u8,
+            },
+            persist: true,
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Lore,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::ChosenNumber,
+            },
+            target: TargetFilter::SelfRef,
+        },
+    ));
+
+    for replacement in face.replacements.iter_mut() {
+        if is_default_saga_lore_etb(replacement) {
+            replacement.execute = Some(Box::new(read_ahead_execute.clone()));
+            replacement.description = Some(
+                "CR 702.155b: Read ahead — enter with a chosen number of lore counters".to_string(),
+            );
+        }
+    }
+}
+
+/// True for the default Saga "enters with one lore counter" replacement
+/// installed by `parse_saga_chapters` (CR 714.3a): a `Moved` replacement on
+/// `SelfRef` whose execute puts exactly one `Lore` counter on `SelfRef`. After
+/// `synthesize_read_ahead` swaps the execute, this returns false (idempotency).
+fn is_default_saga_lore_etb(r: &ReplacementDefinition) -> bool {
+    if !matches!(r.event, ReplacementEvent::Moved)
+        || !matches!(r.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = r.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Lore,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    )
+}
+
 /// Run all synthesis functions in canonical order on a card face.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure the same
 /// complete set of synthesizers is applied.
 pub fn synthesize_all(face: &mut CardFace) {
     synthesize_basic_land_mana(face);
     synthesize_equip(face);
+    // CR 702.67a: Fortify — attach-to-land activated ability.
+    synthesize_fortify(face);
     // CR 702.151a: Reconfigure — attach/unattach activated abilities.
     synthesize_reconfigure(face);
     // CR 702.167a/b: Craft — sorcery-speed activated ability that exiles the
@@ -7328,6 +8406,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     // The Keyword::Crew(N) on the card provides display information.
     synthesize_ninjutsu_family(face);
     synthesize_changeling_cda(face);
+    // CR 702.114a: Devoid — colorless CDA.
+    synthesize_devoid_cda(face);
     synthesize_kicker(face);
     synthesize_buyback(face);
     synthesize_bargain(face);
@@ -7351,6 +8431,14 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_level_up(face);
     synthesize_specialize(face);
     synthesize_cycling(face);
+    // CR 702.53a: Transmute — "[Cost], Discard this card: search your library for
+    // a card with the same mana value, reveal it, put it in hand, then shuffle.
+    // Activate only as a sorcery."
+    synthesize_transmute(face);
+    // CR 702.71a: Transfigure — "[Cost], Sacrifice this permanent: search your
+    // library for a creature with the same mana value, put it onto the
+    // battlefield, then shuffle. Activate only as a sorcery."
+    synthesize_transfigure(face);
     synthesize_scavenge(face);
     // CR 702.128a / CR 702.129a: Embalm / Eternalize graveyard-activated
     // token-copy abilities (self-contained building block in its own module).
@@ -7358,17 +8446,36 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.84a: Unearth graveyard-activated temporary reanimation (return with
     // haste, exile at the next end step) — self-contained building block.
     crate::database::unearth::synthesize_unearth(face);
+    // CR 702.141a: Encore graveyard-activated per-opponent token-copy generator
+    // (haste, must-attack that opponent, sacrifice at the next end step) —
+    // self-contained building block.
+    crate::database::encore::synthesize_encore(face);
+    // CR 702.55: Haunt — the exile-haunting ability + the haunt-payoff trigger
+    // that fires from exile when the haunted creature dies. Runs after parser
+    // triggers so the creature-form payoff can clone the parsed ETB effect.
+    crate::database::haunt::synthesize_haunt(face);
+    // CR 702.75a: Hideaway ETB look-and-exile-face-down — self-contained
+    // building block (Dig + conceal continuation).
+    crate::database::hideaway::synthesize_hideaway(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);
     // CR 702.56a: Replicate — repeatable optional additional cost + SpellCast
     // copy trigger that makes one copy per replicate payment.
     synthesize_replicate(face);
+    // CR 702.78a: Conspire — optional "tap two color-sharing creatures" additional
+    // cost + a copy-once-on-cast trigger gated on that cost being paid.
+    synthesize_conspire(face);
     // CR 702.69a: Gravestorm — copy this spell for each permanent put into a
     // graveyard from the battlefield this turn.
     synthesize_gravestorm(face);
+    // CR 702.144a: Demonstrate — optional self-copy on cast; if taken, a chosen
+    // opponent also copies the spell.
+    synthesize_demonstrate(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
+    // CR 702.52a: Dredge — optional graveyard draw-replacement (mill N + return).
+    synthesize_dredge(face);
     synthesize_evoke(face);
     synthesize_echo(face);
     // CR 702.24a: Cumulative upkeep — at the beginning of your upkeep, put an
@@ -7389,6 +8496,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // haste. Static grants of Riot synthesize matching ETB replacements from
     // their affected filters.
     synthesize_riot(face);
+    // CR 702.64a: Absorb N — continuous self-recipient damage replacement that
+    // prevents N from each source each time.
+    synthesize_absorb(face);
     // CR 702.98a: Unleash — optional ETB +1/+1 counter plus a "can't block while
     // it has a +1/+1 counter" static. Sibling of Riot's optional-counter shape.
     synthesize_unleash(face);
@@ -7462,6 +8572,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.45a: Bushido N — self blocks / becomes-blocked triggers that pump
     // the creature +N/+N until end of turn.
     synthesize_bushido(face);
+    // CR 702.68a: Frenzy N — attacks-and-isn't-blocked self pump of +N/+0 until
+    // end of turn.
+    synthesize_frenzy(face);
     // CR 702.91a: Battle cry — attack trigger pumping each other attacking
     // creature +1/+0 until end of turn.
     synthesize_battlecry(face);
@@ -7474,6 +8587,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.121a: Melee — attack-trigger self pump +1/+1 per opponent attacked
     // this combat.
     synthesize_melee(face);
+    // CR 702.154a: Enlist — optional attacks trigger that taps a creature you
+    // control and pumps this creature by that creature's power.
+    synthesize_enlist(face);
     // CR 702.95a: Soulbond — two optional ETB triggers that create pair
     // relationships under the resolution checks in CR 702.95c-d.
     synthesize_soulbond(face);
@@ -7502,6 +8618,16 @@ pub fn synthesize_all(face: &mut CardFace) {
     // choice → PutCounter of N P1P1 counters per creature sacrificed. Each
     // instance functions independently (CR 113.2c).
     synthesize_devour(face);
+    // CR 702.38a + CR 614.1c: Amplify N — as-enters replacement adding N P1P1
+    // counters per card in hand sharing a creature type with the entering
+    // permanent (deterministic reveal-all of the strictly-beneficial reveal).
+    // Each instance functions independently (CR 702.38b).
+    synthesize_amplify(face);
+    // CR 702.155a-b: Read Ahead — swap a Saga's default "enters with one lore
+    // counter" replacement for a "choose 1..final, enter with that many lore
+    // counters" replacement. Must run after Saga chapters/ETB are parsed (they
+    // are, pre-synthesis). The chapter-suppression half is in match_counter_added.
+    synthesize_read_ahead(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
@@ -7975,6 +9101,73 @@ pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<K
         }
     }
     base.extend(extracted);
+}
+
+/// Strip level-gated keywords out of a leveler card's base `keywords` list.
+///
+/// CR 711.4 / CR 711.5: Keywords printed inside a {LEVEL} symbol are level-gated
+/// static abilities, not base abilities — below the lowest level the creature has
+/// only its base characteristics, so these must not be granted unconditionally.
+///
+/// MTGJSON's `keywords` array lists *every* keyword printed anywhere on the card,
+/// including those inside {LEVEL} striations (e.g. First strike on Student of
+/// Warfare, Flying on Coralhelm Commander). Those keywords reach `face.keywords`
+/// (and therefore the runtime object's `base_keywords`) and would be granted at
+/// level 0, before the leveler has any level counters. The level-gated static
+/// abilities the parser produced (`HasCounters` on the "level" generic counter)
+/// are the *only* legitimate source of those keywords; this helper removes the
+/// unconditional copies so the layer system grants them solely through the gated
+/// statics.
+///
+/// This is the leveler analog of `merge_extracted_keywords` / the Craft
+/// MTGJSON-vs-parser carve-out: a single authority so the production pipeline
+/// (`build_oracle_face_inner`) and the scenario test harness
+/// (`build_face_from_oracle`) cannot diverge.
+///
+/// Equality, not `kind()`/discriminant: Hexdrinker grants the parameterized
+/// `Protection { instants }` and a separate `Protection` (everything) in distinct
+/// level blocks, so full `Keyword` equality strips only the exact gated variant
+/// rather than collapsing all Protection. `Keyword::LevelUp` never appears in an
+/// `AddKeyword` modification, so it is structurally preserved — synthesis still
+/// finds it to build the level-up activated ability.
+///
+/// Residual assumption: this presumes a gated keyword is never *also* a
+/// legitimate base-text (level-0) keyword on the same card. True for all 26
+/// current levelers — none print a keyword both outside and inside a {LEVEL}
+/// striation.
+pub(crate) fn strip_level_gated_keywords(face: &mut CardFace) {
+    let gated: Vec<Keyword> = face
+        .static_abilities
+        .iter()
+        .filter(|stat| {
+            matches!(
+                &stat.condition,
+                Some(StaticCondition::HasCounters { counters, .. })
+                    if matches!(
+                        counters,
+                        CounterMatch::OfType(CounterType::Generic(s)) if s == "level"
+                    )
+            )
+        })
+        .flat_map(keyword_granted_by_level_gated_static)
+        .collect();
+
+    face.keywords.retain(|kw| !gated.contains(kw));
+}
+
+fn keyword_granted_by_level_gated_static(stat: &StaticDefinition) -> Vec<Keyword> {
+    let mut gated = stat
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(kw) = stat.mode.as_keyword() {
+        gated.push(kw);
+    }
+    gated
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.
@@ -8509,6 +9702,65 @@ mod buyback_synthesis_tests {
 }
 
 #[cfg(test)]
+mod devoid_synthesis_tests {
+    use super::*;
+
+    fn devoid_cda(face: &CardFace) -> Option<&StaticDefinition> {
+        face.static_abilities.iter().find(|s| {
+            s.characteristic_defining
+                && s.affected == Some(TargetFilter::SelfRef)
+                && s.modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::SetColor { colors } if colors.is_empty()))
+        })
+    }
+
+    /// CR 702.114a: Devoid synthesizes a SelfRef colorless CDA (SetColor {[]}).
+    #[test]
+    fn synthesize_devoid_cda_pushes_colorless_cda() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Devoid],
+            ..CardFace::default()
+        };
+        synthesize_devoid_cda(&mut face);
+        assert!(
+            devoid_cda(&face).is_some(),
+            "devoid must push a SelfRef SetColor {{[]}} CDA; got {:?}",
+            face.static_abilities
+        );
+    }
+
+    /// No-op when the card has no Devoid keyword.
+    #[test]
+    fn synthesize_devoid_cda_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_devoid_cda(&mut face);
+        assert!(devoid_cda(&face).is_none());
+    }
+
+    /// A single synthesis pass for one Devoid keyword yields one colorless CDA.
+    #[test]
+    fn synthesize_devoid_cda_single_pass_pushes_one_cda() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Devoid],
+            ..CardFace::default()
+        };
+        synthesize_devoid_cda(&mut face);
+        let count = face
+            .static_abilities
+            .iter()
+            .filter(|s| {
+                s.characteristic_defining
+                    && s.modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::SetColor { colors } if colors.is_empty())
+                    })
+            })
+            .count();
+        assert_eq!(count, 1, "exactly one colorless CDA");
+    }
+}
+
+#[cfg(test)]
 mod bargain_synthesis_tests {
     use super::*;
 
@@ -8594,6 +9846,226 @@ mod cycling_synthesis_tests {
         ));
         let shuffle = put_in_hand.sub_ability.as_ref().expect("shuffle");
         assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+}
+
+#[cfg(test)]
+mod transmute_synthesis_tests {
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+
+    fn transmute_face() -> CardFace {
+        CardFace {
+            keywords: vec![Keyword::Transmute(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })],
+            ..CardFace::default()
+        }
+    }
+
+    /// CR 702.53a: `synthesize_transmute` installs one from-hand, sorcery-speed
+    /// activated ability whose cost is "{cost}, Discard this card", whose effect
+    /// searches the library for a same-mana-value card, and whose sub-ability
+    /// chain puts the found card into hand then shuffles.
+    #[test]
+    fn synthesize_transmute_builds_same_mana_value_tutor() {
+        let mut face = transmute_face();
+        synthesize_transmute(&mut face);
+
+        assert_eq!(face.abilities.len(), 1, "one transmute ability per keyword");
+        let ability = face.abilities.first().expect("transmute ability");
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        // CR 702.53b: functions only while the card is in hand.
+        assert_eq!(ability.activation_zone, Some(Zone::Hand));
+        // CR 702.53a: "Activate only as a sorcery."
+        assert!(ability.sorcery_speed);
+        assert!(ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+        // Transmute is NOT a cycling ability (CR 702.29 vs CR 702.53).
+        assert!(ability.ability_tag.is_none());
+
+        // Cost: Composite[Mana, Discard this card (self_ref)].
+        match &ability.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
+                assert!(costs.iter().any(|c| matches!(
+                    c,
+                    AbilityCost::Discard {
+                        self_ref: true,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                )));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+
+        // Effect: SearchLibrary with a same-mana-value-as-discarded-card filter.
+        let Effect::SearchLibrary { filter, reveal, .. } = &*ability.effect else {
+            panic!("expected SearchLibrary, got {:?}", ability.effect);
+        };
+        assert!(*reveal, "CR 702.53a: reveal that card");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject
+                        }
+                    }
+                }
+            )),
+            "filter must match a card with the same mana value as the discarded card, got {:?}",
+            tf.properties
+        );
+
+        // Sub-ability chain: put found card to hand (Library→Hand), then shuffle.
+        let put_in_hand = ability
+            .sub_ability
+            .as_ref()
+            .expect("put-in-hand sub-ability");
+        assert!(matches!(
+            &*put_in_hand.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        let shuffle = put_in_hand
+            .sub_ability
+            .as_ref()
+            .expect("shuffle sub-ability");
+        assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+
+    #[test]
+    fn synthesize_transmute_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_transmute(&mut face);
+        assert!(face.abilities.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod transfigure_synthesis_tests {
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+
+    fn transfigure_face() -> CardFace {
+        CardFace {
+            keywords: vec![Keyword::Transfigure(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            })],
+            ..CardFace::default()
+        }
+    }
+
+    /// CR 702.71a: `synthesize_transfigure` installs one battlefield, sorcery-speed
+    /// activated ability whose cost is "{cost}, Sacrifice this permanent", whose
+    /// effect searches the library for a same-mana-value creature, and whose
+    /// sub-ability chain puts the found card onto the battlefield then shuffles.
+    #[test]
+    fn synthesize_transfigure_builds_same_mana_value_creature_tutor() {
+        let mut face = transfigure_face();
+        synthesize_transfigure(&mut face);
+
+        assert_eq!(
+            face.abilities.len(),
+            1,
+            "one transfigure ability per keyword"
+        );
+        let ability = face.abilities.first().expect("transfigure ability");
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        // CR 702.71a: functions on the battlefield (default activation_zone), unlike
+        // Transmute's Some(Hand).
+        assert_eq!(ability.activation_zone, None);
+        // CR 702.71a: "Activate only as a sorcery."
+        assert!(ability.sorcery_speed);
+        assert!(ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // Cost: Composite[Mana, Sacrifice this permanent (SelfRef, count 1)].
+        match &ability.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
+                assert!(costs.iter().any(|c| matches!(
+                    c,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    }
+                )));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+
+        // Effect: SearchLibrary with a same-mana-value-as-source creature filter.
+        let Effect::SearchLibrary { filter, reveal, .. } = &*ability.effect else {
+            panic!("expected SearchLibrary, got {:?}", ability.effect);
+        };
+        assert!(!*reveal, "CR 702.71a: no reveal in transfigure");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "CR 702.71a: filter restricted to creature cards, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            // CR 702.71a: same mana value as THIS PERMANENT — Source,
+                            // never CostPaidObject (Sacrifice stamps no cost_paid_object).
+                            scope: ObjectScope::Source
+                        }
+                    }
+                }
+            )),
+            "filter must match a creature with the same mana value as the source, got {:?}",
+            tf.properties
+        );
+
+        // Sub-ability chain: put found card to battlefield (Library→Battlefield),
+        // then shuffle.
+        let put_on_battlefield = ability
+            .sub_ability
+            .as_ref()
+            .expect("put-on-battlefield sub-ability");
+        assert!(matches!(
+            &*put_on_battlefield.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+        let shuffle = put_on_battlefield
+            .sub_ability
+            .as_ref()
+            .expect("shuffle sub-ability");
+        assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+
+    #[test]
+    fn synthesize_transfigure_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_transfigure(&mut face);
+        assert!(face.abilities.is_empty());
     }
 }
 
@@ -8776,6 +10248,74 @@ mod madness_synthesis_tests {
             1
         );
     }
+
+    /// CR 702.52a: Dredge synthesizes one optional `Draw` replacement whose
+    /// execute mills N then returns this card from the graveyard to hand.
+    #[test]
+    fn synthesize_dredge_adds_optional_draw_replacement_with_mill_and_return() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Dredge(3));
+        synthesize_dredge(&mut face);
+
+        let repl = face
+            .replacements
+            .iter()
+            .find(|r| matches!(r.event, ReplacementEvent::Draw))
+            .expect("dredge should add a Draw replacement");
+        // "you may" → Optional; no valid_card (a Draw has no affected object, and
+        // the default player-scope follows the graveyard card's owner).
+        assert!(matches!(
+            repl.mode,
+            crate::types::ability::ReplacementMode::Optional { .. }
+        ));
+        assert!(repl.valid_card.is_none());
+
+        let exec = repl.execute.as_deref().expect("execute body");
+        assert!(matches!(
+            &*exec.effect,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+        let sub = exec
+            .sub_ability
+            .as_deref()
+            .expect("return-to-hand sub-ability");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        assert!(is_dredge_draw_replacement(repl));
+    }
+
+    #[test]
+    fn synthesize_dredge_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Dredge(2));
+        synthesize_dredge(&mut face);
+        synthesize_dredge(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_dredge_draw_replacement(r))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_dredge_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_dredge(&mut face);
+        assert!(face.replacements.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -8856,6 +10396,64 @@ mod evoke_synthesis_tests {
         face.keywords.push(Keyword::Flying);
         synthesize_evoke(&mut face);
         assert!(face.triggers.is_empty());
+    }
+
+    /// Issue #580: MTGJSON's bare "Evoke" keyword must be replaced by the
+    /// parser-extracted non-mana cost from the Oracle evoke line.
+    #[test]
+    fn build_oracle_face_solitude_evoke_merges_to_non_mana() {
+        use crate::types::keywords::EvokeCost;
+
+        let mtgjson = AtomicCard {
+            name: "Solitude".to_string(),
+            mana_cost: Some("{3}{W}{W}".to_string()),
+            colors: vec!["W".to_string()],
+            color_identity: vec!["W".to_string()],
+            power: Some("3".to_string()),
+            toughness: Some("2".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some(
+                "Flash\nLifelink\nWhen this creature enters, exile up to one other target creature. That creature's controller gains life equal to its power.\nEvoke\u{2014}Exile a white card from your hand.".to_string(),
+            ),
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Elemental Incarnation".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Elemental".to_string(), "Incarnation".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec![
+                "Flash".to_string(),
+                "Lifelink".to_string(),
+                "Evoke".to_string(),
+            ]),
+            side: None,
+            face_name: None,
+            mana_value: 5.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+        let evoke = face
+            .keywords
+            .iter()
+            .find_map(|k| match k {
+                Keyword::Evoke(cost) => Some(cost),
+                _ => None,
+            })
+            .expect("Solitude must carry Evoke after synthesis");
+        assert!(
+            matches!(evoke, EvokeCost::NonMana(AbilityCost::Exile { .. })),
+            "MTGJSON bare Evoke must merge to NonMana(Exile), got {evoke:?}"
+        );
     }
 }
 
@@ -10992,6 +12590,160 @@ mod provoke_synthesis_tests {
         ));
     }
 
+    fn enlist_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Enlist);
+        face
+    }
+
+    /// CR 702.154a: synthesizer emits an optional `Attacks` trigger whose body
+    /// taps an untapped creature you control, with a reflexive `Pump` of the
+    /// attacker (`SelfRef`) by `Power { Anaphoric }` (the tapped creature).
+    #[test]
+    fn synthesize_enlist_adds_optional_tap_and_anaphoric_pump_attack_trigger() {
+        let mut face = enlist_face();
+        synthesize_enlist(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Attacks))
+            .expect("enlist should add an Attacks trigger");
+        assert!(
+            matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
+            "valid_card must be SelfRef (only when the enlisting creature attacks)"
+        );
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        // CR 702.154a: "you may tap …" — optional.
+        assert!(
+            execute.optional,
+            "Enlist is a 'you may' trigger (CR 702.154a)"
+        );
+
+        // Parent body taps an eligible Enlist creature.
+        let Effect::Tap { target } = &*execute.effect else {
+            panic!("execute body must be Effect::Tap");
+        };
+        let TargetFilter::And { filters } = target else {
+            panic!("tap target must compose Enlist eligibility with TargetFilter::And");
+        };
+        let tf = filters
+            .iter()
+            .find_map(|filter| match filter {
+                TargetFilter::Typed(tf) => Some(tf),
+                _ => None,
+            })
+            .expect("tap target must include the creature eligibility typed filter");
+        let excludes_attackers = filters.iter().any(|filter| {
+            matches!(
+                filter,
+                TargetFilter::Not { filter }
+                    if matches!(
+                        filter.as_ref(),
+                        TargetFilter::Typed(tf)
+                            if tf.properties.contains(&FilterProp::Attacking)
+                    )
+            )
+        });
+        assert!(
+            excludes_attackers,
+            "tap target must exclude creatures chosen to attack with (CR 702.154a)"
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "tap target must exclude the enlisting creature itself (CR 702.154c)"
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "tap target must be a creature you control (CR 702.154a)"
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Untapped),
+            "tap target must be untapped (CR 702.154a), got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties
+                .contains(&FilterProp::HasHasteOrControlledSinceTurnBegan),
+            "tap target must either have haste or have been controlled since turn began \
+             (CR 702.154a), got {:?}",
+            tf.properties
+        );
+
+        // Reflexive sub-ability: pump SelfRef by Power{Anaphoric} (the tapped
+        // creature's power, CR 608.2c).
+        let pump = execute
+            .sub_ability
+            .as_deref()
+            .expect("pump sub-ability required");
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*pump.effect
+        else {
+            panic!("sub-ability must be Effect::Pump, got {:?}", pump.effect);
+        };
+        assert!(
+            matches!(target, TargetFilter::SelfRef),
+            "pump must affect the attacker"
+        );
+        assert!(
+            matches!(
+                power,
+                PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Anaphoric
+                    }
+                })
+            ),
+            "X must be the tapped creature's power via Power{{Anaphoric}}, got {power:?}"
+        );
+        assert!(
+            matches!(toughness, PtValue::Fixed(0)),
+            "toughness bonus must be +0 (CR 702.154a: +X/+0)"
+        );
+    }
+
+    #[test]
+    fn synthesize_enlist_is_idempotent() {
+        let mut face = enlist_face();
+        synthesize_enlist(&mut face);
+        synthesize_enlist(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_enlist_trigger(t))
+                .count(),
+            1,
+            "enlist trigger should be deduped"
+        );
+    }
+
+    #[test]
+    fn synthesize_enlist_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_enlist(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    #[test]
+    fn enlist_triggers_for_and_matcher_roundtrip() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Enlist);
+        assert_eq!(triggers.len(), 1, "Enlist installs exactly one trigger");
+        assert!(
+            KeywordTriggerInstaller::trigger_matches_keyword_kind(&triggers[0], &Keyword::Enlist),
+            "matcher must recognize the synthesized Enlist trigger"
+        );
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Provoke
+        ));
+    }
+
     /// CR 702.39b: if a creature has multiple instances of Provoke, each
     /// triggers separately. MTGJSON dedupes the keyword array to one "Provoke",
     /// so `build_oracle_face` must recover repeated printed bare words from
@@ -11470,6 +13222,65 @@ mod bushido_synthesis_tests {
         let mut bare = CardFace::default();
         synthesize_bushido(&mut bare);
         assert!(bare.triggers.iter().all(|t| !is_bushido_trigger(t, 1)));
+    }
+
+    #[test]
+    fn synthesize_frenzy_adds_single_attacker_unblocked_pump_trigger() {
+        // CR 702.68a: Frenzy N installs ONE self-trigger (attacks and isn't
+        // blocked) pumping the source +N/+0 until end of turn. CR 702.68b would
+        // synthesize one per instance, but a single Frenzy(2) yields exactly one.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Frenzy(2));
+        synthesize_frenzy(&mut face);
+
+        let frenzy: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| is_frenzy_trigger(t, 2))
+            .collect();
+        assert_eq!(frenzy.len(), 1, "exactly one attacker-unblocked trigger");
+        let t = frenzy[0];
+        assert!(matches!(t.mode, TriggerMode::AttackerUnblocked));
+        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+        let Some(Effect::Pump {
+            power,
+            toughness,
+            target,
+        }) = t.execute.as_deref().map(|a| &*a.effect)
+        else {
+            panic!("frenzy execute must be Effect::Pump");
+        };
+        assert!(matches!(power, PtValue::Fixed(2)));
+        // CR 702.68a: +N/+0 — toughness unchanged.
+        assert!(matches!(toughness, PtValue::Fixed(0)));
+        assert!(matches!(target, TargetFilter::SelfRef));
+        // CR 702.68a: until end of turn — Effect::Pump defaults the duration, so
+        // the execute carries no explicit duration override.
+        assert!(t
+            .execute
+            .as_deref()
+            .and_then(|a| a.duration.as_ref())
+            .is_none());
+    }
+
+    #[test]
+    fn synthesize_frenzy_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Frenzy(1));
+        synthesize_frenzy(&mut face);
+        synthesize_frenzy(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_frenzy_trigger(t, 1))
+                .count(),
+            1,
+            "one trigger, deduped across passes"
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_frenzy(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_frenzy_trigger(t, 1)));
     }
 }
 
@@ -13015,10 +14826,11 @@ mod echo_synthesis_tests {
 
     fn echo_face() -> CardFace {
         let mut face = CardFace::default();
-        face.keywords.push(Keyword::Echo(ManaCost::Cost {
-            shards: vec![ManaCostShard::White, ManaCostShard::White],
-            generic: 3,
-        }));
+        face.keywords
+            .push(Keyword::Echo(EchoCost::Mana(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 3,
+            })));
         face
     }
 
@@ -13228,22 +15040,11 @@ mod cumulative_upkeep_synthesis_tests {
     /// silent-no-op state until per-shape support lands.
     #[test]
     fn cumulative_upkeep_synthesizer_skips_unsupported_base_shapes() {
-        // Discard base — no current cumulative-upkeep card resolves through
-        // `AbilityCost::Discard` because the unless-payment pipeline can't pay
-        // it. Synthesizer must refuse to install.
-        let discard_kw = Keyword::CumulativeUpkeep(AbilityCost::Discard {
-            count: QuantityExpr::Fixed { value: 1 },
-            filter: None,
-            random: false,
-            self_ref: false,
-        });
-        assert_eq!(
-            KeywordTriggerInstaller::triggers_for(&discard_kw).len(),
-            0,
-            "Discard base must not install a cumulative-upkeep trigger"
-        );
-
-        // Exile base — same reasoning as Discard.
+        // Exile base — no current cumulative-upkeep card resolves through
+        // `AbilityCost::Exile` because the unless-payment pipeline can't pay
+        // it. Synthesizer must refuse to install. (Discard became supported
+        // once the per-counter discard payment chain landed — CR 702.24a — so
+        // Exile is now the canonical still-unsupported non-mana base shape.)
         let exile_kw = Keyword::CumulativeUpkeep(AbilityCost::Exile {
             count: 1,
             zone: None,
@@ -13256,17 +15057,16 @@ mod cumulative_upkeep_synthesis_tests {
         );
 
         // Composite of mixed shapes — Composite-of-Mana is supported, but
-        // Composite containing Discard/Exile is not.
+        // Composite containing an unsupported shape (Exile) is not.
         let mixed_composite_kw = Keyword::CumulativeUpkeep(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
                     cost: ManaCost::generic(1),
                 },
-                AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: None,
                     filter: None,
-                    random: false,
-                    self_ref: false,
                 },
             ],
         });
@@ -13280,16 +15080,15 @@ mod cumulative_upkeep_synthesis_tests {
         // PayCumulativeUpkeep trigger after synthesis runs.
         let mut face = CardFace::default();
         face.keywords
-            .push(Keyword::CumulativeUpkeep(AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
+                count: 1,
+                zone: None,
                 filter: None,
-                random: false,
-                self_ref: false,
             }));
         synthesize_cumulative_upkeep(&mut face);
         assert!(
             face.triggers.is_empty(),
-            "synthesize_cumulative_upkeep on a Discard base must install no triggers"
+            "synthesize_cumulative_upkeep on an Exile base must install no triggers"
         );
     }
 
@@ -13325,6 +15124,21 @@ mod cumulative_upkeep_synthesis_tests {
             KeywordTriggerInstaller::triggers_for(&sacrifice_kw).len(),
             1,
             "Sacrifice base must install exactly one cumulative-upkeep trigger"
+        );
+
+        // CR 702.24a: Discard base — Vexing Sphinx-shape. Supported once the
+        // per-counter discard payment chain (scaled_by + remaining re-prompt)
+        // landed; must install exactly one trigger.
+        let discard_kw = Keyword::CumulativeUpkeep(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            random: false,
+            self_ref: false,
+        });
+        assert_eq!(
+            KeywordTriggerInstaller::triggers_for(&discard_kw).len(),
+            1,
+            "Discard base must install exactly one cumulative-upkeep trigger"
         );
 
         // OneOf-of-Mana — Jötun Owl Keeper-shape disjunction of mana costs.
@@ -14514,10 +16328,10 @@ mod suspend_synthesis_tests {
             &suspend,
         ));
         // An unrelated trigger (echo) is not a suspend trigger.
-        let echo = build_echo_trigger(ManaCost::Cost {
+        let echo = build_echo_trigger(EchoCost::Mana(ManaCost::Cost {
             shards: vec![],
             generic: 1,
-        });
+        }));
         assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
             &echo, &suspend,
         ));
@@ -14734,8 +16548,19 @@ mod idempotency_tests {
     //! the engine's per-event dedup (keyed on `(ObjectId, trig_idx)`) to fail
     //! — distinct `trig_idx` values register separately.
     use super::*;
-    use crate::types::ability::QuantityExpr;
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::game::effects::resolve_ability_chain;
+    use crate::game::stack::resolve_top;
+    use crate::game::triggers::check_delayed_triggers;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        CountScope, QuantityExpr, QuantityRef, TargetRef, TypeFilter, ZoneRef,
+    };
     use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
 
     #[test]
     fn synthesize_mobilize_is_idempotent() {
@@ -14752,9 +16577,123 @@ mod idempotency_tests {
     }
 
     #[test]
-    fn synthesize_mobilize_preserves_dynamic_quantity() {
-        use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
+    fn synthesize_mobilize_schedules_sacrifice_at_next_end_step() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
 
+        synthesize_mobilize(&mut face);
+
+        let trigger = face.triggers.first().expect("mobilize trigger");
+        let execute = trigger.execute.as_ref().expect("execute body");
+        let delayed = execute
+            .sub_ability
+            .as_ref()
+            .expect("mobilize must chain end-step sacrifice");
+        match &*delayed.effect {
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase },
+                effect,
+                ..
+            } => {
+                assert_eq!(*phase, Phase::End);
+                match &*effect.effect {
+                    Effect::Sacrifice {
+                        target: TargetFilter::LastCreated,
+                        count: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    } => {}
+                    other => panic!("expected LastCreated Sacrifice, got {other:?}"),
+                }
+            }
+            other => panic!("expected CreateDelayedTrigger sacrifice rider, got {other:?}"),
+        }
+        assert!(
+            execute.duration.is_none(),
+            "token must not use UntilEndOfCombat duration"
+        );
+    }
+
+    /// CR 702.181a: Mobilized tokens are sacrificed at the beginning of the
+    /// next end step, not the end of combat. This drives the synthesized
+    /// Token -> CreateDelayedTrigger(Sacrifice LastCreated) chain through the
+    /// runtime resolver so reverting to `Duration::UntilEndOfCombat` fails.
+    #[test]
+    fn synthesize_mobilize_runtime_sacrifices_tokens_at_next_end_step() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
+        synthesize_mobilize(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mobilizer".to_string(),
+            Zone::Battlefield,
+        );
+        let execute = face
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("mobilize trigger must have an execute body");
+        let ability = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let mobilized_tokens = state.last_created_token_ids.clone();
+        assert_eq!(
+            mobilized_tokens.len(),
+            2,
+            "Mobilize 2 must create exactly two tracked tokens"
+        );
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+        );
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            mobilized_tokens
+                .iter()
+                .copied()
+                .map(TargetRef::Object)
+                .collect::<Vec<_>>(),
+            "end-step cleanup must snapshot the exact mobilized tokens"
+        );
+
+        let stacked = check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::EndCombat,
+            }],
+        );
+        assert!(
+            stacked.is_empty(),
+            "Mobilize cleanup must not fire at end of combat"
+        );
+        for token_id in &mobilized_tokens {
+            assert!(state.battlefield.contains(token_id));
+        }
+
+        let stacked =
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        assert_eq!(stacked.len(), 1, "end-step cleanup must stack once");
+        resolve_top(&mut state, &mut events);
+
+        for token_id in mobilized_tokens {
+            assert_eq!(
+                state.objects[&token_id].zone,
+                Zone::Graveyard,
+                "mobilized token must be sacrificed at the next end step"
+            );
+            assert!(!state.battlefield.contains(&token_id));
+        }
+    }
+
+    #[test]
+    fn synthesize_mobilize_preserves_dynamic_quantity() {
         let quantity = QuantityExpr::Ref {
             qty: QuantityRef::ZoneCardCount {
                 zone: ZoneRef::Graveyard,
@@ -14900,6 +16839,44 @@ mod sorcery_speed_invariant_tests {
                 .contains(&ActivationRestriction::AsSorcery),
             "AsSorcery restriction pushed for runtime enforcement (CR 702.6a)"
         );
+    }
+
+    /// CR 702.67a: Darksteel Garrison — "Fortify {3}" must synthesize a
+    /// sorcery-speed activated ability that attaches the Fortification to a LAND
+    /// you control. Regression test for the confirmed gap where `Keyword::Fortify`
+    /// parsed but no synthesizer ran, leaving the card with no way to attach.
+    /// The land target (not creature) is the Fortify-vs-Equip discriminator.
+    #[test]
+    fn synthesize_fortify_pushes_attach_to_land_as_sorcery() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Fortify(ManaCost::Cost {
+            shards: vec![],
+            generic: 3,
+        }));
+        synthesize_fortify(&mut face);
+
+        assert_eq!(face.abilities.len(), 1, "one fortify ability");
+        let def = &face.abilities[0];
+        assert!(def.sorcery_speed, "sorcery_speed display flag set");
+        assert!(
+            def.activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "AsSorcery restriction pushed for runtime enforcement (CR 702.67a)"
+        );
+        // CR 702.67a: attaches to a land you control (not a creature).
+        match def.effect.as_ref() {
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(
+                    *tf,
+                    TypedFilter::land().controller(ControllerRef::You),
+                    "Fortify attaches to a land you control (not a creature)"
+                );
+            }
+            other => panic!("expected Effect::Attach to a land, got {other:?}"),
+        }
     }
 
     /// CR 702.151a (issue #1559): Reconfigure synthesizes two sorcery-speed
@@ -15057,6 +17034,100 @@ mod sorcery_speed_invariant_tests {
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
+    }
+
+    /// Build a level-gated static carrying `AddKeyword(keyword)` on the "level"
+    /// generic counter — the exact shape `parse_level_blocks` produces for keyword
+    /// lines inside a {LEVEL} striation.
+    fn level_gated_keyword_static(keyword: Keyword, minimum: u32) -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .condition(StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("level".to_string())),
+                minimum,
+                maximum: None,
+            })
+            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+    }
+
+    /// CR 711.4 / CR 711.5: `strip_level_gated_keywords` must remove keywords that
+    /// are sourced from a level-gated static (so they are not granted at level 0),
+    /// while structurally preserving `LevelUp` (never an `AddKeyword`).
+    #[test]
+    fn strip_level_gated_keywords_removes_only_gated_keywords() {
+        let level_up = Keyword::LevelUp(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        });
+        let mut face = CardFace {
+            keywords: vec![
+                Keyword::FirstStrike,
+                Keyword::DoubleStrike,
+                level_up.clone(),
+            ],
+            static_abilities: vec![
+                level_gated_keyword_static(Keyword::FirstStrike, 2),
+                level_gated_keyword_static(Keyword::DoubleStrike, 7),
+            ],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        // Both gated keywords stripped; the LevelUp keyword survives.
+        assert_eq!(face.keywords, vec![level_up]);
+    }
+
+    /// CR 711.4: Level-block standalone keyword static modes (Hada Spy Patrol's
+    /// "Shroud" line) must strip the matching base keyword.
+    #[test]
+    fn strip_level_gated_keywords_strips_static_mode_keyword_grants() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Shroud],
+            static_abilities: vec![StaticDefinition::new(StaticMode::Shroud)
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
+                .condition(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Generic("level".to_string())),
+                    minimum: 3,
+                    maximum: None,
+                })],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        assert!(
+            face.keywords.is_empty(),
+            "Shroud must strip from base keywords"
+        );
+    }
+
+    /// Negative case: a `HasCounters` static on a NON-"level" generic counter
+    /// (e.g. "charge") must NOT strip its keyword — only `{LEVEL}`-gated statics
+    /// (CR 711) are level abilities.
+    #[test]
+    fn strip_level_gated_keywords_ignores_non_level_counters() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Flying],
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .condition(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                    minimum: 1,
+                    maximum: None,
+                })
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }])],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        // Flying is gated on a charge counter, not a level counter — preserved.
+        assert_eq!(face.keywords, vec![Keyword::Flying]);
     }
 
     /// CR 702.97a: Scavenge synthesis must carry AsSorcery (single `.sorcery_speed()`
@@ -15995,7 +18066,9 @@ mod replicate_synthesis_tests {
         );
         // CR 707.10c: copies may choose new targets.
         match &*execute.effect {
-            Effect::CopySpell { target, retarget } => {
+            Effect::CopySpell {
+                target, retarget, ..
+            } => {
                 assert!(matches!(target, TargetFilter::SelfRef));
                 assert!(matches!(
                     retarget,
@@ -16067,6 +18140,91 @@ mod replicate_synthesis_tests {
                 .count(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod conspire_synthesis_tests {
+    use super::*;
+
+    #[test]
+    fn synthesize_conspire_sets_tap_creatures_cost_and_copy_trigger() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Conspire],
+            ..CardFace::default()
+        };
+        synthesize_conspire(&mut face);
+
+        // CR 702.78a: optional "tap two color-sharing creatures" additional cost.
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Optional {
+                cost: AbilityCost::TapCreatures { count, filter },
+                repeatable: false,
+            } => {
+                assert_eq!(*count, 2);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected typed creature filter, got {filter:?}");
+                };
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::SharesQuality {
+                            quality: crate::types::ability::SharedQuality::Color,
+                            reference: Some(r),
+                            ..
+                        } if matches!(**r, TargetFilter::SelfRef)
+                    )),
+                    "filter must share a color with the cast spell (SelfRef), got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected non-repeatable TapCreatures cost, got {other:?}"),
+        }
+
+        // CR 702.78a: copy-once-on-cast trigger.
+        assert!(
+            face.triggers.iter().any(is_conspire_copy_trigger),
+            "conspire should add a copy-on-cast trigger, got {:?}",
+            face.triggers
+        );
+    }
+
+    #[test]
+    fn synthesize_conspire_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Conspire],
+            ..CardFace::default()
+        };
+        synthesize_conspire(&mut face);
+        synthesize_conspire(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_conspire_copy_trigger(t))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_conspire_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_conspire(&mut face);
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.iter().all(|t| !is_conspire_copy_trigger(t)));
+    }
+
+    #[test]
+    fn synthesize_conspire_defers_multiple_instances() {
+        // CR 702.78b: multiple instances need per-instance payment tracking, so the
+        // current single-aggregate model defers rather than miscounting copies.
+        let mut face = CardFace {
+            keywords: vec![Keyword::Conspire, Keyword::Conspire],
+            ..CardFace::default()
+        };
+        synthesize_conspire(&mut face);
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.iter().all(|t| !is_conspire_copy_trigger(t)));
     }
 }
 
@@ -18115,6 +20273,20 @@ mod bloodthirst_synthesis_tests {
         );
     }
 
+    /// CR 702.60a: MTGJSON carries bare "Ripple", but Oracle carries "Ripple N".
+    /// The shared merge authority must replace the default with the parsed depth so
+    /// trigger collection sees a non-zero reveal count.
+    #[test]
+    fn merge_extracted_keywords_replaces_bare_ripple_default() {
+        let mut base = vec![Keyword::Ripple(1)];
+        merge_extracted_keywords(&mut base, vec![Keyword::Ripple(4)]);
+        assert_eq!(
+            base,
+            vec![Keyword::Ripple(4)],
+            "parser-extracted Ripple(4) must replace MTGJSON's bare Ripple default"
+        );
+    }
+
     /// Non-multiplicity parameterized keywords must be replaced, not duplicated,
     /// when the scenario harness supplies the same keyword as both the base hint
     /// and parser-extracted Oracle keyword.
@@ -18938,6 +21110,302 @@ mod devour_synthesis_tests {
     fn synthesize_devour_is_noop_without_keyword() {
         let mut face = CardFace::default();
         synthesize_devour(&mut face);
+        assert!(face.replacements.is_empty());
+    }
+
+    fn face_with_amplify(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Amplify(n));
+        face
+    }
+
+    /// CR 702.38a: Amplify 1 synthesizes one `Moved`/`SelfRef` replacement whose
+    /// execute is `PutCounter(P1P1, SelfRef)` with a bare `ObjectCount` quantity
+    /// over the controller's-hand shared-creature-type filter, and no condition.
+    #[test]
+    fn synthesize_amplify_1_adds_objectcount_etb_replacement() {
+        let mut face = face_with_amplify(1);
+        synthesize_amplify(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_amplify_etb_replacement(r, 1))
+            .expect("amplify should synthesize an ETB-with-counters replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+        assert_eq!(replacement.condition, None);
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("ETB replacement requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("amplify ETB execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert!(matches!(target, TargetFilter::SelfRef));
+
+        // N == 1: bare ObjectCount over the shared-creature-type hand filter.
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("amplify 1 count should be a bare ObjectCount ref");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("amplify filter should be a TypedFilter");
+        };
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+            "filter must be restricted to the controller's hand"
+        );
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another)),
+            "filter must exclude the entering Amplify card itself"
+        );
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CreatureType,
+                    reference: Some(_),
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                }
+            )),
+            "filter must require sharing a creature type with the source"
+        );
+    }
+
+    /// CR 702.38a: Amplify N (> 1) scales the per-card count by `factor: n`
+    /// ("N +1/+1 counters for each card revealed").
+    #[test]
+    fn synthesize_amplify_n_scales_count_by_factor() {
+        let mut face = face_with_amplify(3);
+        synthesize_amplify(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_amplify_etb_replacement(r, 3))
+            .expect("amplify 3 should synthesize a replacement");
+        let execute = replacement.execute.as_deref().expect("execute body");
+        let Effect::PutCounter { count, .. } = &*execute.effect else {
+            panic!("expected PutCounter");
+        };
+        let QuantityExpr::Multiply { factor, inner } = count else {
+            panic!("amplify 3 count should be a Multiply");
+        };
+        assert_eq!(*factor, 3);
+        assert!(matches!(
+            **inner,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn synthesize_amplify_is_idempotent() {
+        let mut face = face_with_amplify(2);
+        synthesize_amplify(&mut face);
+        synthesize_amplify(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_amplify_etb_replacement(r, 2))
+                .count(),
+            1,
+            "ETB replacement should be deduped"
+        );
+    }
+
+    #[test]
+    fn synthesize_amplify_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_amplify(&mut face);
+        assert!(face.replacements.is_empty());
+    }
+
+    /// CR 702.38b: each Amplify instance is cumulative and functions
+    /// independently — one replacement per instance, discriminated by N.
+    #[test]
+    fn synthesize_amplify_emits_one_replacement_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Amplify(1));
+        face.keywords.push(Keyword::Amplify(2));
+        synthesize_amplify(&mut face);
+
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_amplify_etb_replacement(r, 1))
+                .count(),
+            1,
+            "exactly one Amplify(1) ETB replacement"
+        );
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_amplify_etb_replacement(r, 2))
+                .count(),
+            1,
+            "exactly one Amplify(2) ETB replacement"
+        );
+    }
+
+    /// Per-N predicate guard: an Amplify(1) replacement must not satisfy the
+    /// Amplify(2) idempotency check (the `Multiply` factor discriminates count),
+    /// so a hypothetical card with both instances receives both replacements.
+    #[test]
+    fn is_amplify_etb_replacement_distinguishes_n() {
+        let mut face = face_with_amplify(1);
+        synthesize_amplify(&mut face);
+        assert!(face
+            .replacements
+            .iter()
+            .any(|r| is_amplify_etb_replacement(r, 1)));
+        assert!(
+            !face
+                .replacements
+                .iter()
+                .any(|r| is_amplify_etb_replacement(r, 2)),
+            "Amplify(1) replacement must not match the Amplify(2) predicate"
+        );
+    }
+
+    /// Build a Saga face mirroring what `parse_saga_chapters` produces: one
+    /// `CounterAdded` chapter trigger per chapter number, plus the default
+    /// CR 714.3a "enters with one lore counter" replacement.
+    fn saga_face_with_chapters(chapters: &[u32], read_ahead: bool) -> CardFace {
+        let mut face = CardFace::default();
+        if read_ahead {
+            face.keywords.push(Keyword::ReadAhead);
+        }
+        for &n in chapters {
+            face.triggers.push(
+                TriggerDefinition::new(TriggerMode::CounterAdded)
+                    .valid_card(TargetFilter::SelfRef)
+                    .counter_filter(CounterTriggerFilter {
+                        counter_type: CounterType::Lore,
+                        threshold: Some(n),
+                    }),
+            );
+        }
+        face.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Lore,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                ))
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield),
+        );
+        face
+    }
+
+    /// CR 702.155b: a read-ahead Saga's default fixed lore ETB replacement is
+    /// swapped for "choose 1..final chapter, enter with that many lore counters".
+    #[test]
+    fn synthesize_read_ahead_swaps_lore_etb_for_choose_to_final_chapter() {
+        let mut face = saga_face_with_chapters(&[1, 2, 3], true);
+        synthesize_read_ahead(&mut face);
+
+        assert!(
+            !face.replacements.iter().any(is_default_saga_lore_etb),
+            "default fixed lore ETB replacement should be swapped"
+        );
+        let etb = face
+            .replacements
+            .iter()
+            .find(|r| matches!(r.event, ReplacementEvent::Moved))
+            .expect("read-ahead ETB replacement");
+        let execute = etb.execute.as_deref().expect("execute body");
+        let Effect::Choose {
+            choice_type: ChoiceType::NumberRange { min, max },
+            persist,
+        } = &*execute.effect
+        else {
+            panic!("read-ahead ETB should choose a number");
+        };
+        // CR 702.155b + CR 714.2d: between one and the final chapter number (3).
+        assert_eq!((*min, *max), (1, 3));
+        assert!(*persist, "chosen number must persist for ChosenNumber");
+
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("PutCounter sub-ability");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Lore,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ChosenNumber
+                },
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    /// A Saga without read ahead keeps the default fixed "enters with 1 lore" ETB.
+    #[test]
+    fn synthesize_read_ahead_is_noop_without_keyword() {
+        let mut face = saga_face_with_chapters(&[1, 2, 3], false);
+        synthesize_read_ahead(&mut face);
+        assert!(
+            face.replacements.iter().any(is_default_saga_lore_etb),
+            "non-read-ahead Saga keeps the default fixed lore ETB"
+        );
+    }
+
+    /// CR 702.155c: redundant — re-running synthesis swaps exactly once.
+    #[test]
+    fn synthesize_read_ahead_is_idempotent() {
+        let mut face = saga_face_with_chapters(&[1, 2], true);
+        synthesize_read_ahead(&mut face);
+        synthesize_read_ahead(&mut face);
+        let choose_etbs = face
+            .replacements
+            .iter()
+            .filter(|r| {
+                r.execute
+                    .as_deref()
+                    .is_some_and(|e| matches!(&*e.effect, Effect::Choose { .. }))
+            })
+            .count();
+        assert_eq!(
+            choose_etbs, 1,
+            "exactly one swapped read-ahead ETB replacement"
+        );
+    }
+
+    /// No chapters → nothing to read ahead to (final chapter undefined) → no-op.
+    #[test]
+    fn synthesize_read_ahead_no_chapters_is_noop() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::ReadAhead);
+        synthesize_read_ahead(&mut face);
         assert!(face.replacements.is_empty());
     }
 }
@@ -20511,6 +22979,7 @@ mod ingest_gravestorm_synthesis_tests {
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::MayChooseNewTargets,
+                ..
             }
         ));
         assert!(matches!(
@@ -21033,6 +23502,244 @@ mod champion_runtime_tests {
                 .iter()
                 .any(|link| { link.source_id == champion_id && link.exiled_id == elf_id }),
             "Champion LTB return should consume the source-tracked exile link"
+        );
+    }
+}
+
+#[cfg(test)]
+mod demonstrate_synthesis_tests {
+    //! CR 702.144a shape tests: Demonstrate was parsed/typed but had no
+    //! `synthesize_*` pass. `synthesize_demonstrate` installs an optional
+    //! "when you cast this spell" self-copy trigger whose sub-ability copies the
+    //! spell for a chosen opponent (`Effect::CopySpell { copier: Some(Opponent) }`).
+    //! The copier routing itself is verified behaviorally in `copy_spell`'s tests.
+    use super::*;
+
+    fn demonstrate_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Demonstrate);
+        face
+    }
+
+    #[test]
+    fn demonstrate_synthesizes_optional_self_copy_with_opponent_subcopy() {
+        let mut face = demonstrate_face();
+        synthesize_demonstrate(&mut face);
+        let t = face
+            .triggers
+            .iter()
+            .find(|t| is_demonstrate_trigger(t))
+            .expect("Demonstrate should add a SpellCast copy trigger");
+
+        assert!(matches!(t.mode, TriggerMode::SpellCast));
+        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(
+            t.trigger_zones.contains(&Zone::Stack),
+            "CR 702.144a: Demonstrate functions on the stack"
+        );
+
+        let execute = t.execute.as_deref().expect("execute body");
+        assert!(execute.optional, "CR 702.144a: 'you MAY copy it'");
+        // Controller's copy — no copier override, may retarget.
+        assert!(matches!(
+            &*execute.effect,
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+            }
+        ));
+        // Opponent's copy — sub-ability with the opponent copier, may retarget.
+        let sub = execute.sub_ability.as_deref().expect("opponent sub-copy");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: Some(ControllerRef::Opponent),
+            }
+        ));
+    }
+
+    #[test]
+    fn demonstrate_is_idempotent() {
+        let mut face = demonstrate_face();
+        synthesize_demonstrate(&mut face);
+        synthesize_demonstrate(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_demonstrate_trigger(t))
+                .count(),
+            1,
+            "repeated synthesis must not duplicate the Demonstrate trigger"
+        );
+    }
+
+    #[test]
+    fn demonstrate_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_demonstrate(&mut face);
+        assert!(face.triggers.iter().all(|t| !is_demonstrate_trigger(t)));
+    }
+}
+
+#[cfg(test)]
+mod absorb_synthesis_tests {
+    //! CR 702.64a shape tests: Absorb was parsed/typed but had no runtime.
+    //! `synthesize_absorb` installs a continuous self-recipient `DamageDone`
+    //! replacement that subtracts N from each incoming damage event
+    //! (`DamageModification::Minus { value: N }`, `valid_card: SelfRef`). The
+    //! continuous, non-consumed, per-source/per-event semantics (CR 702.64b) come
+    //! for free from `Minus`; CR 702.64c (each instance separate) is one
+    //! replacement per instance.
+    use super::*;
+    use crate::game::effects::deal_damage;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ResolvedAbility, TargetRef};
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    fn absorb_face(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Absorb(n));
+        face
+    }
+
+    fn absorb_creature_face(name: &str, keywords: Vec<Keyword>) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(3)),
+            toughness: Some(PtValue::Fixed(3)),
+            keywords,
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    fn marked_damage_after_absorb_damage(keywords: Vec<Keyword>, damage: u32) -> u32 {
+        let face = absorb_creature_face("Absorb Test", keywords);
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        apply_card_face_to_object(state.objects.get_mut(&target).unwrap(), &face);
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed {
+                    value: damage as i32,
+                },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        deal_damage::resolve(&mut state, &ability, &mut events).unwrap();
+
+        state.objects[&target].damage_marked
+    }
+
+    #[test]
+    fn absorb_synthesizes_self_damage_prevention() {
+        let mut face = absorb_face(2);
+        synthesize_absorb(&mut face);
+        let r = face
+            .replacements
+            .iter()
+            .find(|r| is_absorb_replacement(r, 2))
+            .expect("Absorb should add a self-recipient damage replacement");
+        assert!(matches!(r.event, ReplacementEvent::DamageDone));
+        assert!(
+            matches!(r.valid_card, Some(TargetFilter::SelfRef)),
+            "CR 702.64a: only damage to THIS creature is prevented"
+        );
+        assert!(
+            matches!(
+                r.damage_modification,
+                Some(DamageModification::Minus { value: 2 })
+            ),
+            "CR 702.64a: prevent N (=2) of the damage"
+        );
+    }
+
+    #[test]
+    fn absorb_is_idempotent() {
+        let mut face = absorb_face(1);
+        synthesize_absorb(&mut face);
+        synthesize_absorb(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_absorb_replacement(r, 1))
+                .count(),
+            1,
+            "repeated synthesis must not duplicate the Absorb replacement"
+        );
+    }
+
+    #[test]
+    fn absorb_multiple_instances_apply_separately() {
+        // CR 702.64c: two instances of Absorb 1 prevent 1 each (2 total per source).
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Absorb(1));
+        face.keywords.push(Keyword::Absorb(1));
+        synthesize_absorb(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_absorb_replacement(r, 1))
+                .count(),
+            2,
+            "CR 702.64c: each Absorb instance installs its own prevention replacement"
+        );
+    }
+
+    #[test]
+    fn absorb_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_absorb(&mut face);
+        assert!(face
+            .replacements
+            .iter()
+            .all(|r| !is_absorb_replacement(r, 1)));
+    }
+
+    #[test]
+    fn absorb_runtime_prevents_damage_to_absorb_creature() {
+        assert_eq!(
+            marked_damage_after_absorb_damage(vec![Keyword::Absorb(2)], 5),
+            3,
+            "CR 702.64a: Absorb 2 prevents 2 damage from the event"
+        );
+    }
+
+    #[test]
+    fn absorb_runtime_applies_multiple_instances_separately() {
+        assert_eq!(
+            marked_damage_after_absorb_damage(vec![Keyword::Absorb(1), Keyword::Absorb(1)], 3),
+            1,
+            "CR 702.64c: two Absorb 1 instances each prevent 1 damage"
         );
     }
 }

@@ -527,4 +527,55 @@ mod tests {
             "Create a 1/1 green Saproling."
         ));
     }
+
+    /// Fable of the Mirror-Breaker chapter III: exile then return transformed.
+    #[test]
+    fn fable_chapter_three_exiles_then_returns_transformed() {
+        let lines = vec![
+            "III — Exile this Saga, then return it to the battlefield transformed under your control.",
+        ];
+        let (triggers, _etb, _consumed) =
+            parse_saga_chapters(&lines, "Fable of the Mirror-Breaker");
+        assert_eq!(triggers.len(), 1);
+        let exec = triggers[0].execute.as_ref().expect("chapter III execute");
+        match &*exec.effect {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            } => {}
+            other => panic!("expected exile SelfRef clause 1, got {other:?}"),
+        }
+        let sub = exec.sub_ability.as_ref().expect("return transformed sub");
+        assert!(
+            !matches!(&*sub.effect, Effect::ChangeZoneAll { .. }),
+            "chapter III return must be single-object ChangeZone so enter_transformed propagates"
+        );
+        match &*sub.effect {
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target,
+                enter_transformed,
+                enters_under,
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        target,
+                        TargetFilter::SelfRef
+                            | TargetFilter::TrackedSet { .. }
+                            | TargetFilter::ParentTarget
+                    ),
+                    "return target must refer to the exiled saga, got {target:?}"
+                );
+                assert!(*enter_transformed, "chapter III must return transformed");
+                assert_eq!(
+                    enters_under.as_ref(),
+                    Some(&ControllerRef::You),
+                    "chapter III must enter under your control"
+                );
+            }
+            other => panic!("expected return transformed clause 2, got {other:?}"),
+        }
+    }
 }

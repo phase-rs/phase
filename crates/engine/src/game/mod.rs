@@ -2,6 +2,12 @@ pub mod ability_utils;
 pub mod arithmetic;
 pub mod attractions;
 pub mod bending;
+pub mod blitz;
+// Tests for `blitz` live in a sibling file (declared here, not in `blitz.rs`,
+// so `blitz.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "blitz_tests.rs"]
+mod blitz_tests;
 pub mod bracket_estimate;
 pub mod casting;
 pub(crate) mod casting_costs;
@@ -18,6 +24,10 @@ pub mod commander;
 pub mod companion;
 pub mod cost_payability;
 pub mod coverage;
+pub mod dash;
+#[cfg(test)]
+#[path = "dash_tests.rs"]
+mod dash_tests;
 pub mod day_night;
 pub mod deck_loading;
 pub mod deck_validation;
@@ -42,6 +52,12 @@ pub mod filter;
 pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;
+pub mod haunt;
+// Tests for `haunt` live in a sibling file (declared here, not in `haunt.rs`,
+// so `haunt.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "haunt_tests.rs"]
+mod haunt_tests;
 pub mod keywords;
 pub mod layers;
 pub mod life_costs;
@@ -76,6 +92,9 @@ pub mod scenario;
 pub mod scenario_db;
 pub mod specialize;
 pub mod speed;
+pub mod splice;
+#[cfg(test)]
+mod splice_tests;
 pub mod stack;
 pub mod static_abilities;
 pub mod static_source_index;

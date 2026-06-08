@@ -1,4 +1,6 @@
-use crate::game::effects::counters::add_counter_with_replacement;
+use crate::game::effects::counters::{
+    add_counter_with_replacement, stash_pending_counter_completion_with_actions,
+};
 use crate::game::game_object::DisplaySource;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
@@ -7,7 +9,7 @@ use crate::types::card_type::CardType;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingCounterPostAction};
 use crate::types::identifiers::CardId;
 use crate::types::zones::Zone;
 
@@ -59,15 +61,23 @@ pub fn resolve(
     }
 
     // CR 701.53a: The Incubator enters with N +1/+1 counters.
-    if n > 0 {
-        add_counter_with_replacement(
+    if n > 0
+        && !add_counter_with_replacement(
             state,
             ability.controller,
             obj_id,
             CounterType::Plus1Plus1,
             n,
             events,
+        )
+    {
+        stash_pending_counter_completion_with_actions(
+            state,
+            EffectKind::Incubate,
+            ability.source_id,
+            vec![PendingCounterPostAction::InjectPredefinedTokenAbilities { object_id: obj_id }],
         );
+        return Ok(());
     }
 
     super::token::inject_predefined_token_abilities(state, obj_id);

@@ -89,6 +89,10 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
                 kind: CastOfferKind::Cascade { .. },
                 ..
             }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Ripple { .. },
+                ..
+            }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
@@ -403,6 +407,8 @@ pub(super) fn handle_resolution_choice(
                 let cleanup = crate::types::ability::ResolutionCastCleanup {
                     exiled_misses,
                     reject_action: crate::types::ability::ResolutionMvRejectAction::ToHand,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 };
                 let result = casting::initiate_cast_during_resolution(
                     state,
@@ -536,6 +542,8 @@ pub(super) fn handle_resolution_choice(
                     exiled_misses,
                     reject_action:
                         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 };
                 let result = casting::initiate_cast_during_resolution(
                     state,
@@ -556,6 +564,47 @@ pub(super) fn handle_resolution_choice(
                 // CR 702.85a: Caster declines — hit and misses all go to the
                 // bottom of the library in a random order together.
                 let mut all_to_bottom = exiled_misses;
+                all_to_bottom.push(hit_card);
+                crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
+
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
+        }
+        (
+            WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::Ripple {
+                        hit_card,
+                        remaining_hits,
+                        revealed_misses,
+                    },
+            },
+            GameAction::RippleChoice { choice },
+        ) => {
+            let cast = matches!(choice, crate::types::actions::CastChoice::Cast);
+            if cast {
+                // CR 702.60a + CR 608.2g: cast the same-named revealed card for
+                // free during resolution. No mana-value gate (unlike Cascade); on
+                // decline/rollback the hit joins the rest on the library bottom.
+                let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    exiled_misses: revealed_misses,
+                    reject_action:
+                        crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
+                    success_action:
+                        crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining {
+                            remaining_hits,
+                        },
+                };
+                let result = casting::initiate_cast_during_resolution(
+                    state, player, hit_card, None, false, cleanup, events,
+                )?;
+                ResolutionChoiceOutcome::WaitingFor(result)
+            } else {
+                // CR 702.60a: declined — the hit and the rest all go to the bottom
+                // of the library together.
+                let mut all_to_bottom = revealed_misses;
+                all_to_bottom.extend(remaining_hits);
                 all_to_bottom.push(hit_card);
                 crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
 
@@ -1004,6 +1053,7 @@ pub(super) fn handle_resolution_choice(
                 selectable_cards,
                 kept_destination,
                 rest_destination,
+                enter_tapped,
                 ..
             },
             GameAction::SelectCards { cards: kept },
@@ -1070,6 +1120,11 @@ pub(super) fn handle_resolution_choice(
             }
             for &obj_id in &kept {
                 zones::move_to_zone(state, obj_id, kept_zone, events);
+                if enter_tapped && kept_zone == Zone::Battlefield {
+                    if let Some(obj) = state.objects.get_mut(&obj_id) {
+                        obj.tapped = true;
+                    }
+                }
             }
             // CR 701.33 + CR 701.18: Publish the kept (revealed) cards as a
             // tracked set so downstream sub_abilities can route them by type
@@ -1957,6 +2012,27 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            // CR 614.13a (snapshot lifetime): a *single-pick* `ChangeZone` devour
+            // entry paused on its as-enters sacrifice WITHOUT stashing a
+            // `pending_change_zone_iteration` (only the mass/targeted loop stashes
+            // one). So when this sacrifice resolves and no iteration is pending,
+            // the single-pick entry's event is over and the pre-entry Devour
+            // snapshot's lifetime ends here — mirroring the synchronous Done-branch
+            // `take()` in `change_zone::resolve`. The snapshot only gated the
+            // (already-built, already-chosen) eligible pool, so clearing it now
+            // cannot unconstrain this devourer's own pool. When an iteration IS
+            // pending (mass/targeted co-entry, or a nested move during a mass
+            // pause), the snapshot is still needed by the remaining members and is
+            // cleared by `drain_pending_change_zone_iteration` instead — so this
+            // never over-clears a live mass snapshot. No-op when no Devour is in
+            // flight (`snapshot == None`).
+            if matches!(effect_kind, EffectKind::Sacrifice)
+                && state.devour_eligible_snapshot.is_some()
+                && state.pending_change_zone_iteration.is_none()
+            {
+                let _ = state.devour_eligible_snapshot.take();
+            }
+
             if chosen.is_empty() {
                 // Issue #423 audit: no cards chosen — this branch moves no
                 // objects and emits no battlefield-exit events, so no
@@ -2142,20 +2218,10 @@ pub(super) fn handle_resolution_choice(
                 // so counter-doubling/modifying replacement effects apply.
                 EffectKind::BlightEffect => {
                     let blighted = chosen[0];
-                    if count_param > 0 {
-                        effects::counters::add_counter_with_replacement(
-                            state,
-                            player,
-                            blighted,
-                            crate::types::counter::CounterType::Minus1Minus1,
-                            count_param,
-                            events,
-                        );
-                    }
-                    // CR 701.68c: Snapshot the chosen creature so spells and
-                    // abilities that refer back to "the creature you blighted"
-                    // resolve to it. The creature stays on the battlefield, so
-                    // the snapshot is taken from its live characteristics.
+                    // CR 701.68c: Snapshot the chosen creature before the
+                    // counter-placement replacement pipeline can pause, so
+                    // "the creature you blighted" remains available when the
+                    // continuation resumes.
                     if let Some(obj) = state.objects.get(&blighted) {
                         let snapshot = crate::types::ability::CostPaidObjectSnapshot {
                             object_id: blighted,
@@ -2164,6 +2230,25 @@ pub(super) fn handle_resolution_choice(
                         if let Some(cont) = state.pending_continuation.as_mut() {
                             cont.chain.set_effect_context_object_recursive(snapshot);
                         }
+                    }
+                    if count_param > 0
+                        && !effects::counters::add_counter_with_replacement(
+                            state,
+                            player,
+                            blighted,
+                            crate::types::counter::CounterType::Minus1Minus1,
+                            count_param,
+                            events,
+                        )
+                    {
+                        effects::counters::stash_pending_counter_completion(
+                            state,
+                            effect_kind,
+                            source_id,
+                        );
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
                     }
                 }
                 other => {

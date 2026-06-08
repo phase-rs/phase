@@ -3,7 +3,9 @@ use crate::database::CardDatabase;
 use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
-use crate::parser::oracle::is_commander_permission_sentence;
+use crate::parser::oracle::{
+    is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
+};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
@@ -61,7 +63,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // and casting_costs.rs.
             | StaticMode::ExileCastPermission { .. }
             | StaticMode::CastWithKeyword { .. }
-            // CR 118.9: CastWithAlternativeCost carries a `ManaCost` — runtime
+            // CR 118.9: CastWithAlternativeCost carries an `AbilityCost` — runtime
             // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
             | StaticMode::CastWithAlternativeCost { .. }
             // CR 702.16: PlayerProtection carries a `ProtectionTarget` (Strings) —
@@ -432,6 +434,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Unblocked => parts.push("unblocked".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
+            FilterProp::HasHasteOrControlledSinceTurnBegan => {
+                parts.push("haste or controlled since turn began".into())
+            }
             FilterProp::WithKeyword { value } => parts.push(format!("with {value:?}")),
             FilterProp::CanEnchant { target } => {
                 parts.push(format!("can enchant {}", fmt_target(target)))
@@ -603,6 +608,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
             FilterProp::Historic => parts.push("historic".into()),
+            FilterProp::NotHistoric => parts.push("nonhistoric".into()),
             // CR 903.3d
             FilterProp::IsCommander => parts.push("commander".into()),
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
@@ -1133,9 +1139,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsDrawnThisTurn { player } => {
             format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
-        QuantityRef::LandsPlayedThisTurn { player } => {
-            format!("lands played this turn ({})", fmt_player_scope(player))
-        }
+        QuantityRef::LandsPlayedThisTurn { player, from_zones } => from_zones.as_ref().map_or_else(
+            || format!("lands played this turn ({})", fmt_player_scope(player)),
+            |zones| {
+                format!(
+                    "lands played this turn ({}, from {:?})",
+                    fmt_player_scope(player),
+                    zones
+                )
+            },
+        ),
         QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => {
             format!(
                 "{} zone changes this turn ({from:?}->{to:?})",
@@ -1168,7 +1181,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::TurnsTaken => "turns taken".into(),
         QuantityRef::ChosenNumber => "chosen number".into(),
-        QuantityRef::AttackedThisTurn => "attacked this turn".into(),
+        QuantityRef::AttackedThisTurn { .. } => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             format!("loyalty abilities activated this turn ({player:?})")
@@ -1416,6 +1429,13 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
         }
         ManaProduction::DistinctColorsAmongPermanents { filter } => {
             format!("1 of each color among {}", fmt_target(filter))
+        }
+        ManaProduction::AnyOneColorAmongPermanents { count, filter, .. } => {
+            format!(
+                "1 of any color among {} x{}",
+                fmt_target(filter),
+                fmt_quantity(count)
+            )
         }
         ManaProduction::TriggerEventManaType => "1 of the triggering mana's type".to_string(),
     }
@@ -2273,6 +2293,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 702.85a: Cascade takes no parameters — source MV is read from the
         // stack object at resolution time.
         Effect::Cascade => {}
+        Effect::Ripple { .. } => {}
         // CR 702.94a: MiracleCast is an internal engine effect, not parsed from Oracle text.
         Effect::MiracleCast { .. } => {}
         // CR 702.35a: MadnessCast is synthesized from Keyword::Madness.
@@ -2468,6 +2489,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Learn
         | Effect::SwitchPT { .. }
         | Effect::Myriad
+        | Effect::Encore
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::Populate
         | Effect::VentureIntoDungeon
@@ -4419,6 +4443,9 @@ fn count_effective_oracle_lines(oracle_text: &str) -> usize {
         if is_commander_permission_sentence(&lower) {
             continue;
         }
+        if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
 
         // Check if this line contains a modal header ("choose one —", "choose two.", etc.)
         // Handles standalone headers, triggered modals ("when enters, choose one —"),
@@ -5400,7 +5427,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
-        QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Handled),
+        QuantityRef::AttackedThisTurn { .. } => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
             ("LoyaltyAbilitiesActivatedThisTurn", Handled)
@@ -6414,6 +6441,17 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         }
         let lower = stripped.to_lowercase();
         if is_commander_permission_sentence(&lower) {
+            continue;
+        }
+
+        // CR 100.2a / CR 903.5b: Deck-construction copy-limit lines ("A deck can
+        // have any number of cards named X.", "...up to seven cards named Seven
+        // Dwarves.", the Megalegendary line, etc.) are consumed by the parser as
+        // typed `DeckCopyLimit` metadata (see `compute_deck_copy_limit_from_text`,
+        // read by `deck_validation`), not as a resolvable ability — they
+        // legitimately produce no `ParsedElement`. Skip them so they are not
+        // falsely reported as `SilentDrop`.
+        if is_deck_construction_copy_limit_sentence(stripped) {
             continue;
         }
 
@@ -9943,13 +9981,15 @@ mod tests {
 
     #[test]
     fn unsupported_cumulative_upkeep_cost_counts_as_keyword_gap() {
+        // CR 702.24a: Exile-base cumulative upkeep is still unsupported by the
+        // unless-payment pipeline (Discard became supported once the per-counter
+        // discard payment chain landed), so it remains a coverage gap.
         let mut face = make_face();
         face.keywords
-            .push(Keyword::CumulativeUpkeep(AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
+                count: 1,
+                zone: None,
                 filter: None,
-                random: false,
-                self_ref: false,
             }));
 
         let gaps = card_face_gaps(&face);
@@ -10075,6 +10115,40 @@ mod tests {
         face.oracle_text = Some(oracle.to_string());
 
         assert!(audit_card_lines(oracle, &face).is_empty());
+    }
+
+    #[test]
+    fn deck_construction_copy_limit_line_does_not_count_as_silent_drop() {
+        // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
+        // (and the "up to N" / bare-Megalegendary variants) is consumed by the
+        // parser as typed DeckCopyLimit metadata, not a resolvable ability, so
+        // it must not be flagged as a SilentDrop. Covers the class, not one card.
+        let mut face = make_face();
+        for oracle in [
+            "A deck can have any number of cards named Relentless Rats.",
+            "A deck can have up to seven cards named Seven Dwarves.",
+            "A deck can have up to nine cards named Nazgûl.",
+            "Megalegendary",
+            "Megalegendary (Your deck can have any number of cards named Vazal, the Compleat.)",
+        ] {
+            face.oracle_text = Some(oracle.to_string());
+            assert!(
+                audit_card_lines(oracle, &face).is_empty(),
+                "deck-construction line falsely flagged as a finding: {oracle}"
+            );
+
+            let mut missing = Vec::new();
+            check_silent_drops(&Some(oracle.to_string()), &[], &mut missing);
+            assert!(
+                missing.is_empty(),
+                "deck-construction line falsely counted as SilentDrop: {oracle} -> {missing:?}"
+            );
+            assert_eq!(
+                count_effective_oracle_lines(oracle),
+                0,
+                "deck-construction line should not count as a runtime oracle line: {oracle}"
+            );
+        }
     }
 
     #[test]

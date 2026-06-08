@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::{ReplacementDefinition, RestrictionExpiry};
+use crate::types::ability::{EffectKind, ReplacementDefinition, RestrictionExpiry};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
-use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
+use crate::types::game_state::{
+    AutoPassMode, GameState, PendingCounterAddition, PendingEffectResolved, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -560,6 +562,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // a card drawn last turn.
     state.pending_miracle_offers.clear();
     state.spells_cast_this_turn_by_player.clear();
+    state.lands_played_this_turn_by_player.clear();
     state.players_who_searched_library_this_turn.clear();
     state.player_actions_this_turn.clear();
     state.players_attacked_this_step.clear();
@@ -569,6 +572,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.creature_attacked_defenders_this_turn.clear();
     state.combat_phases_started_this_turn = 0;
     state.creatures_attacked_this_turn.clear();
+    state.attacker_declarations_this_turn.clear();
     state.creatures_blocked_this_turn.clear();
     state.players_who_created_token_this_turn.clear();
     state.created_tokens_this_turn.clear();
@@ -586,6 +590,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state
         .assassin_or_commander_dealt_combat_damage_this_turn
         .clear();
+    // CR 702.76a + CR 514: Clear the Prowl creature-type ledger at cleanup — its
+    // "was dealt combat damage this turn" predicate is turn-scoped too.
+    state.creature_types_dealt_combat_damage_this_turn.clear();
     // CR 500.8: Clear any leftover extra phases from the previous turn.
     state.extra_phases.clear();
     // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.
@@ -1066,7 +1073,8 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             )
     });
 
-    // CR 730.2: Check day/night transition at cleanup.
+    // CR 502.2 / CR 731.2: Check the prior active player's day/night transition
+    // before advancing the active player.
     day_night::check_day_night_transition(state, events);
 
     let active = state.active_player;
@@ -1319,7 +1327,7 @@ fn should_skip_step_now(state: &mut GameState, step: Phase) -> bool {
 
 /// CR 714.3b: As the precombat main phase begins, put a lore counter on each Saga
 /// the active player controls. This is a turn-based action, not a triggered ability.
-fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>) {
+fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>) -> bool {
     let active = state.active_player;
     let saga_ids: Vec<_> = state
         .battlefield
@@ -1337,16 +1345,38 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
         .collect();
 
     // CR 614.1: Route through replacement pipeline so Vorinclex-class effects apply.
-    for saga_id in saga_ids {
-        super::effects::counters::add_counter_with_replacement(
+    for (index, saga_id) in saga_ids.iter().copied().enumerate() {
+        if !super::effects::counters::add_counter_with_replacement(
             state,
             active,
             saga_id,
             CounterType::Lore,
             1,
             events,
-        );
+        ) {
+            let remaining = saga_ids[index + 1..]
+                .iter()
+                .copied()
+                .map(|object_id| PendingCounterAddition::Object {
+                    actor: active,
+                    object_id,
+                    counter_type: CounterType::Lore,
+                    count: 1,
+                })
+                .collect();
+            super::effects::counters::stash_pending_counter_additions(
+                state,
+                remaining,
+                PendingEffectResolved::with_post_actions_without_effect(
+                    EffectKind::GenericEffect,
+                    saga_id,
+                    Vec::new(),
+                ),
+            );
+            return false;
+        }
     }
+    true
 }
 
 /// CR 503.1 / CR 504.2 / CR 507.1 / CR 513.1: Process phase triggers for the current step.
@@ -1498,7 +1528,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 714.3b: As the precombat main phase begins, add a lore counter
                 // to each Saga the active player controls (turn-based action).
                 if state.phase == Phase::PreCombatMain {
-                    add_lore_counters_to_sagas(state, events);
+                    if !add_lore_counters_to_sagas(state, events) {
+                        return state.waiting_for.clone();
+                    }
                     super::attractions::perform_roll_to_visit_turn_based_action(state, events);
                     // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
                     // the start of the active player's first precombat main

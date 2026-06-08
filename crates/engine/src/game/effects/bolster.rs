@@ -1,4 +1,6 @@
-use crate::game::effects::counters::add_counter_with_replacement;
+use crate::game::effects::counters::{
+    add_counter_with_replacement, stash_pending_counter_completion,
+};
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility};
 use crate::types::counter::CounterType;
@@ -65,15 +67,18 @@ pub fn resolve(
 
     if tied.len() == 1 {
         // CR 701.39a: Unique minimum — auto-choose and add counters.
-        if n > 0 {
-            add_counter_with_replacement(
+        if n > 0
+            && !add_counter_with_replacement(
                 state,
                 ability.controller,
                 tied[0],
                 CounterType::Plus1Plus1,
                 n,
                 events,
-            );
+            )
+        {
+            stash_pending_counter_completion(state, EffectKind::Bolster, source_id);
+            return Ok(());
         }
 
         events.push(GameEvent::EffectResolved {

@@ -16,6 +16,7 @@
 
 use crate::database::card_db::CardDatabase;
 use crate::game::deck_loading::create_object_from_card_face;
+use crate::game::printed_cards::populate_back_face_if_dfc;
 use crate::game::scenario::GameScenario;
 use crate::game::zones::{add_to_zone, remove_from_zone};
 use crate::types::identifiers::ObjectId;
@@ -59,6 +60,7 @@ impl GameScenarioDbExt for GameScenario {
 
         // create_object_from_card_face places the object in Zone::Library
         let id = create_object_from_card_face(&mut self.state, face, player);
+        populate_back_face_if_dfc(self.state.objects.get_mut(&id).unwrap(), db, face);
 
         // Move from Library to the requested zone
         remove_from_zone(&mut self.state, id, Zone::Library, player);

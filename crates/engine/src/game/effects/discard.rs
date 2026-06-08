@@ -25,6 +25,25 @@ pub(crate) enum DiscardOutcome {
     NeedsReplacementChoice(PlayerId),
 }
 
+/// CR 701.9a: To discard a card, move it from its owner's hand to their graveyard.
+/// CR 702.187b: Mayhem's cast permission is gated by the graveyard card having
+/// been discarded this turn, so stamp that marker at the same completion point
+/// that records the discard event.
+pub(crate) fn complete_discard_to_graveyard(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player_id: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    zones::move_to_zone(state, object_id, Zone::Graveyard, events);
+    crate::game::restrictions::record_discard(state, player_id);
+    crate::game::restrictions::record_card_discarded(state, object_id);
+    events.push(GameEvent::Discarded {
+        player_id,
+        object_id,
+    });
+}
+
 /// CR 701.9a: To discard a card, move it from owner's hand to their graveyard.
 /// If targets specify specific cards, discard those; otherwise discard from end of hand.
 pub fn resolve(
@@ -58,12 +77,18 @@ pub fn resolve(
         _ => (1, false, None, TargetFilter::Any, false),
     };
 
-    // Check if targets specify specific cards to discard
+    // Check if targets specify specific cards to discard. Parent chain
+    // propagation can inherit non-hand object targets (e.g. Traumatic Critique's
+    // damage recipient) — those must not short-circuit the hand-choice path.
     let specific_targets: Vec<_> = ability
         .targets
         .iter()
         .filter_map(|t| {
-            if let TargetRef::Object(obj_id) = t {
+            let TargetRef::Object(obj_id) = t else {
+                return None;
+            };
+            let obj = state.objects.get(obj_id)?;
+            if obj.zone == Zone::Hand {
                 Some(*obj_id)
             } else {
                 None
@@ -98,12 +123,7 @@ pub fn resolve(
                             object_id: oid,
                             ..
                         } => {
-                            zones::move_to_zone(state, oid, Zone::Graveyard, events);
-                            crate::game::restrictions::record_discard(state, pid);
-                            events.push(GameEvent::Discarded {
-                                player_id: pid,
-                                object_id: oid,
-                            });
+                            complete_discard_to_graveyard(state, oid, pid, events);
                         }
                         zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                             // Replacement redirected (e.g., Madness → exile instead of graveyard).
@@ -255,12 +275,7 @@ pub(crate) fn discard_as_cost_with_source(
                 object_id: oid,
                 ..
             } => {
-                zones::move_to_zone(state, oid, Zone::Graveyard, events);
-                crate::game::restrictions::record_discard(state, pid);
-                events.push(GameEvent::Discarded {
-                    player_id: pid,
-                    object_id: oid,
-                });
+                complete_discard_to_graveyard(state, oid, pid, events);
             }
             zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                 // CR 614.1c: Replacement redirected destination (e.g., Madness → exile).
@@ -434,6 +449,7 @@ mod tests {
         assert!(matches!(outcome, DiscardOutcome::Complete));
         assert!(state.exile.contains(&card));
         assert!(!state.players[0].graveyard.contains(&card));
+        assert_eq!(state.objects[&card].discarded_turn, None);
         assert!(events.iter().any(
             |event| matches!(event, GameEvent::Discarded { object_id, .. } if *object_id == card)
         ));
@@ -571,6 +587,7 @@ mod tests {
         assert!(state
             .players_who_discarded_card_this_turn
             .contains(&PlayerId(0)));
+        assert_eq!(state.objects[&card].discarded_turn, Some(state.turn_number));
         assert_eq!(
             state
                 .cards_discarded_this_turn_by_player
@@ -1001,6 +1018,53 @@ mod tests {
         assert!(
             state.cost_payment_failed_flag,
             "cost_payment_failed_flag should be set when discard count is 0 (empty hand)"
+        );
+    }
+
+    #[test]
+    fn controller_filter_ignores_inherited_non_hand_object_targets() {
+        // CR 115.1 regression — Traumatic Critique: damage target is an
+        // inherited Object target, but "discard a card" is a hand choice for
+        // the spell's controller.
+        use crate::types::ability::QuantityExpr;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_card_a = create_object(&mut state, CardId(1), PlayerId(0), "A".into(), Zone::Hand);
+        let _p0_card_b = create_object(&mut state, CardId(3), PlayerId(0), "B".into(), Zone::Hand);
+        let damage_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Creature".into(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Object(damage_target)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::DiscardChoice { player: PlayerId(0), count: 1, .. }
+            ),
+            "must prompt controller to discard from hand, not silently skip inherited battlefield target"
+        );
+        assert!(
+            state.players[0].hand.contains(&p0_card_a),
+            "no discard should happen before the player chooses"
         );
     }
 

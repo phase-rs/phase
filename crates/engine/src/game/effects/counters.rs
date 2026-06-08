@@ -3,20 +3,22 @@ use std::collections::HashSet;
 use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityTag, CounterMoveSelection, CounterTransferMode, Effect, EffectError, EffectKind,
-    ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
+    AbilityTag, CounterMoveSelection, CounterTransferMode, DelayedTriggerCondition, Duration,
+    Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CounterAddedRecord, CounterMoveChoice, GameState, PendingCounterMove, PendingCounterMoveQueue,
-    WaitingFor,
+    CounterAddedRecord, CounterMoveChoice, DelayedTrigger, GameState, PendingCounterAddition,
+    PendingCounterAdditionQueue, PendingCounterMove, PendingCounterMoveQueue,
+    PendingCounterPostAction, PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterMoveStage, ProposedEvent};
+use crate::types::proposed_event::{CounterMoveStage, CounterPlacement, ProposedEvent};
 
 /// CR 306.5c + CR 310.4c: After mutating the counter map, re-derive the
 /// `obj.loyalty` / `obj.defense` field so the counter count and the cached
@@ -103,14 +105,16 @@ pub fn add_counter_with_replacement(
     counter_type: CounterType,
     count: u32,
     events: &mut Vec<GameEvent>,
-) {
+) -> bool {
     if count == 0 {
-        return;
+        return true;
     }
     let proposed = ProposedEvent::AddCounter {
-        actor,
-        object_id,
-        counter_type,
+        placement: CounterPlacement::Object {
+            actor,
+            object_id,
+            counter_type,
+        },
         count,
         applied: HashSet::new(),
     };
@@ -118,22 +122,512 @@ pub fn add_counter_with_replacement(
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             if let ProposedEvent::AddCounter {
-                actor,
-                object_id,
-                counter_type,
+                placement:
+                    CounterPlacement::Object {
+                        actor,
+                        object_id,
+                        counter_type,
+                    },
                 count,
                 ..
             } = event
             {
                 apply_counter_addition(state, actor, object_id, counter_type, count, events);
             }
+            true
         }
-        ReplacementResult::Prevented => {}
+        ReplacementResult::Prevented => true,
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
+            false
         }
     }
+}
+
+pub(crate) fn stash_pending_counter_additions(
+    state: &mut GameState,
+    remaining: Vec<PendingCounterAddition>,
+    completion: PendingEffectResolved,
+) {
+    state.pending_counter_additions = Some(PendingCounterAdditionQueue {
+        remaining,
+        completion: Some(completion),
+    });
+}
+
+pub(crate) fn stash_pending_counter_completion(
+    state: &mut GameState,
+    kind: EffectKind,
+    source_id: ObjectId,
+) {
+    stash_pending_counter_additions(
+        state,
+        Vec::new(),
+        PendingEffectResolved::new(kind, source_id),
+    );
+}
+
+pub(crate) fn stash_pending_counter_completion_with_actions(
+    state: &mut GameState,
+    kind: EffectKind,
+    source_id: ObjectId,
+    post_actions: Vec<PendingCounterPostAction>,
+) {
+    stash_pending_counter_additions(
+        state,
+        Vec::new(),
+        PendingEffectResolved::with_post_actions(kind, source_id, post_actions),
+    );
+}
+
+pub(crate) fn stash_pending_counter_post_actions(
+    state: &mut GameState,
+    kind: EffectKind,
+    source_id: ObjectId,
+    post_actions: Vec<PendingCounterPostAction>,
+) {
+    stash_pending_counter_additions(
+        state,
+        Vec::new(),
+        PendingEffectResolved::with_post_actions_without_effect(kind, source_id, post_actions),
+    );
+}
+
+pub(crate) fn append_pending_counter_post_actions(
+    state: &mut GameState,
+    post_actions: Vec<PendingCounterPostAction>,
+) {
+    if post_actions.is_empty() {
+        return;
+    }
+    if let Some(completion) = state
+        .pending_counter_additions
+        .as_mut()
+        .and_then(|queue| queue.completion.as_mut())
+    {
+        completion.post_actions.extend(post_actions);
+    }
+}
+
+fn object_counter_addition(
+    actor: PlayerId,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+) -> PendingCounterAddition {
+    PendingCounterAddition::Object {
+        actor,
+        object_id,
+        counter_type,
+        count,
+    }
+}
+
+fn apply_object_counter_addition(
+    state: &mut GameState,
+    addition: PendingCounterAddition,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let PendingCounterAddition::Object {
+        actor,
+        object_id,
+        counter_type,
+        count,
+    } = addition
+    else {
+        return true;
+    };
+    add_counter_with_replacement(state, actor, object_id, counter_type, count, events)
+}
+
+fn merge_pending_counter_completion_after_nested_pause(
+    state: &mut GameState,
+    completion: PendingEffectResolved,
+) {
+    let Some(queue) = state.pending_counter_additions.as_mut() else {
+        stash_pending_counter_additions(state, Vec::new(), completion);
+        return;
+    };
+
+    let Some(nested_completion) = queue.completion.as_mut() else {
+        queue.completion = Some(completion);
+        return;
+    };
+
+    nested_completion
+        .post_actions
+        .extend(completion.post_actions);
+    match completion.resolution_event {
+        PendingEffectResolutionEvent::Emit => {
+            nested_completion
+                .post_actions
+                .push(PendingCounterPostAction::EmitEffectResolved {
+                    kind: completion.kind,
+                    source_id: completion.source_id,
+                });
+        }
+        PendingEffectResolutionEvent::Suppress => {}
+    }
+    if let Some(action) = completion.player_action {
+        nested_completion
+            .post_actions
+            .push(PendingCounterPostAction::RecordPlayerAction {
+                player_id: action.player_id,
+                action: action.action,
+            });
+    }
+}
+
+pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    while let Some(mut queue) = state.pending_counter_additions.take() {
+        let Some(next) = queue.remaining.first().cloned() else {
+            if let Some(PendingEffectResolved {
+                kind,
+                source_id,
+                resolution_event,
+                mut post_actions,
+                player_action,
+            }) = queue.completion.take()
+            {
+                while let Some(action) = post_actions.first().cloned() {
+                    post_actions.remove(0);
+                    if !apply_pending_counter_post_action(state, action, events) {
+                        merge_pending_counter_completion_after_nested_pause(
+                            state,
+                            PendingEffectResolved {
+                                kind,
+                                source_id,
+                                resolution_event,
+                                post_actions,
+                                player_action,
+                            },
+                        );
+                        return;
+                    }
+                }
+                match resolution_event {
+                    PendingEffectResolutionEvent::Emit => {
+                        events.push(GameEvent::EffectResolved { kind, source_id });
+                    }
+                    PendingEffectResolutionEvent::Suppress => {}
+                }
+                if let Some(action) = player_action {
+                    events.push(GameEvent::PlayerPerformedAction {
+                        player_id: action.player_id,
+                        action: action.action,
+                    });
+                }
+            }
+            continue;
+        };
+        queue.remaining.remove(0);
+        state.pending_counter_additions = Some(queue);
+        let completed = match next {
+            PendingCounterAddition::Object {
+                actor,
+                object_id,
+                counter_type,
+                count,
+            } => add_counter_with_replacement(state, actor, object_id, counter_type, count, events),
+            PendingCounterAddition::Player {
+                actor,
+                player_id,
+                counter_kind,
+                count,
+            } => super::player_counter::add_player_counter_with_replacement(
+                state,
+                actor,
+                player_id,
+                counter_kind,
+                count,
+                events,
+            ),
+            PendingCounterAddition::Energy {
+                actor,
+                player_id,
+                count,
+            } => super::energy::add_energy_with_replacement(state, actor, player_id, count, events),
+        };
+        if !completed {
+            return;
+        }
+    }
+}
+
+fn apply_pending_counter_post_action(
+    state: &mut GameState,
+    action: PendingCounterPostAction,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    match action {
+        PendingCounterPostAction::EmitEffectResolved { kind, source_id } => {
+            events.push(GameEvent::EffectResolved { kind, source_id });
+            true
+        }
+        PendingCounterPostAction::RecordPlayerAction { player_id, action } => {
+            events.push(GameEvent::PlayerPerformedAction { player_id, action });
+            true
+        }
+        PendingCounterPostAction::AddSubtype { object_id, subtype } => {
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                if !obj
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(&subtype))
+                {
+                    obj.card_types.subtypes.push(subtype.clone());
+                    obj.base_card_types.subtypes.push(subtype);
+                }
+            }
+            true
+        }
+        PendingCounterPostAction::InjectPredefinedTokenAbilities { object_id } => {
+            // CR 111.10 + CR 400.7: Incubator tokens get predefined
+            // subtype abilities and battlefield-entry bookkeeping after their
+            // replacement-processed counters finish.
+            super::token::inject_predefined_token_abilities(state, object_id);
+            crate::game::layers::mark_layers_entered(state, object_id);
+            crate::game::restrictions::record_battlefield_entry(state, object_id);
+            crate::game::restrictions::record_token_created(state, object_id);
+            true
+        }
+        PendingCounterPostAction::FinalizeTokenEntry {
+            object_id,
+            name,
+            attach_to,
+            sacrifice_at,
+            source_id,
+            controller,
+        } => {
+            // CR 111.1 + CR 111.10 + CR 603.6a: once ETB counters finish,
+            // complete token entry exactly as the uninterrupted token path
+            // does: abilities/bookkeeping, attachment, ETB events, and any
+            // delayed sacrifice trigger.
+            super::token::inject_predefined_token_abilities(state, object_id);
+            crate::game::layers::mark_layers_entered(state, object_id);
+            crate::game::restrictions::record_battlefield_entry(state, object_id);
+            crate::game::restrictions::record_token_created(state, object_id);
+            if let Some(host) = attach_to {
+                match host {
+                    crate::game::game_object::AttachTarget::Object(id) => {
+                        super::attach::attach_to(state, object_id, id);
+                    }
+                    crate::game::game_object::AttachTarget::Player(pid) => {
+                        super::attach::attach_to_player(state, object_id, pid);
+                    }
+                }
+            }
+            push_token_entry_events(state, events, object_id, name);
+            if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
+                state.delayed_triggers.push(DelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase {
+                        phase: crate::types::phase::Phase::EndCombat,
+                    },
+                    ability: ResolvedAbility::new(
+                        Effect::Sacrifice {
+                            target: TargetFilter::Any,
+                            count: QuantityExpr::Fixed { value: 1 },
+                            min_count: 0,
+                        },
+                        vec![TargetRef::Object(object_id)],
+                        source_id,
+                        controller,
+                    ),
+                    controller,
+                    source_id,
+                    one_shot: true,
+                });
+            }
+            state.last_created_token_ids.push(object_id);
+            true
+        }
+        PendingCounterPostAction::ContinueTokenCreation {
+            owner,
+            spec,
+            enter_tapped,
+            remaining_count,
+        } => {
+            if remaining_count == 0 {
+                return true;
+            }
+            let event = ProposedEvent::CreateToken {
+                owner,
+                spec,
+                copy: None,
+                enter_tapped,
+                count: remaining_count,
+                applied: HashSet::new(),
+            };
+            let created_ids = state.last_created_token_ids.clone();
+            super::token::apply_create_token_after_replacement_with_created_ids(
+                state,
+                event,
+                created_ids,
+                PendingEffectResolutionEvent::Suppress,
+                events,
+            )
+        }
+        PendingCounterPostAction::FinalizeCopyTokenEntry {
+            object_id,
+            name,
+            enters_attacking,
+            source_id,
+            controller,
+        } => {
+            // CR 508.4 + CR 111.1 + CR 603.6a: complete copy-token entry after
+            // replacement-processed counters finish, preserving attacking
+            // placement and the normal token ETB events.
+            if enters_attacking {
+                crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+            }
+            super::token::inject_predefined_token_abilities(state, object_id);
+            crate::game::layers::mark_layers_entered(state, object_id);
+            crate::game::restrictions::record_battlefield_entry(state, object_id);
+            crate::game::restrictions::record_token_created(state, object_id);
+            push_token_entry_events(state, events, object_id, name);
+            state.last_created_token_ids.push(object_id);
+            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+                pending.created_ids.push(object_id);
+            }
+            true
+        }
+        PendingCounterPostAction::ContinueCopyTokenCreation {
+            owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            remaining_count,
+        } => {
+            if remaining_count == 0 {
+                return true;
+            }
+            let status = super::token_copy::apply_copy_token_after_replacement(
+                state,
+                owner,
+                *copy,
+                enter_tapped,
+                enter_with_counters,
+                remaining_count,
+                events,
+            );
+            let completion = status.completion;
+            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+                pending.created_ids.extend(status.created_ids);
+            } else {
+                state.last_created_token_ids.extend(status.created_ids);
+            }
+            match completion {
+                super::token_copy::CopyTokenApplyCompletion::Completed => true,
+                super::token_copy::CopyTokenApplyCompletion::Paused => false,
+            }
+        }
+        PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+            object_id,
+            name,
+            enters_attacking,
+            source_id,
+            controller,
+            remaining_modifications,
+        } => super::token_copy::apply_remaining_token_modifications_after_counter_pause(
+            state,
+            object_id,
+            name,
+            enters_attacking,
+            source_id,
+            controller,
+            remaining_modifications,
+            events,
+        ),
+        PendingCounterPostAction::ClearPendingEtbCounters { object_id } => {
+            state
+                .pending_etb_counters
+                .retain(|(pending_id, _, _)| *pending_id != object_id);
+            true
+        }
+        PendingCounterPostAction::ContinueZoneDeliveryTail {
+            object_id,
+            from,
+            to,
+            cause,
+            source_id,
+            duration,
+            exile_tracking,
+        } => {
+            // CR 614.12a: the delivery tail may surface a Devour as-enters
+            // sacrifice `EffectZoneChoice`. On that pause, return `false` so the
+            // drain stashes the remaining post-actions and pauses; the tail's
+            // post-effect already fired (it surfaced the choice), so the resume
+            // path continues from the EffectZoneChoice resolution.
+            match super::change_zone::apply_zone_delivery_tail(
+                state,
+                object_id,
+                from,
+                to,
+                cause,
+                source_id,
+                duration.as_ref(),
+                exile_tracking,
+                events,
+            ) {
+                super::change_zone::ZoneDeliveryResult::Done => true,
+                super::change_zone::ZoneDeliveryResult::NeedsChoice(_) => false,
+            }
+        }
+        PendingCounterPostAction::RecordStationed {
+            spacecraft_id,
+            creature_id,
+            counters_added,
+        } => {
+            // CR 702.184a: Station records the completed keyword action after
+            // its replacement-processed charge counters finish.
+            events.push(GameEvent::Stationed {
+                spacecraft_id,
+                creature_id,
+                counters_added,
+            });
+            true
+        }
+        PendingCounterPostAction::MarkMonstrous { object_id } => {
+            // CR 701.37a: a creature becomes monstrous after the monstrosity
+            // instruction resolves, even if counter placement was modified or
+            // prevented.
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.monstrous = true;
+            }
+            true
+        }
+        PendingCounterPostAction::MarkRenowned { object_id } => {
+            // CR 702.112a: a creature becomes renowned after the renown
+            // instruction resolves, even if counter placement was modified or
+            // prevented.
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.is_renowned = true;
+            }
+            true
+        }
+    }
+}
+
+fn push_token_entry_events(
+    state: &GameState,
+    events: &mut Vec<GameEvent>,
+    object_id: ObjectId,
+    name: String,
+) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    let zone_change_record =
+        obj.snapshot_for_zone_change(object_id, None, crate::types::zones::Zone::Battlefield);
+    events.push(GameEvent::ZoneChanged {
+        object_id,
+        from: None,
+        to: crate::types::zones::Zone::Battlefield,
+        record: Box::new(zone_change_record),
+    });
+    events.push(GameEvent::TokenCreated { object_id, name });
 }
 
 /// CR 122.1 + CR 122.6: Apply an already-accepted counter addition and record
@@ -518,44 +1012,57 @@ pub fn resolve_add(
     };
 
     // CR 601.2d: If distribution was assigned at cast time, apply per-target counter counts.
-    if let Some(distribution) = &ability.distribution {
-        for (target, count) in distribution {
-            if let crate::types::ability::TargetRef::Object(obj_id) = target {
-                let event_start = events.len();
-                add_counter_with_replacement(
-                    state,
-                    ability.controller,
-                    *obj_id,
-                    counter_type.clone(),
-                    *count,
-                    events,
-                );
-                emit_evolved_event_for_counter_addition(
-                    ability,
-                    events,
-                    event_start,
-                    *obj_id,
-                    &counter_type,
-                );
-            }
-        }
+    let additions: Vec<PendingCounterAddition> = if let Some(distribution) = &ability.distribution {
+        distribution
+            .iter()
+            .filter_map(|(target, count)| {
+                if let crate::types::ability::TargetRef::Object(obj_id) = target {
+                    Some(object_counter_addition(
+                        ability.controller,
+                        *obj_id,
+                        counter_type.clone(),
+                        *count,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
     } else {
         let targets = resolve_defined_or_targets(state, ability);
-        for obj_id in targets {
-            let event_start = events.len();
-            add_counter_with_replacement(
-                state,
-                ability.controller,
-                obj_id,
-                counter_type.clone(),
-                counter_num,
-                events,
-            );
+        targets
+            .into_iter()
+            .map(|obj_id| {
+                object_counter_addition(
+                    ability.controller,
+                    obj_id,
+                    counter_type.clone(),
+                    counter_num,
+                )
+            })
+            .collect()
+    };
+
+    let completion =
+        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        let PendingCounterAddition::Object {
+            object_id, count, ..
+        } = addition
+        else {
+            continue;
+        };
+        let event_start = events.len();
+        if !apply_object_counter_addition(state, addition, events) {
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return Ok(());
+        }
+        if count > 0 {
             emit_evolved_event_for_counter_addition(
                 ability,
                 events,
                 event_start,
-                obj_id,
+                object_id,
                 &counter_type,
             );
         }
@@ -698,27 +1205,37 @@ pub fn resolve_add_all(
     // binding scope the parser stamps on per-recipient counts.
     let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
 
-    for obj_id in matching_ids {
-        let counter_num = if count_uses_recipient {
-            crate::game::quantity::resolve_quantity_with_recipient(
-                state,
-                &count,
+    let additions: Vec<PendingCounterAddition> = matching_ids
+        .into_iter()
+        .map(|obj_id| {
+            let counter_num = if count_uses_recipient {
+                crate::game::quantity::resolve_quantity_with_recipient(
+                    state,
+                    &count,
+                    ability.controller,
+                    ability.source_id,
+                    obj_id,
+                )
+                .max(0) as u32
+            } else {
+                counter_num_shared
+            };
+            object_counter_addition(
                 ability.controller,
-                ability.source_id,
                 obj_id,
+                counter_type.clone(),
+                counter_num,
             )
-            .max(0) as u32
-        } else {
-            counter_num_shared
-        };
-        add_counter_with_replacement(
-            state,
-            ability.controller,
-            obj_id,
-            counter_type.clone(),
-            counter_num,
-            events,
-        );
+        })
+        .collect();
+
+    let completion =
+        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        if !apply_object_counter_addition(state, addition, events) {
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return Ok(());
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -744,8 +1261,8 @@ pub fn resolve_multiply(
         _ => (CounterType::Plus1Plus1, 2),
     };
 
-    let targets = resolve_defined_or_targets(state, ability);
-    for obj_id in targets {
+    let mut additions = Vec::new();
+    for obj_id in resolve_defined_or_targets(state, ability) {
         let current = state
             .objects
             .get(&obj_id)
@@ -760,14 +1277,21 @@ pub fn resolve_multiply(
             // additional counters, so this must flow through the central
             // counter-addition path for replacement effects and per-turn
             // "counters you've put" history.
-            add_counter_with_replacement(
-                state,
+            additions.push(object_counter_addition(
                 ability.controller,
                 obj_id,
                 counter_type.clone(),
                 to_add,
-                events,
-            );
+            ));
+        }
+    }
+
+    let completion =
+        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+    for (index, addition) in additions.iter().cloned().enumerate() {
+        if !apply_object_counter_addition(state, addition, events) {
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return Ok(());
         }
     }
 
@@ -947,6 +1471,52 @@ pub fn resolve_move(
         .map(|expr| crate::game::quantity::resolve_quantity_with_targets(state, expr, ability))
         .map(|value| value.max(0) as u32);
 
+    if mode != CounterTransferMode::Move {
+        // CR 122.1 / CR 122.5: Non-move counter transfers copy counters by
+        // placing new counters, so each addition goes through the replacement
+        // pipeline rather than the atomic move-counter path.
+        let mut additions = Vec::new();
+        for source_id in source_ids {
+            let source_counters =
+                counter_transfer_source_counters(state, source_id, mode, counter_type_filter);
+            if source_counters.is_empty() {
+                continue;
+            }
+            let mut remaining = transfer_limit;
+            for dest_id in &dest_ids {
+                for (ct, available) in &source_counters {
+                    let count = remaining.map_or(*available, |limit| limit.min(*available));
+                    if count == 0 {
+                        continue;
+                    }
+                    additions.push(object_counter_addition(
+                        ability.controller,
+                        *dest_id,
+                        ct.clone(),
+                        count,
+                    ));
+                    if let Some(limit) = remaining.as_mut() {
+                        *limit = limit.saturating_sub(count);
+                    }
+                }
+            }
+        }
+
+        let completion =
+            PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+        for (index, addition) in additions.iter().cloned().enumerate() {
+            if !apply_object_counter_addition(state, addition, events) {
+                stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+                return Ok(());
+            }
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     for source_id in source_ids {
         let source_counters =
             counter_transfer_source_counters(state, source_id, mode, counter_type_filter);
@@ -971,31 +1541,17 @@ pub fn resolve_move(
                 if count == 0 {
                     continue;
                 }
-                if mode == CounterTransferMode::Move {
-                    if !move_counter_with_replacement(
-                        state,
-                        ability.controller,
-                        source_id,
-                        dest_id,
-                        ct.clone(),
-                        count,
-                        events,
-                    ) {
-                        return Ok(());
-                    }
-                    if let Some(limit) = remaining.as_mut() {
-                        *limit = limit.saturating_sub(count);
-                    }
-                    continue;
-                }
-                add_counter_with_replacement(
+                if !move_counter_with_replacement(
                     state,
                     ability.controller,
+                    source_id,
                     dest_id,
                     ct.clone(),
                     count,
                     events,
-                );
+                ) {
+                    return Ok(());
+                }
                 if let Some(limit) = remaining.as_mut() {
                     *limit = limit.saturating_sub(count);
                 }
@@ -1373,11 +1929,13 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, FilterProp, QuantityExpr, TargetChoiceTiming, TargetFilter, TypedFilter,
+        ControllerRef, FilterProp, QuantityExpr, QuantityModification, ReplacementDefinition,
+        TargetChoiceTiming, TargetFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
 
     fn make_counter_ability(effect: Effect, target: ObjectId) -> ResolvedAbility {
@@ -1397,6 +1955,42 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Creature);
+    }
+
+    fn install_noncommuting_counter_replacements(state: &mut GameState) {
+        let doubler_id = create_object(
+            state,
+            CardId(900),
+            PlayerId(0),
+            "Counter Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&doubler_id)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Double),
+            );
+
+        let plus_id = create_object(
+            state,
+            CardId(901),
+            PlayerId(0),
+            "Counter Plus".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plus_id)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Plus { value: 1 }),
+            );
     }
 
     /// Issue #1675 — Canopy Gargantuan: "put a number of +1/+1 counters on each
@@ -1718,6 +2312,197 @@ mod tests {
     }
 
     #[test]
+    fn add_counter_replacement_choice_stashes_remaining_targets_and_completion() {
+        let mut state = GameState::new_two_player(42);
+        install_noncommuting_counter_replacements(&mut state);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::AddCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first), TargetRef::Object(second)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_add(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let pending = state
+            .pending_counter_additions
+            .as_ref()
+            .expect("remaining target should be queued");
+        assert_eq!(pending.remaining.len(), 1);
+        assert!(matches!(
+            pending.remaining[0],
+            PendingCounterAddition::Object {
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+                ..
+            } if object_id == second
+        ));
+        assert!(matches!(
+            pending.completion,
+            Some(PendingEffectResolved {
+                kind: EffectKind::AddCounter,
+                source_id: ObjectId(100),
+                player_action: None,
+                ..
+            })
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+    }
+
+    #[test]
+    fn nested_post_action_pause_preserves_parent_completion() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_counter_additions = Some(PendingCounterAdditionQueue {
+            remaining: vec![PendingCounterAddition::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(10),
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            }],
+            completion: Some(PendingEffectResolved::with_post_actions_without_effect(
+                EffectKind::Token,
+                ObjectId(20),
+                vec![PendingCounterPostAction::MarkRenowned {
+                    object_id: ObjectId(30),
+                }],
+            )),
+        });
+
+        merge_pending_counter_completion_after_nested_pause(
+            &mut state,
+            PendingEffectResolved::with_post_actions(
+                EffectKind::AddCounter,
+                ObjectId(40),
+                vec![PendingCounterPostAction::MarkMonstrous {
+                    object_id: ObjectId(50),
+                }],
+            ),
+        );
+
+        let queue = state
+            .pending_counter_additions
+            .as_ref()
+            .expect("nested queue remains installed");
+        assert_eq!(queue.remaining.len(), 1);
+        let completion = queue
+            .completion
+            .as_ref()
+            .expect("nested completion remains installed");
+        assert_eq!(completion.kind, EffectKind::Token);
+        assert_eq!(
+            completion.resolution_event,
+            PendingEffectResolutionEvent::Suppress
+        );
+        assert!(matches!(
+            completion.post_actions.as_slice(),
+            [
+                PendingCounterPostAction::MarkRenowned {
+                    object_id: ObjectId(30)
+                },
+                PendingCounterPostAction::MarkMonstrous {
+                    object_id: ObjectId(50)
+                },
+                PendingCounterPostAction::EmitEffectResolved {
+                    kind: EffectKind::AddCounter,
+                    source_id: ObjectId(40)
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn add_all_counter_replacement_choice_stashes_remaining_objects_and_completion() {
+        let mut state = GameState::new_two_player(42);
+        install_noncommuting_counter_replacements(&mut state);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First Creature".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, first);
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second Creature".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, second);
+        let ability = ResolvedAbility::new(
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_add_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let pending = state
+            .pending_counter_additions
+            .as_ref()
+            .expect("remaining object should be queued");
+        assert_eq!(pending.remaining.len(), 1);
+        assert!(matches!(
+            pending.remaining[0],
+            PendingCounterAddition::Object {
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+                ..
+            } if object_id == second
+        ));
+        assert!(matches!(
+            pending.completion,
+            Some(PendingEffectResolved {
+                kind: EffectKind::PutCounterAll,
+                source_id: ObjectId(100),
+                player_action: None,
+                ..
+            })
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+    }
+
+    #[test]
     fn multiply_counter_records_added_counter_history() {
         let mut state = GameState::new_two_player(42);
         let obj_id = create_object(
@@ -1758,6 +2543,78 @@ mod tests {
             CounterType::Plus1Plus1
         );
         assert_eq!(state.counter_added_this_turn[0].count, 2);
+    }
+
+    #[test]
+    fn multiply_counter_replacement_choice_stashes_remaining_targets_and_completion() {
+        let mut state = GameState::new_two_player(42);
+        install_noncommuting_counter_replacements(&mut state);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for obj_id in [first, second] {
+            state
+                .objects
+                .get_mut(&obj_id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Plus1Plus1, 1);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::MultiplyCounter {
+                counter_type: CounterType::Plus1Plus1,
+                multiplier: 2,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first), TargetRef::Object(second)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_multiply(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let pending = state
+            .pending_counter_additions
+            .as_ref()
+            .expect("remaining target should be queued");
+        assert_eq!(pending.remaining.len(), 1);
+        assert!(matches!(
+            pending.remaining[0],
+            PendingCounterAddition::Object {
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+                ..
+            } if object_id == second
+        ));
+        assert!(matches!(
+            pending.completion,
+            Some(PendingEffectResolved {
+                kind: EffectKind::MultiplyCounter,
+                source_id: ObjectId(100),
+                player_action: None,
+                ..
+            })
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
     }
 
     #[test]

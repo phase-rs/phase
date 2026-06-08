@@ -11,8 +11,12 @@ use crate::types::player::PlayerId;
 pub fn count_devotion(state: &GameState, player: PlayerId, colors: &[ManaColor]) -> u32 {
     let mut total = 0u32;
     for &id in &state.battlefield {
+        // CR 702.26b: a phased-out permanent "is treated as though it does not
+        // exist," so its mana symbols drop out of devotion. Phased-out permanents
+        // remain in `state.battlefield` (only `phase_status` flips), so this guard
+        // is required — mirroring `filter.rs` and `targeting.rs::zone_object_ids`.
         let obj = match state.objects.get(&id) {
-            Some(o) if o.controller == player => o,
+            Some(o) if o.controller == player && o.is_phased_in() => o,
             _ => continue,
         };
         if let ManaCost::Cost { ref shards, .. } = obj.mana_cost {
@@ -177,6 +181,42 @@ mod tests {
             count_devotion(&state, PlayerId(0), &[ManaColor::Black, ManaColor::Red]),
             4
         );
+    }
+
+    /// CR 702.26b: a phased-out permanent is treated as though it doesn't exist —
+    /// "it can't affect or be affected by anything else in the game." Its mana
+    /// symbols therefore drop out of devotion (CR 700.5) while it is phased out.
+    /// (Phased-out permanents stay in `state.battlefield` with `phase_status`
+    /// flipped, so a raw battlefield scan that ignores phasing over-counts them —
+    /// corrupting Gray Merchant's drain, the Theros Gods' creature-ness CDA, and
+    /// any `QuantityRef::Devotion`.)
+    #[test]
+    fn devotion_excludes_phased_out_permanents() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nightveil Specter".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::BlueBlack,
+                ManaCostShard::BlueBlack,
+                ManaCostShard::BlueBlack,
+            ],
+            generic: 0,
+        };
+        // Phased in: the three {U/B} pips count.
+        assert_eq!(count_devotion(&state, PlayerId(0), &[ManaColor::Blue]), 3);
+
+        // Phase it out — CR 702.26b: its pips no longer exist for devotion.
+        state.objects.get_mut(&id).unwrap().phase_status = PhaseStatus::PhasedOut {
+            cause: PhaseOutCause::Directly,
+        };
+        assert_eq!(count_devotion(&state, PlayerId(0), &[ManaColor::Blue]), 0);
     }
 
     #[test]

@@ -171,6 +171,11 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
             // CR 701.6: counter-targeting filter is dynamic; rare.
             return (keys, true);
         }
+        // CR 702.55c: Haunt payoff triggers live on a card in the EXILE zone and
+        // fire via the off-zone scan, never through this battlefield-scoped
+        // index. Route to `unclassified` so the index stays exhaustive without
+        // claiming a battlefield bucket these triggers can never occupy.
+        TriggerMode::HauntedCreatureDies => return (keys, true),
 
         // --- Combat ---
         TriggerMode::Attacks
@@ -701,6 +706,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::CopySpell
         | EffectKind::CopyTokenOf
         | EffectKind::Myriad
+        | EffectKind::Encore
+        | EffectKind::ExileHaunting
+        | EffectKind::HideawayConceal
         | EffectKind::BecomeCopy
         | EffectKind::ChooseCard
         | EffectKind::PutCounter
@@ -769,6 +777,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileFromTopUntil
         | EffectKind::RevealUntil
         | EffectKind::Cascade
+        | EffectKind::Ripple
         | EffectKind::MiracleCast
         | EffectKind::MadnessCast
         | EffectKind::PutAtLibraryPosition

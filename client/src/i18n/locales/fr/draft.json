@@ -44,7 +44,8 @@
     "endDraftConfirm": "Terminer ce draft pour tout le monde ? Cette action est irreversible."
   },
   "manaCurve": {
-    "title": "Courbe de mana"
+    "title": "Courbe de mana",
+    "bucketLabel": "Valeur de mana {{bucket}}"
   },
   "pickTimer": {
     "label": "Minuteur de sélection",

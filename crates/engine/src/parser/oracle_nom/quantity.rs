@@ -353,6 +353,17 @@ fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     }
 }
 
+fn parse_quantity_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(ControllerRef::You, tag(" you control")),
+        value(
+            ControllerRef::SourceChosenPlayer,
+            tag(" the chosen player controls"),
+        ),
+    ))
+    .parse(input)
+}
+
 /// Parse an optional ", rounded up/down" / ", round up/down" suffix.
 ///
 /// CR 107.1a: Oracle text must specify rounding direction for fractional
@@ -751,15 +762,12 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
 /// source via `ChosenAttribute::Player` (Skyshroud War Beast, Lost Order of
 /// Jarkeld), distinct from the controller ("you control").
 fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
+    if let Ok(parsed) = parse_qualified_controlled_type(input) {
+        return Ok(parsed);
+    }
+
     let (rest, head) = parse_type_filter_word(input)?;
-    let (rest, controller) = alt((
-        value(ControllerRef::You, tag(" you control")),
-        value(
-            ControllerRef::SourceChosenPlayer,
-            tag(" the chosen player controls"),
-        ),
-    ))
-    .parse(rest)?;
+    let (rest, controller) = parse_quantity_controller_suffix(rest)?;
     // CR 205.2b: "<head> you control that are <t1> and/or <t2>" restricts the
     // controlled population to objects that have any of the listed card types.
     // CR 205.2b makes a multi-type object satisfy any of its types, so a
@@ -784,6 +792,28 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
             }),
         },
     ))
+}
+
+/// CR 201.2 + CR 109.2: Parse qualified controlled object counts like
+/// "permanents named Food Fight you control" or "other creature named Seven
+/// Dwarves you control". The named/card-quality parser (`parse_type_phrase`)
+/// owns the object description — type word plus any `other`/`named X`
+/// qualifier — and this quantity parser owns the trailing controller scope.
+/// Shared by the "the number of … you control" and "for each … you control"
+/// paths: a `named X` qualifier sits between the type word and the controller
+/// suffix, which the bare-`parse_type_filter_word` arms cannot reach.
+fn parse_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (mut filter, rest) = parse_type_phrase(input);
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    let (rest, controller) = parse_quantity_controller_suffix(rest)?;
+    attach_controller_to_quantity_filter(&mut filter, controller);
+    Ok((rest, QuantityRef::ObjectCount { filter }))
 }
 
 /// CR 604.3 + CR 613.1: Parse "<type> of the chosen type [on the battlefield]"
@@ -1923,6 +1953,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_subtype_died_this_turn,
         parse_for_each_creature_died_this_turn,
+        // CR 400.7 + CR 603.10a: "creature that left the battlefield under your
+        // control this turn" — destination-agnostic zone-change count, distinct
+        // from the graveyard-only "died" arm above.
+        parse_for_each_creature_left_battlefield_this_turn,
         parse_entered_this_turn_ref,
     ))
     .or(alt((
@@ -1939,6 +1973,12 @@ fn parse_for_each_clause_ref_with_they_controller(
         // token does not commit to it.
         parse_for_each_distinct_counter_kinds_among,
         parse_for_each_controlled_type,
+        // CR 201.2: "for each [other] <type> named <CardName> you control"
+        // (Seven Dwarves). The `named X` qualifier sits between the type word
+        // and " you control", so the bare-type `parse_for_each_controlled_type`
+        // arm above cannot reach the controller suffix. Tried last so it only
+        // catches the qualified case the bare-type arm rejects.
+        parse_qualified_controlled_type,
     )))
     .parse(input)
 }
@@ -2469,6 +2509,37 @@ fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, Quant
     ))
     .parse(input)?;
     Ok((rest, creatures_died_this_turn_ref()))
+}
+
+/// CR 400.7 + CR 603.10a: Parse "creature that left the battlefield under your
+/// control [this turn]" -> filtered zone-change count where the destination is
+/// unconstrained ("left the battlefield" = battlefield -> *any* zone, unlike
+/// "died" which is battlefield -> graveyard). CR 603.10a classes
+/// leaves-the-battlefield as a look-back zone-change event, so the count is
+/// taken over `zone_changes_this_turn` records using each object's last-known
+/// characteristics.
+///
+/// "under your control" scopes the count to creatures controlled by the
+/// source's controller at the time they left (`ControllerRef::You`). The
+/// trailing "this turn" qualifier is engine-redundant (tracking is per-turn)
+/// and is stripped upstream by `strip_trailing_duration`, mirroring
+/// `parse_for_each_creature_died_this_turn`.
+fn parse_for_each_creature_left_battlefield_this_turn(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((
+        tag("creature that left the battlefield under your control this turn"),
+        tag("creature that left the battlefield under your control"),
+    ))
+    .parse(input)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: None,
+            filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        },
+    ))
 }
 
 fn parse_for_each_subtype_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -3130,6 +3201,39 @@ mod tests {
                 other => panic!("expected ObjectCount, got {other:?}"),
             }
         }
+    }
+
+    /// CR 201.2 + CR 109.4: "for each [other] <type> named <CardName> you
+    /// control" must keep the `named X` qualifier AND the controller scope —
+    /// not drop the whole DynamicQty. Seven Dwarves ("gets +1/+1 for each other
+    /// creature named Seven Dwarves you control") regressed to a swallowed
+    /// clause once the named-X terminator correctly stopped the card name at
+    /// " you control": the bare-type `parse_for_each_controlled_type` arm could
+    /// not reach the controller suffix past the qualifier. Tests the class:
+    /// the `named X`/`other`/controller triple survives for any card name.
+    #[test]
+    fn parse_for_each_other_named_creature_you_control_keeps_dynamic_quantity() {
+        let (rest, q) =
+            parse_for_each_clause_ref("other creature named seven dwarves you control").unwrap();
+        assert_eq!(rest, "");
+        let QuantityRef::ObjectCount {
+            filter:
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }),
+        } = q
+        else {
+            panic!("expected ObjectCount(Typed), got {q:?}");
+        };
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::Another));
+        assert!(properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Named { name } if name == "seven dwarves"
+        )));
     }
 
     #[test]
@@ -4632,6 +4736,42 @@ mod tests {
         ));
     }
 
+    /// CR 400.7 + CR 603.10a: "creature that left the battlefield under your
+    /// control this turn" must parse to a destination-agnostic zone-change
+    /// count (to: None) scoped to creatures you control — distinct from the
+    /// graveyard-only "died" arm. Kutzil's Flanker mode 1.
+    #[test]
+    fn parse_for_each_creature_left_battlefield_under_your_control() {
+        for phrase in [
+            "creature that left the battlefield under your control this turn",
+            "creature that left the battlefield under your control",
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(phrase)
+                .unwrap_or_else(|_| panic!("expected {phrase:?} to parse"));
+            assert_eq!(rest, "", "{phrase:?} left unconsumed");
+            let QuantityRef::ZoneChangeCountThisTurn { from, to, filter } = q else {
+                panic!("expected ZoneChangeCountThisTurn for {phrase:?}, got {q:?}");
+            };
+            assert_eq!(from, Some(Zone::Battlefield));
+            // "left the battlefield" is destination-agnostic (NOT graveyard-only).
+            assert_eq!(to, None, "destination must be unconstrained");
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed creature filter, got {filter:?}");
+            };
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        // The graveyard-only "died" phrasing must NOT be captured by this arm.
+        let (_, died) = parse_for_each_clause_ref("creature that died this turn").unwrap();
+        assert!(matches!(
+            died,
+            QuantityRef::ZoneChangeCountThisTurn {
+                to: Some(Zone::Graveyard),
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn test_parse_for_each_creature_blocking_it() {
         let (rest, q) = parse_for_each("for each creature blocking it").unwrap();
@@ -5440,6 +5580,27 @@ mod tests {
                     type_filters: vec![TypeFilter::Artifact],
                     controller: Some(ControllerRef::You),
                     properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// CR 201.2: "named <card name>" ends before the controller suffix in a
+    /// controlled object-count quantity. Food Fight.
+    #[test]
+    fn parse_quantity_ref_controlled_named_type_keeps_controller_out_of_name() {
+        let (rest, q) =
+            parse_quantity_ref("the number of permanents named food fight you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::Named {
+                        name: "food fight".to_string(),
+                    }],
                 }),
             }
         );

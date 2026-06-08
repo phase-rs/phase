@@ -1,8 +1,10 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::char;
 use nom::combinator::opt;
 use nom::combinator::value;
+use nom::sequence::delimited;
 use nom::Parser;
 
 use crate::types::ability::{
@@ -395,18 +397,34 @@ pub(super) fn parse_escape_keyword(line: &str) -> Option<Keyword> {
 }
 
 pub(super) fn parse_harmonize_keyword(line: &str) -> Option<Keyword> {
-    let lower = line.to_lowercase();
-    let ((), rest) = nom_on_lower(line, &lower, |i| value((), tag("harmonize ")).parse(i))?;
-    let cost_str = if let Some(paren_start) = rest.find('(') {
-        rest[..paren_start].trim()
-    } else {
-        rest.trim()
-    };
-    if cost_str.is_empty() {
-        return None;
-    }
-    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+    let cost = parse_keyword_mana_cost_line(line, "harmonize ")?;
     Some(Keyword::Harmonize(cost))
+}
+
+fn parse_keyword_mana_cost_line(line: &str, keyword: &'static str) -> Option<ManaCost> {
+    let lower = line.to_lowercase();
+    let ((), rest) = nom_on_lower(line, &lower, |i| value((), tag(keyword)).parse(i))?;
+    let (after_cost, cost) = nom_primitives::parse_mana_cost(rest.trim_start()).ok()?;
+    let after_cost = after_cost.trim();
+    if !after_cost.is_empty() {
+        let lower_after_cost = after_cost.to_lowercase();
+        let ((), remainder) = nom_on_lower(after_cost, &lower_after_cost, |i| {
+            value((), delimited(char('('), take_until(")"), char(')'))).parse(i)
+        })?;
+        if !remainder.trim().is_empty() {
+            return None;
+        }
+    }
+    Some(cost)
+}
+
+/// CR 702.187b: Parse a "Mayhem {cost}" Oracle line into `Keyword::Mayhem`.
+/// MTGJSON's keywords array carries only the bare "Mayhem" name, so the mana
+/// cost is extracted here from the card's Oracle text (the cost precedes the
+/// parenthesized reminder text). Mirrors `parse_harmonize_keyword`.
+pub(super) fn parse_mayhem_keyword(line: &str) -> Option<Keyword> {
+    let cost = parse_keyword_mana_cost_line(line, "mayhem ")?;
+    Some(Keyword::Mayhem(cost))
 }
 
 /// CR 702.24a: Dispatch a cumulative-upkeep cost text into a typed

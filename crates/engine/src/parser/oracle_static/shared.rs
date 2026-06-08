@@ -329,6 +329,9 @@ pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
 pub(crate) enum GraveyardGrantedKeywordKind {
     Flashback,
     Escape,
+    Mayhem,
+    Scavenge,
+    Encore,
 }
 
 impl GraveyardGrantedKeywordKind {
@@ -340,6 +343,14 @@ impl GraveyardGrantedKeywordKind {
             GraveyardGrantedKeywordKind::Escape => {
                 keyword.kind() == crate::types::keywords::KeywordKind::Escape
             }
+            // CR 702.187b: Green Goblin grants Mayhem to graveyard cards.
+            GraveyardGrantedKeywordKind::Mayhem => {
+                keyword.kind() == crate::types::keywords::KeywordKind::Mayhem
+            }
+            // CR 702.97 (Scavenge) / CR 702.141 (Encore): activated graveyard
+            // keywords share `KeywordKind::Unknown`, so match the variant directly.
+            GraveyardGrantedKeywordKind::Scavenge => matches!(keyword, Keyword::Scavenge(_)),
+            GraveyardGrantedKeywordKind::Encore => matches!(keyword, Keyword::Encore(_)),
         }
     }
 }
@@ -635,6 +646,38 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // the Engine). Split so the CantUntap clause is not dropped. (The "enters
     // tapped and doesn't untap" replacement+static compound is carved out earlier.)
     if let Some(defs) = try_split_and_doesnt_untap(&stripped) {
+        return defs;
+    }
+
+    // CR 702.5 / CR 702.6: "<grant or restriction> and can't be enchanted [or
+    // equipped] [by other Auras]" pairs a first clause with an attach prohibition
+    // under one subject (Anti-Magic Aura, Consecrate Land). Split so the
+    // CantBeEnchanted/CantBeEquipped clause is not dropped.
+    if let Some(defs) = try_split_and_cant_be_attached(&stripped) {
+        return defs;
+    }
+
+    // CR 702.18a / CR 702.11a: "<grant or restriction> and can't be the target of
+    // …" pairs a first clause with a targeting restriction under one subject
+    // (Spectral Shield). Split so the CantBeTargeted/Hexproof clause is not
+    // dropped.
+    if let Some(defs) = try_split_and_cant_be_targeted(&stripped) {
+        return defs;
+    }
+
+    // CR 602.5: "<grant or restriction> and its activated abilities can't be
+    // activated" pairs a first clause with an activation prohibition under one
+    // subject (Viper's Kiss). Split so the CantBeActivated clause is not dropped.
+    // (The "can't attack/block, and activated abilities …" compound — Arrest,
+    // Faith's Fetters — is handled by its own earlier branch above.)
+    if let Some(defs) = try_split_and_cant_activate_abilities(&stripped) {
+        return defs;
+    }
+
+    // CR 701.21: "<grant or restriction> and can't be sacrificed" pairs a first
+    // clause with a sacrifice prohibition under one subject (Assault Suit). Split
+    // so the CantBeSacrificed clause is not dropped.
+    if let Some(defs) = try_split_and_cant_be_sacrificed(&stripped) {
         return defs;
     }
 
@@ -1438,18 +1481,48 @@ pub(crate) fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<Ta
 /// "Cleric, Rogue, Warrior, and/or Wizard", "Cat, Elemental, Nightmare, Dinosaur, or Beast".
 /// Returns `TargetFilter::Or` for multiple subtypes, single `TargetFilter::Typed` for one.
 pub(crate) fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
-    fn parse_subtype_word(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
-        use nom::bytes::complete::take_while1;
-        let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
-        if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Fail,
-            )));
-        }
-        Ok((rest, word))
-    }
+    parse_subtype_or_list_with_word_parser(input, parse_subtype_word_capitalized)
+}
 
+/// CR 205.3m: Lowercase subtype list prefix plus the unconsumed suffix.
+pub(crate) fn parse_subtype_or_list_insensitive_prefix(
+    input: &str,
+) -> Option<(TargetFilter, &str)> {
+    parse_subtype_or_list_prefix_with_word_parser(input, parse_subtype_word_any_case)
+}
+
+fn parse_subtype_word_capitalized(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    use nom::bytes::complete::take_while1;
+    let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
+    if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((rest, word))
+}
+
+fn parse_subtype_word_any_case(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    use nom::bytes::complete::take_while1;
+    take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)
+}
+
+fn parse_subtype_or_list_with_word_parser(
+    input: &str,
+    parse_subtype_word: fn(&str) -> nom::IResult<&str, &str, OracleError<'_>>,
+) -> Option<TargetFilter> {
+    let (filter, rest) = parse_subtype_or_list_prefix_with_word_parser(input, parse_subtype_word)?;
+    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('.') {
+        return None;
+    }
+    Some(filter)
+}
+
+fn parse_subtype_or_list_prefix_with_word_parser(
+    input: &str,
+    parse_subtype_word: fn(&str) -> nom::IResult<&str, &str, OracleError<'_>>,
+) -> Option<(TargetFilter, &str)> {
     fn parse_list_separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((
             tag(", and/or a "),
@@ -1474,9 +1547,6 @@ pub(crate) fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
         separated_list1(parse_list_separator, parse_subtype_word)
             .parse(input)
             .ok()?;
-    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('.') {
-        return None;
-    }
     let filters: Vec<TargetFilter> = words
         .iter()
         .map(|w| {
@@ -1487,9 +1557,9 @@ pub(crate) fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
         })
         .collect();
     if filters.len() == 1 {
-        filters.into_iter().next()
+        filters.into_iter().next().map(|filter| (filter, rest))
     } else {
-        Some(TargetFilter::Or { filters })
+        Some((TargetFilter::Or { filters }, rest))
     }
 }
 

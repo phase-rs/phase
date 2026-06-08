@@ -917,6 +917,12 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("the next time "),
         tag("at the beginning "),
         tag("for as long as "),
+        // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
+        // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the
+        // whole clause together so the leading-conditional splitter (which gates
+        // the body on the parsed condition) sees the comma, not the chunker.
+        tag("during any turn "),
+        tag("during a turn "),
     ))
     .parse(current_lower)
     .is_ok()
@@ -1224,7 +1230,25 @@ fn remainder_trimmed_starts_with_compound_subject_each(remainder: &str) -> bool 
         value((), tag("that creature each ")),
     ))
     .parse(lower.as_str());
-    result.is_ok()
+    if result.is_ok() {
+        return true;
+    }
+    controlled_creature_each_subject_starts(&lower)
+}
+
+fn controlled_creature_each_subject_starts(lower: &str) -> bool {
+    let Ok((_, type_phrase)) = terminated(
+        take_until::<_, _, OracleError<'_>>(" you control each "),
+        tag::<_, _, OracleError<'_>>(" you control each "),
+    )
+    .parse(lower) else {
+        return false;
+    };
+    let type_phrase = type_phrase.trim();
+    !type_phrase.is_empty()
+        && take_until::<_, _, OracleError<'_>>(" and ")
+            .parse(type_phrase)
+            .is_err()
 }
 
 /// Restricted clause-start check for bare " and " splitting (not after comma).
@@ -1537,9 +1561,13 @@ fn combat_requirement_conjunct_prepend(
     remainder_trimmed: &str,
 ) -> Option<String> {
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    let cant_be_blocked_restriction =
+        super::subject::is_cant_be_blocked_restriction_predicate(&remainder_lower);
     if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
         && !super::subject::is_can_block_extra_predicate(&remainder_lower)
         && !super::subject::is_can_attack_despite_defender_predicate(&remainder_lower)
+        && !(cant_be_blocked_restriction
+            && cant_be_blocked_restriction_needs_subject_reattach(&remainder_lower))
     {
         return None;
     }
@@ -1570,8 +1598,9 @@ fn combat_requirement_conjunct_prepend(
             alt((tag::<_, _, OracleError<'_>>(" gains "), tag(" gain ")))
                 .parse(after)
                 .ok()?;
-            // Map the verb position back onto the original-case slice.
-            let subject = before_and[..before_verb.len()].trim();
+            // Map the verb position back onto the original-case slice and keep
+            // only the local sentence's subject.
+            let subject = local_subject_before_continuous_verb(before_and, before_verb.len())?;
             (!subject.is_empty()).then_some(subject)
         })
         .or_else(|| {
@@ -1583,8 +1612,10 @@ fn combat_requirement_conjunct_prepend(
                     alt((tag::<_, _, OracleError<'_>>(" gets "), tag(" get ")))
                         .parse(after)
                         .ok()?;
-                    // Map the verb position back onto the original-case slice.
-                    let subject = before_and[..before_verb.len()].trim();
+                    // Map the verb position back onto the original-case slice
+                    // and keep only the local sentence's subject.
+                    let subject =
+                        local_subject_before_continuous_verb(before_and, before_verb.len())?;
                     (!subject.is_empty()).then_some(subject)
                 })
         })?;
@@ -1601,6 +1632,29 @@ fn combat_requirement_conjunct_prepend(
     } else {
         Some(format!("{subject_text} "))
     }
+}
+
+fn cant_be_blocked_restriction_needs_subject_reattach(remainder_lower: &str) -> bool {
+    // Plain inline evasion grants are owned by `parse_continuous_modifications`
+    // and must stay in one static definition. The where-suffixed form needs a
+    // split so the first conjunct's duration is not hidden behind the trailing
+    // variable definition.
+    nom_primitives::scan_contains(remainder_lower, "where ")
+}
+
+fn local_subject_before_continuous_verb(before_and: &str, before_verb_len: usize) -> Option<&str> {
+    let mut subject = before_and[..before_verb_len].trim();
+    let mut remaining = subject;
+    while let Ok((after_sentence, _)) = terminated(
+        take_until::<_, _, OracleError<'_>>(". "),
+        tag::<_, _, OracleError<'_>>(". "),
+    )
+    .parse(remaining)
+    {
+        subject = after_sentence.trim();
+        remaining = subject;
+    }
+    (!subject.is_empty()).then_some(subject)
 }
 
 /// CR 121.1 / CR 119.1: Returns true when the token immediately following a
@@ -2002,6 +2056,7 @@ pub(super) fn apply_clause_continuation(
             rest_destination: rest_dest,
             enters_under,
             face_down_profile,
+            enter_tapped,
         } => {
             // CR 608.2c: the "from among those cards" continuation patches the
             // earlier "look at the top N" instruction. When a transparent
@@ -2022,6 +2077,7 @@ pub(super) fn apply_clause_continuation(
                 destination,
                 rest_destination,
                 reveal,
+                enter_tapped: dig_enter_tapped,
                 ..
             } = &mut *previous.effect
             {
@@ -2073,6 +2129,7 @@ pub(super) fn apply_clause_continuation(
                 if let Some(rd) = rest_dest {
                     *rest_destination = Some(rd);
                 }
+                *dig_enter_tapped = enter_tapped;
             } else if let Effect::Mill {
                 destination: mill_destination,
                 ..
@@ -2742,17 +2799,7 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
     // Experiment): "reveal up to N <filter> cards from among them, then put the
     // rest on the bottom" — the kept cards are NOT auto-routed; subsequent
     // sub_abilities route them by type via `TargetFilter::TrackedSetFiltered`.
-    let destination = if nom_primitives::scan_contains(lower, "onto the battlefield") {
-        Some(Zone::Battlefield)
-    } else if nom_primitives::scan_contains(lower, "into your hand")
-        || nom_primitives::scan_contains(lower, "into their hand")
-        || nom_primitives::scan_contains(lower, "to your hand")
-        || nom_primitives::scan_contains(lower, "to their hand")
-    {
-        Some(Zone::Hand)
-    } else {
-        None
-    };
+    let (destination, enter_tapped) = parse_dig_kept_destination(lower);
 
     // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
     // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
@@ -2792,6 +2839,7 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             rest_destination,
             enters_under: None,
             face_down_profile: None,
+            enter_tapped,
         });
     }
 
@@ -2912,6 +2960,7 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
             rest_destination: None,
             enters_under,
             face_down_profile,
+            enter_tapped,
         });
     }
 
@@ -3000,7 +3049,87 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         rest_destination: None, // rest_destination handled by subsequent PutRest continuation
         enters_under,
         face_down_profile,
+        enter_tapped,
     })
+}
+
+fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool) {
+    if let Some(parsed) = parse_dig_from_among_destination(lower) {
+        return parsed;
+    }
+
+    let destination = if nom_primitives::scan_contains(lower, "onto the battlefield") {
+        Some(Zone::Battlefield)
+    } else if nom_primitives::scan_contains(lower, "into your hand")
+        || nom_primitives::scan_contains(lower, "into their hand")
+        || nom_primitives::scan_contains(lower, "to your hand")
+        || nom_primitives::scan_contains(lower, "to their hand")
+    {
+        Some(Zone::Hand)
+    } else {
+        None
+    };
+    (destination, false)
+}
+
+fn parse_dig_from_among_destination(lower: &str) -> Option<(Option<Zone>, bool)> {
+    let (tail, _) = preceded(
+        take_until::<_, _, OracleError<'_>>("from among"),
+        (
+            tag::<_, _, OracleError<'_>>("from among "),
+            alt((tag("them"), tag("those cards"), tag("those"))),
+        ),
+    )
+    .parse(lower)
+    .ok()?;
+    parse_dig_destination_tail(tail)
+}
+
+fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool)> {
+    let input = input.trim_start();
+    let (input, _) = opt(alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))))
+        .parse(input)
+        .ok()?;
+    let input = input.trim_start();
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("put it "),
+        tag("put them "),
+        tag("put that card "),
+        tag("put those cards "),
+        tag("put the card "),
+        tag("return it "),
+        tag("return them "),
+        tag("return that card "),
+    )))
+    .parse(input)
+    .ok()?;
+    let input = input.trim_start();
+
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("onto the battlefield"),
+        tag("to the battlefield"),
+    ))
+    .parse(input)
+    {
+        let (_, tapped) = opt(tag::<_, _, OracleError<'_>>(" tapped"))
+            .parse(rest)
+            .ok()?;
+        return Some((Some(Zone::Battlefield), tapped.is_some()));
+    }
+
+    if alt((
+        tag::<_, _, OracleError<'_>>("into your hand"),
+        tag("into their hand"),
+        tag("to your hand"),
+        tag("to their hand"),
+    ))
+    .parse(input)
+    .is_ok()
+    {
+        return Some((Some(Zone::Hand), false));
+    }
+
+    None
 }
 
 /// CR 708.2a + CR 205.1a: Parse a "They're N/M [types] [subtypes] creatures."
@@ -3197,6 +3326,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
+        | Effect::Encore
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::ChooseCard { .. }
@@ -3269,6 +3401,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::RevealUntil { .. }
         | Effect::Discover { .. }
         | Effect::Cascade
+        | Effect::Ripple { .. }
         | Effect::MiracleCast { .. }
         | Effect::MadnessCast { .. }
         | Effect::PutAtLibraryPosition { .. }
@@ -3450,6 +3583,7 @@ pub(super) fn parse_followup_continuation_ast(
                 rest_destination: None,
                 enters_under: None,
                 face_down_profile: None,
+                enter_tapped: false,
             })
         }
         // "You may put one of those cards back on top of your library" after
@@ -3463,6 +3597,7 @@ pub(super) fn parse_followup_continuation_ast(
                 rest_destination: None,
                 enters_under: None,
                 face_down_profile: None,
+                enter_tapped: false,
             })
         }
         // "put them back in any order" after Dig means all looked-at cards
@@ -4855,6 +4990,7 @@ mod tests {
         let copy = Effect::CopySpell {
             target: TargetFilter::SelfRef,
             retarget: CopyRetargetPermission::KeepOriginalTargets,
+            copier: None,
         };
         let result = parse_followup_continuation_ast(
             "may choose a new target for that copy",
@@ -4883,6 +5019,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
             },
         )));
 
@@ -4912,6 +5049,7 @@ mod tests {
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
+            enter_tapped: false,
         }
     }
 
@@ -5054,6 +5192,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 enters_under: None,
                 face_down_profile: None,
+                enter_tapped: false,
             })
         );
     }
@@ -5076,6 +5215,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 enters_under: None,
                 face_down_profile: None,
+                enter_tapped: false,
             })
         );
     }
@@ -5103,6 +5243,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 enters_under: None,
                 face_down_profile: None,
+                enter_tapped: false,
             })
         );
     }
@@ -5124,7 +5265,24 @@ mod tests {
                 rest_destination: Some(Zone::Graveyard),
                 enters_under: None,
                 face_down_profile: None,
+                enter_tapped: false,
             })
+        );
+    }
+
+    #[test]
+    fn from_among_enter_tapped_is_local_to_kept_destination() {
+        assert_eq!(
+            parse_dig_kept_destination(
+                "put a land card from among them onto the battlefield tapped. put the rest on the bottom of your library.",
+            ),
+            (Some(Zone::Battlefield), true)
+        );
+        assert_eq!(
+            parse_dig_kept_destination(
+                "put a land card from among them onto the battlefield. put the rest onto the battlefield tapped.",
+            ),
+            (Some(Zone::Battlefield), false)
         );
     }
 
@@ -5262,6 +5420,7 @@ mod tests {
                 rest_destination: None,
                 enters_under: None,
                 face_down_profile: None,
+                enter_tapped: false,
             },
             AbilityKind::Spell,
         );
@@ -5803,6 +5962,7 @@ mod tests {
                 rest_destination: None,
                 enters_under: None,
                 face_down_profile: None,
+                enter_tapped: false,
             })
         );
     }

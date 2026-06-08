@@ -6,7 +6,7 @@ use super::transform;
 
 /// Check and apply day/night transition at end of turn.
 ///
-/// CR 730.2a/b:
+/// CR 502.2 (see also CR 731, "Day and Night"):
 /// - If it's currently Day and the active player cast no spells this turn, it becomes Night.
 /// - If it's currently Night and the active player cast 2+ spells this turn, it becomes Day.
 /// - On transition, all Daybound/Nightbound permanents transform accordingly.
@@ -16,9 +16,21 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
         None => return, // Day/night not yet initialized
     };
 
+    // CR 502.2: the transition keys on the spells the (previous turn's) ACTIVE
+    // player cast that turn — not the table-wide total. `spells_cast_this_turn`
+    // counts every player's casts, so an opponent's instant-speed spell on the
+    // active player's turn would wrongly drive or suppress the transition (e.g.
+    // keep it Day when the active player cast nothing). Read the active player's
+    // own per-turn cast count. This runs at cleanup, where `active_player` is
+    // still the player whose turn is ending and the per-player tally is intact.
+    let active_spells = state
+        .spells_cast_this_turn_by_player
+        .get(&state.active_player)
+        .map_or(0, |records| records.len());
+
     let new_state = match current {
-        DayNight::Day if state.spells_cast_this_turn == 0 => DayNight::Night,
-        DayNight::Night if state.spells_cast_this_turn >= 2 => DayNight::Day,
+        DayNight::Day if active_spells == 0 => DayNight::Night,
+        DayNight::Night if active_spells >= 2 => DayNight::Day,
         _ => return, // No transition
     };
 
@@ -54,7 +66,7 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
     }
 }
 
-/// CR 730.1: Set the game's day/night designation to a specific value.
+/// CR 731.1: Set the game's day/night designation to a specific value.
 /// Triggered by Effect::SetDayNight. Transforms all Daybound/Nightbound permanents
 /// as appropriate for the new designation.
 pub fn resolve_set_day_night(state: &mut GameState, to: DayNight, events: &mut Vec<GameEvent>) {
@@ -93,7 +105,7 @@ pub fn resolve_set_day_night(state: &mut GameState, to: DayNight, events: &mut V
 
 /// Initialize day/night to Day when a daybound/nightbound card first enters the game.
 ///
-/// CR 702.145d / CR 730.1: The game starts with no day/night designation. Once a permanent
+/// CR 702.145d / CR 731.1: The game starts with no day/night designation. Once a permanent
 /// with daybound or nightbound enters the battlefield, it becomes day (if not already set).
 pub fn initialize_day_night(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if state.day_night.is_some() {
@@ -169,11 +181,23 @@ mod tests {
         id
     }
 
+    /// Record `n` spells cast this turn by the active player in the per-player
+    /// tally that CR 502.2 keys the day/night transition on.
+    fn set_active_spells(state: &mut GameState, n: usize) {
+        let player = state.active_player;
+        state.spells_cast_this_turn_by_player.insert(
+            player,
+            (0..n)
+                .map(|_| crate::types::game_state::SpellCastRecord::default())
+                .collect(),
+        );
+    }
+
     #[test]
     fn test_day_to_night_on_zero_spells() {
         let mut state = GameState::new_two_player(42);
         state.day_night = Some(DayNight::Day);
-        state.spells_cast_this_turn = 0;
+        set_active_spells(&mut state, 0);
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
@@ -189,7 +213,7 @@ mod tests {
     fn test_night_to_day_on_two_spells() {
         let mut state = GameState::new_two_player(42);
         state.day_night = Some(DayNight::Night);
-        state.spells_cast_this_turn = 2;
+        set_active_spells(&mut state, 2);
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
@@ -205,7 +229,7 @@ mod tests {
     fn test_no_transition_day_with_spells() {
         let mut state = GameState::new_two_player(42);
         state.day_night = Some(DayNight::Day);
-        state.spells_cast_this_turn = 1;
+        set_active_spells(&mut state, 1);
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
@@ -218,13 +242,50 @@ mod tests {
     fn test_no_transition_night_with_one_spell() {
         let mut state = GameState::new_two_player(42);
         state.day_night = Some(DayNight::Night);
-        state.spells_cast_this_turn = 1;
+        set_active_spells(&mut state, 1);
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
 
         assert_eq!(state.day_night, Some(DayNight::Night));
         assert!(events.is_empty());
+    }
+
+    /// CR 502.2: only the (previous turn's) ACTIVE player's spells drive the
+    /// transition. An opponent casting spells on the active player's turn must not
+    /// affect it. Here the active player casts 0 but the opponent casts 2; the
+    /// table-wide total is 2, yet Day must still become Night (active player cast
+    /// nothing). Using the global `spells_cast_this_turn` would wrongly stay Day.
+    #[test]
+    fn day_night_ignores_non_active_player_spells() {
+        use crate::types::game_state::SpellCastRecord;
+
+        let mut state = GameState::new_two_player(42);
+        state.day_night = Some(DayNight::Day);
+        let active = state.active_player;
+        let opponent = if active == PlayerId(0) {
+            PlayerId(1)
+        } else {
+            PlayerId(0)
+        };
+
+        // Active player cast nothing; opponent cast 2 (e.g. instants on this turn).
+        set_active_spells(&mut state, 0);
+        state.spells_cast_this_turn_by_player.insert(
+            opponent,
+            (0..2).map(|_| SpellCastRecord::default()).collect(),
+        );
+        // The global tally reflects the table total but must be irrelevant.
+        state.spells_cast_this_turn = 2;
+
+        let mut events = Vec::new();
+        check_day_night_transition(&mut state, &mut events);
+
+        assert_eq!(
+            state.day_night,
+            Some(DayNight::Night),
+            "CR 502.2: active player cast 0 spells, so Day becomes Night regardless of the opponent's casts"
+        );
     }
 
     #[test]
@@ -244,7 +305,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let id = setup_daybound_creature(&mut state);
         state.day_night = Some(DayNight::Day);
-        state.spells_cast_this_turn = 0;
+        set_active_spells(&mut state, 0);
 
         let mut events = Vec::new();
         check_day_night_transition(&mut state, &mut events);
@@ -262,7 +323,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let id = setup_daybound_creature(&mut state);
         state.day_night = Some(DayNight::Day);
-        state.spells_cast_this_turn = 0;
+        set_active_spells(&mut state, 0);
 
         // First transition to night (transforms daybound -> nightbound)
         let mut events = Vec::new();
@@ -271,7 +332,7 @@ mod tests {
         assert!(state.objects[&id].transformed);
 
         // Now transition back to day
-        state.spells_cast_this_turn = 2;
+        set_active_spells(&mut state, 2);
         let mut events2 = Vec::new();
         check_day_night_transition(&mut state, &mut events2);
 

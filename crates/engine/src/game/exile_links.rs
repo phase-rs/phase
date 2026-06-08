@@ -45,6 +45,21 @@ pub(crate) fn push_tracked_by_source(
     exiled_id: ObjectId,
     source_id: ObjectId,
 ) {
+    push_with_kind(state, exiled_id, source_id, ExileLinkKind::TrackedBySource);
+}
+
+/// CR 607.2a + CR 406.6: Record an exiled→source link with an explicit
+/// `ExileLinkKind`, deduped on the `(exiled_id, source_id)` pair (mirrors
+/// `push_tracked_by_source`, which delegates here for the plain tracked kind).
+/// Used by Hideaway (`ExileLinkKind::HideawayLookable`, CR 702.75a) to mark the
+/// exiled card as look-permitted for the source's controller while keeping it
+/// discoverable by the kind-agnostic `ExiledBySource` companion-ability filter.
+pub(crate) fn push_with_kind(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+    kind: ExileLinkKind,
+) {
     if state
         .exile_links
         .iter()
@@ -55,7 +70,7 @@ pub(crate) fn push_tracked_by_source(
     state.exile_links.push(ExileLink {
         exiled_id,
         source_id,
-        kind: ExileLinkKind::TrackedBySource,
+        kind,
     });
     push_exiled_with_source_this_turn(state, exiled_id, source_id);
 }

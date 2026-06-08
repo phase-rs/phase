@@ -11,6 +11,7 @@
 //! Strict-failure: any PlayerEffect we don't recognise propagates as
 //! `UnknownVariant` so the report tracks the work queue.
 
+use engine::types::ability::{AbilityCost, CastTimingPermission};
 use engine::types::ability::{
     CardPlayMode, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
 };
@@ -58,7 +59,24 @@ fn apply_with_controller(
     out: &mut Vec<StaticDefinition>,
 ) -> ConvResult<()> {
     for eff in effects {
-        out.push(player_effect_to_static(eff, &controller)?);
+        match eff {
+            // CR 118.9 + CR 702.8a: Combined alt-cost + flash grant (Primal
+            // Prayers). The flash permission is tied to choosing the alternative
+            // cost, not a separate unconditional keyword grant.
+            PlayerEffect::MayCastSpellsForAlternateCostAsThoughTheyHadFlash(spells, cost) => {
+                let scope = spell_scope_for_caster(spells, &controller)?;
+                let alt_cost: AbilityCost = cost_conv::convert(cost)?;
+                out.push(
+                    StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+                        cost: alt_cost,
+                        timing_permission: Some(CastTimingPermission::AsThoughHadFlash),
+                    })
+                    .affected(scope)
+                    .active_zones(vec![Zone::Battlefield]),
+                );
+            }
+            other => out.push(player_effect_to_static(other, &controller)?),
+        }
     }
     Ok(())
 }

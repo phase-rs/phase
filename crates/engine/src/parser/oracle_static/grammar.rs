@@ -206,14 +206,6 @@ pub(crate) fn parse_cast_from_anywhere_other_than_tp(tp: &TextPair) -> Option<Ve
     if !nom_primitives::scan_contains(tp.lower, "from anywhere other than") {
         return None;
     }
-    // CR 601.2a: The full set of zones a spell can be cast from.
-    const CAST_CAPABLE_ZONES: [Zone; 5] = [
-        Zone::Hand,
-        Zone::Graveyard,
-        Zone::Library,
-        Zone::Exile,
-        Zone::Command,
-    ];
     // Currently only the "their hand(s)" allowed-zone phrasing is printed. The
     // allowed zone is the hand; the prohibited set is its complement.
     let allowed = if nom_primitives::scan_contains(tp.lower, "their hand")
@@ -223,12 +215,9 @@ pub(crate) fn parse_cast_from_anywhere_other_than_tp(tp: &TextPair) -> Option<Ve
     } else {
         return None;
     };
-    Some(
-        CAST_CAPABLE_ZONES
-            .into_iter()
-            .filter(|zone| *zone != allowed)
-            .collect(),
-    )
+    Some(crate::parser::oracle_target::cast_capable_zones_except(
+        allowed,
+    ))
 }
 
 /// Parse a color name from Oracle text, delegating to the shared nom color combinator.

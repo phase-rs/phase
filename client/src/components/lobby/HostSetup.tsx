@@ -47,11 +47,11 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
 const DIFFICULTY_OPTIONS = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"];
 const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
 
-/** P2P's WebRTC mesh supports 2-4 peers (see `p2p-adapter.ts:165`). The
- * HostSetup UI clamps format player counts to this ceiling so multi-seat
- * formats like Commander can still be hosted while 6-player FreeForAll
- * can't advertise an unreachable configuration. */
-const P2P_MAX_PEERS = 4;
+/** P2P uses a hub-and-spoke topology (see `p2p-adapter.ts` `P2PHostAdapter`):
+ * the host holds one connection per guest and fans out filtered state, which
+ * scales linearly. The ceiling here matches the engine's Free-for-All maximum
+ * (`format.rs` `free_for_all`, max_players 6) rather than a transport limit. */
+const P2P_MAX_PEERS = 6;
 
 /** Uppercase field label + optional hint wrapper (mirrors the design mockup's
  *  Host-setup `Field`). Pure presentation. */
@@ -344,10 +344,10 @@ export function HostSetup({
     }
   };
 
-  // Filter formats: P2P supports 2-4 peers via WebRTC mesh, so any format
-  // whose minimum is reachable from that ceiling is listable. Multi-seat
-  // formats that need more than 4 players (e.g. 6-player FreeForAll) are
-  // hidden here to avoid advertising a configuration we can't actually host.
+  // Filter formats: P2P supports 2-6 players (hub-and-spoke, see P2P_MAX_PEERS),
+  // so any format whose minimum is reachable from that ceiling is listable.
+  // Formats requiring more seats than the ceiling are hidden here to avoid
+  // advertising a configuration we can't actually host.
   const availableFormats = isP2P
     ? FORMAT_OPTIONS.filter(
         (f) => FORMAT_DEFAULTS[f.format].min_players <= P2P_MAX_PEERS,

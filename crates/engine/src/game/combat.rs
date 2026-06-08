@@ -1994,6 +1994,19 @@ pub fn declare_attackers_with_bands(
         }
     }
 
+    // CR 508.1a + CR 608.2c: Snapshot declaration-time characteristics before
+    // later combat/SBA movement can make post-combat "attacked with <quality>"
+    // queries chase stale or missing live objects.
+    let attacker_declarations: Vec<_> = attacker_ids
+        .iter()
+        .filter_map(|id| {
+            state
+                .objects
+                .get(id)
+                .map(|obj| obj.snapshot_for_attack_declaration(*id))
+        })
+        .collect();
+
     // Populate CombatState with per-creature defending players and attack targets
     let mut attackers: Vec<AttackerInfo> = attacks
         .iter()
@@ -2070,6 +2083,9 @@ pub fn declare_attackers_with_bands(
     state
         .creatures_attacked_this_turn
         .extend(attacker_ids.iter().copied());
+    state
+        .attacker_declarations_this_turn
+        .extend(attacker_declarations);
     for (attacker_id, defending_player) in creature_attacked_defenders {
         state
             .creature_attacked_defenders_this_turn

@@ -1131,6 +1131,21 @@ pub enum ManaProduction {
     /// control, add one mana of that color." Mirrors the structure of
     /// `QuantityRef::DistinctColorsAmongPermanents`.
     DistinctColorsAmongPermanents { filter: TargetFilter },
+    /// CR 106.1 + CR 109.1: Produce N mana of one chosen color from the distinct
+    /// colors present among permanents matching `filter`. Mox Amber class:
+    /// "{T}: Add one mana of any color among legendary creatures and
+    /// planeswalkers you control." Colors resolve dynamically at activation
+    /// time; CR 106.5 applies when no matching permanent is colored.
+    AnyOneColorAmongPermanents {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        filter: TargetFilter,
+        #[serde(
+            default = "default_mana_contribution",
+            skip_serializing_if = "is_default_mana_contribution"
+        )]
+        contribution: ManaContribution,
+    },
     /// CR 603.7c + CR 106.3: Produce one mana of the same type as the mana
     /// produced by the triggering `ManaAdded` event. Used by `TapsForMana`
     /// triggers of the form "add one mana of any type that land produced"
@@ -1235,6 +1250,13 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     DistinctColorsAmongPermanents {
                         filter: TargetFilter,
                     },
+                    AnyOneColorAmongPermanents {
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
+                        filter: TargetFilter,
+                        #[serde(default = "default_mana_contribution")]
+                        contribution: ManaContribution,
+                    },
                     TriggerEventManaType,
                 }
                 let helper: ManaProductionHelper =
@@ -1304,6 +1326,15 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     ManaProductionHelper::DistinctColorsAmongPermanents { filter } => {
                         ManaProduction::DistinctColorsAmongPermanents { filter }
                     }
+                    ManaProductionHelper::AnyOneColorAmongPermanents {
+                        count,
+                        filter,
+                        contribution,
+                    } => ManaProduction::AnyOneColorAmongPermanents {
+                        count,
+                        filter,
+                        contribution,
+                    },
                     ManaProductionHelper::TriggerEventManaType => {
                         ManaProduction::TriggerEventManaType
                     }
@@ -1702,13 +1733,17 @@ pub enum CastPermissionConstraint {
 /// and `RemainExiled` — the marker still arms the CR 608.2g timing bypass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCastCleanup {
-    /// Cards exiled during the dig that were not the hit; they go to the
-    /// bottom of the library in a random order on resolution completion.
+    /// Cards exiled/revealed during the dig that were not the hit.
     /// Empty for Suspend's self-free-cast (no dig).
     pub exiled_misses: Vec<super::identifiers::ObjectId>,
     /// Where the hit goes if the player declines or the cast-time MV check
     /// rejects the cast.
     pub reject_action: ResolutionMvRejectAction,
+    /// What happens after the hit is successfully cast. Cascade/Discover bottom
+    /// their misses immediately; Ripple may need to offer additional same-named
+    /// cards from the same reveal first (CR 702.60a).
+    #[serde(default)]
+    pub success_action: ResolutionCastSuccessAction,
 }
 
 /// CR 608.2g: Disposition of a during-resolution card that is not cast.
@@ -1724,6 +1759,20 @@ pub enum ResolutionMvRejectAction {
     /// reached if a future during-resolution free cast adds a constraint. "If
     /// you don't [cast it], it remains exiled" — the card stays in exile.
     RemainExiled,
+}
+
+/// CR 608.2g: Follow-up after a during-resolution cast succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ResolutionCastSuccessAction {
+    /// Cascade/Discover: cast hit is gone, so bottom the dig misses now.
+    #[default]
+    BottomMisses,
+    /// CR 702.60a: Ripple can cast any number of same-named revealed cards. Keep
+    /// offering the remaining hits before bottoming the non-hit revealed cards.
+    RippleOfferRemaining {
+        remaining_hits: Vec<super::identifiers::ObjectId>,
+    },
 }
 
 /// When a delayed triggered ability fires (CR 603.7).
@@ -2045,6 +2094,10 @@ pub enum FilterProp {
     Tapped,
     /// CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
     Untapped,
+    /// CR 302.6 + CR 702.10b + CR 702.154a: Matches creatures that either have
+    /// haste or have been under their controller's control continuously since
+    /// that player's most recent turn began. Used by Enlist's tap eligibility.
+    HasHasteOrControlledSinceTurnBegan,
     WithKeyword {
         value: Keyword,
     },
@@ -2302,6 +2355,10 @@ pub enum FilterProp {
     /// "historic card" subjects, mirroring `FilterProp::Modified` for
     /// CR 700.9's "modified" predicate.
     Historic,
+    /// CR 700.6: Matches objects that are not historic (negation of `Historic`).
+    /// Used for "nonhistoric" / "not historic" in compound type phrases such as
+    /// Desynchronization's "nonland, nonhistoric permanent".
+    NotHistoric,
     /// Matches objects whose name differs from all objects matching the inner filter
     /// that the evaluating controller controls on the battlefield.
     /// Used for "with a different name than each [type] you control" (e.g. Light-Paws).
@@ -3248,9 +3305,14 @@ pub enum QuantityRef {
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
     /// CR 305.2a + CR 603.4: Count of lands played by the scoped player this turn.
-    /// Backed by `Player::lands_played_this_turn`. Used for intervening-if conditions
-    /// like "if it wasn't the first land you played this turn" (Fastbond).
-    LandsPlayedThisTurn { player: PlayerScope },
+    /// `from_zones: None` uses `Player::lands_played_this_turn`; `Some` reads the
+    /// per-player land-play origin history for conditions like "played a land
+    /// from anywhere other than your hand."
+    LandsPlayedThisTurn {
+        player: PlayerScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_zones: Option<Vec<Zone>>,
+    },
     /// CR 500: Number of turns this player has taken so far in the game.
     /// Resolved against the controller/scope player.
     TurnsTaken,
@@ -3297,10 +3359,16 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
-    /// CR 508.1a: Number of creatures the controller attacked with this turn.
-    /// Used for "if you attacked this turn" and "for each creature you attacked
-    /// with this turn" patterns.
-    AttackedThisTurn,
+    /// CR 508.1a: Number of creatures the controller attacked with this turn,
+    /// optionally narrowed by `filter` (e.g. "attacked with a token / a
+    /// commander / a Wolf"). `None` counts all attacking creatures (the bare
+    /// "if you attacked this turn" / "for each creature you attacked with this
+    /// turn" patterns); `Some(filter)` counts only this-turn attackers matching
+    /// `filter`, resolved against `state.creatures_attacked_this_turn`.
+    AttackedThisTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 603.4: Whether the controller descended this turn (permanent card entered graveyard).
     DescendedThisTurn,
     /// CR 606.1 + CR 603.4: Number of loyalty abilities the scoped player has
@@ -4953,7 +5021,11 @@ impl AbilityCost {
         match self {
             AbilityCost::Mana { .. }
             | AbilityCost::PayLife { .. }
-            | AbilityCost::Sacrifice { .. } => true,
+            | AbilityCost::Sacrifice { .. }
+            // CR 702.24a + CR 118.12: Discard's per-counter-scaled count is
+            // folded by `expand_per_counter` and paid by the `remaining`
+            // re-prompt loop in `handle_unless_payment` end-to-end.
+            | AbilityCost::Discard { .. } => true,
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.
@@ -5902,6 +5974,10 @@ pub enum Effect {
         /// CR 701.20a vs CR 701.16a: True = cards are revealed (public), false = looked at (private).
         #[serde(default)]
         reveal: bool,
+        /// CR 614.1 / CR 110.5b: Kept cards routed to the battlefield enter
+        /// tapped when true (Planar Genesis — "onto the battlefield tapped").
+        #[serde(default)]
+        enter_tapped: bool,
     },
     GainControl {
         #[serde(default = "default_target_filter_any")]
@@ -6115,6 +6191,17 @@ pub enum Effect {
         /// CR 707.10c: whether the controller may choose new targets for the copy.
         #[serde(default = "default_copy_keep_targets")]
         retarget: CopyRetargetPermission,
+        /// CR 707.10: which player puts this copy onto the stack (and thus
+        /// controls it), when that player is NOT the effect's controller. `None`
+        /// = the controller copies (Twincast, Casualty, Replicate). `Some(ref)`
+        /// resolves a player relative to the controller for "[another player]
+        /// copies the spell" effects — CR 702.144a (Demonstrate) uses
+        /// `Some(ControllerRef::Opponent)` so a chosen opponent copies. This
+        /// parameterizes the existing copier axis (the same axis the Chain cycle
+        /// expresses via an inherited `TargetRef::Player`) rather than adding a
+        /// sibling copy effect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copier: Option<ControllerRef>,
     },
     /// CR 707.12: Create a copy of a card/object in its zone and cast that
     /// copy while the resolving spell or ability continues resolving.
@@ -6177,6 +6264,31 @@ pub enum Effect {
     /// opponent other than the defending player for the source creature, then
     /// exiles those tokens at end of combat.
     Myriad,
+    /// CR 702.141a: Encore — for each opponent, create a token that's a copy of
+    /// the (exiled) source card that must attack that opponent this turn if
+    /// able. The tokens gain haste and are sacrificed at the beginning of the
+    /// next end step. Resolver: `game/effects/encore.rs`. No player-selectable
+    /// target (opponents and per-opponent attack binding are chosen by the
+    /// effect, like `Myriad`).
+    Encore,
+    /// CR 702.55a: Haunt — exile the source card (currently in a graveyard, put
+    /// there by dying or by resolving) from the graveyard, *haunting* the target
+    /// creature: it moves to exile and an `ExileLinkKind::Haunt` link records the
+    /// haunted creature. Resolver: `game/haunt.rs`. The target is the haunted
+    /// creature, chosen when the haunt triggered ability goes on the stack.
+    ExileHaunting {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 702.75a: Hideaway conceal step — turn the just-exiled `target` card
+    /// face down and link it to the source in the `exile_links` pool. Chained as
+    /// a `sub_ability` after the `Effect::Dig` of a Hideaway ETB ability
+    /// (`database/hideaway.rs`); `target` is `ParentTarget` (the card the Dig
+    /// continuation exiled), never announced. Resolver: `game/effects/hideaway.rs`.
+    HideawayConceal {
+        #[serde(default = "default_target_filter_parent")]
+        target: TargetFilter,
+    },
     /// CR 509.1g + CR 506.3e + CR 707.2: For each attacking creature matched by
     /// `source_filter`, create a token that's a copy of it and put that token
     /// onto the battlefield blocking the attacker it copies. Mirror Match is the
@@ -7098,6 +7210,13 @@ pub enum Effect {
     /// time (the cascade spell is on the stack when cascade resolves per CR 702.85a),
     /// so no threshold parameter is stored on the variant itself.
     Cascade,
+    /// CR 702.60a: Ripple N — when you cast this spell, reveal the top N cards of
+    /// your library; you may cast any with the same name as this spell without
+    /// paying their mana cost, then put the rest on the bottom.
+    /// The source spell's name is read from `ability.source_id` at resolve time.
+    Ripple {
+        count: u32,
+    },
     /// CR 702.94a: Miracle trigger resolution — offers the player the chance to
     /// cast the source card from hand for its miracle cost. Carries the cost so
     /// the resolution handler can populate `WaitingFor::CastOffer` (Miracle).
@@ -7331,7 +7450,7 @@ pub enum Effect {
     },
     /// CR 701.48a: Learn — you may discard a card to draw a card, or get a Lesson from outside the game.
     Learn,
-    /// CR 702.166a: Forage — exile three cards from your graveyard or sacrifice a Food.
+    /// CR 701.61a: Forage — exile three cards from your graveyard or sacrifice a Food.
     Forage,
     /// CR 702.163a: Collect evidence N — exile cards with total mana value N or more from graveyard.
     CollectEvidence {
@@ -7643,6 +7762,12 @@ fn is_target_filter_controller(t: &TargetFilter) -> bool {
 
 fn default_target_filter_self_ref() -> TargetFilter {
     TargetFilter::SelfRef
+}
+
+/// CR 608.2c: default for continuation effects whose target is inherited from
+/// the parent ability (e.g. `Effect::HideawayConceal`).
+fn default_target_filter_parent() -> TargetFilter {
+    TargetFilter::ParentTarget
 }
 
 fn target_filter_is_self_ref(filter: &TargetFilter) -> bool {
@@ -8119,7 +8244,17 @@ impl Effect {
             // target slot and so resolution-time re-validation (CR 608.2b) checks
             // it against the StackSpell/StackAbility filter instead of the
             // battlefield-only default (which would always fizzle a stack target).
-            | Effect::ChangeTargets { target, .. } => Some(target),
+            | Effect::ChangeTargets { target, .. }
+            // CR 702.55a: Haunt — "exile it haunting target creature". The
+            // haunted creature is a real target chosen as the haunt trigger goes
+            // on the stack, so it must be surfaced for the target-slot path.
+            | Effect::ExileHaunting { target } => Some(target),
+
+            // CR 702.75a: Hideaway conceal acts on the just-exiled card inherited
+            // from the parent `Dig` continuation (`ParentTarget`); it is never
+            // announced as a target, but surfacing the filter keeps chain-time
+            // resolution consistent.
+            Effect::HideawayConceal { target } => Some(target),
 
             // CR 109.4 + CR 115.1 + CR 707.2: `CopyTokenOf` has two
             // potentially-targetable axes — the copy *source* (`target`) and
@@ -8209,6 +8344,9 @@ impl Effect {
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
             | Effect::Myriad
+            // CR 702.141a: opponents and per-opponent attack binding are chosen
+            // by the effect, not declared as targets.
+            | Effect::Encore
             // CR 508.1: copies are chosen by the effect, not declared as targets.
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::ChangeSpeed { .. }
@@ -8261,6 +8399,7 @@ impl Effect {
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
             | Effect::Cascade
+            | Effect::Ripple { .. }
             | Effect::MiracleCast { .. }
             | Effect::MadnessCast { .. }
             | Effect::GiftDelivery { .. }
@@ -8387,6 +8526,9 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
+        Effect::Encore => "Encore",
+        Effect::ExileHaunting { .. } => "ExileHaunting",
+        Effect::HideawayConceal { .. } => "HideawayConceal",
         Effect::CopyTokenBlockingAttacker { .. } => "CopyTokenBlockingAttacker",
         Effect::BecomeCopy { .. } => "BecomeCopy",
         Effect::ChooseCard { .. } => "ChooseCard",
@@ -8461,6 +8603,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RevealUntil { .. } => "RevealUntil",
         Effect::Discover { .. } => "Discover",
         Effect::Cascade => "Cascade",
+        Effect::Ripple { .. } => "Ripple",
         Effect::MiracleCast { .. } => "MiracleCast",
         Effect::MadnessCast { .. } => "MadnessCast",
         Effect::PutAtLibraryPosition { .. } => "PutAtLibraryPosition",
@@ -8577,6 +8720,9 @@ pub enum EffectKind {
     CastCopyOfCard,
     CopyTokenOf,
     Myriad,
+    Encore,
+    ExileHaunting,
+    HideawayConceal,
     BecomeCopy,
     ChooseCard,
     PutCounter,
@@ -8648,6 +8794,7 @@ pub enum EffectKind {
     RevealUntil,
     Discover,
     Cascade,
+    Ripple,
     MiracleCast,
     MadnessCast,
     PutAtLibraryPosition,
@@ -8764,6 +8911,9 @@ impl From<&Effect> for EffectKind {
             Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
+            Effect::Encore => EffectKind::Encore,
+            Effect::ExileHaunting { .. } => EffectKind::ExileHaunting,
+            Effect::HideawayConceal { .. } => EffectKind::HideawayConceal,
             // CR 707.2: classified as a copy-token effect — the block placement
             // is bookkeeping layered on top of the same token-copy creation.
             Effect::CopyTokenBlockingAttacker { .. } => EffectKind::CopyTokenOf,
@@ -8840,6 +8990,7 @@ impl From<&Effect> for EffectKind {
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::Cascade => EffectKind::Cascade,
+            Effect::Ripple { .. } => EffectKind::Ripple,
             Effect::MiracleCast { .. } => EffectKind::MiracleCast,
             Effect::MadnessCast { .. } => EffectKind::MadnessCast,
             Effect::PutAtLibraryPosition { .. } => EffectKind::PutAtLibraryPosition,
@@ -9293,6 +9444,13 @@ pub struct AbilityDefinition {
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
+    /// this ability's target(s) at stack placement. `None` = controller chooses
+    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
+    /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
+    /// sacrifices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
     /// non-count companion to `repeat_for`. When `Some`, the resolution chain
     /// is re-followed ("repeat this process") under this predicate instead of
@@ -9378,6 +9536,8 @@ struct AbilityDefinitionRepr<'a> {
     #[serde(skip_serializing_if = "TargetSelectionMode::is_chosen")]
     target_selection_mode: TargetSelectionMode,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_chooser: &'a Option<TargetFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     repeat_until: &'a Option<RepeatContinuation>,
     #[serde(skip_serializing_if = "SubAbilityLink::is_continuation")]
     sub_link: SubAbilityLink,
@@ -9422,6 +9582,7 @@ impl Serialize for AbilityDefinition {
             player_scope,
             starting_with,
             target_selection_mode,
+            target_chooser,
             repeat_until,
             sub_link,
             iteration_kind_binding,
@@ -9459,6 +9620,7 @@ impl Serialize for AbilityDefinition {
             player_scope,
             starting_with,
             target_selection_mode: *target_selection_mode,
+            target_chooser,
             repeat_until,
             sub_link: *sub_link,
             iteration_kind_binding,
@@ -9598,6 +9760,7 @@ impl AbilityDefinition {
             player_scope: None,
             starting_with: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            target_chooser: None,
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             iteration_kind_binding: None,
@@ -9841,6 +10004,12 @@ pub enum AbilityCondition {
         card_type: CoreType,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         additional_filter: Option<FilterProp>,
+        /// CR 205.3m: Optional subtype constraint on the revealed card (e.g.
+        /// Kenessos: "If it's a Kraken, Leviathan, Octopus, or Serpent
+        /// creature card"). Evaluated against `last_revealed_ids` alongside
+        /// `card_type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtype_filter: Option<Box<TargetFilter>>,
     },
     /// CR 400.7 + CR 608.2c: True when the source permanent entered the battlefield
     /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker
@@ -10988,6 +11157,13 @@ pub struct TriggerDefinition {
     /// When `Some(Won)`, fires only on wins; `Some(Lost)` only on losses; `None` fires on any flip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coin_flip_result: Option<CoinFlipResult>,
+    /// CR 603.2 + CR 106.1: Produced-mana filter for `TriggerMode::TapsForMana`
+    /// triggers whose event text specifies "for {C}" / "for {G}" rather than
+    /// the generic "for mana". When `Some`, the `TappedForMana` event must
+    /// include at least one produced unit matching the set; `None` accepts any
+    /// mana type (the "for mana" form). Ignored by other trigger modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taps_for_mana_produced: Option<Vec<ManaType>>,
 }
 
 impl TriggerDefinition {
@@ -11022,6 +11198,7 @@ impl TriggerDefinition {
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
+            taps_for_mana_produced: None,
         }
     }
 
@@ -11406,8 +11583,10 @@ pub enum CombatDamageScope {
 }
 
 /// CR 614.1a: Which player(s) a replacement effect applies to, scoped relative
-/// to the replacement source's controller. `valid_player: None` keeps the
-/// controller-only default; `Some(You)` is the explicit controller scope,
+/// to the replacement source player. For permanents/spells this is the source's
+/// controller; for cards outside the battlefield/stack, CR 109.4 + CR 108.4a
+/// make this the owner. `valid_player: None` keeps the source-player default;
+/// `Some(You)` is the explicit source-player scope,
 /// `Some(Opponent)` an opponent-scoped replacement (Tainted Remedy), and
 /// `Some(AnyPlayer)` a global all-players replacement (Rain of Gore).
 ///
@@ -11416,9 +11595,9 @@ pub enum CombatDamageScope {
 /// `valid_player` values (`"You"` / `"Opponent"`) deserialize unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplacementPlayerScope {
-    /// The replacement source's controller.
+    /// The replacement source player.
     You,
-    /// Any opponent of the replacement source's controller.
+    /// Any opponent of the replacement source player.
     Opponent,
     /// Every player in the game, regardless of who controls the source.
     AnyPlayer,
@@ -11528,7 +11707,7 @@ pub struct ReplacementDefinition {
     /// CR 614.1a: Restricts which player this replacement applies to.
     /// "an opponent would gain life" → Some(Opponent); "a spell or ability would
     /// cause its controller to gain life" (Rain of Gore) → Some(AnyPlayer).
-    /// None = applies to the replacement source's controller only.
+    /// None = applies to the replacement source player only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_player: Option<ReplacementPlayerScope>,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
@@ -12287,6 +12466,13 @@ pub struct ResolvedAbility {
     /// to short-circuit `WaitingFor::TargetSelection` for `Random` abilities.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
+    /// this ability's target(s) at stack placement. `None` = controller chooses
+    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
+    /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
+    /// sacrifices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 109.4: Players chosen by `Effect::Choose { choice_type:
     /// ChoiceType::Player }` instructions during this resolution, in chain
     /// order. The `WaitingFor::NamedChoice` answer handler appends to this list
@@ -12354,6 +12540,7 @@ impl ResolvedAbility {
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            target_chooser: None,
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
@@ -12444,6 +12631,25 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_original_controller_recursive(player);
+        }
+    }
+
+    /// CR 608.2: Rebind the acting controller across this ability and every
+    /// sub/else branch. Used by the `player_scope` driver: when a compound
+    /// "each player <verb1>, <verb2>, then <verb3>" instruction iterates, the
+    /// SCOPED player is the acting controller for the WHOLE chain, not just the
+    /// top clause — so a co-scoped sub-clause's implicit-controller recipient
+    /// (e.g. `LoseLife { target: None }`, "each player ... loses life") and any
+    /// generic handler that reads `controller` resolve to the iterating player.
+    /// The printed ability controller is preserved separately via
+    /// `original_controller` (CR 109.5), so "you" references are unaffected.
+    pub fn set_controller_recursive(&mut self, player: PlayerId) {
+        self.controller = player;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_controller_recursive(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_controller_recursive(player);
         }
     }
 
@@ -12866,7 +13072,7 @@ mod tests {
             ],
         }
         .supports_cumulative_upkeep_payment());
-        assert!(!AbilityCost::Discard {
+        assert!(AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
             random: false,
@@ -13270,6 +13476,7 @@ mod tests {
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
+            taps_for_mana_produced: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
@@ -13720,6 +13927,7 @@ mod tests {
             FilterProp::Unblocked,
             FilterProp::Tapped,
             FilterProp::Untapped,
+            FilterProp::HasHasteOrControlledSinceTurnBegan,
             FilterProp::WithKeyword {
                 value: Keyword::Flying,
             },

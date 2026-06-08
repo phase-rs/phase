@@ -90,6 +90,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ModeChoice { .. }
         | WaitingFor::DiscardToHandSize { .. }
         | WaitingFor::OptionalCostChoice { .. }
+        | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::AbilityModeChoice { .. }
         // CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
@@ -138,6 +139,11 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::ProliferateChoice { .. }
+        | WaitingFor::TimeTravelChoice { .. }
+        // CR 702.132a: Assist offer / payment — casting-payment-adjacent choices,
+        // routed to the ability catch-all bucket like the other opt-in cast steps.
+        | WaitingFor::AssistChoosePlayer { .. }
+        | WaitingFor::AssistPayment { .. }
         | WaitingFor::ChooseObjectsSelection { .. }
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }

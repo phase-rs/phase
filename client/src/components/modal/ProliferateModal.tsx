@@ -11,6 +11,7 @@ import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { filterTargetsByController, targetKey, targetLabel } from "./targetRef.ts";
 
 type ProliferateChoice = Extract<WaitingFor, { type: "ProliferateChoice" }>;
+type TimeTravelChoice = Extract<WaitingFor, { type: "TimeTravelChoice" }>;
 type ChooseObjectsSelection = Extract<
   WaitingFor,
   { type: "ChooseObjectsSelection" }
@@ -19,20 +20,26 @@ type ChooseObjectsSelection = Extract<
 // CR 701.34a: Proliferate — choose any number (including zero) of permanents
 // and players that have counters; each chosen target gets one more counter of
 // each kind already there.
+// CR 701.56a: Time travel — choose any number of eligible objects for the
+// current remove/add phase; each selected object gets exactly that phase's
+// counter operation.
 // CR 603.7e: ChooseObjectsSelection — choose any number of battlefield
-// permanents (Magnetic Mountain class). Both prompts carry the identical
-// `{ player, eligible: TargetRef[] }` shape and dispatch `SelectTargets`, so a
-// single modal serves both; `variant` only adapts the title/subtitle copy.
+// permanents (Magnetic Mountain class). These prompts share the same
+// `SelectTargets` dispatch over an engine-provided `eligible` list, so a single
+// modal serves them; `variant` adapts copy and default selection.
 // Engine pre-filters `eligible`; the modal is purely a chooser. Default-select-
 // all is a UX choice (one-click confirm for the common case), not a rules
 // requirement.
 type ProliferateModalData =
   | ProliferateChoice["data"]
+  | TimeTravelChoice["data"]
   | ChooseObjectsSelection["data"];
 
 /** Maps the variant prop to its i18n leaf pair under `proliferate.*`. */
 const VARIANT_KEYS = {
   proliferate: { title: "proliferateTitle", subtitle: "proliferateSubtitle" },
+  timeTravelRemove: { title: "timeTravelTitle", subtitle: "timeTravelRemoveSubtitle" },
+  timeTravelAdd: { title: "timeTravelTitle", subtitle: "timeTravelAddSubtitle" },
   chooseObjects: { title: "chooseObjectsTitle", subtitle: "chooseObjectsSubtitle" },
 } as const;
 
@@ -49,13 +56,17 @@ export function ProliferateModal({
   const playerId = usePlayerId();
   const hoverProps = useInspectHoverProps();
 
-  const [selected, setSelected] = useState<TargetRef[]>(data.eligible);
+  const defaultSelection = useCallback(
+    () => (variant === "timeTravelAdd" ? [] : data.eligible),
+    [data.eligible, variant],
+  );
+  const [selected, setSelected] = useState<TargetRef[]>(() => defaultSelection());
 
   // Reset selection when a fresh choice arrives (back-to-back prompts from one
   // ability resolution don't remount this component).
   useEffect(() => {
-    setSelected(data.eligible);
-  }, [data.eligible]);
+    setSelected(defaultSelection());
+  }, [defaultSelection]);
 
   const handleToggle = useCallback((target: TargetRef) => {
     const key = targetKey(target);

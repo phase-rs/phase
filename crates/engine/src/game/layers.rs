@@ -1350,6 +1350,12 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
+    // CR 113.11: "It's also impossible for an effect or keyword counter to add
+    // [a denied] ability to the object." The keyword-counter grant above runs
+    // after the in-loop Layer 6 denial, so re-apply the denial to strip any
+    // counter-granted keyword that a `CantHaveKeyword` static forbids.
+    apply_cant_have_keyword_denials(state, None);
+
     // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
     // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
     // (P/T counters are applied in-loop at Layer::CounterPT above, in layer 7c
@@ -1895,6 +1901,12 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             }
         }
     }
+
+    // CR 113.11: re-apply the can't-have denial after the keyword-counter grant
+    // (which runs after the in-loop Layer 6 denial) so a counter can't add a
+    // forbidden keyword. Restricted to the freshly-entered objects, mirroring the
+    // incremental denial hook above.
+    apply_cant_have_keyword_denials(state, Some(entered_ids));
 
     // CR 613.11: Combat-assignment rule effects, restricted to entered objects.
     apply_combat_assignment_rule_effects_filtered(state, Some(entered_ids));
@@ -5035,6 +5047,68 @@ mod tests {
                 .unwrap()
                 .has_keyword(&Keyword::Flying),
             "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
+        );
+    }
+
+    /// CR 113.11 + CR 122.1b: a "can't have [keyword]" effect makes it impossible
+    /// for even a KEYWORD COUNTER to add that ability. A first-strike counter on a
+    /// creature under an Archetype-of-Courage-style `CantHaveKeyword { FirstStrike }`
+    /// denial must NOT grant first strike. The keyword-counter grant ran after the
+    /// denial pass with no re-denial, so the counter wrongly re-added the keyword.
+    #[test]
+    fn cant_have_keyword_denial_overrides_keyword_counter() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .counters
+            .insert(CounterType::Keyword(KeywordKind::FirstStrike), 1);
+
+        // Baseline: the keyword counter grants first strike with no denial present.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "keyword counter grants first strike before the denial is added"
+        );
+
+        // Archetype of Courage: creatures can't have first strike (Layer 6 denial).
+        let denial = StaticDefinition::new(StaticMode::CantHaveKeyword {
+            keyword: Keyword::FirstStrike,
+        })
+        .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+        let archetype = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Archetype of Courage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&archetype).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(denial);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        assert!(
+            !state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .has_keyword(&Keyword::FirstStrike),
+            "CR 113.11: a keyword counter cannot grant a denied keyword"
         );
     }
 

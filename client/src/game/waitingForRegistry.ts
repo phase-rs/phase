@@ -46,6 +46,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "AbilityModeChoice",
     "ModalFaceChoice",
     "AlternativeCastChoice",
+    "SpliceOffer",
     // CR 702.140c + CR 730.2a: mutate top/bottom merge choice (MutateMergeChoiceModal).
     "MutateMergeChoice",
     // CR 702.99a: cipher encode-on-resolve choice (CipherEncodeChoiceModal).
@@ -111,6 +112,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ClashCardPlacement",
     "TopOrBottomChoice",
     "ProliferateChoice",
+    "TimeTravelChoice",
     "ChooseObjectsSelection",
     "CategoryChoice",
     "DistributeAmong",

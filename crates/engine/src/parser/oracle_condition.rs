@@ -20,6 +20,26 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+fn scan_source_zone_filter(text: &str) -> Option<Zone> {
+    let mut offset = 0;
+    while offset <= text.len() {
+        if let Ok((rest, zone)) = super::oracle_nom::filter::parse_zone_filter(&text[offset..]) {
+            if rest
+                .chars()
+                .next()
+                .is_none_or(|ch| matches!(ch, ' ' | ',' | '.'))
+            {
+                return Some(zone);
+            }
+        }
+        match text[offset..].find(' ') {
+            Some(i) => offset += i + 1,
+            None => break,
+        }
+    }
+    None
+}
+
 /// CR 601.3 / CR 602.5: Parse a restriction condition from Oracle text into a typed
 /// `ParsedCondition`. These conditions gate whether a spell can be cast or ability activated.
 /// Returns `None` for unrecognized conditions (caller treats `None` as permissive true).
@@ -234,6 +254,9 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     // the full zone vocabulary (graveyard/hand/exile/library/battlefield) is covered
     // uniformly with word-boundary safety and the combinator-mandated parse path.
     if let Some((zone, _ctrl, _props)) = super::oracle_target::scan_zone_phrase(text) {
+        return Some(ParsedCondition::SourceInZone { zone });
+    }
+    if let Some(zone) = scan_source_zone_filter(text) {
         return Some(ParsedCondition::SourceInZone { zone });
     }
     // Source state: scan for state keywords after the subject using nom at word boundaries
@@ -1171,6 +1194,10 @@ mod tests {
             Some(ParsedCondition::SourceInZone {
                 zone: Zone::Graveyard
             }),
+        );
+        assert_eq!(
+            parse_restriction_condition("~ is on the stack"),
+            Some(ParsedCondition::SourceInZone { zone: Zone::Stack }),
         );
         assert_eq!(
             parse_restriction_condition("From your graveyard"),

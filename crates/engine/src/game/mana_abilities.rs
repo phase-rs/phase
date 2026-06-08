@@ -519,6 +519,21 @@ pub(crate) fn mana_choice_prompt(
                 None
             }
         }
+        ManaProduction::AnyOneColorAmongPermanents { filter, .. } => {
+            // CR 106.1: Player chooses one of the colors among matching permanents they
+            // control.
+            let options = super::effects::mana::distinct_colors_among_permanents(
+                state, ability, source_id, filter,
+            )
+            .into_iter()
+            .map(|color| mana_color_to_type(&color))
+            .collect::<Vec<_>>();
+            if options.len() > 1 {
+                Some(ManaChoicePrompt::SingleColor { options })
+            } else {
+                None
+            }
+        }
         // CR 605.3b: Filter lands — pick one of N fixed multi-mana combinations.
         ManaProduction::ChoiceAmongCombinations { options } if options.len() > 1 => {
             Some(ManaChoicePrompt::Combination {

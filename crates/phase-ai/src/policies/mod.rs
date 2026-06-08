@@ -11,7 +11,7 @@ pub(crate) mod combo_line;
 mod condition_gated_activation;
 pub(crate) mod context;
 mod control_change_awareness;
-mod copy_value;
+pub(crate) mod copy_value;
 mod downside_awareness;
 pub(crate) mod effect_classify;
 mod effect_timing;

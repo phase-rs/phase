@@ -370,6 +370,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // `parse_target_with_ctx` during chunk parse. `Random` flips the engine
         // off the controller-choice path at target-selection time.
         def.target_selection_mode = clause_ir.target_selection_mode;
+        // CR 601.2c + CR 603.3d: copy the per-clause target chooser captured by
+        // `parse_target_with_ctx` during chunk parse, so a targeted "of their
+        // choice" routes target selection to the scoped (upkeep) player.
+        def.target_chooser = clause_ir.target_chooser.clone();
         let clause_sub = if is_target_only {
             def.sub_ability = clause_ir.parsed.sub_ability.clone();
             None
@@ -603,7 +607,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
     let chain_rounding = ir.chain_rounding;
 
-    // CR 701.20a vs CR 701.16a: Demote reveal-Dig back to RevealTop when no DigFromAmong
+    // CR 701.20a / CR 701.20e: Demote reveal-Dig back to RevealTop when no DigFromAmong
     // continuation patched it. An unpatched Dig { reveal: true, keep_count: None, filter: Any }
     // is a simple "reveal the top N" with no player selection — it must resolve synchronously
     // (via RevealTop) so that sub_ability chains like RevealedHasCardType evaluate inline.
@@ -615,6 +619,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             reveal: true,
             destination,
             rest_destination,
+            player,
             ..
         } = &*def.effect
         {
@@ -626,7 +631,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 _ => 1,
             };
             *def.effect = Effect::RevealTop {
-                player: TargetFilter::Controller,
+                player: player.clone(),
                 count: count_val,
             };
         }
@@ -790,6 +795,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
+    nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
@@ -1253,6 +1259,71 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         }
         _ => {}
     }
+}
+
+/// CR 603.7c: Sentence splitting can leave a WheneverEvent delayed trigger's
+/// token-creating inner effect and its end-step cleanup delayed trigger as
+/// sibling `sub_ability` links on the activated ability. Rewire the cleanup
+/// under the token creator so it registers when the WheneverEvent fires, not
+/// at activation time (Dalkovan Encampment, Encore sacrifice riders).
+fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut AbilityDefinition) {
+    let cleanup_sub = match def.sub_ability.take() {
+        Some(sub) => sub,
+        None => return,
+    };
+
+    let inner = match &mut *def.effect {
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent { .. },
+            effect: inner,
+            ..
+        } => inner,
+        _ => {
+            def.sub_ability = Some(cleanup_sub);
+            return;
+        }
+    };
+
+    let is_token_cleanup = matches!(
+        &*cleanup_sub.effect,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { .. },
+            effect: cleanup_effect,
+            ..
+        } if matches!(
+            &*cleanup_effect.effect,
+            Effect::Sacrifice { .. } | Effect::ChangeZone { .. } | Effect::Destroy { .. }
+        )
+    );
+    if !is_token_cleanup || !is_token_creating_effect(&inner.effect) {
+        def.sub_ability = Some(cleanup_sub);
+        return;
+    }
+
+    let mut cleanup_sub = cleanup_sub;
+    let remaining_sibling_chain = cleanup_sub
+        .sub_ability
+        .as_ref()
+        .is_some_and(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+        .then(|| cleanup_sub.sub_ability.take())
+        .flatten();
+    if let Effect::CreateDelayedTrigger {
+        effect: cleanup_effect,
+        ..
+    } = &mut *cleanup_sub.effect
+    {
+        rewrite_parent_target_to_last_created(&mut cleanup_effect.effect);
+    }
+
+    let mut cursor = inner.as_mut();
+    while cursor.sub_ability.is_some() {
+        cursor = cursor
+            .sub_ability
+            .as_mut()
+            .expect("sub_ability checked above");
+    }
+    cursor.sub_ability = Some(cleanup_sub);
+    def.sub_ability = remaining_sibling_chain;
 }
 
 /// CR 705: Post-process parsed ability defs to consolidate coin flip conditional
@@ -2274,13 +2345,26 @@ pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
 }
 
 pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
-    let lower = text.to_lowercase();
+    // Oracle sentences often end with a period before duration stripping runs
+    // (e.g. Shifting Woodland: "... until end of turn. Activate only if ...").
+    let text = text.trim();
+    let duration_text = text.trim_end_matches('.').trim();
+    let lower = duration_text.to_lowercase();
     if target_relative_clause_owns_suffix(lower.as_str()) {
         return (text, None);
     }
     for (suffix, duration) in [
         (" this turn", Duration::UntilEndOfTurn),
         (" until end of turn", Duration::UntilEndOfTurn),
+        // CR 611.2a: "A continuous effect generated by the resolution of a
+        // spell or ability lasts as long as stated by the spell or ability
+        // creating it ... If no duration is stated, it lasts until the end of
+        // the game." A one-shot effect that creates a continuous restriction
+        // worded "... for the rest of the game" (Screaming Nemesis: "can't gain
+        // life for the rest of the game") therefore has no expiry - modeled as
+        // `Duration::Permanent`. CR 119.7 governs the restriction's semantics
+        // for the "can't gain life" case specifically.
+        (" for the rest of the game", Duration::Permanent),
         (
             // CR 514.2: cleanup-pruned next-turn duration.
             " until the end of your next turn",
@@ -2323,8 +2407,61 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         ),
     ] {
         if lower.ends_with(suffix) {
-            let end = text.len() - suffix.len();
-            return (text[..end].trim_end_matches(',').trim(), Some(duration));
+            let end = duration_text.len() - suffix.len();
+            return (
+                duration_text[..end].trim_end_matches(',').trim(),
+                Some(duration),
+            );
+        }
+    }
+
+    // CR 611.2a: Duration mid-clause before a trailing conjunct, variable
+    // definition, or alternative expiry. End-of-string durations are handled
+    // above. Do NOT treat " unless " as a boundary here — unless-pay parsers
+    // (`try_parse_unless_player_have_deal_damage`, `extract_resolution_unless_pay_modifier`)
+    // own that tail and must see the full phrase.
+    for (phrase, duration) in [
+        (" until end of turn", Duration::UntilEndOfTurn),
+        (" this turn", Duration::UntilEndOfTurn),
+        (" until end of combat", Duration::UntilEndOfCombat),
+        (
+            " until the end of your next turn",
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until the end of their next turn",
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until their next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until your next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until ~ leaves the battlefield",
+            Duration::UntilHostLeavesPlay,
+        ),
+        (
+            " until this creature leaves the battlefield",
+            Duration::UntilHostLeavesPlay,
+        ),
+    ] {
+        for delimiter in [", or ", ", where "] {
+            let pattern = format!("{phrase}{delimiter}");
+            if let Some(pos) = lower.find(&pattern) {
+                return (duration_text[..pos].trim_end(), Some(duration));
+            }
         }
     }
 
@@ -2332,7 +2469,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     if let Some(pos) = lower.rfind(" for as long as ") {
         let condition_text = &lower[pos + " for as long as ".len()..];
         if let Some(dur) = parse_for_as_long_as_condition(condition_text) {
-            let stripped = text[..pos].trim_end_matches(',').trim();
+            let stripped = duration_text[..pos].trim_end_matches(',').trim();
             return (stripped, Some(dur));
         }
     }
@@ -2648,6 +2785,11 @@ fn parse_total_mana_value_target_constraint(text: &str) -> Option<TargetSelectio
 pub(super) fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
+    if let Some((remainder, spec)) = strip_bounded_targets_placeholder(after_each_of) {
+        if remainder.is_empty() {
+            return Some(spec);
+        }
+    }
     let (_, multi_target) = strip_optional_target_prefix(after_each_of);
     multi_target
 }
@@ -2727,6 +2869,11 @@ fn parse_each_of_up_to_damage_target<'a>(
         .ok()?;
     let consumed = lower.len() - after_each_of_lower.len();
     let after_each_of = &target_phrase[consumed..];
+    if let Some((remainder, _)) = strip_bounded_targets_placeholder(after_each_of) {
+        if remainder.is_empty() {
+            return Some((TargetFilter::Any, ""));
+        }
+    }
     let (target_text, multi_target) = strip_optional_target_prefix(after_each_of);
     multi_target.as_ref()?;
     let (target, remainder) = parse_target_with_ctx(target_text, ctx);
@@ -2745,6 +2892,11 @@ fn parse_each_of_up_to_damage_target<'a>(
 /// and collapse the count to a fixed 1 (issue #458).
 const MULTI_TARGET_VERBS: &[&str] = &[
     "exile", "tap", "untap", "goad", "return", "destroy", "choose",
+];
+
+pub(super) const BOUNDED_TARGET_PHRASES: &[(&str, usize, usize)] = &[
+    ("one or two targets", 1, 2),
+    ("one, two, or three targets", 1, 3),
 ];
 
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
@@ -2781,6 +2933,23 @@ fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> 
         value(QuantityExpr::Fixed { value: 6 }, tag("six ")),
     ))
     .parse(input)
+}
+
+/// CR 115.1d: Bare target-count placeholders after "each of" — "one or two
+/// targets" (Prismari Charm: "deals 1 damage to each of one or two targets").
+/// Returns the unconsumed remainder and a bounded `MultiTargetSpec` with min ≥ 1.
+fn strip_bounded_targets_placeholder(text: &str) -> Option<(&str, MultiTargetSpec)> {
+    let lower = text.to_ascii_lowercase();
+    for &(phrase, min, max) in BOUNDED_TARGET_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
+            let consumed = lower.len() - rest.len();
+            return Some((
+                text[consumed..].trim_start(),
+                MultiTargetSpec::fixed(min, max),
+            ));
+        }
+    }
+    None
 }
 
 /// CR 115.1d: Strip optional target-count prefixes before a targeted phrase.
@@ -4322,9 +4491,19 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
             } else {
                 inner
             };
-            return Some(QuantityExpr::Offset {
+            let offset = QuantityExpr::Offset {
                 inner: Box::new(inner),
                 offset: n as i32,
+            };
+            // CR 107.1b: "where X is N minus …" can resolve negative; damage
+            // and other effect-result quantities use zero instead (The Rack).
+            return Some(if sign < 0 {
+                QuantityExpr::ClampMin {
+                    inner: Box::new(offset),
+                    minimum: 0,
+                }
+            } else {
+                offset
             });
         }
     }
@@ -4594,9 +4773,18 @@ pub(super) fn apply_where_x_effect_expression(
             *power = apply_where_x_expression(power.clone(), where_x_expression);
             *toughness = apply_where_x_expression(toughness.clone(), where_x_expression);
         }
-        Effect::PreventDamage { amount_dynamic, .. } => {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            ..
+        } => {
+            // CR 615.7: "prevent all …" must not inherit a sibling clause's
+            // where-X binding (Arachnogenesis: token count uses where-X;
+            // prevention is blanket).
             if let Some(expr) = where_x_expression {
-                *amount_dynamic = parse_where_x_quantity_expression(expr);
+                if !matches!(amount, crate::types::ability::PreventionAmount::All) {
+                    *amount_dynamic = parse_where_x_quantity_expression(expr);
+                }
             }
         }
         // CR 107.3i + CR 118.1: Resolution-time cost amounts (Life / Speed /
@@ -4927,12 +5115,17 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_where_x_quantity_expression, strip_return_destination_ext_with_remainder,
-        strip_trailing_where_x,
+        nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_where_x_quantity_expression,
+        strip_return_destination_ext_with_remainder, strip_trailing_where_x,
     };
     use crate::parser::oracle_util::TextPair;
-    use crate::types::ability::{QuantityExpr, QuantityRef};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, PtValue, QuantityExpr,
+        QuantityRef, TargetFilter, TriggerDefinition,
+    };
     use crate::types::counter::CounterType;
+    use crate::types::phase::Phase;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     /// CR 614.1c + issue #1498: "return it to the battlefield tapped and with
@@ -4995,6 +5188,105 @@ mod tests {
                 "{expression}"
             );
         }
+    }
+
+    #[test]
+    fn token_cleanup_nesting_splits_only_cleanup_node_from_sibling_chain() {
+        let token_creator = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Warrior".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string(), "Warrior".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: true,
+                count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: true,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        );
+        let mut cleanup = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Sacrifice {
+                        target: TargetFilter::ParentTarget,
+                        count: QuantityExpr::Fixed { value: 2 },
+                        min_count: 0,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+        );
+        let mut following_sibling = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        following_sibling.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+        cleanup.sub_ability = Some(Box::new(following_sibling));
+        let mut outer = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::YouAttack)),
+                },
+                effect: Box::new(token_creator),
+                uses_tracked_set: false,
+            },
+        );
+        outer.sub_ability = Some(Box::new(cleanup));
+
+        nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut outer);
+
+        let Effect::CreateDelayedTrigger { effect: inner, .. } = outer.effect.as_ref() else {
+            panic!("expected outer delayed trigger");
+        };
+        let nested_cleanup = inner
+            .sub_ability
+            .as_deref()
+            .expect("cleanup node must move under token creator");
+        let Effect::CreateDelayedTrigger {
+            effect: cleanup_effect,
+            ..
+        } = nested_cleanup.effect.as_ref()
+        else {
+            panic!("expected nested cleanup delayed trigger");
+        };
+        assert!(
+            nested_cleanup.sub_ability.is_none(),
+            "only the cleanup node should move under the token creator"
+        );
+        assert!(
+            matches!(
+                cleanup_effect.effect.as_ref(),
+                Effect::Sacrifice {
+                    target: TargetFilter::LastCreated,
+                    ..
+                }
+            ),
+            "nested cleanup target must be rewritten to LastCreated"
+        );
+        assert!(
+            matches!(
+                outer
+                    .sub_ability
+                    .as_deref()
+                    .map(|ability| ability.effect.as_ref()),
+                Some(Effect::Draw { .. })
+            ),
+            "sibling effects after the cleanup must remain on the outer ability"
+        );
     }
 }
 

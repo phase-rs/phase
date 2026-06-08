@@ -459,7 +459,7 @@ fn pay_activation_costs_after_target_selection(
     state: &mut GameState,
     player: PlayerId,
     pending: &PendingCast,
-    assigned_ability: ResolvedAbility,
+    mut assigned_ability: ResolvedAbility,
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
@@ -489,6 +489,12 @@ fn pay_activation_costs_after_target_selection(
                 player,
                 ability_index,
             );
+        super::casting::stamp_self_ref_discard_cost_paid_object(
+            state,
+            pending.object_id,
+            &mut assigned_ability,
+            activation_cost,
+        );
         if let super::casting::AbilityCostPaymentOutcome::Paused { remaining_cost } =
             pay_ability_cost_for_activation(
                 state,

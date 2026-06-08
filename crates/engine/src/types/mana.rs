@@ -829,6 +829,16 @@ impl ManaCost {
         }
     }
 
+    /// CR 202.3e: X in a mana cost equals the announced value only while the
+    /// object is on the stack; in every other zone, X contributes 0.
+    pub fn mana_value_with_x(&self, zone: Zone, cost_x_paid: Option<u32>) -> u32 {
+        self.mana_value()
+            + match zone {
+                Zone::Stack => cost_x_paid.unwrap_or(0),
+                _ => 0,
+            }
+    }
+
     /// CR 508.1h + CR 509.1d: Aggregate this cost with another cost, producing a
     /// combined "locked in" total. Used for combat-tax aggregation where multiple
     /// UnlessPay static abilities apply to the same attacker/blocker (e.g., two
@@ -2020,12 +2030,38 @@ mod tests {
 
     #[test]
     fn mana_value_x_contributes_zero() {
-        // CR 202.3e: {X}{R} → 0 + 1 = 1
+        // CR 202.3e: {X}{R} → 0 + 1 = 1 (off-stack, X=0)
         let cost = ManaCost::Cost {
             shards: vec![ManaCostShard::X, ManaCostShard::Red],
             generic: 0,
         };
         assert_eq!(cost.mana_value(), 1);
+    }
+
+    #[test]
+    fn mana_value_with_x_includes_chosen_value() {
+        // CR 202.3e: {X}{R}{R} cast with X=4 → 4 + 1 + 1 = 6 while on the stack.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Red],
+            generic: 0,
+        };
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(4)), 6);
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, None), 2);
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(0)), 2);
+        assert_eq!(cost.mana_value_with_x(Zone::Battlefield, Some(4)), 2);
+    }
+
+    #[test]
+    fn mana_value_with_x_no_x_shard_adds_x_paid() {
+        // On the stack, cost_x_paid is the announced X value even when the cost
+        // expression has no literal {X} shard.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Blue],
+            generic: 1,
+        };
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(5)), 8); // 1R+1U+1 generic = 3, +5 = 8
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, None), 3);
+        assert_eq!(cost.mana_value_with_x(Zone::Graveyard, Some(5)), 3);
     }
 
     #[test]

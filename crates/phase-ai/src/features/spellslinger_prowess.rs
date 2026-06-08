@@ -436,6 +436,7 @@ mod tests {
         Effect::CopySpell {
             target: TargetFilter::Any,
             retarget: engine::types::ability::CopyRetargetPermission::KeepOriginalTargets,
+            copier: None,
         }
     }
 
@@ -624,6 +625,7 @@ mod tests {
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
+            enter_tapped: false,
         }));
         let f = detect(&[entry(c, 4)]);
         assert_eq!(f.cantrip_count, 4);
@@ -644,6 +646,7 @@ mod tests {
             filter: TargetFilter::Any,
             rest_destination: None,
             reveal: false,
+            enter_tapped: false,
         }));
         let f = detect(&[entry(c, 4)]);
         // impulse-dig should NOT count as cantrip

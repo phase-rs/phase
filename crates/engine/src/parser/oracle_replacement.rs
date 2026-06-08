@@ -1,10 +1,11 @@
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{char, multispace1};
 use nom::combinator::{all_consuming, eof, opt, peek, value};
+use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -18,6 +19,7 @@ use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::{parse_attached_subject_target_filter, parse_inner_condition};
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::target::parse_type_filter_word;
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{
@@ -29,8 +31,9 @@ use crate::types::ability::{
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
     FilterProp, ManaModification, ManaReplacementScope, PlayerFilter, PreventionAmount,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, ReplacementPlayerScope, StaticCondition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -463,14 +466,19 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         }
     }
 
+    // --- Global counter-prohibition replacements: Solemnity class ---
+    if let Some(def) = parse_global_player_counter_prohibition(&lower, &text) {
+        return Some(def);
+    }
+    if let Some(def) = parse_global_object_counter_prohibition(&lower, &text) {
+        return Some(def);
+    }
+
     // --- Counter-prohibition replacement: "~ can't have counters put on it." ---
     // CR 614.6 + CR 614.7 + CR 122.1: A self-targeted counter-placement
     // prohibition. The proposed `AddCounter` event never happens
     // (CR 614.6 — "if an event is replaced, it never happens"). Melira's
-    // Keepers class. The Solemnity-class global variant (no player gets
-    // counters anywhere) lifts the SelfRef scope to a wider filter and is
-    // out of scope for this PR — the typed shape (Prevent + valid_card)
-    // composes cleanly for it.
+    // Keepers class.
     if let Some(def) = parse_no_counters_replacement(&norm_lower, &text) {
         return Some(def);
     }
@@ -4646,6 +4654,78 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     Some(def)
 }
 
+/// CR 614.17 + CR 614.6 + CR 122.1: Parse "Players can't get counters."
+/// into a global player-counter prohibition. The runtime models the "can't"
+/// event through `ReplacementEvent::AddCounter` with `valid_player` scope so
+/// player-counter effects are suppressed before mutating player state.
+fn parse_global_player_counter_prohibition(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let mut combinator = all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("players can't get counters"),
+        opt(tag(".")),
+    ));
+    combinator.parse(lower.trim()).ok()?;
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .quantity_modification(QuantityModification::Prevent)
+        .description(original_text.to_string());
+    def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    Some(def)
+}
+
+/// CR 614.17 + CR 614.6 + CR 122.1: Parse global object-counter prohibitions
+/// such as "Counters can't be put on artifacts, creatures, enchantments, or
+/// lands." into an `AddCounter` prevention scoped to the named type list.
+fn parse_global_object_counter_prohibition(
+    lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let mut combinator = all_consuming(terminated(
+        preceded(
+            tag::<_, _, OracleError<'_>>("counters can't be put on "),
+            separated_list1(
+                parse_counter_prohibition_type_separator,
+                parse_counter_prohibition_type,
+            ),
+        ),
+        opt(tag(".")),
+    ));
+    let (_rest, type_filters) = combinator.parse(lower.trim()).ok()?;
+    let type_filter = match type_filters.as_slice() {
+        [single] => single.clone(),
+        _ => TypeFilter::AnyOf(type_filters),
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(attach_zone_to_filter(
+                TargetFilter::Typed(TypedFilter::new(type_filter)),
+                Zone::Battlefield,
+            ))
+            .quantity_modification(QuantityModification::Prevent)
+            .description(original_text.to_string()),
+    )
+}
+
+fn parse_counter_prohibition_type_separator(input: &str) -> OracleResult<'_, &str> {
+    alt((tag(", or "), tag(", "), tag(" or "))).parse(input)
+}
+
+fn parse_counter_prohibition_type(input: &str) -> OracleResult<'_, TypeFilter> {
+    let (rest, type_filter) = parse_type_filter_word(input)?;
+    match type_filter {
+        TypeFilter::Artifact
+        | TypeFilter::Creature
+        | TypeFilter::Enchantment
+        | TypeFilter::Land
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle => Ok((rest, type_filter)),
+        _ => Err(oracle_err(input)),
+    }
+}
+
 /// CR 122.1a + CR 614.1a: Extract the counter-type token named in a counter
 /// replacement's Oracle text. Anchors on the "one or more <type> counter[s]"
 /// phrase that scopes the replaced event to a specific counter type and
@@ -4988,20 +5068,17 @@ fn parse_damage_prevention_replacement(
         || nom_primitives::scan_contains(working_lower, "deal to you")
     {
         Some(damage_target_controller())
-    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature")
-        || nom_primitives::scan_contains(working_lower, "dealt to ~")
-        || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
-    {
+    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature") {
         Some(DamageTargetFilter::CreatureOnly)
     } else {
         // "prevent all combat damage" with no target → any target
         None
     };
 
-    // CR 301.5 + CR 303.4 + CR 614.1a: Damage prevention scoped to the source's
+    // CR 301.5 + CR 303.4 + CR 615.1a: Damage prevention scoped to the source's
     // attached creature ("equipped creature" / "enchanted creature"). The dedicated
     // `DamageTargetFilter` enum can't express attachment relationships (it covers
-    // only player/creature type axes per CR 614.1a), so route through `valid_card`
+    // only player/creature type axes), so route through `valid_card`
     // — the runtime resolves `EquippedBy`/`EnchantedBy` against the source's own
     // `attached_to` (see `game/filter.rs` `FilterProp::EquippedBy`), correctly
     // scoping the shield to only the attached creature regardless of how many
@@ -5010,17 +5087,25 @@ fn parse_damage_prevention_replacement(
     // any target, which was the Multiclass Baldric / Inviolability / Artifact Ward
     // class of bug.
     let valid_card_filter: Option<TargetFilter> =
-        nom_primitives::scan_at_word_boundaries(working_lower, |input| {
-            preceded(
-                tag::<_, _, OracleError<'_>>("dealt to "),
-                terminated(
-                    parse_attached_subject_target_filter,
-                    alt((value((), eof), value((), multispace1), value((), tag(".")))),
-                ),
-            )
-            .parse(input)
-        })
-        .or_else(|| parse_damage_recipient_valid_card_filter(working_lower));
+        if nom_primitives::scan_contains(working_lower, "dealt to ~")
+            || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
+        {
+            // CR 615.1a: Self-scoped prevention ("If damage would be dealt to ~")
+            // must gate on `valid_card: SelfRef`, not a broad creature damage filter.
+            Some(TargetFilter::SelfRef)
+        } else {
+            nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+                preceded(
+                    tag::<_, _, OracleError<'_>>("dealt to "),
+                    terminated(
+                        parse_attached_subject_target_filter,
+                        alt((value((), eof), value((), multispace1), value((), tag(".")))),
+                    ),
+                )
+                .parse(input)
+            })
+            .or_else(|| parse_damage_recipient_valid_card_filter(working_lower))
+        };
 
     // --- 4. Extract damage source filter ---
     let damage_source_filter = parse_damage_source_filter(working_lower);
@@ -6121,6 +6206,28 @@ mod tests {
         ));
     }
 
+    /// Anti-Venom self-scoped prevention must use `valid_card: SelfRef`, not `CreatureOnly`.
+    #[test]
+    fn anti_venom_self_prevention_uses_valid_card_self_ref() {
+        for text in [
+            "If damage would be dealt to ~, prevent that damage and put that many +1/+1 counters on him.",
+            "If damage would be dealt to and dealt by ~, prevent that damage and put that many +1/+1 counters on him.",
+        ] {
+            let def = parse_replacement_line(text, "Anti-Venom, Horrifying Healer")
+                .expect("Anti-Venom prevention should parse");
+
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "self-scoped prevention must gate on SelfRef: {text}"
+            );
+            assert!(
+                def.damage_target_filter.is_none(),
+                "must not use broad CreatureOnly damage_target_filter: {text}"
+            );
+        }
+    }
+
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
     /// another creature you control, prevent that damage. Put a +1/+1 counter
     /// on that creature for each 1 damage prevented this way."
@@ -6143,7 +6250,6 @@ mod tests {
     /// 3. The rider count resolves to `QuantityRef::EventContextAmount` (the
     ///    prevented amount), via the existing `for each 1 damage prevented
     ///    this way` post-target suffix path.
-
     #[test]
     fn vigor_event_recipient_filter_and_counter_target_rewrite() {
         let def = parse_replacement_line(
@@ -9665,6 +9771,52 @@ mod tests {
                 controller: Some(ControllerRef::You),
                 ..
             })) if type_filters == vec![TypeFilter::Creature]
+        ));
+    }
+
+    #[test]
+    fn solemnity_players_cant_get_counters_replacement() {
+        let def = parse_replacement_line("Players can't get counters.", "Solemnity")
+            .expect("Solemnity player-counter line must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert_eq!(
+            def.valid_player,
+            Some(ReplacementPlayerScope::AnyPlayer),
+            "Solemnity must apply to every player, not only its controller"
+        );
+    }
+
+    #[test]
+    fn solemnity_permanent_types_cant_get_counters_replacement() {
+        let def = parse_replacement_line(
+            "Counters can't be put on artifacts, creatures, enchantments, or lands.",
+            "Solemnity",
+        )
+        .expect("Solemnity object-counter line must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: None,
+                properties,
+                ..
+            })) if type_filters == vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Artifact,
+                TypeFilter::Creature,
+                TypeFilter::Enchantment,
+                TypeFilter::Land,
+            ])] && properties == vec![FilterProp::InZone {
+                zone: Zone::Battlefield
+            }]
         ));
     }
 

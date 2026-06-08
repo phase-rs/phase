@@ -523,6 +523,49 @@ mod tests {
         assert_eq!(obj.power, Some(5));
     }
 
+    /// Regression test for GitHub issue #2024: Controller can look at their
+    /// own face-down manifested card on the battlefield. This test verifies
+    /// the visibility system correctly exposes face-down cards to their controller.
+    #[test]
+    fn controller_can_see_own_face_down_manifested_card() {
+        use crate::game::visibility::filter_state_for_viewer;
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let id = create_object(
+            &mut state,
+            CardId(10),
+            controller,
+            "Manifest Target".to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.power = Some(5);
+        obj.toughness = Some(5);
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+        };
+
+        let mut events = Vec::new();
+        manifest(&mut state, controller, &mut events).unwrap();
+
+        // Controller should see the full card
+        let controller_view = filter_state_for_viewer(&state, controller);
+        let controller_obj = controller_view.objects.get(&id).unwrap();
+        assert_eq!(controller_obj.name, "Manifest Target");
+        assert!(controller_obj.face_down);
+
+        // Opponent should see it as hidden
+        let opponent_view = filter_state_for_viewer(&state, opponent);
+        let opponent_obj = opponent_view.objects.get(&id).unwrap();
+        assert_eq!(opponent_obj.name, "Hidden Card");
+        assert!(opponent_obj.face_down);
+    }
+
     #[test]
     fn face_down_profile_applies_specified_characteristics() {
         // CR 708.2a + CR 205.1a: A Cyber-Controller-style profile overrides the

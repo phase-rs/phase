@@ -44,7 +44,8 @@
     "endDraftConfirm": "End this draft for everyone? This cannot be undone."
   },
   "manaCurve": {
-    "title": "Mana Curve"
+    "title": "Mana Curve",
+    "bucketLabel": "Mana value {{bucket}}"
   },
   "pickTimer": {
     "label": "Pick Timer",
