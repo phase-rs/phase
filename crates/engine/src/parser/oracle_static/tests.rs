@@ -11145,6 +11145,37 @@ fn parser_shape_arcane_adaptation_chosen_type_applies_to_creatures_you_control()
     }
 }
 
+// CR 607.2d + CR 301.7: Lifecraft Engine grants the chosen creature subtype to
+// Vehicle permanents you control — not the Creature card type. The additive-type
+// fallback must not mis-tokenize "the chosen creature type" as AddType(Creature).
+#[test]
+fn parser_shape_lifecraft_engine_vehicle_chosen_creature_type_static() {
+    let def = parse_static_line(
+        "Vehicle creatures you control are the chosen creature type in addition to their other types.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def.modifications.iter().all(|modification| matches!(
+        modification,
+        ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType
+        }
+    )));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.get_subtype(), Some("Vehicle"));
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Creature)),
+                "Vehicle scope must not require the Creature card type"
+            );
+        }
+        other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
+}
+
 // CR 613.1d + CR 205.3m: Maskwood Nexus's battlefield static — "Creatures
 // you control are every creature type." — must lower to a Layer 4
 // type-changing effect that adds every creature type (CR 205.3m) to each
