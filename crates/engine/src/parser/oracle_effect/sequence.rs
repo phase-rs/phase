@@ -2118,8 +2118,8 @@ pub(super) fn apply_clause_continuation(
                     }
                 }
                 *filter = card_filter;
-                // CR 701.33: When `destination` is None the kept cards are NOT
-                // auto-routed by the Dig resolver; downstream sub_abilities
+                // CR 701.20b + CR 608.2c: When `destination` is None the kept
+                // cards are NOT auto-routed by the Dig resolver; downstream sub_abilities
                 // read the tracked set and route by type. Also promote the
                 // Dig to reveal:true — "from among them" is a reveal-form.
                 *destination = kept_dest;

@@ -1086,8 +1086,7 @@ pub(super) fn handle_resolution_choice(
                 .filter(|id| !kept.contains(id))
                 .copied()
                 .collect();
-            let kept_zone = kept_destination.unwrap_or(Zone::Hand);
-            if kept_zone == Zone::Library {
+            if kept_destination == Some(Zone::Library) {
                 let move_unkept_to = {
                     let player_state = state
                         .players
@@ -1118,29 +1117,27 @@ pub(super) fn handle_resolution_choice(
                     finish_with_continuation(state, player, events),
                 ));
             }
-            for &obj_id in &kept {
-                zones::move_to_zone(state, obj_id, kept_zone, events);
-                if enter_tapped && kept_zone == Zone::Battlefield {
-                    if let Some(obj) = state.objects.get_mut(&obj_id) {
-                        obj.tapped = true;
+            if let Some(kept_zone) = kept_destination {
+                for &obj_id in &kept {
+                    zones::move_to_zone(state, obj_id, kept_zone, events);
+                    if enter_tapped && kept_zone == Zone::Battlefield {
+                        if let Some(obj) = state.objects.get_mut(&obj_id) {
+                            obj.tapped = true;
+                        }
                     }
                 }
             }
-            // CR 701.33 + CR 701.18: Publish the kept (revealed) cards as a
+            // CR 701.20b + CR 608.2c: Publish the kept (revealed) cards as a
             // tracked set so downstream sub_abilities can route them by type
             // via `TargetFilter::TrackedSetFiltered`. Used by Zimone's
             // Experiment — "Put all land cards revealed this way onto the
             // battlefield tapped and put all creature cards revealed this way
-            // into your hand" consume this set. Safe to populate
-            // unconditionally; unused tracked sets are harmless and resolved
-            // by the latest-set-wins sentinel binding pass.
-            if !kept.is_empty() {
-                let tracked_id = crate::types::identifiers::TrackedSetId(state.next_tracked_set_id);
-                state.next_tracked_set_id += 1;
-                state.tracked_object_sets.insert(tracked_id, kept.clone());
-            }
-            // CR 701.20e: None => Graveyard; map to a concrete zone so the rest
-            // mover (shared with the search-split partition) has a single Zone.
+            // into your hand" consume this set. Use a fresh tracked set so a
+            // parent effect's empty pre-choice publish cannot keep the chain
+            // sentinel bound to the wrong set.
+            effects::publish_fresh_tracked_set(state, kept.clone());
+            // None => Graveyard; map to a concrete zone so the rest mover
+            // (shared with the search-split partition) has a single Zone.
             route_rest_partition(
                 state,
                 &unkept,
