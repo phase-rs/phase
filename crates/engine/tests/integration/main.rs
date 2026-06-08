@@ -83,6 +83,7 @@ mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
 mod issue_1509_sorcery_main_phase_cast;
+mod issue_1985_dfc_command_zone_cast;
 mod issue_1987_bucknards_everfull_purse;
 mod issue_2011_eldrazi_temple_kozilek_cast;
 mod issue_2345_lavinia_no_mana_spent;
