@@ -704,6 +704,26 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         return AbilityCost::Unattach;
     }
 
+    // "reveal your hand" — reveal the controller's entire hand.
+    // CR 701.20a: Reveal means show to all players. Used as alternative cost
+    // (Land Grant class). Modeled as EffectCost wrapping Effect::RevealHand.
+    // Verified: CR 701.20 (docs/MagicCompRules.txt:3430).
+    if nom_on_lower(text, &lower, |i| {
+        value((), tag("reveal your hand")).parse(i)
+    })
+    .is_some()
+    {
+        return AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::RevealHand {
+                target: TargetFilter::SelfRef,
+                card_filter: TargetFilter::Any,
+                count: None,
+                random: false,
+                choice_optional: false,
+            }),
+        };
+    }
+
     // "Reveal this card from your hand" — reveal self cost
     if nom_on_lower(text, &lower, |i| {
         value((), tag("reveal this card from your hand")).parse(i)

@@ -21,6 +21,7 @@ pub fn resolve(
         kept_dest,
         rest_dest,
         is_reveal,
+        enter_tapped,
     ) = match &ability.effect {
         Effect::Dig {
             player,
@@ -31,6 +32,7 @@ pub fn resolve(
             destination,
             rest_destination,
             reveal,
+            enter_tapped,
         } => {
             let resolved_count =
                 resolve_quantity_with_targets(state, count, ability).max(0) as usize;
@@ -50,6 +52,7 @@ pub fn resolve(
                 *destination,
                 *rest_destination,
                 *reveal,
+                *enter_tapped,
             )
         }
         _ => (
@@ -60,6 +63,7 @@ pub fn resolve(
             TargetFilter::Any,
             None,
             None,
+            false,
             false,
         ),
     };
@@ -149,6 +153,7 @@ pub fn resolve(
         kept_destination: kept_dest,
         rest_destination: rest_dest,
         source_id: Some(ability.source_id),
+        enter_tapped,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -184,6 +189,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -264,6 +270,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             },
             vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -314,6 +321,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -364,6 +372,7 @@ mod tests {
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -384,7 +393,7 @@ mod tests {
         }
     }
 
-    /// CR 701.33 + CR 701.18: After the player's `SelectCards` resolves a
+    /// CR 701.20b + CR 608.2c: After the player's `SelectCards` resolves a
     /// `DigChoice`, the kept (revealed) cards must be published to
     /// `state.tracked_object_sets` so downstream sub_abilities can route
     /// them by type via `TargetFilter::TrackedSetFiltered`. Zimone's
@@ -432,6 +441,7 @@ mod tests {
             kept_destination: None,
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -442,6 +452,17 @@ mod tests {
         let outcome = handle_resolution_choice(&mut state, waiting, action, &mut events)
             .expect("DigChoice resolution must succeed");
         assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        for &obj_id in &kept {
+            assert_eq!(
+                state.objects[&obj_id].zone,
+                Zone::Library,
+                "reveal-only DigChoice must not auto-route kept cards"
+            );
+            assert!(
+                !state.players[0].hand.contains(&obj_id),
+                "reveal-only DigChoice must not move kept cards to hand"
+            );
+        }
 
         // A fresh tracked set must have been inserted with exactly the kept cards.
         let tracked_id = TrackedSetId(next_id_before);
@@ -458,6 +479,63 @@ mod tests {
             next_id_before + 1,
             "next_tracked_set_id must have advanced"
         );
+        assert_eq!(
+            state.chain_tracked_set_id,
+            Some(tracked_id),
+            "TrackedSetId(0) continuations must bind to the kept-card set"
+        );
+    }
+
+    #[test]
+    fn dig_choice_empty_selection_rebinds_fresh_tracked_set() {
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::TrackedSetId;
+
+        let mut state = GameState::new_two_player(42);
+        let prior = TrackedSetId(7);
+        state.tracked_object_sets.insert(prior, vec![ObjectId(999)]);
+        state.chain_tracked_set_id = Some(prior);
+        let cards: Vec<_> = (0..2)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(i + 20),
+                    PlayerId(0),
+                    format!("Card {}", i),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        let next_id_before = state.next_tracked_set_id;
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            selectable_cards: cards.clone(),
+            cards,
+            keep_count: 2,
+            up_to: true,
+            kept_destination: None,
+            rest_destination: Some(Zone::Library),
+            source_id: Some(ObjectId(100)),
+            enter_tapped: false,
+        };
+        let mut events = Vec::new();
+
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards { cards: Vec::new() },
+            &mut events,
+        )
+        .expect("DigChoice resolution must succeed");
+
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        let fresh = TrackedSetId(next_id_before);
+        assert_eq!(state.tracked_object_sets.get(&fresh), Some(&Vec::new()));
+        assert_eq!(state.chain_tracked_set_id, Some(fresh));
     }
 
     #[test]
@@ -502,6 +580,7 @@ mod tests {
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         state.pending_continuation =
             Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
@@ -570,6 +649,7 @@ mod tests {
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
 
         let mut events = Vec::new();
@@ -632,6 +712,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
 
         let mut events = Vec::new();
@@ -691,6 +772,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
 
         let mut events = Vec::new();
@@ -759,6 +841,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -829,6 +912,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -894,6 +978,7 @@ mod tests {
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -969,6 +1054,7 @@ mod tests {
                 filter,
                 rest_destination: None,
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -1162,6 +1248,7 @@ mod tests {
                 filter: filter.clone(),
                 rest_destination: Some(Zone::Library),
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(200),
@@ -1215,6 +1302,7 @@ mod tests {
                 filter: filter_you,
                 rest_destination: Some(Zone::Library),
                 reveal: false,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(201),
@@ -1280,6 +1368,7 @@ mod tests {
             kept_destination: Some(Zone::Battlefield),
             rest_destination: Some(Zone::Library),
             source_id: Some(ObjectId(100)),
+            enter_tapped: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),

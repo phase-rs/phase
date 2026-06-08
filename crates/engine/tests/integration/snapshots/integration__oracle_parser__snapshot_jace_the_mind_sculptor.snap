@@ -22,7 +22,8 @@ expression: result
           "type": "Any"
         },
         "rest_destination": null,
-        "reveal": false
+        "reveal": false,
+        "enter_tapped": false
       },
       "cost": {
         "type": "Loyalty",

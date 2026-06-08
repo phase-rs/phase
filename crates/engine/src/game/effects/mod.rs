@@ -2170,6 +2170,15 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    // CR 608.2c + CR 707.2: `CopyTokenOf` may carry `TrackedSet` on
+    // `target` while `target_filter()` surfaces `owner` (context-ref copy
+    // sources). Sin, Spira's Punishment — random exile publishes the set for
+    // the chained copy.
+    if let Effect::CopyTokenOf { target, .. } = effect {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
     if let Effect::GenericEffect {
         static_abilities, ..
     } = effect
@@ -4377,16 +4386,26 @@ fn resolve_chain_body(
         return Ok(());
     }
 
-    // CR 615.5: `PreventDamage` with a chained sub-ability installs the sub
-    // as the shield's `runtime_execute` continuation — it runs once per fired
-    // damage prevention event (Gatta and Luzzu's "prevent that damage and put
-    // that many +1/+1 counters on it"). The outer chain walker must NOT also
-    // resolve the sub-ability inline, or the rider would fire twice (once
-    // immediately when the shield is installed, and again from each
-    // post-replacement continuation). The shield is the single authority for
-    // the rider's execution lifecycle.
-    if matches!(ability.effect, Effect::PreventDamage { .. }) && ability.sub_ability.is_some() {
-        return Ok(());
+    // CR 615.5: `PreventDamage` with a chained `ContinuationStep` sub-ability
+    // installs the sub as the shield's `runtime_execute` continuation — it runs
+    // once per fired damage prevention event (Gatta and Luzzu's "prevent that
+    // damage and put that many +1/+1 counters on it"). The outer chain walker
+    // must NOT also resolve such a sub inline, or the rider would fire twice
+    // (once immediately when the shield is installed, and again from each
+    // post-replacement continuation). The shield is the single authority for the
+    // rider's execution lifecycle.
+    //
+    // CR 700.2d: A `SequentialSibling` sub is an INDEPENDENT instruction (a
+    // separate chosen mode of a modal spell — Dromoka's Command mode 3's
+    // `PutCounter`), not a rider. It is NOT installed as the shield's
+    // `runtime_execute`, so the chain walker must fall through to the generic
+    // sub resolution tail below and resolve it on its own target.
+    if matches!(ability.effect, Effect::PreventDamage { .. }) {
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            if sub.sub_link == SubAbilityLink::ContinuationStep {
+                return Ok(());
+            }
+        }
     }
 
     // Extract moved objects for result forwarding when forward_result is set.
@@ -15400,6 +15419,106 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// Issue #2405: Broken Bond — optional hand→battlefield land put must not
+    /// consume the land-drop counter (CR 305.4).
+    #[test]
+    fn issue_2405_broken_bond_land_put_does_not_consume_land_drop() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Destroy target artifact or enchantment. You may put a land card from your hand onto the battlefield.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("land put sub");
+
+        let mut state = GameState::new_two_player(42);
+        state.lands_played_this_turn = 1;
+        state.players[0].lands_played_this_turn = 1;
+        let _played_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let hand_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        for id in [_played_land, hand_land] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Land];
+        }
+        let mut ability =
+            crate::game::ability_utils::build_resolved_from_def(sub, ObjectId(999), PlayerId(0));
+        ability.optional = false;
+        ability.context.optional_effect_performed = true;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.lands_played_this_turn, 1,
+            "effect-driven land put must not consume land drop"
+        );
+        assert!(
+            state.battlefield.contains(&hand_land),
+            "land must reach battlefield, waiting_for={:?}",
+            state.waiting_for
+        );
+    }
+
+    /// Issue #2403: Sin, Spira's Punishment — random exile must publish a
+    /// tracked set so the chained `CopyTokenOf` creates a tapped copy.
+    #[test]
+    fn issue_2403_sin_spira_random_exile_copy_token_from_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+
+        let gy_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_card).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_name = "Grizzly Bears".to_string();
+        }
+        state.players[0].graveyard.push_back(gy_card);
+
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Sin, Spira's Punishment".to_string(),
+            Zone::Stack,
+        );
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Exile a permanent card from your graveyard at random, then create a tapped token that's a copy of that card.",
+            AbilityKind::Spell,
+        );
+        let mut ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+        ability.target_selection_mode = crate::types::ability::TargetSelectionMode::Random;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).expect("copy token created");
+        assert!(token.is_token);
+        assert!(token.tapped);
+        assert_eq!(token.name, "Grizzly Bears");
+        assert_eq!(state.objects[&gy_card].zone, Zone::Exile);
     }
 
     /// Issue #2400: Doubling Chant — `repeat_for: ObjectCount` over controlled

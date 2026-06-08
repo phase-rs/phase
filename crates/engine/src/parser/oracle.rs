@@ -37,11 +37,13 @@ use super::oracle_casting::{
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern, is_compound_turn_limit,
-    is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound, is_enters_with_counter_trigger,
-    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
-    is_opening_hand_begin_game, is_replacement_pattern, is_spells_alternative_cost_pattern,
-    is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
+    is_alternative_keyword_cost_pattern, is_cant_win_lose_compound,
+    is_cast_spells_alternative_cost_pattern, is_collect_evidence_alt_cost_pattern,
+    is_compound_turn_limit, is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound,
+    is_enters_with_counter_trigger, is_flashback_equal_mana_cost, is_granted_static_line,
+    is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
+    is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
+    is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -74,10 +76,10 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    lower_static_ir, parse_cast_spells_alternative_cost_multi,
-    parse_chosen_creature_type_static_prefix, parse_every_creature_type_static_prefix,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    lower_static_ir, parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
+    parse_chosen_creature_type_static_prefix, parse_collect_evidence_alt_cost,
+    parse_every_creature_type_static_prefix, parse_spells_alternative_cost, parse_static_line,
+    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -2566,6 +2568,42 @@ pub(crate) fn parse_oracle_ir(
             let defs = parse_cast_spells_alternative_cost_multi(&line);
             if !defs.is_empty() {
                 result.statics.extend(defs);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-c: CR 118.9 + CR 701.59a — "You may collect evidence N
+        // rather than pay the mana cost for [filter] spells you cast."
+        // Conspiracy Unraveler class. Must run before Priority 7 because
+        // `is_spells_alternative_cost_pattern` requires "you may pay " prefix
+        // and would miss this verb form.
+        if is_collect_evidence_alt_cost_pattern(&lower) {
+            if let Some(static_def) = parse_collect_evidence_alt_cost(&line) {
+                result.statics.push(static_def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-d: CR 107.4f — "For each {C} in a cost, you may pay
+        // 2 life rather than pay that mana." K'rrik class. Must run before Priority 7
+        // because is_static_pattern does not classify this shape.
+        if is_pay_life_as_colored_mana_pattern(&lower) {
+            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            if !defs.is_empty() {
+                result.statics.extend(defs);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-e: CR 118.9 + CR 702.29a + CR 702.122a —
+        // "You may [cost] rather than pay [keyword] cost[s]."
+        // New Perspectives (cycling) / Heart of Kiran (crew) / Gavi class.
+        if is_alternative_keyword_cost_pattern(&lower) {
+            if let Some(static_def) = parse_alternative_keyword_cost(&line) {
+                result.statics.push(static_def);
                 i += 1;
                 continue;
             }
@@ -7487,6 +7525,213 @@ mod tests {
             *r.abilities[0].effect,
             Effect::Unimplemented { ref name, .. } if name == "cast"
         ));
+    }
+
+    // CR 118.9 + CR 701.59a: Conspiracy Unraveler — "You may collect evidence N
+    // rather than pay the mana cost for spells you cast." routes to a
+    // CastWithAlternativeCost static carrying a CollectEvidence cost, and the
+    // Optional_YouMay swallow detector no longer flags it.
+    #[test]
+    fn conspiracy_unraveler_collect_evidence_alternative_cost_static() {
+        let r = parse(
+            "Flying\nYou may collect evidence 10 rather than pay the mana cost for spells you cast. (To collect evidence 10, exile cards with total mana value 10 or greater from your graveyard.)",
+            "Conspiracy Unraveler",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert_eq!(r.statics.len(), 1, "warnings: {:?}", r.parse_warnings);
+        assert!(matches!(
+            r.statics[0].mode,
+            StaticMode::CastWithAlternativeCost {
+                cost: AbilityCost::CollectEvidence { amount: 10 },
+                ..
+            }
+        ));
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 107.4f: K'rrik, Son of Yawgmoth — "For each {B} in a cost, you may pay
+    // 2 life rather than pay that mana." routes to a PayLifeAsColoredMana static
+    // and suppresses both the Optional_YouMay and DynamicQty swallow detectors.
+    #[test]
+    fn krrik_pay_life_as_colored_mana_static() {
+        let r = parse(
+            "({B/P} can be paid with either {B} or 2 life.)\nLifelink\nFor each {B} in a cost, you may pay 2 life rather than pay that mana.\nWhenever you cast a black spell, put a +1/+1 counter on K'rrik.",
+            "K'rrik, Son of Yawgmoth",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(
+            r.statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::PayLifeAsColoredMana { .. })),
+            "statics: {:?} warnings: {:?}",
+            r.statics,
+            r.parse_warnings
+        );
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 118.9 + CR 702.122a: Heart of Kiran — "You may remove a loyalty counter
+    // from a planeswalker you control rather than pay Heart of Kiran's crew cost."
+    // routes to an AlternativeKeywordCost(Crew) static.
+    #[test]
+    fn heart_of_kiran_alternative_crew_cost_static() {
+        let r = parse(
+            "Flying, vigilance\nCrew 3 (Tap any number of creatures you control with total power 3 or more: This Vehicle becomes an artifact creature until end of turn.)\nYou may remove a loyalty counter from a planeswalker you control rather than pay Heart of Kiran's crew cost.",
+            "Heart of Kiran",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(
+            r.statics.iter().any(|s| matches!(
+                s.mode,
+                StaticMode::AlternativeKeywordCost {
+                    keyword: crate::types::keywords::KeywordKind::Crew,
+                    ..
+                }
+            )),
+            "statics: {:?} warnings: {:?}",
+            r.statics,
+            r.parse_warnings
+        );
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 118.9 + CR 702.29a + CR 611.3a: New Perspectives — "As long as you have
+    // seven or more cards in hand, you may pay {0} rather than pay cycling costs."
+    // routes to a conditional AlternativeKeywordCost(Cycling) static.
+    #[test]
+    fn new_perspectives_conditional_alternative_cycling_cost_static() {
+        let r = parse(
+            "When this enchantment enters, draw three cards.\nAs long as you have seven or more cards in hand, you may pay {0} rather than pay cycling costs.",
+            "New Perspectives",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let alt = r.statics.iter().find(|s| {
+            matches!(
+                s.mode,
+                StaticMode::AlternativeKeywordCost {
+                    keyword: crate::types::keywords::KeywordKind::Cycling,
+                    ..
+                }
+            )
+        });
+        assert!(
+            alt.is_some(),
+            "statics: {:?} warnings: {:?}",
+            r.statics,
+            r.parse_warnings
+        );
+        assert!(
+            alt.unwrap().condition.is_some(),
+            "as-long-as gate must attach as a StaticCondition"
+        );
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 118.9 + CR 702.29a: Gavi's "first card you cycle each turn" clause
+    // routes to the once-per-turn frequency on the cycling alternative cost.
+    #[test]
+    fn gavi_alternative_cycling_cost_tracks_once_per_turn_frequency() {
+        let r = parse(
+            "You may pay {0} rather than pay the cycling cost of the first card you cycle each turn.",
+            "Gavi, Nest Warden",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let alt = r.statics.iter().find_map(|s| match &s.mode {
+            StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Cycling,
+                cost,
+                frequency,
+            } => Some((cost, frequency)),
+            _ => None,
+        });
+        let (cost, frequency) = alt.unwrap_or_else(|| {
+            panic!(
+                "expected cycling AlternativeKeywordCost, statics: {:?}, warnings: {:?}",
+                r.statics, r.parse_warnings
+            )
+        });
+        assert!(
+            matches!(cost, AbilityCost::Mana { cost } if cost == &ManaCost::generic(0)),
+            "expected zero mana alternative cost, got {cost:?}"
+        );
+        assert_eq!(
+            frequency,
+            &Some(crate::types::statics::CastFrequency::OncePerTurn)
+        );
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 118.9 + CR 701.20a + CR 601.3: Land Grant — "If you have no land cards in
+    // hand, you may reveal your hand rather than pay this spell's mana cost."
+    // routes to a conditional alternative-cost casting option whose cost is an
+    // EffectCost wrapping RevealHand.
+    #[test]
+    fn land_grant_reveal_hand_alternative_cost_option() {
+        let r = parse(
+            "If you have no land cards in hand, you may reveal your hand rather than pay this spell's mana cost.\nSearch your library for a Forest card, reveal that card, put it into your hand, then shuffle.",
+            "Land Grant",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(
+            r.casting_options.len(),
+            1,
+            "warnings: {:?}",
+            r.parse_warnings
+        );
+        assert!(matches!(
+            r.casting_options[0].cost,
+            Some(AbilityCost::EffectCost { ref effect })
+                if matches!(**effect, Effect::RevealHand { .. })
+        ));
+        assert!(matches!(
+            r.casting_options[0].condition.as_ref(),
+            Some(ParsedCondition::Not { condition })
+                if matches!(
+                    condition.as_ref(),
+                    ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+                        zone: Zone::Hand,
+                        core_type: crate::types::card_type::CoreType::Land,
+                        count: 1,
+                    }
+                )
+        ));
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
     }
 
     #[test]

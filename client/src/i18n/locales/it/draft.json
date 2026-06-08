@@ -44,7 +44,8 @@
     "endDraftConfirm": "Terminare questo draft per tutti? L'azione non puo essere annullata."
   },
   "manaCurve": {
-    "title": "Curva del mana"
+    "title": "Curva del mana",
+    "bucketLabel": "Valore di mana {{bucket}}"
   },
   "pickTimer": {
     "label": "Timer di scelta",

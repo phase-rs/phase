@@ -252,6 +252,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         kept_destination,
         rest_destination,
         source_id,
+        enter_tapped,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -265,6 +266,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 kept_destination,
                 rest_destination,
                 source_id,
+                enter_tapped,
             };
         }
     }

@@ -936,6 +936,21 @@ pub(crate) fn evaluate_condition(
         ParsedCondition::ZoneCardTypeCountAtLeast { zone, count } => {
             distinct_zone_card_type_count(state, player, *zone) >= *count
         }
+        ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+            zone,
+            core_type,
+            count,
+        } => {
+            player_zone_ids(state, player, *zone)
+                .filter(|object_id| {
+                    state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|obj| obj.card_types.core_types.contains(core_type))
+                })
+                .count()
+                >= *count
+        }
         ParsedCondition::ZoneSubtypeCardCountAtLeast {
             zone,
             subtype,
@@ -1807,6 +1822,49 @@ mod tests {
         assert!(!evaluate_condition(&state, player, source_id, &condition));
         state.players[usize::from(player.0)].lands_played_this_turn = 1;
         assert!(evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    #[test]
+    fn zone_core_type_card_count_condition_checks_hand_card_types() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = ObjectId(10);
+        let no_land_cards_in_hand = ParsedCondition::Not {
+            condition: Box::new(ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+                zone: Zone::Hand,
+                core_type: CoreType::Land,
+                count: 1,
+            }),
+        };
+
+        assert!(evaluate_condition(
+            &state,
+            player,
+            source_id,
+            &no_land_cards_in_hand
+        ));
+
+        let forest = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        assert!(!evaluate_condition(
+            &state,
+            player,
+            source_id,
+            &no_land_cards_in_hand
+        ));
     }
 
     #[test]
