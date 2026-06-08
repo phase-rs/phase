@@ -212,8 +212,8 @@ pub fn try_parse_counter_type(text: &str) -> Option<CounterType> {
         return None;
     }
     match trimmed {
-        "P1P1" | "+1/+1" | "plus1plus1" => return Some(CounterType::Plus1Plus1),
-        "M1M1" | "-1/-1" | "minus1minus1" => return Some(CounterType::Minus1Minus1),
+        "P1P1" | "p1p1" | "+1/+1" | "plus1plus1" => return Some(CounterType::Plus1Plus1),
+        "M1M1" | "m1m1" | "-1/-1" | "minus1minus1" => return Some(CounterType::Minus1Minus1),
         "LOYALTY" | "loyalty" => return Some(CounterType::Loyalty),
         "defense" | "DEFENSE" => return Some(CounterType::Defense),
         "stun" => return Some(CounterType::Stun),
@@ -359,7 +359,9 @@ mod tests {
         assert_eq!(parse_counter_type("+1/+1"), CounterType::Plus1Plus1);
         assert_eq!(parse_counter_type("-1/-1"), CounterType::Minus1Minus1);
         assert_eq!(parse_counter_type("P1P1"), CounterType::Plus1Plus1);
+        assert_eq!(parse_counter_type("p1p1"), CounterType::Plus1Plus1);
         assert_eq!(parse_counter_type("M1M1"), CounterType::Minus1Minus1);
+        assert_eq!(parse_counter_type("m1m1"), CounterType::Minus1Minus1);
         assert_eq!(
             parse_counter_type("MINING"),
             CounterType::Generic("mining".to_string())
