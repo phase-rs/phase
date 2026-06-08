@@ -283,6 +283,8 @@
     "graveyardShort": "CE",
     "graveyardTitle": "Cementerio ({{count}})",
     "libraryAlt": "Biblioteca",
+    "library": "Biblioteca",
+    "libraryLower": "biblioteca",
     "libraryCount_one": "Biblioteca ({{count}} carta)",
     "libraryCount_other": "Biblioteca ({{count}} cartas)",
     "playFromTop": "Juega {{name}} desde la parte superior de la biblioteca",
@@ -1254,6 +1256,16 @@
     "decline": "Rechazar",
     "discoverDeclineSuffix": "(pon el resto en el fondo)",
     "cascadeDeclineSuffix": "(baraja todas las cartas exiliadas hacia el fondo)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Lanzamiento gratis",
+    "title": "Lanza un hechizo gratis",
+    "subtitle": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
+    "subtitleNoBudget": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
+    "castNamed": "Lanzar {{name}}",
+    "castSuffix": "(sin pagar su coste de maná)",
+    "done": "Listo",
+    "doneSuffix": "(deja de lanzar hechizos de esta forma)"
   },
   "castingVariant": {
     "eyebrow": "Lanzar",

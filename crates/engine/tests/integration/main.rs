@@ -82,6 +82,7 @@ mod inevitable_betrayal_no_mana_cost;
 mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
+mod invoke_calamity_free_cast;
 mod issue_1509_sorcery_main_phase_cast;
 mod issue_1971_enduring_tenacity;
 mod issue_1973_rise_of_dark_realms;

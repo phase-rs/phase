@@ -2101,6 +2101,30 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("free cast".into(), "yes".into()));
             }
         }
+        Effect::FreeCastFromZones {
+            count,
+            max_total_mv,
+            filter,
+            zones,
+            exile_instead_of_graveyard,
+        } => {
+            d.push(("count".into(), count.to_string()));
+            if let Some(mv) = max_total_mv {
+                d.push(("total mana value".into(), mv.to_string()));
+            }
+            d.push(("filter".into(), fmt_target(filter)));
+            d.push((
+                "zones".into(),
+                zones
+                    .iter()
+                    .map(|z| format!("{z:?}"))
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            ));
+            if *exile_instead_of_graveyard {
+                d.push(("exile instead of graveyard".into(), "yes".into()));
+            }
+        }
         Effect::RollDie {
             count,
             sides,

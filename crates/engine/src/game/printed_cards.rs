@@ -790,6 +790,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::AddPendingETBCounters { .. }
         | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
         | Effect::PreventDamage { .. }
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }

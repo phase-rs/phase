@@ -355,7 +355,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Aftermath, and Harmonize exile when leaving the stack
                     // for any reason, including fizzle. Escape (CR 702.138)
                     // has no such clause — escaped spells go to graveyard normally.
-                    let dest = if casting_variant.replaces_stack_to_graveyard_with_exile() {
+                    let dest = if casting_variant.replaces_stack_to_graveyard_with_exile()
+                        || object_exiles_instead_of_graveyard(state, entry.id)
+                    {
                         Zone::Exile
                     } else {
                         Zone::Graveyard
@@ -517,13 +519,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // instead of putting it anywhere else any time it would leave the stack.
             // Flashback only appears on instants/sorceries — unconditional exile is correct.
             Zone::Exile
-        } else if casting_variant.replaces_stack_to_graveyard_with_exile()
+        } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
+            || object_exiles_instead_of_graveyard(state, entry.id))
             && !is_permanent_spell(state, entry.id)
         {
-            // CR 614.1a + CR 608.2n: Graveyard-cast permission riders that
-            // say "If a spell cast this way would be put into your graveyard,
-            // exile it instead" replace the normal non-permanent resolution
-            // destination. Permanent spells still resolve to the battlefield.
+            // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
+            // spell cast this way would be put into your graveyard, exile it
+            // instead") and the per-object Invoke Calamity rider both replace the
+            // normal non-permanent resolution destination. Permanent spells still
+            // resolve to the battlefield.
             Zone::Exile
         } else if is_permanent_spell(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.
@@ -1924,6 +1928,16 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
 /// "spell that will enter the battlefield" from "non-permanent spell"
 /// (e.g., Sneak's CR 702.190b alongside-attacker placement, which applies
 /// only to permanent spells).
+/// CR 614.1a + CR 608.2n: True when a spell carries the per-object "exile
+/// instead of graveyard" rider (Invoke Calamity's free-cast spells). Read by the
+/// stack-resolution router to send the spell to exile when it leaves the stack.
+fn object_exiles_instead_of_graveyard(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.exile_from_stack_instead_of_graveyard)
+}
+
 pub(crate) fn is_permanent_spell(state: &GameState, object_id: ObjectId) -> bool {
     use crate::types::card_type::CoreType;
 

@@ -122,7 +122,10 @@ fn starts_have_base_power_toughness(input: &str) -> bool {
     value(
         (),
         (
-            tag_no_case::<_, _, OracleError<'_>>("have"),
+            alt((
+                tag_no_case::<_, _, OracleError<'_>>("have"),
+                tag_no_case("has"),
+            )),
             multispace1,
             tag_no_case("base"),
             multispace1,
@@ -3391,6 +3394,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::AddPendingETBCounters { .. }
         | Effect::CreateEmblem { .. }
         | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
         | Effect::LoseTheGame { .. }
@@ -4654,6 +4658,21 @@ mod tests {
             chunks,
             vec![
                 "creatures your opponents control lose all abilities and have base power and toughness 1/1 until end of turn"
+            ]
+        );
+    }
+
+    /// CR 509.1b + CR 613.4b: Atomic Microsizer — "has" must suppress the bare-and
+    /// split the same way "have" does when it introduces a base P/T conjunct.
+    #[test]
+    fn bare_and_does_not_split_cant_be_blocked_and_has_base_pt() {
+        let chunks = clause_texts(
+            "That creature can't be blocked this turn and has base power and toughness 1/1 until end of turn",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "That creature can't be blocked this turn and has base power and toughness 1/1 until end of turn"
             ]
         );
     }

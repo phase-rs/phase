@@ -283,6 +283,8 @@
     "graveyardShort": "CIM",
     "graveyardTitle": "Cimitero ({{count}})",
     "libraryAlt": "Grimorio",
+    "library": "Grimorio",
+    "libraryLower": "grimorio",
     "libraryCount_one": "Grimorio ({{count}} carta)",
     "libraryCount_other": "Grimorio ({{count}} carte)",
     "playFromTop": "Gioca {{name}} dalla cima del grimorio",
@@ -1254,6 +1256,16 @@
     "decline": "Rifiuta",
     "discoverDeclineSuffix": "(metti il resto in fondo)",
     "cascadeDeclineSuffix": "(rimescola tutte le carte esiliate in fondo)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Lancio gratuito",
+    "title": "Lancia una magia gratuitamente",
+    "subtitle": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
+    "subtitleNoBudget": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
+    "castNamed": "Lancia {{name}}",
+    "castSuffix": "(senza pagare il suo costo di mana)",
+    "done": "Fatto",
+    "doneSuffix": "(smetti di lanciare magie in questo modo)"
   },
   "castingVariant": {
     "eyebrow": "Lancia",

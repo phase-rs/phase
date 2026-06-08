@@ -134,7 +134,9 @@ pub fn merge_object_onto(
     // base values rather than the prior merged form.
     remove_merge_layer_effect(state, target_id);
 
-    let Some((values, printed_ref)) = merged_copiable_values(state, &ordered, topmost_id) else {
+    let Some((values, display_source, printed_ref, token_image_ref)) =
+        merged_copiable_values(state, &ordered, topmost_id)
+    else {
         return;
     };
 
@@ -142,7 +144,15 @@ pub fn merge_object_onto(
         survivor.merged_components = ordered;
     }
 
-    install_merge_layer_effect(state, target_id, controller, values, printed_ref);
+    install_merge_layer_effect(
+        state,
+        target_id,
+        controller,
+        values,
+        display_source,
+        printed_ref,
+        token_image_ref,
+    );
 
     // CR 702.140c-d: the mutation is observable. NO ETB (CR 730.2b/c).
     events.push(GameEvent::Mutated {
@@ -159,12 +169,22 @@ fn merged_copiable_values(
     state: &GameState,
     ordered: &[ObjectId],
     topmost_id: ObjectId,
-) -> Option<(CopiableValues, Option<crate::types::card::PrintedCardRef>)> {
+) -> Option<(
+    CopiableValues,
+    crate::game::game_object::DisplaySource,
+    Option<crate::types::card::PrintedCardRef>,
+    Option<crate::types::card::TokenImageRef>,
+)> {
     let topmost = state.objects.get(&topmost_id)?;
     let printed_ref = topmost
         .base_printed_ref
         .clone()
         .or_else(|| topmost.printed_ref.clone());
+    // CR 730.2a: the merged permanent presents the topmost component's identity,
+    // so its art routing follows the topmost too (a token-topmost mutate carries
+    // the token's `display_source`/`token_image_ref`, not just `printed_ref`).
+    let display_source = topmost.display_source;
+    let token_image_ref = topmost.token_image_ref.clone();
     let mut values = crate::game::layers::compute_current_copiable_values(state, topmost_id)
         .unwrap_or_else(|| intrinsic_copiable_values(topmost));
     let mut abilities = Vec::new();
@@ -208,7 +228,7 @@ fn merged_copiable_values(
     values.static_definitions = Arc::new(statics);
     values.replacement_definitions = Arc::new(replacements);
     values.keywords = keywords;
-    Some((values, printed_ref))
+    Some((values, display_source, printed_ref, token_image_ref))
 }
 
 fn remove_merge_layer_effect(state: &mut GameState, target_id: ObjectId) {
@@ -233,7 +253,9 @@ fn install_merge_layer_effect(
     target_id: ObjectId,
     controller: crate::types::player::PlayerId,
     values: CopiableValues,
+    display_source: crate::game::game_object::DisplaySource,
     printed_ref: Option<crate::types::card::PrintedCardRef>,
+    token_image_ref: Option<crate::types::card::TokenImageRef>,
 ) {
     let effect_id = state.add_transient_continuous_effect(
         target_id,
@@ -242,7 +264,9 @@ fn install_merge_layer_effect(
         TargetFilter::SpecificObject { id: target_id },
         vec![ContinuousModification::CopyValues {
             values: Box::new(values),
+            display_source,
             printed_ref,
+            token_image_ref,
         }],
         None,
     );

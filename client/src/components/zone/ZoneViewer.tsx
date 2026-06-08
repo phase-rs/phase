@@ -9,14 +9,18 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
-import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import {
+  getPlayerZoneIds,
+  getWaitingForObjectChoiceIds,
+  isLibraryCardRevealedToViewer,
+} from "../../viewmodel/gameStateView.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
 import { playOrCastActionsForObject, resolveSingleActionDispatch } from "../../viewmodel/cardActionChoice.ts";
 
 interface ZoneViewerProps {
-  zone: "graveyard" | "exile";
+  zone: "graveyard" | "exile" | "library";
   playerId: number;
   onClose: () => void;
 }
@@ -24,11 +28,13 @@ interface ZoneViewerProps {
 const ZONE_TITLE_KEYS: Record<string, string> = {
   graveyard: "zone.graveyard",
   exile: "zone.exile",
+  library: "zone.library",
 };
 
 const ZONE_TITLE_LOWER_KEYS: Record<string, string> = {
   graveyard: "zone.graveyardLower",
   exile: "zone.exileLower",
+  library: "zone.libraryLower",
 };
 
 export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
@@ -42,6 +48,7 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const dispatchAction = useGameDispatch();
   const canActForWaitingState = useCanActForWaitingState();
+  const viewerId = usePlayerId();
   const zoneIds = useMemo(
     () => getPlayerZoneIds(gameState, zone, playerId),
     [gameState, playerId, zone],
@@ -49,8 +56,31 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
 
   const cards = useMemo(() => {
     if (!objects) return [];
-    return zoneIds.map((id) => objects[id]).filter(Boolean);
-  }, [objects, zoneIds]);
+    const resolved = zoneIds.map((id) => objects[id]).filter(Boolean) as GameObject[];
+    // CR 701.20: the library viewer shows only the cards the engine has revealed
+    // to this viewer (top-of-library reveals + private looks), top-first.
+    // Unrevealed cards are omitted entirely — visibility is gated on the engine's
+    // reveal sets, never inferred from name redaction (single-player renders the
+    // raw, unredacted state).
+    if (zone === "library") {
+      // The "look at the top card of your library" capability (Future Sight,
+      // Bolas's Citadel, Oracle of Mul Daya) is a continuous static that exposes
+      // the OWNER's own top card without adding it to revealed_cards/private_look
+      // — mirror LibraryPile's `peek` clause so that top still shows (and stays
+      // castable) through the modal.
+      const ownTopId =
+        viewerId === playerId &&
+        (gameState?.players[playerId]?.can_look_at_top_of_library ?? false)
+          ? gameState?.players[playerId]?.library?.[0]
+          : undefined;
+      return resolved.filter(
+        (obj) =>
+          isLibraryCardRevealedToViewer(gameState, obj.id, viewerId) ||
+          obj.id === ownTopId,
+      );
+    }
+    return resolved;
+  }, [objects, zoneIds, zone, gameState, viewerId, playerId]);
 
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
@@ -109,13 +139,18 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
               // Suspend, Plot, Warp, etc.). The zone viewer surfaces whatever
               // the engine reports — no per-mechanic permission inspection.
               //
+              // CR 401.5 + CR 118.9: for `library`, the engine only surfaces a
+              // play/cast action on the top card when a TopOfLibraryCastPermission
+              // (Future Sight, Bolas's Citadel, Mystic Forge, …) is active, so
+              // the playable affordance naturally lands on the revealed top.
+              //
               // CR 715.3d / CR 400.7i: this includes opponent-OWNED cards in
               // exile the viewer was granted permission to play (Hostage Taker,
               // Gonti, Thief of Sanity). Those live in the owner's exile pile,
               // so castability must NOT be gated on the pile belonging to the
               // viewer — `legalActionsByObject` (engine authority, keyed to the
               // player the permission was granted to) is the sole gate.
-              const castActions = (zone === "graveyard" || zone === "exile") && hasPriority
+              const castActions = hasPriority
                 ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
               const isValidTarget = currentLegalTargets.has(obj.id);

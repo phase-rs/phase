@@ -283,6 +283,8 @@
     "graveyardShort": "CIM",
     "graveyardTitle": "Cimetière ({{count}})",
     "libraryAlt": "Bibliothèque",
+    "library": "Bibliothèque",
+    "libraryLower": "bibliothèque",
     "libraryCount_one": "Bibliothèque ({{count}} carte)",
     "libraryCount_other": "Bibliothèque ({{count}} cartes)",
     "playFromTop": "Jouer {{name}} depuis le dessus de la bibliothèque",
@@ -1254,6 +1256,16 @@
     "decline": "Refuser",
     "discoverDeclineSuffix": "(mettre le reste en dessous)",
     "cascadeDeclineSuffix": "(mélanger toutes les cartes exilées en dessous)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Lancement gratuit",
+    "title": "Lancez un sort gratuitement",
+    "subtitle": "Choisissez un sort à lancer sans payer son coût de mana ({{remaining}} restant(s)). Valeur de mana totale restante : {{budget}}.",
+    "subtitleNoBudget": "Choisissez un sort à lancer sans payer son coût de mana ({{remaining}} restant(s)).",
+    "castNamed": "Lancer {{name}}",
+    "castSuffix": "(sans payer son coût de mana)",
+    "done": "Terminé",
+    "doneSuffix": "(arrêter de lancer des sorts de cette façon)"
   },
   "castingVariant": {
     "eyebrow": "Lancer",
