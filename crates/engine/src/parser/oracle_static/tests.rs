@@ -5406,6 +5406,34 @@ fn continuous_mods_grant_keyword_and_cant_be_blocked() {
     );
 }
 
+/// CR 509.1b + CR 613.4b: Atomic Microsizer — evasion restriction and base P/T
+/// set must parse from one compound predicate.
+#[test]
+fn continuous_mods_cant_be_blocked_and_has_base_pt() {
+    let mods = parse_continuous_modifications(
+        "can't be blocked this turn and has base power and toughness 1/1 until end of turn",
+    );
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlocked
+            }
+        )),
+        "missing CantBeBlocked grant in {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+        "missing SetPower(1) in {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+        "missing SetToughness(1) in {mods:?}"
+    );
+}
+
 /// Extract the subtype string from a single-subtype `IsPresent` filter, for
 /// asserting per-subtype conditional keyword grants.
 fn is_present_subtype(cond: &StaticCondition) -> Option<String> {

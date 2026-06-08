@@ -24327,6 +24327,56 @@ mod tests {
         }
     }
 
+    /// CR 509.1b + CR 613.4b: Atomic Microsizer — anaphoric subject with a
+    /// restriction conjunct and a trailing "has base power and toughness" conjunct
+    /// must stay one GenericEffect (sequence splitter recognizes "has" as well as
+    /// "have").
+    #[test]
+    fn that_creature_cant_be_blocked_and_has_base_pt_parses_as_single_generic_effect() {
+        let def = parse_effect_chain(
+            "That creature can't be blocked this turn and has base power and toughness 1/1 until end of turn",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "must parse as a single clause, not split into sub_ability: {:?}",
+            def.sub_ability
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                let mods: Vec<_> = static_abilities
+                    .iter()
+                    .flat_map(|s| s.modifications.iter())
+                    .collect();
+                assert!(
+                    mods.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::CantBeBlocked
+                        }
+                    )),
+                    "must contain CantBeBlocked: {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    "must contain SetPower(1): {mods:?}"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    "must contain SetToughness(1): {mods:?}"
+                );
+            }
+            other => panic!("expected single GenericEffect, got {other:?}"),
+        }
+    }
+
     /// Regression: a gain-keyword clause with no combat-requirement conjunct
     /// still parses as one `GenericEffect` with the duration recovered.
     #[test]

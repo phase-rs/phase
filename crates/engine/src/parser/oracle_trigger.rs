@@ -6280,6 +6280,10 @@ fn try_parse_event(
         },
         DealtCombatDamage,
         DealtDamage,
+        /// CR 120.10 + CR 120.2b: Excess noncombat damage received by the subject.
+        DealtExcessNoncombatDamage,
+        /// CR 120.10: Excess damage (combat or noncombat) received by the subject.
+        DealtExcessDamage,
         BecomesTapped,
         TappedForMana,
         BecomesUntapped,
@@ -6372,6 +6376,24 @@ fn try_parse_event(
             value(
                 SimpleEvent::BecomesTargetSpell { qualifier: None },
                 tag("becomes the target of a spell"),
+            ),
+            // CR 120.10 + CR 120.2b: Excess noncombat damage — precede generic damage arms.
+            value(
+                SimpleEvent::DealtExcessNoncombatDamage,
+                tag("is dealt excess noncombat damage"),
+            ),
+            value(
+                SimpleEvent::DealtExcessNoncombatDamage,
+                tag("are dealt excess noncombat damage"),
+            ),
+            // CR 120.10: Excess damage without combat/noncombat qualifier.
+            value(
+                SimpleEvent::DealtExcessDamage,
+                tag("is dealt excess damage"),
+            ),
+            value(
+                SimpleEvent::DealtExcessDamage,
+                tag("are dealt excess damage"),
             ),
             value(
                 SimpleEvent::DealtCombatDamage,
@@ -6504,6 +6526,17 @@ fn try_parse_event(
             SimpleEvent::DealtCombatDamage => {
                 def.mode = TriggerMode::DamageReceived;
                 def.damage_kind = DamageKindFilter::CombatOnly;
+                set_trigger_subject(&mut def, subject);
+            }
+            // CR 120.10: Any source deals excess damage to permanents matching `subject`.
+            SimpleEvent::DealtExcessDamage => {
+                def.mode = TriggerMode::ExcessDamageAll;
+                set_trigger_subject(&mut def, subject);
+            }
+            // CR 120.10 + CR 120.2b: Noncombat excess damage to `subject`.
+            SimpleEvent::DealtExcessNoncombatDamage => {
+                def.mode = TriggerMode::ExcessDamageAll;
+                def.damage_kind = DamageKindFilter::NoncombatOnly;
                 set_trigger_subject(&mut def, subject);
             }
             SimpleEvent::DealtDamage => {
@@ -19501,6 +19534,24 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    #[test]
+    fn trigger_opponents_creatures_dealt_excess_noncombat_damage() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures your opponents control are dealt excess noncombat damage, create a Treasure token.",
+            "Become Brutes",
+        );
+        assert_eq!(def.mode, TriggerMode::ExcessDamageAll);
+        assert_eq!(def.damage_kind, DamageKindFilter::NoncombatOnly);
+        assert!(def.batched);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.valid_target, None);
     }
 
     #[test]
