@@ -5796,8 +5796,7 @@ mod tests {
     /// Test parse_for_each_differently_named for distinct-by-name iteration.
     #[test]
     fn parse_for_each_differently_named_basic() {
-        let (rest, q) =
-            parse_for_each_differently_named("differently named basic land").unwrap();
+        let (rest, q) = parse_for_each_differently_named("differently named basic land").unwrap();
         assert_eq!(rest, "");
         match q {
             QuantityRef::ObjectCountDistinct { filter, qualities } => {
