@@ -4386,16 +4386,26 @@ fn resolve_chain_body(
         return Ok(());
     }
 
-    // CR 615.5: `PreventDamage` with a chained sub-ability installs the sub
-    // as the shield's `runtime_execute` continuation — it runs once per fired
-    // damage prevention event (Gatta and Luzzu's "prevent that damage and put
-    // that many +1/+1 counters on it"). The outer chain walker must NOT also
-    // resolve the sub-ability inline, or the rider would fire twice (once
-    // immediately when the shield is installed, and again from each
-    // post-replacement continuation). The shield is the single authority for
-    // the rider's execution lifecycle.
-    if matches!(ability.effect, Effect::PreventDamage { .. }) && ability.sub_ability.is_some() {
-        return Ok(());
+    // CR 615.5: `PreventDamage` with a chained `ContinuationStep` sub-ability
+    // installs the sub as the shield's `runtime_execute` continuation — it runs
+    // once per fired damage prevention event (Gatta and Luzzu's "prevent that
+    // damage and put that many +1/+1 counters on it"). The outer chain walker
+    // must NOT also resolve such a sub inline, or the rider would fire twice
+    // (once immediately when the shield is installed, and again from each
+    // post-replacement continuation). The shield is the single authority for the
+    // rider's execution lifecycle.
+    //
+    // CR 700.2d: A `SequentialSibling` sub is an INDEPENDENT instruction (a
+    // separate chosen mode of a modal spell — Dromoka's Command mode 3's
+    // `PutCounter`), not a rider. It is NOT installed as the shield's
+    // `runtime_execute`, so the chain walker must fall through to the generic
+    // sub resolution tail below and resolve it on its own target.
+    if matches!(ability.effect, Effect::PreventDamage { .. }) {
+        if let Some(sub) = ability.sub_ability.as_deref() {
+            if sub.sub_link == SubAbilityLink::ContinuationStep {
+                return Ok(());
+            }
+        }
     }
 
     // Extract moved objects for result forwarding when forward_result is set.

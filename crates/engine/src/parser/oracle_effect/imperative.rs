@@ -18,7 +18,7 @@ use super::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
+use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
@@ -3341,6 +3341,28 @@ fn parse_prevent_effect(text: &str) -> Effect {
         PreventionAmount::Next(n)
     };
 
+    // CR 609.7 + CR 615.2: prevention scoped to a chosen source (a targeted
+    // spell). "Prevent all damage target instant or sorcery spell would deal
+    // this turn" (Dromoka's Command) restricts the shield to a SINGLE chosen
+    // source object, not a blanket recipient-scoped prevent-all. When this
+    // matches, the recipient `target` collapses to `Any` and the source scope
+    // is carried as the `damage_source_filter`.
+    if let Some(source_filter) = parse_prevent_source_scope(text, &lower) {
+        // CR 609.7a: the source is chosen when the effect is created and applies
+        // even after the spell leaves the stack. The chosen spell lands in
+        // `ability.targets[0]` (the recipient `Any` surfaces no slot), so the
+        // shield captures it via `ParentTargetSlot { index: 0 }`.
+        return Effect::PreventDamage {
+            amount,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            scope,
+            damage_source_filter: Some(TargetFilter::And {
+                filters: vec![TargetFilter::ParentTargetSlot { index: 0 }, source_filter],
+            }),
+        };
+    }
+
     // Determine target
     let target = if nom_primitives::scan_contains(rest, "any target") {
         TargetFilter::Any
@@ -3398,6 +3420,65 @@ fn parse_prevent_damage_source_filter(text: &str, lower: &str) -> Option<TargetF
         Some(filter)
     } else {
         None
+    }
+}
+
+/// CR 609.7 + CR 615.2: Detect the source-scoped prevent form — "prevent
+/// [all/the next N] damage **target `<source>`** would deal this turn"
+/// (Dromoka's Command: "Prevent all damage target instant or sorcery spell
+/// would deal this turn").
+///
+/// This is distinct from the recipient form ("...damage **to** target
+/// creature"), which the caller already handles. The disambiguator is the
+/// trailing `" would deal"` clause: a source-scoped prevent names what the
+/// chosen object *deals*, whereas the recipient form names what is dealt *to*
+/// the target. We isolate the region before `" would deal"`, take the source
+/// descriptor after `"target "` (both via the `split_once_on_lower` combinator
+/// bridge — `take_until`+`tag`, never ad-hoc string dispatch), and run
+/// `parse_target` on it. We accept ONLY when the parsed filter resolves to a
+/// choosable stack source (a spell on the stack) — `parse_target` is the
+/// detector.
+///
+/// Returns the parsed `<source>` filter (e.g. an `Or`/`And` of stack-spell
+/// `Typed` legs) on match, or `None` to fall through to the recipient/by-source
+/// logic.
+fn parse_prevent_source_scope(text: &str, lower: &str) -> Option<TargetFilter> {
+    // Isolate the slice that precedes " would deal" (the source phrase region).
+    // `split_once_on_lower` composes `take_until`+`tag` internally and returns
+    // original-case slices, so the borrowed remainder escapes cleanly.
+    let (before_would_deal, _) = split_once_on_lower(text, lower, " would deal")?;
+    // Within that region, the source descriptor follows the "target " keyword.
+    let region_lower = before_would_deal.to_lowercase();
+    let (_, source_descriptor) = split_once_on_lower(before_would_deal, &region_lower, "target ")?;
+    let (source_filter, rem) = parse_target(source_descriptor);
+    // The candidate must consume the entire source descriptor and resolve to a
+    // choosable spell on the stack — otherwise this is not the source-scoped
+    // form (e.g. "target creature" recipient).
+    if rem.trim().is_empty() && filter_is_choosable_stack_source(&source_filter) {
+        Some(source_filter)
+    } else {
+        None
+    }
+}
+
+/// CR 609.7a: A source-scope prevent's chosen source must be a choosable object
+/// on the stack — a spell (`StackSpell`, or a `Typed` filter scoped `InZone
+/// Stack`), possibly wrapped in `And`/`Or`/`Not` (e.g. "instant or sorcery
+/// spell" → `Or` of two stack-spell legs). Mirrors `targeting.rs`'s
+/// `filter_targets_stack_spells`, kept local so the parser stays dependency-free
+/// of the runtime targeting module.
+fn filter_is_choosable_stack_source(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell => true,
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Stack)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_is_choosable_stack_source)
+        }
+        TargetFilter::Not { filter } => filter_is_choosable_stack_source(filter),
+        _ => false,
     }
 }
 
@@ -11621,6 +11702,79 @@ mod tests {
                 }
             ),
             "expected ScopedPlayer ExileTop, got {each:?}"
+        );
+    }
+
+    /// CR 609.7 + CR 615.2: A source-scoped prevent ("prevent all damage target
+    /// instant or sorcery spell would deal this turn" — Dromoka's Command)
+    /// collapses the recipient `target` to `Any` and carries the chosen source
+    /// as `damage_source_filter = And[ParentTargetSlot{0}, <stack-spell leaf>]`.
+    #[test]
+    fn prevent_source_scoped_spell_yields_parent_target_slot_filter() {
+        let effect = parse_prevent_effect(
+            "Prevent all damage target instant or sorcery spell would deal this turn.",
+        );
+        let Effect::PreventDamage {
+            amount,
+            target,
+            scope,
+            damage_source_filter,
+            ..
+        } = effect
+        else {
+            panic!("expected PreventDamage, got {effect:?}");
+        };
+        assert_eq!(amount, PreventionAmount::All);
+        assert_eq!(target, TargetFilter::Any);
+        assert_eq!(scope, PreventionScope::AllDamage);
+        let Some(TargetFilter::And { filters }) = damage_source_filter else {
+            panic!("expected And source filter, got {damage_source_filter:?}");
+        };
+        // First leg: the cast-time-chosen-source sentinel at slot 0.
+        assert!(
+            filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::ParentTargetSlot { index: 0 })),
+            "expected ParentTargetSlot {{ index: 0 }} leg, got {filters:?}"
+        );
+        // Sibling leg: the choosable instant-or-sorcery stack-spell filter.
+        let source_leaf = filters
+            .iter()
+            .find(|f| !matches!(f, TargetFilter::ParentTargetSlot { .. }))
+            .expect("source leaf present");
+        assert!(
+            is_stack_spell_leg(source_leaf)
+                || matches!(source_leaf, TargetFilter::Or { filters } if filters.iter().any(is_stack_spell_leg)),
+            "source leaf must scope to a stack spell, got {source_leaf:?}"
+        );
+    }
+
+    /// NEGATIVE: a recipient-scoped prevent ("prevent the next 3 damage to
+    /// target creature") must stay recipient-targeted — `target: Typed(creature)`
+    /// and `damage_source_filter: None` — proving the source-scope branch does
+    /// not divert the recipient form.
+    #[test]
+    fn prevent_recipient_scoped_creature_not_diverted_to_source() {
+        let effect = parse_prevent_effect(
+            "Prevent the next 3 damage that would be dealt to target creature this turn.",
+        );
+        let Effect::PreventDamage {
+            amount,
+            target,
+            damage_source_filter,
+            ..
+        } = effect
+        else {
+            panic!("expected PreventDamage, got {effect:?}");
+        };
+        assert_eq!(amount, PreventionAmount::Next(3));
+        assert!(
+            typed_leg(&target).is_some_and(|tf| has_type(tf, TypeFilter::Creature)),
+            "recipient target must stay Typed(creature), got {target:?}"
+        );
+        assert_eq!(
+            damage_source_filter, None,
+            "recipient prevent must not carry a source filter"
         );
     }
 }
