@@ -2,7 +2,7 @@ use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
     EffectKind, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
-    ResolvedAbility, TargetFilter, TargetRef,
+    ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -11,14 +11,46 @@ use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
+/// Resolve each child of an `And`/`Or` source filter and drop `StackSpell`
+/// legs (which `resolve_source_filter` maps to `TargetFilter::Any`). A leg that
+/// resolves to a bare `Any` carries no damage-time constraint, so it is pruned
+/// from the conjunction/disjunction — keeping only the `SpecificObject` identity
+/// pin and the typed (instant/sorcery) recheck. See `resolve_source_filter`'s
+/// `StackSpell` arm (CR 609.7a).
+fn resolve_and_prune_stack_spell_legs(
+    filters: &[TargetFilter],
+    state: &GameState,
+    source_id: ObjectId,
+    ability_targets: &[TargetRef],
+) -> Vec<TargetFilter> {
+    filters
+        .iter()
+        .map(|inner| resolve_source_filter(inner, state, source_id, ability_targets))
+        .filter(|f| !matches!(f, TargetFilter::Any))
+        .collect()
+}
+
 /// CR 614.1a: Resolve a damage source filter, replacing dynamic references
-/// (e.g., `IsChosenColor`) with concrete values from the source object's state.
+/// (e.g., `IsChosenColor`, `ParentTargetSlot`) with concrete values from the
+/// source object's state and the ability's chosen targets.
 fn resolve_source_filter(
     filter: &TargetFilter,
     state: &GameState,
     source_id: ObjectId,
+    ability_targets: &[TargetRef],
 ) -> TargetFilter {
     match filter {
+        // CR 609.7a: a cast-time-chosen source object ("target instant or
+        // sorcery spell") is captured into a SpecificObject shield so it
+        // persists after the spell leaves the stack.
+        TargetFilter::ParentTargetSlot { index } => ability_targets
+            .get(*index)
+            .and_then(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                _ => None,
+            })
+            .map(|id| TargetFilter::SpecificObject { id })
+            .unwrap_or(TargetFilter::None),
         TargetFilter::ChosenDamageSource => state
             .last_chosen_damage_source
             .as_ref()
@@ -27,25 +59,41 @@ fn resolve_source_filter(
                     TargetFilter::SpecificObject {
                         id: choice.source_id,
                     },
-                    resolve_source_filter(&choice.source_filter, state, source_id),
+                    resolve_source_filter(&choice.source_filter, state, source_id, ability_targets),
                 ],
             })
             .unwrap_or(TargetFilter::None),
         TargetFilter::Not { filter: inner } => TargetFilter::Not {
-            filter: Box::new(resolve_source_filter(inner, state, source_id)),
+            filter: Box::new(resolve_source_filter(
+                inner,
+                state,
+                source_id,
+                ability_targets,
+            )),
         },
+        // CR 609.7a: A `StackSpell` leg ("instant or sorcery SPELL") is a
+        // targeting-enumeration predicate (zone presence on the stack), not a
+        // damage-time property recheck. Once the chosen source is pinned by its
+        // `SpecificObject` identity, CR 609.7a applies the shield "even if that
+        // object is no longer in the zone it used to be in" — and the resolving
+        // spell deals its damage while leaving the stack. `matches_target_filter`
+        // never matches `StackSpell` at damage time (it is handled only at
+        // targeting call sites), so the leg is dropped here, leaving the typed
+        // (instant/sorcery) recheck (CR 609.7b) intact.
+        TargetFilter::StackSpell => TargetFilter::Any,
         TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .iter()
-                .map(|inner| resolve_source_filter(inner, state, source_id))
-                .collect(),
+            filters: resolve_and_prune_stack_spell_legs(filters, state, source_id, ability_targets),
         },
-        TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters
-                .iter()
-                .map(|inner| resolve_source_filter(inner, state, source_id))
-                .collect(),
-        },
+        TargetFilter::And { filters } => {
+            let pruned =
+                resolve_and_prune_stack_spell_legs(filters, state, source_id, ability_targets);
+            // An `And` reduced to a single non-trivial leg collapses to that leg.
+            match pruned.len() {
+                0 => TargetFilter::Any,
+                1 => pruned.into_iter().next().unwrap(),
+                _ => TargetFilter::And { filters: pruned },
+            }
+        }
         TargetFilter::Typed(tf) => {
             let has_chosen_ref = tf
                 .properties
@@ -165,6 +213,20 @@ pub fn resolve(
         }
     };
 
+    // CR 609.7 + CR 609.7a: A source-scoped prevent ("prevent all damage target
+    // instant or sorcery spell would deal this turn") carries its chosen source
+    // object in `ability.targets[0]` via a `ParentTargetSlot` sentinel in the
+    // source filter. Those targets are the damage SOURCE, not a recipient — so
+    // the shield must NOT be hosted on them as a recipient object. It routes to
+    // the untargeted branch (pending registry) scoped via `damage_source_filter`.
+    let source_scoped_prevent = matches!(
+        &effect_source_filter,
+        Some(TargetFilter::And { filters })
+            if filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::ParentTargetSlot { .. }))
+    );
+
     // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
     // count at effect-resolution time; the Next(n) shield itself is always static.
     let amount = match amount_dynamic {
@@ -186,7 +248,8 @@ pub fn resolve(
     // Filters using IsChosenColor need the chosen color resolved from the source object
     // and converted to a concrete HasColor filter for the shield.
     if let Some(src_filter) = effect_source_filter {
-        let resolved_filter = resolve_source_filter(&src_filter, state, ability.source_id);
+        let resolved_filter =
+            resolve_source_filter(&src_filter, state, ability.source_id, &ability.targets);
         shield = shield.damage_source_filter(resolved_filter);
     }
 
@@ -215,8 +278,16 @@ pub fn resolve(
         }
     }
 
+    // CR 615.5: A `ContinuationStep` rider ("prevent that damage and put that
+    // many +1/+1 counters on it" — Gatta and Luzzu) fires per prevented event,
+    // so it installs as the shield's `runtime_execute`. A `SequentialSibling`
+    // sub is an independent instruction (CR 700.2d — a separate chosen mode of a
+    // modal spell, e.g. Dromoka's Command mode 3), NOT a rider; it is resolved
+    // on its own by the chain walker and must not become the shield rider.
     if let Some(sub_ability) = &ability.sub_ability {
-        shield = shield.runtime_execute(sub_ability.as_ref().clone());
+        if sub_ability.sub_link == SubAbilityLink::ContinuationStep {
+            shield = shield.runtime_execute(sub_ability.as_ref().clone());
+        }
     }
 
     // CR 615: For targeted prevention ("prevent the next N damage to target creature"),
@@ -235,7 +306,8 @@ pub fn resolve(
     // The shield host is the chosen creature in that case, so the targeted
     // branch must also accept `ParentTarget` when `ability.targets` carries the
     // inherited parent targets.
-    let host_on_targets = !ability.targets.is_empty()
+    let host_on_targets = !source_scoped_prevent
+        && !ability.targets.is_empty()
         && (!target.is_context_ref() || matches!(target, TargetFilter::ParentTarget));
     if host_on_targets {
         for selected_target in &ability.targets {
@@ -1123,5 +1195,259 @@ mod tests {
             "shield must NOT land on the source — got {:?}",
             source_obj.replacement_definitions
         );
+    }
+
+    /// CR 609.7a: A source-scoped prevent's `ParentTargetSlot { 0 }` sentinel is
+    /// concretized into a `SpecificObject` shield from the ability's chosen
+    /// target, so the prevention persists after the spell leaves the stack. The
+    /// sibling `Typed` leg survives for the CR 609.7b damage-time recheck.
+    /// Mirrors `chosen_damage_source_resolves_to_specific_source_and_rechecked_filter`.
+    #[test]
+    fn parent_target_slot_resolves_to_specific_chosen_spell() {
+        use crate::types::ability::TypeFilter;
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        let typed_leg =
+            TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
+                TypeFilter::Instant,
+                TypeFilter::Sorcery,
+            ])));
+        let source_filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ParentTargetSlot { index: 0 },
+                typed_leg.clone(),
+            ],
+        };
+        let resolved = resolve_source_filter(
+            &source_filter,
+            &state,
+            ObjectId(99),
+            &[TargetRef::Object(spell)],
+        );
+        assert_eq!(
+            resolved,
+            TargetFilter::And {
+                filters: vec![TargetFilter::SpecificObject { id: spell }, typed_leg],
+            },
+            "ParentTargetSlot must resolve to the chosen spell's SpecificObject, keeping the Typed leg"
+        );
+    }
+
+    /// CR 609.7 + CR 609.7b: A source-scoped prevent shield is restricted to the
+    /// ONE chosen spell — damage from a different source (a creature trigger, as
+    /// in Shalai and Hallar's "+1/+1 counter → deal damage to opponent") is NOT
+    /// prevented, while damage from the chosen spell IS. This is the
+    /// discriminating regression for the Dromoka's Command infinite loop.
+    #[test]
+    fn source_scoped_shield_only_prevents_chosen_spell_not_other_sources() {
+        use crate::types::ability::TypeFilter;
+        let mut state = GameState::new_two_player(42);
+        // The Dromoka's Command spell on the stack chooses a spell as its source.
+        let dromoka = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dromoka's Command".to_string(),
+            Zone::Stack,
+        );
+        let chosen_spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Banefire".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&chosen_spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Sorcery);
+        // An unrelated creature source (Shalai) that must NOT be shielded.
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Shalai and Hallar".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: Some(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ParentTargetSlot { index: 0 },
+                        TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(
+                            vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        ))),
+                    ],
+                }),
+            },
+            vec![TargetRef::Object(chosen_spell)],
+            dromoka,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The shield must be a global pending shield (the source instant leaves
+        // the stack), scoped to the chosen spell — NOT hosted on the chosen
+        // spell as a recipient.
+        assert_eq!(
+            state.pending_damage_replacements.len(),
+            1,
+            "source-scoped shield must go to the pending registry"
+        );
+        assert!(
+            state
+                .objects
+                .get(&chosen_spell)
+                .unwrap()
+                .replacement_definitions
+                .is_empty(),
+            "shield must NOT be hosted on the chosen spell as a recipient"
+        );
+        let shield = &state.pending_damage_replacements[0];
+        assert_eq!(
+            shield.damage_source_filter,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: chosen_spell },
+                    TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
+                        TypeFilter::Instant,
+                        TypeFilter::Sorcery,
+                    ]))),
+                ],
+            })
+        );
+
+        // Damage from the chosen spell IS prevented.
+        let spell_ctx = deal_damage::DamageContext::from_source(&state, chosen_spell).unwrap();
+        let spell_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &spell_ctx,
+            TargetRef::Player(PlayerId(0)),
+            5,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(spell_result, deal_damage::DamageResult::Applied(0)),
+            "damage from the chosen spell must be prevented"
+        );
+        assert_eq!(state.players[0].life, 20);
+
+        // Damage from the unrelated creature is NOT prevented (no loop).
+        let creature_ctx = deal_damage::DamageContext::from_source(&state, creature).unwrap();
+        let creature_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &creature_ctx,
+            TargetRef::Player(PlayerId(0)),
+            3,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(creature_result, deal_damage::DamageResult::Applied(3)),
+            "damage from a non-chosen source must NOT be prevented"
+        );
+        assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 615.5 + CR 700.2d: A `ContinuationStep` rider (Gatta and Luzzu) is
+    /// installed as the shield's `runtime_execute`, but a `SequentialSibling`
+    /// sub (Dromoka's Command mode 3's independent `PutCounter`) is NOT — it is
+    /// an independent instruction resolved by the chain walker, not a rider.
+    #[test]
+    fn sequential_sibling_sub_is_not_installed_as_shield_rider() {
+        use crate::types::ability::QuantityExpr;
+        use crate::types::counter::CounterType;
+
+        fn put_counter_sub(source: ObjectId, link: SubAbilityLink) -> ResolvedAbility {
+            let mut sub = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            sub.sub_link = link;
+            sub
+        }
+
+        // ContinuationStep rider → installed.
+        {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Gatta and Luzzu".into(),
+                Zone::Battlefield,
+            );
+            let ability = make_prevent_ability(
+                source,
+                PreventionAmount::All,
+                PreventionScope::AllDamage,
+                vec![],
+            )
+            .sub_ability(put_counter_sub(source, SubAbilityLink::ContinuationStep));
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            let shield = &state.objects.get(&source).unwrap().replacement_definitions[0];
+            assert!(
+                shield.runtime_execute.is_some(),
+                "a ContinuationStep rider must install as runtime_execute"
+            );
+        }
+
+        // SequentialSibling sub → NOT installed.
+        {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Dromoka's Command".into(),
+                Zone::Battlefield,
+            );
+            let ability = make_prevent_ability(
+                source,
+                PreventionAmount::All,
+                PreventionScope::AllDamage,
+                vec![],
+            )
+            .sub_ability(put_counter_sub(source, SubAbilityLink::SequentialSibling));
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+            let shield = &state.objects.get(&source).unwrap().replacement_definitions[0];
+            assert!(
+                shield.runtime_execute.is_none(),
+                "a SequentialSibling sub must NOT install as runtime_execute"
+            );
+        }
     }
 }

@@ -16384,6 +16384,18 @@ fn try_parse_put_zone_change_parts(
             // (see `parse_total_mana_value_target_constraint` in `lower.rs`).
             let stripped_mv = strip_total_mana_value_target_phrase(target_text);
             let target_text: &str = stripped_mv.as_deref().unwrap_or(target_text);
+            // CR 400.7 + CR 110.2a: Mass put-onto-battlefield text moves every
+            // matching object from the origin zone. Strip the mass quantifier
+            // before target parsing so the filter mirrors the `return all`
+            // dispatcher instead of relying on parse_target to re-strip it.
+            let (is_mass, target_text) = if let Some((_, rest)) =
+                nom_on_lower(target_text, &target_text.to_ascii_lowercase(), |input| {
+                    value((), alt((tag("all "), tag("each ")))).parse(input)
+                }) {
+                (true, rest)
+            } else {
+                (false, target_text)
+            };
             let up_to = parse_up_to_one_target_prefix(before.lower) || choice_count.is_some();
             let (target, _) = parse_target(target_text);
             // CR 202.3 + CR 107.3i: A trailing "where X is <expression>"
@@ -16455,6 +16467,23 @@ fn try_parse_put_zone_change_parts(
             };
             let enter_transformed = destination == Zone::Battlefield
                 && parse_battlefield_transformed_qualifier(after.lower);
+            if is_mass && enter_with_counters.is_empty() {
+                // No printed mass put-onto-battlefield card currently combines
+                // `all`/`each` with transformed, attacking, or up-to qualifiers;
+                // those remain on the single-object ChangeZone path until a
+                // real card needs corresponding ChangeZoneAll fields.
+                return Some((
+                    Effect::ChangeZoneAll {
+                        origin: infer_origin_zone(after_put_tp.lower),
+                        destination,
+                        target,
+                        enters_under,
+                        enter_tapped,
+                        face_down_profile: None,
+                    },
+                    choice_count,
+                ));
+            }
             return Some((
                 Effect::ChangeZone {
                     origin: infer_origin_zone(after_put_tp.lower),
@@ -17051,6 +17080,8 @@ fn infer_origin_zone(lower: &str) -> Option<Zone> {
         || scan_contains_phrase(lower, "from a graveyard")
         || scan_contains_phrase(lower, "from a single graveyard")
         || scan_contains_phrase(lower, "from a random graveyard")
+        || scan_contains_phrase(lower, "from all graveyards")
+        || scan_contains_phrase(lower, "from each graveyard")
     {
         Some(Zone::Graveyard)
     } else if scan_contains_phrase(lower, "from exile")
@@ -26433,7 +26464,7 @@ mod tests {
         );
     }
 
-    /// CR 701.33 + CR 701.18 + CR 608.2b: Zimone's Experiment end-to-end.
+    /// CR 701.20b + CR 608.2c + CR 608.2b: Zimone's Experiment end-to-end.
     ///
     /// `"Look at the top five cards of your library. You may reveal up to two
     /// creature and/or land cards from among them, then put the rest on the
@@ -26491,12 +26522,12 @@ mod tests {
             other => panic!("expected Or {{ [Creature, Land] }}, got {other:?}"),
         }
 
-        // First sub_ability: ChangeZone { TrackedSetFiltered(Land) → Battlefield tapped }.
+        // First sub_ability: ChangeZoneAll { TrackedSetFiltered(Land) → Battlefield tapped }.
         let sub1 = def
             .sub_ability
             .as_ref()
             .expect("first sub_ability (Land routing) must exist");
-        let Effect::ChangeZone {
+        let Effect::ChangeZoneAll {
             destination: dest1,
             target: target1,
             enter_tapped,
@@ -26504,7 +26535,7 @@ mod tests {
         } = &*sub1.effect
         else {
             panic!(
-                "expected ChangeZone in first sub_ability, got {:?}",
+                "expected ChangeZoneAll in first sub_ability, got {:?}",
                 sub1.effect
             );
         };
@@ -26520,19 +26551,19 @@ mod tests {
             other => panic!("expected TrackedSetFiltered, got {other:?}"),
         }
 
-        // Second sub_ability: ChangeZone { TrackedSetFiltered(Creature) → Hand }.
+        // Second sub_ability: ChangeZoneAll { TrackedSetFiltered(Creature) → Hand }.
         let sub2 = sub1
             .sub_ability
             .as_ref()
             .expect("second sub_ability (Creature routing) must exist");
-        let Effect::ChangeZone {
+        let Effect::ChangeZoneAll {
             destination: dest2,
             target: target2,
             ..
         } = &*sub2.effect
         else {
             panic!(
-                "expected ChangeZone in second sub_ability, got {:?}",
+                "expected ChangeZoneAll in second sub_ability, got {:?}",
                 sub2.effect
             );
         };
@@ -44131,6 +44162,42 @@ fn issue_2402_hazel_copy_target_token_trigger_parses() {
         .properties
         .iter()
         .any(|prop| matches!(prop, FilterProp::Token)));
+}
+
+#[test]
+fn issue_1973_rise_of_dark_realms_put_all_graveyards_parses_change_zone_all() {
+    for text in [
+        "Put all creature cards from all graveyards onto the battlefield under your control.",
+        "Put each creature card from each graveyard onto the battlefield under your control.",
+        "Put all creature cards from each player's graveyard onto the battlefield under your control.",
+    ] {
+        let e = parse_effect(text);
+        let Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            enters_under,
+            ..
+        } = e
+        else {
+            panic!("mass graveyard put must lower to ChangeZoneAll, got {e:?}");
+        };
+        assert_eq!(origin, Some(Zone::Graveyard), "{text}");
+        assert_eq!(destination, Zone::Battlefield, "{text}");
+        assert_eq!(enters_under, Some(ControllerRef::You), "{text}");
+
+        let typed = match target {
+            TargetFilter::Typed(typed) => typed,
+            other => panic!("mass graveyard put must keep typed creature-card filter, got {other:?}"),
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature), "{text}");
+        assert!(
+            typed
+                .properties
+                .contains(&FilterProp::InZone { zone: Zone::Graveyard }),
+            "{text}"
+        );
+    }
 }
 
 #[test]

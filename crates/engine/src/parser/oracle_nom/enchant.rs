@@ -15,12 +15,15 @@ use nom::combinator::value;
 use nom::Parser;
 
 use super::error::OracleResult;
+use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AttachmentKind, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
 };
+use crate::types::card_type::{noncreature_subtype_set, SubtypeSet};
 
-/// CR 702.5a: One enchantable core-type or land-subtype token. Driven by
-/// `value()` + `alt()` so additional types slot in as one-line extensions.
+/// CR 702.5a: One enchantable core-type or supported subtype token. Core
+/// types and established basic-land subtype legs stay as literal nom arms;
+/// artifact subtypes delegate to the canonical subtype classifier below.
 ///
 /// Basic land subtypes (Forest, Plains, Island, Swamp, Mountain) are included
 /// per CR 205.3i — basic land types are the canonical Aura targets for
@@ -31,8 +34,12 @@ use crate::types::ability::{
 pub(crate) fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter> {
     alt((
         value(TypeFilter::Creature, tag("creature")),
-        value(TypeFilter::Land, tag("land")),
         value(TypeFilter::Artifact, tag("artifact")),
+        // CR 205.3g + CR 702.5a: Artifact subtype legs use the canonical
+        // subtype registry. This must precede `land` so `Lander` is not
+        // short-matched as the core Land type.
+        parse_artifact_subtype_enchant_leg,
+        value(TypeFilter::Land, tag("land")),
         value(TypeFilter::Enchantment, tag("enchantment")),
         value(TypeFilter::Planeswalker, tag("planeswalker")),
         value(TypeFilter::Permanent, tag("permanent")),
@@ -49,6 +56,27 @@ pub(crate) fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter
         value(TypeFilter::Subtype("Mountain".to_string()), tag("mountain")),
     ))
     .parse(input)
+}
+
+fn parse_artifact_subtype_enchant_leg(input: &str) -> OracleResult<'_, TypeFilter> {
+    let Some((subtype, consumed)) = parse_subtype(input) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+
+    if !matches!(
+        noncreature_subtype_set(&subtype),
+        Some(SubtypeSet::Artifact)
+    ) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    Ok((&input[consumed..], TypeFilter::Subtype(subtype)))
 }
 
 /// Separator between enchant list legs. Covers serial-comma (", or "/", and "),
