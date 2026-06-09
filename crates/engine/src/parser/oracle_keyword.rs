@@ -1336,6 +1336,30 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.160a + CR 718.3b: Prototype {cost} — {P}/{T}. The Oracle line carries
+    // the secondary (prototype) power/toughness that the bare MTGJSON keyword lacks;
+    // the generic name/param split below would drop the "— P/T" segment. CR 718.3b:
+    // the prototyped spell/permanent uses ONLY this alternative P/T — never the
+    // top-level (full-cast) P/T — so it must come from this Oracle segment.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("prototype ").parse(text) {
+        if let Ok((_, (cost_str, pt_str))) =
+            split_once_on(rest, "\u{2014}").or_else(|_| split_once_on(rest, "--"))
+        {
+            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str.trim());
+            if let Ok((after_power, power)) = nom_primitives::parse_number.parse(pt_str.trim()) {
+                if let Ok((tough_str, _)) = tag::<_, _, OracleError<'_>>("/").parse(after_power) {
+                    if let Ok((_, toughness)) = nom_primitives::parse_number.parse(tough_str) {
+                        return Some(Keyword::Prototype {
+                            cost,
+                            power: Some(power as i32),
+                            toughness: Some(toughness as i32),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // CR 702.60a: Ripple N — when you cast this spell, you may reveal the top N cards
     // of your library and cast any with the same name without paying their mana cost.
     // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels;
@@ -3126,6 +3150,45 @@ mod tests {
         // CR 702.62a: Suspend lines must be recognized as keyword cost lines
         assert!(is_keyword_cost_line("suspend 4\u{2014}{u}"));
         assert!(is_keyword_cost_line("suspend 1\u{2014}{r}"));
+    }
+
+    #[test]
+    fn parse_prototype_keyword_line_extracts_pt() {
+        use crate::types::mana::ManaCost;
+
+        // CR 702.160a + CR 718.3b: "Prototype {cost} — {P}/{T}" carries the
+        // alternative power/toughness. The prototype P/T (2/1) must come from the
+        // Oracle "— P/T" segment, NOT the card's top-level P/T (Arcane Proxy: 4/3).
+        let kw = parse_keyword_from_oracle("prototype {1}{u}{u} \u{2014} 2/1").unwrap();
+        match kw {
+            Keyword::Prototype {
+                cost,
+                power,
+                toughness,
+            } => {
+                assert_eq!(power, Some(2));
+                assert_eq!(toughness, Some(1));
+                assert!(
+                    matches!(cost, ManaCost::Cost { generic: 1, ref shards } if shards.len() == 2),
+                    "expected {{1}}{{U}}{{U}}, got {cost:?}"
+                );
+            }
+            other => panic!("Expected Prototype with P/T, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_prototype_keyword_line_without_pt_falls_through() {
+        // Graceful degradation: a cost-only "prototype {2}" line (no "— P/T")
+        // must NOT panic — it falls through to the cost-only keyword path.
+        let kw = parse_keyword_from_oracle("prototype {2}");
+        if let Some(Keyword::Prototype {
+            power, toughness, ..
+        }) = kw
+        {
+            assert_eq!(power, None);
+            assert_eq!(toughness, None);
+        }
     }
 
     #[test]
