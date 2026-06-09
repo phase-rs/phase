@@ -711,6 +711,7 @@ pub(crate) fn apply_counter_removal(
     let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
     let removed = (*entry).min(count);
     *entry = entry.saturating_sub(count);
+    let is_zero = *entry == 0;
 
     // CR 306.5c / CR 310.4c: Keep obj.loyalty / obj.defense in
     // sync with the counter map — the field IS the counter count.
@@ -731,9 +732,7 @@ pub(crate) fn apply_counter_removal(
     // objects correctly fall back to their field value. (Defense needs no such
     // exception: the layer system never resets obj.defense, so a battle drained
     // to 0 keeps defense 0 without help and the CR 704.5v SBA fires normally.)
-    let keep_zero = was_present
-        && counter_type == CounterType::Loyalty
-        && obj.counters.get(&counter_type).copied() == Some(0);
+    let keep_zero = was_present && counter_type == CounterType::Loyalty && is_zero;
     crate::types::counter::prune_zero_counters(&mut obj.counters);
     if keep_zero {
         obj.counters.insert(counter_type.clone(), 0);

@@ -50,13 +50,11 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   const graveyard = useGameStore(
     (s) => s.gameState?.players[playerId]?.graveyard ?? EMPTY,
   );
-  const topObjectId = useGameStore((s) => {
+  const topObject = useGameStore((s) => {
     const gy = s.gameState?.players[playerId]?.graveyard;
-    return gy && gy.length > 0 ? gy[gy.length - 1] : null;
+    const id = gy && gy.length > 0 ? gy[gy.length - 1] : null;
+    return id != null ? (s.gameState?.objects[id] ?? null) : null;
   });
-  const topObject = useGameStore((s) =>
-    topObjectId != null ? (s.gameState?.objects[topObjectId] ?? null) : null,
-  );
   const topLookup = useMemo(
     () => (topObject ? cardImageLookup(topObject) : null),
     [topObject],
