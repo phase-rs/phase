@@ -525,10 +525,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
                 if rest.trim().is_empty() || rest.trim() == "." {
                     definition.condition = Some(sc);
                 }
-            } else if tag::<_, _, OracleError<'_>>("it targets ")
-                .parse(cond_text)
-                .is_ok()
-            {
+            } else if is_nested_stack_target_condition(cond_text) {
                 let filter = parse_it_targets_that_targets_spell_filter(cond_text)?;
                 // CR 115.9b: "if it targets a spell or ability that targets a [type]
                 // you control [with power N or greater]" — wire the parsed nested
@@ -542,6 +539,22 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     }
 
     Some(definition)
+}
+
+fn is_nested_stack_target_condition(cond_text: &str) -> bool {
+    preceded(
+        tag::<_, _, OracleError<'_>>("it targets "),
+        preceded(
+            opt(alt((tag("a "), tag("an "), tag("one or more ")))),
+            alt((
+                tag("spell or ability that targets "),
+                tag("spell that targets "),
+                tag("ability that targets "),
+            )),
+        ),
+    )
+    .parse(cond_text)
+    .is_ok()
 }
 
 pub(crate) fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
