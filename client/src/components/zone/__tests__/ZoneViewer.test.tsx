@@ -7,8 +7,8 @@ import { useUiStore } from "../../../stores/uiStore.ts";
 import { ZoneViewer } from "../ZoneViewer.tsx";
 
 vi.mock("../../card/CardImage.tsx", () => ({
-  CardImage: ({ cardName }: { cardName: string }) => (
-    <div aria-label={cardName} data-testid="card-image" />
+  CardImage: ({ cardName, oracleId }: { cardName: string; oracleId?: string }) => (
+    <div aria-label={cardName} data-testid="card-image" data-oracle-id={oracleId ?? ""} />
   ),
 }));
 
@@ -143,6 +143,28 @@ describe("ZoneViewer", () => {
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ type: "CastSpell" }),
+    );
+  });
+
+  it("resolves graveyard card art via printed_ref oracle_id, not name", () => {
+    // Regression: a transformed / DFC / back-face card (e.g. a transformed
+    // planeswalker) has a back-face name that isn't a scryfall-data key, so the
+    // legacy name-only lookup failed and rendered the oversized broken-image
+    // fallback ("huge, no art"). The viewer must use the engine's printed_ref
+    // (oracle_id) like every other object-rendering surface.
+    const pw = makeObject({
+      id: 42,
+      name: "Ral, Leyline Prodigy",
+      card_types: { supertypes: [], core_types: ["Planeswalker"], subtypes: ["Ral"] },
+      transformed: true,
+      printed_ref: { oracle_id: "ral-oracle-id", face_name: "Ral, Leyline Prodigy" },
+    });
+    useGameStore.setState({ gameState: makeState(pw) });
+
+    render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
+
+    expect(screen.getByTestId("card-image").getAttribute("data-oracle-id")).toBe(
+      "ral-oracle-id",
     );
   });
 
