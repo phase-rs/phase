@@ -882,3 +882,104 @@ fn three_way_oxford_disjunctive_doubler_source() {
         ]
     );
 }
+
+/// CR 613.1d + CR 613.4b + CR 613.1g (issue #2363): Grand Master of Flowers —
+/// "As long as ~ has seven or more loyalty counters on him, he's a 7/7 Dragon
+/// God creature with flying and indestructible."
+/// The parser must emit SetPower(7), SetToughness(7), AddType(Creature),
+/// AddSubtype(Dragon), AddSubtype(God), AddKeyword(Flying),
+/// AddKeyword(Indestructible), plus a non-null HasCounters condition.
+#[test]
+fn grand_master_of_flowers_becomes_777_dragon_god_creature() {
+    let text = "As long as ~ has seven or more loyalty counters on him, \
+                he's a 7/7 Dragon God creature with flying and indestructible.";
+    let def = parse_static_line(text)
+        .unwrap_or_else(|| panic!("Grand Master animation static must parse; text = {text:?}"));
+    let mods = &def.modifications;
+
+    assert!(
+        mods.contains(&ContinuousModification::SetPower { value: 7 }),
+        "expected SetPower(7) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetToughness { value: 7 }),
+        "expected SetToughness(7) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature
+        }),
+        "expected AddType(Creature) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Dragon".to_string()
+        }),
+        "expected AddSubtype(Dragon) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "God".to_string()
+        }),
+        "expected AddSubtype(God) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }),
+        "expected AddKeyword(Flying) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible
+        }),
+        "expected AddKeyword(Indestructible) in {mods:?}"
+    );
+    assert!(
+        def.condition.is_some(),
+        "expected a HasCounters condition (loyalty counter threshold); got None"
+    );
+}
+
+/// CR 613.1d + CR 613.4b + CR 613.1g (issue #2363): "she's a" gendered pronoun
+/// variant — confirms the parser accepts feminine pronouns on cards like future
+/// Planeswalkers that become creatures.
+#[test]
+fn gendered_pronoun_she_becomes_creature_static() {
+    let text = "As long as ~ has three or more loyalty counters on her, \
+                she's a 3/3 Warrior creature with first strike.";
+    let def = parse_static_line(text)
+        .unwrap_or_else(|| panic!("gendered she's-a animation static must parse; text = {text:?}"));
+    let mods = &def.modifications;
+
+    assert!(
+        mods.contains(&ContinuousModification::SetPower { value: 3 }),
+        "expected SetPower(3) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetToughness { value: 3 }),
+        "expected SetToughness(3) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature
+        }),
+        "expected AddType(Creature) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Warrior".to_string()
+        }),
+        "expected AddSubtype(Warrior) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike
+        }),
+        "expected AddKeyword(FirstStrike) in {mods:?}"
+    );
+    assert!(
+        def.condition.is_some(),
+        "expected a HasCounters condition; got None"
+    );
+}
