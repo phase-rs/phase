@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::ability_utils::append_to_sub_chain;
+use crate::game::effects::player_counter;
 use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
 use crate::game::filter;
 use crate::game::keywords;
@@ -18,8 +19,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::player::PlayerId;
+use crate::types::keywords::KeywordKind;
+use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
 
 /// Source attributes needed for damage application (CR 120.3).
@@ -103,14 +104,11 @@ impl DamageContext {
                 source_id,
                 KeywordKind::Infect,
             ),
-            combat_damage_poison: obj
-                .keywords
-                .iter()
-                .filter_map(|keyword| match keyword {
-                    Keyword::Toxic(amount) => Some(*amount),
-                    _ => None,
-                })
-                .sum(),
+            // CR 702.164b: total toxic value = sum of N over ALL effective toxic
+            // instances (printed + granted, on/off battlefield), matching the
+            // sibling effective-keyword flags above rather than reading printed
+            // `obj.keywords` directly.
+            combat_damage_poison: keywords::effective_total_toxic_value(state, source_id),
         })
     }
 
@@ -419,9 +417,19 @@ pub(crate) fn apply_damage_after_replacement(
                 return DamageResult::Applied(0);
             }
             if ctx.has_infect {
-                // CR 702.90: Infect deals damage to players as poison counters.
-                if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
-                    player.poison_counters += actual_amount;
+                // CR 120.3b + CR 614.17: Infect deals damage to players as poison
+                // counters. Route through the player-counter replacement pipeline
+                // so "players can't get poison counters" / poison-doublers apply;
+                // the actor is the source's controller.
+                if !player_counter::add_player_counter_with_replacement(
+                    state,
+                    ctx.controller,
+                    *player_id,
+                    PlayerCounterKind::Poison,
+                    actual_amount,
+                    events,
+                ) {
+                    return DamageResult::NeedsChoice;
                 }
             } else {
                 // CR 120.3a: Damage to a player causes life loss.
@@ -437,10 +445,19 @@ pub(crate) fn apply_damage_after_replacement(
                 && ctx.source_is_creature
                 && ctx.combat_damage_poison > 0
             {
-                // CR 702.164c: Toxic adds poison counters when a creature
-                // deals combat damage to a player.
-                if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
-                    player.poison_counters += ctx.combat_damage_poison;
+                // CR 120.3g + CR 702.164c + CR 614.17: Toxic adds poison counters
+                // when a creature deals combat damage to a player. Route through
+                // the player-counter replacement pipeline (prevention/doublers);
+                // the actor is the source's controller.
+                if !player_counter::add_player_counter_with_replacement(
+                    state,
+                    ctx.controller,
+                    *player_id,
+                    PlayerCounterKind::Poison,
+                    ctx.combat_damage_poison,
+                    events,
+                ) {
+                    return DamageResult::NeedsChoice;
                 }
             }
         }
@@ -2220,7 +2237,7 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: spell_id },
             vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Lifelink,
+                keyword: crate::types::keywords::Keyword::Lifelink,
             }],
             None,
         );
