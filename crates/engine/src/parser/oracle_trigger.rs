@@ -4219,16 +4219,15 @@ fn starts_with_subject_phrase(text: &str) -> bool {
 /// Extract the trigger keyword ("When " or "Whenever ") from a condition string.
 /// Returns None if no valid trigger keyword is found.
 fn extract_trigger_keyword(cond_lower: &str) -> Option<&'static str> {
-    // allow-noncombinator: trigger keyword extraction for compound split — extracts
-    // the literal trigger word from an already-lowercased structural prefix, not
-    // parsing dispatch.
-    if cond_lower.starts_with("whenever ") { // allow-noncombinator: trigger keyword extraction for compound split
-        Some("Whenever ")
-    } else if cond_lower.starts_with("when ") { // allow-noncombinator: trigger keyword extraction for compound split
-        Some("When ")
-    } else {
-        None
+    // allow-noncombinator: structural prefix read on already-lowercased string, not parsing dispatch
+    if cond_lower.starts_with("whenever ") {
+        return Some("Whenever ");
     }
+    // allow-noncombinator: structural prefix read on already-lowercased string, not parsing dispatch
+    if cond_lower.starts_with("when ") {
+        return Some("When ");
+    }
+    None
 }
 
 /// Split serial compound events sharing one subject — the N-way branch of
