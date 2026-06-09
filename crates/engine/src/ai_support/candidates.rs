@@ -2392,6 +2392,15 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             kind: CastOfferKind::FreeCastWindow { .. },
             ..
         }
+        | WaitingFor::ScryChoice { .. }
+        | WaitingFor::DigChoice { .. }
+        | WaitingFor::SurveilChoice { .. }
+        | WaitingFor::RevealChoice { .. }
+        | WaitingFor::SearchChoice { .. }
+        | WaitingFor::SearchPartitionChoice { .. }
+        | WaitingFor::OutsideGameChoice { .. }
+        | WaitingFor::ChooseFromZoneChoice { .. }
+        | WaitingFor::EffectZoneChoice { .. }
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::RepeatDecision { .. }
         | WaitingFor::LearnChoice { .. }
