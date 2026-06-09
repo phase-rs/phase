@@ -1745,8 +1745,8 @@ fn blood_ability() -> AbilityDefinition {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             },
             AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,
@@ -1860,7 +1860,7 @@ fn lander_ability() -> AbilityDefinition {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -3000,7 +3000,7 @@ mod tests {
         assert!(matches!(
             *put.effect,
             Effect::ChangeZone {
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 ..
             }
         ));
@@ -4543,7 +4543,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::White,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],

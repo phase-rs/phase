@@ -264,6 +264,7 @@
     "grantsProperty": "Concede una proprietà alla magia"
   },
   "zone": {
+    "commandZone": "Zona di comando",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",

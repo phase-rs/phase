@@ -264,6 +264,7 @@
     "grantsProperty": "Otorga una propiedad al hechizo"
   },
   "zone": {
+    "commandZone": "Zona de mando",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",

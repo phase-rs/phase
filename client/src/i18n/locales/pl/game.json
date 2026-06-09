@@ -264,6 +264,7 @@
     "grantsProperty": "Nadaje czarowi właściwość"
   },
   "zone": {
+    "commandZone": "Strefa dowodzenia",
     "emblem": "Emblemat",
     "emblemFallback": "Emblemat",
     "commander": "Dowódca",

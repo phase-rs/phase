@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-08T00:00:00Z",
+  "updated": "2026-06-09T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -758,6 +758,138 @@
       ]
     },
     {
+      "name": "Grixis Reanimator",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "R",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Abhorrent Oculus"
+        },
+        {
+          "count": 4,
+          "name": "Archon of Cruelty"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 4,
+          "name": "Emperor of Bones"
+        },
+        {
+          "count": 4,
+          "name": "Faithless Looting"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Persist"
+        },
+        {
+          "count": 4,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 4,
+          "name": "Psychic Frog"
+        },
+        {
+          "count": 1,
+          "name": "Raucous Theater"
+        },
+        {
+          "count": 1,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Thought Scour"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 1,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 4,
+          "name": "Unearth"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 4,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "Damping Sphere"
+        },
+        {
+          "count": 2,
+          "name": "Meltdown"
+        },
+        {
+          "count": 2,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 1,
+          "name": "Surgical Extraction"
+        },
+        {
+          "count": 2,
+          "name": "Vexing Bauble"
+        }
+      ]
+    },
+    {
       "name": "Belcher",
       "author": "MTGGoldfish",
       "colors": [],
@@ -996,138 +1128,6 @@
         {
           "count": 1,
           "name": "Engineered Explosives"
-        }
-      ]
-    },
-    {
-      "name": "Grixis Reanimator",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Abhorrent Oculus"
-        },
-        {
-          "count": 4,
-          "name": "Archon of Cruelty"
-        },
-        {
-          "count": 1,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 4,
-          "name": "Emperor of Bones"
-        },
-        {
-          "count": 4,
-          "name": "Faithless Looting"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Persist"
-        },
-        {
-          "count": 4,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 4,
-          "name": "Psychic Frog"
-        },
-        {
-          "count": 1,
-          "name": "Raucous Theater"
-        },
-        {
-          "count": 1,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Thought Scour"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Unearth"
-        },
-        {
-          "count": 1,
-          "name": "Watery Grave"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 4,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 2,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 2,
-          "name": "Meltdown"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 1,
-          "name": "Surgical Extraction"
-        },
-        {
-          "count": 2,
-          "name": "Vexing Bauble"
         }
       ]
     },

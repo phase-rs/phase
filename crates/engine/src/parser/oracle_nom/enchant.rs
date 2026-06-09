@@ -149,7 +149,11 @@ pub(crate) fn parse_enchant_attachment_qualifier(input: &str) -> OracleResult<'_
         FilterProp::HasAttachment {
             kind,
             controller: None,
-            exclude_source,
+            exclude_source: if exclude_source {
+                crate::types::ability::SourceExclusion::Exclude
+            } else {
+                crate::types::ability::SourceExclusion::Include
+            },
         },
     ))
 }

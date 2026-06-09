@@ -71,6 +71,34 @@ fn runtime_granted_cycling_abilities(
         .collect()
 }
 
+/// CR 604.1 (seam 4: activated-ability-on-grant): synthesize graveyard activated
+/// abilities (Encore, Scavenge) for keywords granted to a graveyard card by a
+/// static. The `AddKeyword` layer seam installs only the keyword + triggers, so a
+/// granted graveyard activated keyword carries no activatable ability without
+/// this on-the-fly synthesis. Mirrors `runtime_granted_cycling_abilities`: only
+/// keywords present in the *effective* (granted-inclusive) set but NOT printed on
+/// the card are synthesized, so a printed Encore/Scavenge ability (already in
+/// `obj.abilities`) is never double-counted.
+fn runtime_granted_graveyard_activated_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<AbilityDefinition> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    if obj.zone != Zone::Graveyard {
+        return Vec::new();
+    }
+
+    crate::game::off_zone_characteristics::effective_off_zone_keywords(state, source_id)
+        .into_iter()
+        .filter(|keyword| !obj.base_keywords.iter().any(|printed| printed == keyword))
+        .filter_map(|keyword| {
+            crate::database::synthesis::graveyard_activated_ability_for_keyword(&keyword)
+        })
+        .collect()
+}
+
 pub fn activated_ability_definitions(
     state: &GameState,
     source_id: ObjectId,
@@ -84,6 +112,9 @@ pub fn activated_ability_definitions(
     abilities.extend(
         runtime_granted_cycling_abilities(state, source_id)
             .into_iter()
+            .chain(runtime_granted_graveyard_activated_abilities(
+                state, source_id,
+            ))
             .enumerate()
             .map(|(offset, ability)| (printed_len + offset, ability)),
     );
@@ -101,8 +132,14 @@ fn activation_ability_definition(
     }
 
     let offset = ability_index.checked_sub(obj.abilities.len())?;
+    // Must match the append order in `activated_ability_definitions`: printed
+    // abilities first, then runtime-granted cycling, then runtime-granted
+    // graveyard activated (Encore/Scavenge).
     runtime_granted_cycling_abilities(state, source_id)
         .into_iter()
+        .chain(runtime_granted_graveyard_activated_abilities(
+            state, source_id,
+        ))
         .nth(offset)
 }
 
@@ -2747,10 +2784,12 @@ fn casting_variant_candidates(
 
     // CR 702.152a: Blitz is an opt-in alternative cost from hand; surface it as a
     // candidate so the gate offers it (and so it is reachable when the printed
-    // cost is unaffordable).
+    // cost is unaffordable). Read the *effective* spell keywords so a Blitz cost
+    // granted by a static (CR 604.1) is honored, not just printed Blitz.
+    // CR 702.152b: only one Blitz may be applied to a spell, so the dedup-by-kind
+    // `effective_spell_keywords` is the correct (single-instance) collector here.
     if obj.zone == Zone::Hand
-        && obj
-            .keywords
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Blitz(_)))
     {
@@ -3023,12 +3062,17 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
 
     // CR 702.152a: Blitz — when casting from hand with Keyword::Blitz, the blitz
-    // mana cost replaces the printed cost (opt-in via `variant_override`).
+    // mana cost replaces the printed cost (opt-in via `variant_override`). Read
+    // the *effective* spell keywords so a Blitz cost granted by a static
+    // (CR 604.1) is honored; CR 702.152b makes Blitz single-instance, so the
+    // dedup-by-kind collector is correct.
     let blitz_cost = if obj.zone == Zone::Hand {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
+                _ => None,
+            })
     } else {
         None
     };
@@ -7144,10 +7188,16 @@ pub fn handle_cast_spell_with_payment_mode(
     // affordable, present the choice; auto-route when only blitz is payable.
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Hand {
-            if let Some(blitz_cost) = obj.keywords.iter().find_map(|k| match k {
-                crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
-                _ => None,
-            }) {
+            // CR 604.1: honor a Blitz cost granted by a static, not only printed
+            // Blitz. CR 702.152b makes Blitz single-instance, so the dedup-by-kind
+            // `effective_spell_keywords` collector is correct here.
+            if let Some(blitz_cost) = effective_spell_keywords(state, player, object_id)
+                .iter()
+                .find_map(|k| match k {
+                    crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
+                    _ => None,
+                })
+            {
                 // CR 601.2f: affordability and displayed costs reflect active
                 // cost modifiers, applied to both the printed and blitz costs.
                 let normal_cost =
@@ -10170,17 +10220,18 @@ fn pay_ability_cost_inner(
             }
         }
         // CR 207.2c + CR 602.1: Discard the source card itself as part of the cost (Channel).
-        AbilityCost::Discard { self_ref: true, .. } => {
-            match super::effects::discard::discard_as_cost(state, source_id, player, events) {
-                super::effects::discard::DiscardOutcome::Complete => {}
-                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
-                    pause_cost_payment_for_replacement_choice(state, choice_player);
-                    return Ok(AbilityCostPaymentOutcome::Paused {
-                        remaining_cost: None,
-                    });
-                }
+        AbilityCost::Discard {
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+            ..
+        } => match super::effects::discard::discard_as_cost(state, source_id, player, events) {
+            super::effects::discard::DiscardOutcome::Complete => {}
+            super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                pause_cost_payment_for_replacement_choice(state, choice_player);
+                return Ok(AbilityCostPaymentOutcome::Paused {
+                    remaining_cost: None,
+                });
             }
-        }
+        },
         // CR 118.3: A self-ref "exile this card" activation cost — the source
         // exiles itself from whatever zone the cost names. Covers exile-from-
         // graveyard costs (CR 702.97a Scavenge, Renew), the exile-from-hand
@@ -10557,7 +10608,7 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
         AbilityCost::Discard {
             count,
             filter,
-            self_ref: false,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             ..
         } => Some((count, filter.as_ref())),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard),
@@ -10567,7 +10618,10 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
 
 fn has_self_ref_discard_cost(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Discard { self_ref: true, .. } => true,
+        AbilityCost::Discard {
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+            ..
+        } => true,
         AbilityCost::Composite { costs } => costs.iter().any(has_self_ref_discard_cost),
         _ => false,
     }
@@ -12626,7 +12680,7 @@ mod tests {
             player_data.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -12666,7 +12720,7 @@ mod tests {
         player_data.mana_pool.add(ManaUnit {
             color,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions,
             grants: vec![],
@@ -13909,7 +13963,7 @@ mod tests {
         let unit = ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
@@ -16537,8 +16591,8 @@ mod tests {
                     AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: true,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                     },
                     AbilityCost::Mana {
                         cost: ManaCost::Cost {
@@ -16630,8 +16684,8 @@ mod tests {
             .cost(AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             });
             ability.activation_zone = Some(Zone::Hand);
             Arc::make_mut(&mut obj.abilities).push(ability);
@@ -17045,8 +17099,8 @@ mod tests {
                         AbilityCost::Discard {
                             count: QuantityExpr::Fixed { value: 1 },
                             filter: None,
-                            random: false,
-                            self_ref: false,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                         },
                         AbilityCost::Sacrifice {
                             target: TargetFilter::SelfRef,
@@ -17397,7 +17451,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Black,
             source_id: ObjectId(0),
-            snow: true,
+            supertype: Some(crate::types::mana::ManaSupertype::Snow),
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -20820,7 +20874,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -22024,6 +22078,149 @@ mod tests {
                 .any(|o| o.variant == CastingVariant::Blitz),
             "choice set must include the Blitz option; got {:?}",
             choices.options
+        );
+    }
+
+    /// CR 702.152a + CR 604.1: Blitz granted to a hand creature by a battlefield
+    /// `CastWithKeyword` static (the card itself prints no Blitz) must surface the
+    /// Blitz alternative-cast option. The candidate read routes through
+    /// `effective_spell_keywords`; before that routing, `casting_variant_candidates`
+    /// inspected only printed `obj.keywords`, so the Blitz option would be absent.
+    #[test]
+    fn granted_blitz_offers_blitz_variant() {
+        use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
+
+        // Grantor: "creatures you control have blitz {2}" (modeled directly as a
+        // CastWithKeyword static, the same shape the parser emits for such grants).
+        let grantor = create_object(
+            &mut state,
+            CardId(9100),
+            PlayerId(0),
+            "Blitz Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            let def = StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::Blitz(ManaCost::generic(2)),
+            })
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
+            obj.static_definitions = vec![def].into();
+        }
+
+        // Recipient: a vanilla creature in hand with NO printed Blitz.
+        let spell = create_object(
+            &mut state,
+            CardId(9101),
+            PlayerId(0),
+            "Vanilla Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(4);
+            obj.base_mana_cost = ManaCost::generic(4);
+        }
+
+        assert!(
+            !state
+                .objects
+                .get(&spell)
+                .unwrap()
+                .keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Blitz(_))),
+            "recipient must have no printed Blitz — the option must come from the grant"
+        );
+
+        let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+        assert!(
+            choices
+                .options
+                .iter()
+                .any(|o| o.variant == CastingVariant::Blitz),
+            "granted Blitz must surface the Blitz option; got {:?}",
+            choices.options
+        );
+    }
+
+    /// CR 702.141a + CR 604.1 (seam 4: activated-ability-on-grant): Encore
+    /// granted to a graveyard card by an `AddKeyword` effect must surface its
+    /// graveyard activated ability. The `AddKeyword` layer seam installs only the
+    /// keyword + triggers (never activated abilities), so the gather
+    /// (`activated_ability_definitions`) must synthesize the Encore ability from
+    /// the card's *effective* keyword set. Before that synthesis, the card had
+    /// the bare Encore keyword but no activatable Encore ability.
+    #[test]
+    fn granted_encore_surfaces_graveyard_activated_ability() {
+        let mut state = setup_game_at_main_phase();
+
+        // Grantor on the battlefield; recipient is a creature card in graveyard
+        // with NO printed Encore.
+        let grantor = create_object(
+            &mut state,
+            CardId(9200),
+            PlayerId(0),
+            "Encore Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(9201),
+            PlayerId(0),
+            "Some Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&card).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Sanity: before the grant, no Encore ability is surfaced.
+        let before = activated_ability_definitions(&state, card);
+        assert!(
+            !before
+                .iter()
+                .any(|(_, a)| matches!(&*a.effect, crate::types::ability::Effect::Encore)),
+            "no printed Encore ability should exist before the grant"
+        );
+
+        // Grant Encore {2}{R} to this graveyard card.
+        state.add_transient_continuous_effect(
+            grantor,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: card },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Encore(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![ManaCostShard::Red],
+                }),
+            }],
+            None,
+        );
+
+        let after = activated_ability_definitions(&state, card);
+        let encore = after
+            .iter()
+            .find(|(_, a)| matches!(&*a.effect, crate::types::ability::Effect::Encore))
+            .expect("granted Encore must surface a graveyard activated ability");
+        assert_eq!(
+            encore.1.activation_zone,
+            Some(Zone::Graveyard),
+            "synthesized Encore ability must function only from the graveyard"
         );
     }
 
@@ -26306,7 +26503,7 @@ mod tests {
                     generic: 0,
                 },
             }],
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
         obj.modal.as_mut().unwrap().constraints.push(
             ModalSelectionConstraint::ConditionalMaxChoices {
@@ -26550,7 +26747,7 @@ mod tests {
                         generic: 1,
                     },
                 }],
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             Arc::make_mut(&mut spell.abilities).push(
                 AbilityDefinition::new(
@@ -26562,7 +26759,7 @@ mod tests {
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: false,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
@@ -26579,7 +26776,7 @@ mod tests {
                             owner_library: false,
                             enter_transformed: false,
                             enters_under: None,
-                            enter_tapped: false,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
@@ -26664,7 +26861,7 @@ mod tests {
                         generic: 2,
                     },
                 }],
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             Arc::make_mut(&mut spell.abilities).push(
                 AbilityDefinition::new(
@@ -27322,7 +27519,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -27486,7 +27683,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -27512,7 +27709,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -27895,7 +28092,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -27911,7 +28108,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -28847,8 +29044,8 @@ mod tests {
                 AbilityCost::Discard {
                     count: QuantityExpr::Fixed { value: 1 },
                     filter: None,
-                    random: false,
-                    self_ref: true,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                 },
             ],
         };
@@ -38457,7 +38654,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -38488,8 +38685,8 @@ mod tests {
                     AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: true,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                     },
                 ],
             });

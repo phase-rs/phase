@@ -2952,7 +2952,7 @@ fn matches_filter_prop(
             controller,
             exclude_source,
         } => obj.attachments.iter().any(|att_id| {
-            if *exclude_source && *att_id == source.id {
+            if exclude_source.is_exclude() && *att_id == source.id {
                 return false;
             }
             let Some(att) = state.objects.get(att_id) else {
@@ -3481,7 +3481,7 @@ fn zone_change_record_matches_property(
             controller,
             exclude_source,
         } => record.attachments.iter().any(|att| {
-            (!*exclude_source || att.object_id != source.id)
+            (exclude_source.is_include() || att.object_id != source.id)
                 && att.kind == *kind
                 && attachment_controller_matches(
                     controller.as_ref(),
@@ -6994,7 +6994,7 @@ mod tests {
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             },
         ]));
         assert!(
@@ -8037,7 +8037,7 @@ mod tests {
             &FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             },
             &state,
             &enchanted_record,
@@ -8047,7 +8047,7 @@ mod tests {
             &FilterProp::HasAttachment {
                 kind: AttachmentKind::Equipment,
                 controller: None,
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             },
             &state,
             &enchanted_record,

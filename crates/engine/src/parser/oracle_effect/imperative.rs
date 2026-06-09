@@ -1516,7 +1516,11 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             // CR 701.9a: "Discard" with no subject defaults to the controller.
             // Subject injection overrides this for "target player discards" patterns.
             target: TargetFilter::Controller,
-            random,
+            selection: if random {
+                crate::types::ability::CardSelectionMode::Random
+            } else {
+                crate::types::ability::CardSelectionMode::Chosen
+            },
             unless_filter,
             filter,
         },
@@ -1556,7 +1560,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             owner_library: false,
             enter_transformed,
             enters_under,
-            enter_tapped,
+            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
             enters_attacking,
             up_to: false,
             enter_with_counters,
@@ -1574,7 +1578,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -1597,7 +1601,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 destination,
                 target,
                 enters_under,
-                enter_tapped,
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 face_down_profile: None,
             }
         }
@@ -2142,7 +2146,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             count,
             from_top,
             destination,
-            enter_tapped,
+            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
         },
         // CR 400.7 + CR 701.23 + CR 701.24: Multi-zone same-name exile.
         // The target filter encodes both the zone union (graveyard, hand,
@@ -2160,7 +2164,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
                 crate::types::ability::FilterProp::SameNameAsParentTarget,
             ])),
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             face_down_profile: None,
         },
     }
@@ -2346,7 +2350,11 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             target,
             card_filter: TargetFilter::None,
             count,
-            random,
+            selection: if random {
+                crate::types::ability::CardSelectionMode::Random
+            } else {
+                crate::types::ability::CardSelectionMode::Chosen
+            },
             choice_optional: false,
         },
         HandRevealImperativeAst::RevealAll {
@@ -2356,14 +2364,14 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             target,
             card_filter,
             count: None,
-            random: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         },
         HandRevealImperativeAst::RevealPartial { count } => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter: TargetFilter::None,
             count: Some(count),
-            random: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         },
         // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
@@ -2929,7 +2937,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             target: TargetFilter::Any,
             card_filter,
             count: None,
-            random: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional,
         },
         // CR 700.2: Anaphoric "choose N of them/those" → select from the tracked set
@@ -3734,7 +3742,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
                 destination,
                 target,
                 enters_under,
-                enter_tapped,
+                enter_tapped: enter_tapped.is_tapped(),
             }),
             Effect::ChangeZone {
                 origin,
@@ -3752,7 +3760,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
                 destination,
                 target,
                 enters_under,
-                enter_tapped,
+                enter_tapped: enter_tapped.is_tapped(),
                 enter_transformed,
                 enters_attacking,
                 up_to,
@@ -3787,7 +3795,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             destination,
             target,
             enters_under,
-            enter_tapped,
+            enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
             face_down_profile: None,
         },
         PutImperativeAst::ZoneChange {
@@ -3818,7 +3826,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     destination,
                     target,
                     enters_under: None,
-                    enter_tapped,
+                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     face_down_profile: None,
                 }
             } else {
@@ -3829,7 +3837,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     owner_library: false,
                     enter_transformed,
                     enters_under,
-                    enter_tapped,
+                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     // CR 508.4: Propagated from the inline-tail patcher in
                     // `try_parse_put_zone_change` (Kaalia / Ilharg class).
                     enters_attacking,
@@ -4244,7 +4252,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 owner_library,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4271,7 +4279,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4382,7 +4390,7 @@ pub(super) fn lower_multi_filter_search_library(
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped,
+        enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
@@ -4453,7 +4461,7 @@ pub(super) fn lower_multi_filter_seek(
                 count: count.clone(),
                 from_top,
                 destination,
-                enter_tapped,
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
             },
         );
         seek_def.sub_ability = tail;
@@ -4465,7 +4473,7 @@ pub(super) fn lower_multi_filter_seek(
         count,
         from_top,
         destination,
-        enter_tapped,
+        enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
     });
     clause.sub_ability = tail;
     clause
@@ -4558,7 +4566,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         destination: Zone::Library,
         target: TargetFilter::Controller,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         face_down_profile: None,
     }
 }
@@ -7318,7 +7326,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     destination: Zone::Exile,
                     target,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     face_down_profile: None,
                 }
             } else {
@@ -7329,7 +7337,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters,
@@ -8980,7 +8988,7 @@ mod tests {
             } => {
                 assert_eq!(origin, None);
                 assert_eq!(destination, Zone::Battlefield);
-                assert!(!enter_tapped);
+                assert!(!enter_tapped.is_tapped());
                 assert_eq!(filters.len(), 2);
                 for filter in filters {
                     let TargetFilter::Typed(typed) = filter else {

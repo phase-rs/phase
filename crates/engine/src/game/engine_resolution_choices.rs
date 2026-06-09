@@ -471,7 +471,7 @@ pub(super) fn handle_resolution_choice(
             if accept {
                 zones::move_to_zone(state, hit_card, accept_zone, events);
                 // CR 110.5b: the kept card enters tapped when requested.
-                if enter_tapped {
+                if enter_tapped.resolve(false) {
                     if let Some(obj) = state.objects.get_mut(&hit_card) {
                         obj.tapped = true;
                     }

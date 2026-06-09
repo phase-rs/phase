@@ -265,13 +265,13 @@ impl AbilityCost {
             AbilityCost::Discard {
                 count,
                 filter,
-                self_ref,
+                self_scope,
                 ..
             } => {
                 let Some(p) = state.players.get(player.0 as usize) else {
                     return false;
                 };
-                if *self_ref {
+                if self_scope.is_source_card() {
                     return p.hand.contains(&source);
                 }
                 let resolved =
@@ -942,8 +942,8 @@ mod tests {
         assert!(!AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         }
         .is_payable(&state, P0, ObjectId(0)));
     }

@@ -4748,7 +4748,7 @@ fn static_during_your_turn_equipped_creatures_you_control_have_double_strike() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Equipment,
                     controller: None,
-                    exclude_source: false,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
                 }]),
         ))
     );
@@ -9523,7 +9523,7 @@ fn creatures_you_control_that_are_enchanted() {
                 [FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
-                    exclude_source: false
+                    exclude_source: crate::types::ability::SourceExclusion::Include
                 }]
             ));
         }
@@ -12440,7 +12440,7 @@ fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
-                    exclude_source: false,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
                 }])
         ))
     );
@@ -14641,7 +14641,7 @@ fn eriette_charmed_apple_static_and_trigger_parse() {
             vec![FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             }]
         ))),
         "affected must be creatures enchanted by an Aura you control, got {:?}",

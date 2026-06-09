@@ -54,7 +54,7 @@ fn open_private_zone_cast_selection(
         effect_kind: EffectKind::CastFromZone,
         zone: source_zone,
         destination: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enter_transformed: false,
         enters_under_player: None,
         enters_attacking: false,

@@ -725,6 +725,14 @@ export interface GameObject {
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
   /**
+   * CR 114: Display-only provenance of the source that created this emblem
+   * (e.g. the planeswalker whose ultimate made it). The frontend renders the
+   * emblem as a small chip bearing the source's art crop and a "from <name>"
+   * label. Distinct from `printed_ref` — an emblem is not represented by that
+   * card (CR 114.5); this is purely presentational. Present only on emblems.
+   */
+  emblem_source?: { name: string; printed_ref?: PrintedRef | null } | null;
+  /**
    * CR 111.1: Whether this object is a token (not a card). Independent of
    * `display_source`: a token-copy of a real card (Twinflame, Helm of the
    * Host) carries `is_token = true` AND `display_source = "Card"`, so it

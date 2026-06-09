@@ -1704,7 +1704,7 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
             .properties(vec![FilterProp::HasAttachment {
                 kind,
                 controller: None,
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             }]),
     )
 }
@@ -2087,7 +2087,7 @@ pub(crate) fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<F
     let prop = FilterProp::HasAttachment {
         kind,
         controller: Some(ControllerRef::You),
-        exclude_source: false,
+        exclude_source: crate::types::ability::SourceExclusion::Include,
     };
     (&subject[..before.len()], Some(prop))
 }

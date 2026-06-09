@@ -127,18 +127,18 @@ fn merge_kicker_additional_cost(slot: &mut Option<AdditionalCost>, incoming: Add
     match incoming {
         AdditionalCost::Kicker {
             costs: incoming_costs,
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         } => {
             if let Some(AdditionalCost::Kicker {
                 costs,
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             }) = slot.as_mut()
             {
                 costs.extend(incoming_costs);
             } else {
                 *slot = Some(AdditionalCost::Kicker {
                     costs: incoming_costs,
-                    repeatable: false,
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 });
             }
         }
@@ -498,7 +498,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             // CR 122.1: entry counters parsed from "with [N] [type] counter(s) on it".
@@ -3550,7 +3550,10 @@ pub(crate) fn parse_oracle_ir(
 
 fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
     match cost {
-        AbilityCost::Discard { self_ref: true, .. } => Some(Zone::Hand),
+        AbilityCost::Discard {
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+            ..
+        } => Some(Zone::Hand),
         AbilityCost::Exile {
             filter: Some(TargetFilter::SelfRef),
             zone: Some(zone),
@@ -5446,8 +5449,11 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(!repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 2);
                 assert!(matches!(
                     &costs[0],
@@ -5479,8 +5485,11 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(!repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 2);
                 assert!(matches!(
                     &costs[0],
@@ -5510,8 +5519,11 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_repeatable());
                 assert_eq!(costs.len(), 1);
                 assert!(matches!(
                     &costs[0],
@@ -5535,8 +5547,11 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(!repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 1);
                 assert!(matches!(&costs[0], AbilityCost::Sacrifice { count: 1, .. }));
             }
@@ -5558,7 +5573,7 @@ mod tests {
                     AbilityCost::Sacrifice {
                         count: u32::MAX, ..
                     },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             }) => {}
             other => panic!("expected optional any-number sacrifice, got {other:?}"),
         }
@@ -11146,9 +11161,13 @@ mod tests {
                     costs
                 );
                 assert!(
-                    costs
-                        .iter()
-                        .any(|c| matches!(c, AbilityCost::Discard { self_ref: true, .. })),
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Discard {
+                            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+                            ..
+                        }
+                    )),
                     "Channel cost should include self-ref discard, got {:?}",
                     costs
                 );
@@ -12112,7 +12131,10 @@ mod tests {
             } => {
                 assert_eq!(*origin, Some(crate::types::zones::Zone::Library));
                 assert_eq!(*destination, crate::types::zones::Zone::Battlefield);
-                assert!(enter_tapped, "searched land should enter tapped");
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "searched land should enter tapped"
+                );
             }
             other => panic!("Expected ChangeZone, got {other:?}"),
         }
@@ -12156,7 +12178,7 @@ mod tests {
             } => {
                 assert_eq!(*destination, crate::types::zones::Zone::Battlefield);
                 assert!(
-                    enter_tapped,
+                    enter_tapped.is_tapped(),
                     "searched land after 'Then' should enter tapped"
                 );
             }
@@ -12185,7 +12207,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*destination, crate::types::zones::Zone::Hand);
-                assert!(!enter_tapped, "search-to-hand should not be tapped");
+                assert!(
+                    !enter_tapped.is_tapped(),
+                    "search-to-hand should not be tapped"
+                );
             }
             other => panic!("Expected ChangeZone to Hand, got {other:?}"),
         }
@@ -14648,7 +14673,7 @@ mod tests {
             result.additional_cost,
             Some(AdditionalCost::Optional {
                 cost: AbilityCost::CollectEvidence { amount: 8 },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             })
         );
         assert_eq!(result.abilities.len(), 1);

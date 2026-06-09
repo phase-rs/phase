@@ -318,18 +318,36 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
 ///
 /// Returns an empty vec for non-planeswalker, non-battle permanents or when
 /// the face carries no printed loyalty/defense number.
-pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
+/// CR 306.5b + CR 310.4b: A planeswalker enters with loyalty counters equal to
+/// its printed loyalty; a battle enters with defense counters equal to its
+/// printed defense. Computes those intrinsic counters from the loyalty/defense
+/// values of the face the permanent will have *on entry* — the caller passes
+/// the entering face's values, which is the back face for a transformed entry
+/// (CR 712.14a) or the copied permanent's values for a token copy (CR 707.2).
+/// Keeping this separate from [`intrinsic_etb_counters`] lets every entry path
+/// (cast, effect-driven entry, play, transform-return, token-copy) seed the
+/// counter map — the single source of truth for loyalty (CR 306.5c) — without
+/// duplicating the rule.
+pub fn intrinsic_face_counters(
+    loyalty: Option<u32>,
+    defense: Option<u32>,
+) -> Vec<(CounterType, u32)> {
     let mut counters = Vec::new();
-    if let Some(loy) = obj.loyalty {
+    if let Some(loy) = loyalty {
         if loy > 0 {
             counters.push((CounterType::Loyalty, loy));
         }
     }
-    if let Some(def) = obj.defense {
+    if let Some(def) = defense {
         if def > 0 {
             counters.push((CounterType::Defense, def));
         }
     }
+    counters
+}
+
+pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
+    let mut counters = intrinsic_face_counters(obj.loyalty, obj.defense);
     // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
     // effect. The paid X is stamped on the object when the spell leaves the
     // stack, before the ZoneChange replacement pipeline applies counters.

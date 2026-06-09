@@ -3310,7 +3310,7 @@ mod tests {
                         if properties.contains(&FilterProp::HasAttachment {
                             kind: engine::types::ability::AttachmentKind::Aura,
                             controller: None,
-                            exclude_source: false,
+                            exclude_source: engine::types::ability::SourceExclusion::Include,
                         })
                 ));
             }

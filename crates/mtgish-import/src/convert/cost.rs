@@ -86,8 +86,8 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
         Cost::DiscardACard => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
         // CR 701.8 + CR 117.6: "Discard <specific card>" cost. Channel
         // (Boseiju, Throat Slitter) and similar self-discard activations use
@@ -100,8 +100,8 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
             CardInHand::ThisCardInHand => AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
+                self_scope: engine::types::ability::DiscardSelfScope::SourceCard,
             },
             other => {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
@@ -115,28 +115,28 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
         Cost::DiscardACardAtRandom => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: true,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Random,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
         Cost::DiscardNumberCards(n) => AbilityCost::Discard {
             count: quantity::convert(n)?,
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
         // CR 701.9: Discard a card of a given card type.
         Cost::DiscardACardOfType(cards) => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: Some(cards_to_filter(cards)?),
-            random: false,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
         // CR 701.9: Random discard of a fixed count.
         Cost::DiscardNumberCardsAtRandom(n) => AbilityCost::Discard {
             count: quantity::convert(n)?,
             filter: None,
-            random: true,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Random,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
 
         // CR 701.26 + CR 602.5b: Tap N permanents matching a filter.

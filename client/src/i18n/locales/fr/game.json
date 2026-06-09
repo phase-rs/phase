@@ -264,6 +264,7 @@
     "grantsProperty": "Accorde une propriété au sort"
   },
   "zone": {
+    "commandZone": "Zone de commandement",
     "emblem": "Emblème",
     "emblemFallback": "Emblème",
     "commander": "Commandant",

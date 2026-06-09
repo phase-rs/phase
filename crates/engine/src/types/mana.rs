@@ -486,11 +486,42 @@ pub enum ManaExpiry {
     EndOfCombat,
 }
 
+/// CR 205.4g: Supertype carried by produced mana (Snow today; extensible).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ManaSupertype {
+    Snow,
+}
+
+/// Serde adapter for legacy `snow: bool` on `ManaUnit`.
+pub mod snow_compat {
+    use super::ManaSupertype;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        supertype: &Option<ManaSupertype>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(matches!(supertype, Some(ManaSupertype::Snow)))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<ManaSupertype>, D::Error> {
+        let snow = bool::deserialize(deserializer)?;
+        Ok(if snow {
+            Some(ManaSupertype::Snow)
+        } else {
+            None
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManaUnit {
     pub color: ManaType,
     pub source_id: ObjectId,
-    pub snow: bool,
+    #[serde(default, with = "snow_compat", rename = "snow")]
+    pub supertype: Option<ManaSupertype>,
     /// True when this unit was produced by a source that could produce two or
     /// more colors of mana. Used by the Universes Beyond `{Z}` cost symbol.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -516,7 +547,7 @@ impl ManaUnit {
         Self {
             color,
             source_id,
-            snow,
+            supertype: snow.then_some(ManaSupertype::Snow),
             source_could_produce_two_or_more_colors: false,
             restrictions,
             grants: Vec::new(),
@@ -527,11 +558,15 @@ impl ManaUnit {
     /// Construct a convoke payment marker. This is intentionally not mana
     /// production; it exists only so the shared mana-payment algorithm can
     /// consume a tap as satisfying the selected shard.
+    pub fn is_snow(&self) -> bool {
+        matches!(self.supertype, Some(ManaSupertype::Snow))
+    }
+
     pub fn convoke_payment(color: ManaType, source_id: ObjectId) -> Self {
         Self {
             color,
             source_id,
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::ConvokePayment],
             grants: Vec::new(),
@@ -1345,7 +1380,7 @@ mod tests {
             vec![ManaRestriction::OnlyForSpellType("Creature".to_string())],
         );
         assert_eq!(unit.source_id, ObjectId(42));
-        assert!(unit.snow);
+        assert!(unit.is_snow());
         assert_eq!(unit.restrictions.len(), 1);
     }
 

@@ -2068,7 +2068,7 @@ mod tests {
             p.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -3109,7 +3109,7 @@ mod tests {
                         generic: 2,
                     },
                 }],
-                repeatable: true,
+                repeatability: engine::types::ability::AdditionalCostRepeatability::Repeatable,
             },
             times_kicked: 0,
             pending_cast: Box::new(pending),

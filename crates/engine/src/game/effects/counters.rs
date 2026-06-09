@@ -707,17 +707,36 @@ pub(crate) fn apply_counter_removal(
         return;
     };
 
+    let was_present = obj.counters.contains_key(&counter_type);
     let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
     let removed = (*entry).min(count);
     *entry = entry.saturating_sub(count);
+    let is_zero = *entry == 0;
 
     // CR 306.5c / CR 310.4c: Keep obj.loyalty / obj.defense in
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
 
-    // CR 122.1: Zero-count entries are absent — prune so proliferate and other
-    // "has a counter" checks cannot resurrect removed counter types.
+    // CR 122.1: Zero-count entries are normally absent — prune so proliferate
+    // and other "has a counter" checks cannot resurrect removed counter types.
+    //
+    // EXCEPTION (CR 306.5c): loyalty is a characteristic-defining counter whose
+    // field IS the counter count, and the layer system RESETS obj.loyalty to
+    // base each evaluation then re-derives it from the counter map. Once the
+    // last loyalty counter is pruned, that re-derive can no longer tell "drained
+    // to 0" (must die, CR 704.5i) from "not counter-tracked, use the field"
+    // (a clone whose loyalty comes from the Copy layer). So a genuinely-tracked
+    // planeswalker drained to exactly 0 must KEEP its 0 entry — the present 0 is
+    // the signal the layer re-derive needs. A phantom 0 created by `or_insert`
+    // on a counter that was never present is still pruned, so un-counter-tracked
+    // objects correctly fall back to their field value. (Defense needs no such
+    // exception: the layer system never resets obj.defense, so a battle drained
+    // to 0 keeps defense 0 without help and the CR 704.5v SBA fires normally.)
+    let keep_zero = was_present && counter_type == CounterType::Loyalty && is_zero;
     crate::types::counter::prune_zero_counters(&mut obj.counters);
+    if keep_zero {
+        obj.counters.insert(counter_type.clone(), 0);
+    }
 
     if counter_type_affects_layers(&counter_type) {
         state.layers_dirty.mark_full();
@@ -3523,11 +3542,48 @@ mod tests {
         remove_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 5, &mut events);
 
         let obj = &state.objects[&pw_id];
-        assert!(
-            !obj.counters.contains_key(&CounterType::Loyalty),
-            "zero-count loyalty entry should be pruned after removal"
+        // CR 306.5c + CR 704.5i: a genuinely-tracked planeswalker drained to 0
+        // KEEPS its zero loyalty entry so the layer re-derive reports 0 (not the
+        // printed base) and the state-based action can fire. (Phantom zeros from
+        // removing a counter that was never present are still pruned — see
+        // `apply_counter_removal`.)
+        assert_eq!(
+            obj.counters.get(&CounterType::Loyalty).copied(),
+            Some(0),
+            "drained loyalty entry must persist at 0, not be pruned away"
         );
         assert_eq!(obj.loyalty, Some(0));
+    }
+
+    /// CR 306.5c (hybrid model): removing loyalty from an object that was NOT
+    /// counter-tracked (e.g. a clone whose loyalty comes from the Copy layer)
+    /// must NOT leave a persistent 0 entry. Only genuinely-tracked counters keep
+    /// their 0; a phantom 0 from `or_insert` on an absent counter is pruned, so
+    /// the layer re-derive falls back to the object's field value rather than
+    /// killing it. Guards the `was_present` condition in `apply_counter_removal`.
+    #[test]
+    fn remove_untracked_loyalty_does_not_leave_phantom_zero() {
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cloned PW".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&pw_id).unwrap();
+        // Loyalty present as a field (Copy-layer value) but NO loyalty counter.
+        obj.loyalty = Some(5);
+
+        let mut events = Vec::new();
+        remove_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 1, &mut events);
+
+        assert!(
+            !state.objects[&pw_id]
+                .counters
+                .contains_key(&CounterType::Loyalty),
+            "removing an untracked loyalty counter must not create a persistent 0 entry",
+        );
     }
 
     /// CR 310.4c: Defense counters drive `obj.defense` for battles. The same
@@ -3630,6 +3686,59 @@ mod tests {
                 .copied(),
             Some(5),
             "counters[Loyalty] must remain 5 after layer evaluation"
+        );
+    }
+
+    /// CR 306.5c + CR 704.5i regression: a planeswalker drained to 0 loyalty
+    /// must still read `Some(0)` after a layer re-evaluation — not snap back to
+    /// its printed `base_loyalty`. Removing the last loyalty counter prunes the
+    /// zero-count entry (CR 122.1), so the layer re-derive must treat the absent
+    /// key as 0. Pre-fix this returned `Some(4)` (base_loyalty), leaving the
+    /// planeswalker unkillable: check_zero_loyalty never saw 0, so neither a
+    /// `-N` ability nor lethal damage could ever destroy it.
+    #[test]
+    fn loyalty_drained_to_zero_stays_zero_after_layer_re_evaluation() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test PW".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&pw_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        // Printed loyalty 4; currently at 7 (entered at 4, gained 3).
+        obj.base_loyalty = Some(4);
+        obj.loyalty = Some(7);
+        obj.counters.insert(CounterType::Loyalty, 7);
+
+        let mut events = Vec::new();
+        // A "-7" loyalty ability (or 7+ damage) routes through the resolver.
+        remove_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 7, &mut events);
+        assert_eq!(state.objects[&pw_id].loyalty, Some(0));
+        // CR 306.5c: the drained loyalty entry persists at 0 (it was genuinely
+        // tracked) so the layer re-derive can distinguish "tracked, drained to 0"
+        // from "not counter-tracked" (absent entry → fall back to base).
+        assert_eq!(
+            state.objects[&pw_id]
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied(),
+            Some(0),
+            "drained loyalty entry must persist at 0",
+        );
+
+        // Force layer re-evaluation: the present 0 entry must re-derive to 0,
+        // NOT revert to base_loyalty (4).
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&pw_id].loyalty,
+            Some(0),
+            "drained planeswalker must read 0 after layer re-derive, not snap back to printed 4",
         );
     }
 

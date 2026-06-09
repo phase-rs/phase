@@ -6,7 +6,9 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityCost, AdditionalCost, StaticCondition};
+use engine::types::ability::{
+    AbilityCost, AdditionalCost, AdditionalCostRepeatability, StaticCondition,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost};
@@ -110,7 +112,7 @@ fn rottenmouth_viper_parses_sacrifice_additional_cost_and_reduction() {
             cost: AbilityCost::Sacrifice {
                 count: u32::MAX, ..
             },
-            repeatable: false,
+            repeatability: AdditionalCostRepeatability::Once,
         }) => {}
         other => panic!("expected optional any-number sacrifice cost, got {other:?}"),
     }

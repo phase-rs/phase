@@ -1615,15 +1615,15 @@ where
         Some(AbilityCost::Discard {
             count,
             filter,
-            random,
-            self_ref,
+            selection,
+            self_scope,
         }) => {
-            if *random {
+            if selection.is_random() {
                 return Err(EngineError::InvalidAction(
                     "Unsupported random discard cost for mana ability".to_string(),
                 ));
             }
-            if *self_ref {
+            if self_scope.is_source_card() {
                 match crate::game::effects::discard::discard_as_cost(
                     state, source_id, player, events,
                 ) {
@@ -1749,15 +1749,15 @@ where
                     AbilityCost::Discard {
                         count,
                         filter,
-                        random,
-                        self_ref,
+                        selection,
+                        self_scope,
                     } => {
-                        if *random {
+                        if selection.is_random() {
                             return Err(EngineError::InvalidAction(
                                 "Unsupported random discard cost for mana ability".to_string(),
                             ));
                         }
-                        if *self_ref {
+                        if self_scope.is_source_card() {
                             match crate::game::effects::discard::discard_as_cost(
                                 state, source_id, player, events,
                             ) {
@@ -2518,8 +2518,8 @@ fn find_non_self_discard_cost(
         AbilityCost::Discard {
             count,
             filter,
-            self_ref: false,
-            random: false,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
         } => Some((count, filter.as_ref())),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard_cost),
         _ => None,
@@ -2754,7 +2754,7 @@ mod tests {
             state.players[player.0 as usize].mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -4169,8 +4169,8 @@ mod tests {
                         },
                     },
                     filter: None,
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
                 AbilityCost::Sacrifice {
                     target: TargetFilter::SelfRef,
@@ -4620,7 +4620,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
