@@ -165,12 +165,15 @@ mod tests {
         )));
 
         match &state.waiting_for {
-            WaitingFor::ScryChoice { player, cards } => {
+            WaitingFor::ZoneManipulation {
+                player,
+                kind: ZoneManipulationKind::Scry { cards },
+            } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(cards.len(), 2);
                 assert_eq!(*cards, top_2);
             }
-            other => panic!("Expected ScryChoice, got {:?}", other),
+            other => panic!("Expected ZoneManipulation::Scry, got {:?}", other),
         }
     }
 
@@ -190,11 +193,14 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::ScryChoice { player, cards } => {
+            WaitingFor::ZoneManipulation {
+                player,
+                kind: ZoneManipulationKind::Scry { cards },
+            } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(cards.len(), 1);
             }
-            other => panic!("Expected ScryChoice, got {:?}", other),
+            other => panic!("Expected ZoneManipulation::Scry, got {:?}", other),
         }
     }
 
@@ -237,7 +243,13 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
         let waiting = state.waiting_for.clone();
-        assert!(matches!(waiting, WaitingFor::ScryChoice { .. }));
+        assert!(matches!(
+            waiting,
+            WaitingFor::ZoneManipulation {
+                kind: ZoneManipulationKind::Scry { .. },
+                ..
+            }
+        ));
 
         // CR 701.22a: keep obj2 then obj0 on top (reordered partial subset of the
         // looked-at {obj0, obj1, obj2}); obj1 goes to the bottom in any order.
