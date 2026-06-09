@@ -97,7 +97,10 @@ expression: "&lowered"
       "valid_source": null,
       "description": "When ~ enters, if its surge cost was paid, other creatures you control get +1/+0 and gain haste until end of turn.",
       "constraint": null,
-      "condition": null,
+      "condition": {
+        "type": "CastVariantPaid",
+        "variant": "Surge"
+      },
       "batched": false
     }
   ],

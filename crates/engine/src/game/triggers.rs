@@ -1371,6 +1371,54 @@ fn collect_pending_triggers(
             }
         }
 
+        // CR 603.10a: Abilities that trigger when a player sacrifices a permanent
+        // look back in time. An exploit ability emits `CreatureExploited` only
+        // after the sacrifice resolves (CR 702.110b), so a creature that exploits
+        // ITSELF has already left the battlefield when this event fires. Scan the
+        // exploiter with zone_filter=Battlefield (last-known information) so its
+        // own "when ~ exploits a creature" trigger still fires. Guarded to the
+        // off-battlefield case only: when the exploiter sacrificed a DIFFERENT
+        // creature it is still on the battlefield and the live scan + per-event
+        // dedup already cover it.
+        if let GameEvent::CreatureExploited { exploiter, .. } = event {
+            if state
+                .objects
+                .get(exploiter)
+                .is_some_and(|o| o.zone != Zone::Battlefield)
+            {
+                let matched_triggers = {
+                    let obj = &state.objects[exploiter];
+                    collect_matching_triggers(
+                        state,
+                        event,
+                        events,
+                        obj,
+                        obj.entered_battlefield_turn.unwrap_or(0),
+                        Some(Zone::Battlefield),
+                        &mut batched_this_pass,
+                        &mut registered_this_event,
+                    )
+                };
+                for matched in matched_triggers {
+                    record_trigger_fired(
+                        state,
+                        matched.constraint.as_ref(),
+                        *exploiter,
+                        matched.trig_idx,
+                        event,
+                    );
+                    if matched.batched {
+                        batched_this_pass.insert((*exploiter, matched.trig_idx));
+                    }
+                    registered_this_event.insert((*exploiter, matched.trig_idx));
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
+                }
+            }
+        }
+
         // CR 603.10a (continued): an observer that left the battlefield in the
         // SAME simultaneous event as this departure observes it via last-known
         // information. The producer stamps that group onto `record.co_departed`
@@ -11927,6 +11975,14 @@ pub mod tests {
         assert_eq!(run(PlayerId(0), Phase::Upkeep), 0);
         assert_eq!(run(PlayerId(1), Phase::PreCombatMain), 0);
     }
+
+    // NOTE: The discriminating real-pipeline test for the `CreatureExploited` LKI
+    // look-back lives in `effects::exploit::tests::self_exploit_dependent_trigger_lands_on_stack`.
+    // That test drives the actual exploit resolution (real sacrifice → real zone
+    // change → real trigger collection), so it exercises CR 400.7 graveyard
+    // clearing faithfully. A previous unit test here manually set `obj.zone =
+    // Graveyard` while leaving the object's triggers/continuous effects intact,
+    // which masked the very clearing it claimed to cover (Gemini [MED]).
 
     /// CR 601.2h + CR 603.4: Increment intervening-if gates the counter-placement
     /// trigger on the amount of mana spent to cast the triggering spell exceeding

@@ -1139,7 +1139,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // at cleanup (CR 514).
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if obj.is_saddled {
+            // CR 702.171b: the designation (and the saddling-creature record) ends at end of turn.
             obj.is_saddled = false;
+            obj.saddled_by.clear();
         }
     }
 
@@ -1387,21 +1389,12 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///   target selection, or are awaiting CR 603.3b ordering. The combat arms
 ///   (BeginCombat / EndCombat) use this to decide whether to set up / tear down
 ///   combat and grant a priority window.
-/// * `ordering_prompt` is `Some(WaitingFor::OrderTriggers { .. })` when 2+
-///   simultaneous triggers controlled by the same player fired and that player
-///   must order them (CR 603.3b) before anyone receives priority. The caller
-///   MUST surface this prompt instead of granting priority — `process_triggers`
-///   populated `state.pending_trigger_order` and set `state.waiting_for` to the
-///   prompt, but the phase arm's return value is what `apply` writes back to
-///   `state.waiting_for`. Returning `Priority` here would overwrite the prompt
-///   and strand the queued triggers in `pending_trigger_order` forever (they
-///   never reach the stack). Single-trigger steps take the `NoChoiceNeeded`
-///   path with no prompt and fall through to the normal priority grant. The
-///   prompt is rebuilt from the AUTHORITATIVE `pending_trigger_order` state via
-///   `build_next_order_triggers_prompt_public`, not cloned from
-///   `state.waiting_for` — so a stale `waiting_for` left by an upstream
-///   phase-advance can't re-surface and hang, and already-corrupted saves
-///   recover by surfacing the real ordering prompt.
+/// * `ordering_prompt` is `Some(...)` when the phase must pause before priority:
+///   - `WaitingFor::OrderTriggers { .. }` when 2+ simultaneous triggers controlled
+///     by the same player fired and that player must order them (CR 603.3b), or
+///   - an active trigger prompt (`TriggerTargetSelection`, etc.) when
+///     `pending_trigger` / `deferred_triggers` still hold unresolved work (CR
+///     603.3). The caller MUST surface this prompt instead of granting priority.
 fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
     let stack_before = state.stack.len();
@@ -1416,11 +1409,16 @@ fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     // surfacing the real ordering prompt. Note `pending_trigger_order.is_some()` no
     // longer blindly implies `waiting_for == OrderTriggers`, which is exactly why
     // the prior `.then(|| clone)` idiom was unsafe.
-    let ordering_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
+    let order_triggers_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
+    let active_trigger_prompt = (order_triggers_prompt.is_none()
+        && (state.pending_trigger.is_some() || !state.deferred_triggers.is_empty()))
+    .then(|| state.waiting_for.clone());
+    let prompt = order_triggers_prompt.or(active_trigger_prompt);
     let fired = state.stack.len() > stack_before
         || state.pending_trigger.is_some()
-        || ordering_prompt.is_some();
-    (fired, ordering_prompt)
+        || !state.deferred_triggers.is_empty()
+        || prompt.is_some();
+    (fired, prompt)
 }
 
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {

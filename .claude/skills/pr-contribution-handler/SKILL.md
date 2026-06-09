@@ -26,9 +26,20 @@ This skill lands contributor work, but **only after it meets the maintainer's ba
 
 4. **New machinery must earn its keep.** When a PR introduces a new parsing style, helper, enum surface, or abstraction, measure it: *how many cards/cases does it actually serve, and does equivalent infrastructure already exist?* A general-looking building block that serves one card while duplicating an existing helper is a special case in disguise — unify it with the existing pattern (parameterize-don't-proliferate) before merge. Keep the genuinely high-value parts; retire the redundant machinery.
 
-5. **Stress-test your own "clean" verdict (adversarial second pass).** A first-pass "CLEAN" is a hypothesis, not a conclusion. Before enqueue, re-ask: *"Would a principal engineer merge this as-is, or request changes?"* Spawn an independent adversarial reviewer (or re-review with that framing) for any PR touching a hot/shared path or introducing new machinery. The first reviewer's job is to find it correct; the second's is to find what the bar would reject.
+5. **Large refactors need an explicit value gate before rescue work or enqueue.** Any PR with broad cross-cutting churn, multiple unrelated abstraction axes, or new enum/helper surfaces must be evaluated for *pulling its weight* before spending maintainer cycles to make it compile. Write the verdict in the PR notes before enqueue:
+   - What concrete architectural debt does this retire, and at which seam?
+   - How many real cards/cases/classes become cleaner or newly possible?
+   - Does it replace a hot-path or high-confusion bool/stringly field with a domain type, or is it a cosmetic rename?
+   - Does it leave the repo with fewer concepts, clearer boundaries, and no duplicated parallel shapes?
+   - How much blast radius does it create (files/crates/touched call sites), and is that proportional to the value?
+   - Are there still sibling bools or equivalent raw fields in the same location? If yes, explain why the partial conversion is still valuable, or stop and request/split.
+   - Did maintainer handling require repeated compile/CI rescue commits across unrelated crates? If yes, re-run the value gate before enqueue; green CI after rescue is not enough.
 
-6. **Never auto-enqueue a batch on the strength of a first-pass review.** Enqueue is effectively irreversible under the merge queue. Bring the maintainer the per-PR evidence (change summary, blast radius, regression/perf findings, test-discrimination result, architecture verdict) and confirm authority. When authorized, enqueue only PRs that clear the full bar above — and improve the ones that fall short *first*.
+   Default posture: large mechanical refactors should be split or held unless the value is objective and localizable. If the best evidence is "this follows the bool-to-enum preference" but it addresses only one or two low-confusion booleans, that is not enough.
+
+6. **Stress-test your own "clean" verdict (adversarial second pass).** A first-pass "CLEAN" is a hypothesis, not a conclusion. Before enqueue, re-ask: *"Would a principal engineer merge this as-is, or request changes?"* Spawn an independent adversarial reviewer (or re-review with that framing) for any PR touching a hot/shared path, introducing new machinery, or tripping the large-refactor value gate. The first reviewer's job is to find it correct; the second's is to find what the bar would reject.
+
+7. **Never auto-enqueue a batch on the strength of a first-pass review.** Enqueue is effectively irreversible under the merge queue. Bring the maintainer the per-PR evidence (change summary, blast radius, regression/perf findings, test-discrimination result, architecture verdict, and large-refactor value verdict when applicable) and confirm authority. When authorized, enqueue only PRs that clear the full bar above — and improve the ones that fall short *first*.
 
 ### Gemini review handling
 
@@ -50,6 +61,15 @@ Before changing code, read these files from the repo root and apply their logic:
 
 Do not paraphrase these from memory. Re-read them each time because they are the source of truth.
 
+## Rate-Limit Discipline (governs every `gh` call)
+
+A non-stop fleet exhausts GitHub's **5,000-req/hr REST `core`** bucket long before the separate GraphQL bucket. Minimize `core` reads:
+
+- **Scan diffs locally, not via API.** After fetching the PR head ref (needed for checkout anyway), use `git diff origin/main...pr/<N>` — never `gh pr diff <N>`, which spends one `core` request per PR and returns a truncatable payload. The local diff is free and carries the full patch (gitlink modes, binary flags, deletion counts).
+- **Comments: comprehensive via GraphQL for the gate; a windowed sweep only for triage.** Most feedback here is **top-level** — review bodies (Gemini's summary, human reviews) and issue comments — which have no resolved-flag, so the "all blocking comments resolved" gate must read every one. Fetch `reviews` + `comments` + inline `reviewThreads` comprehensively in one GraphQL call per PR (idle bucket), paginating every connection whose `hasNextPage` is true — never a time-windowed slice, which can drop an old unaddressed blocker (see `pr-review-comment-resolver.md` §2). A repo-wide `since=` REST sweep is acceptable **only** for lightweight "what's new across the batch" triage: derive `since` from the run window, dedup by comment `id` (`since` is inclusive), never a per-PR un-`since`'d `--paginate` walk (the top `core` drain). Do NOT persist a shared global high-water-mark file: concurrent fleet agents race on it and skip each other's new comments.
+- **Prefer GraphQL builders for state.** `gh pr view --json` / `gh pr list --json` / `gh pr checks` are GraphQL (the idle bucket) — they do not relieve `core`, but they are the right place to read PR state and check rollups.
+- **Back-pressure off response headers.** Watch `x-ratelimit-remaining` on calls you already make; consult `gh api rate_limit` at most once per batch (it counts against the *secondary* limit). When `core` runs low, pause **only at PR boundaries** — never inside the approve → label → enqueue → verify sequence (that critical section must not be interrupted; a half-enqueued PR is worse than waiting).
+
 ## Intake
 
 1. Parse the PR number(s), URL(s), or branch name(s).
@@ -64,7 +84,7 @@ Do not paraphrase these from memory. Re-read them each time because they are the
 
 **The goal of this skill is to MERGE PRs into `main`.** Most "out of place" changes are unintentional and fixable inline. A small subset is malicious or destructive enough that you should stop and flag the maintainer instead of patching forward.
 
-Run these checks against the diff (`gh pr diff <N>` or `git diff origin/main...HEAD` after checkout — you can do it pre-checkout via `gh pr diff <N>`):
+Run these checks against the **local** diff. Fetch the PR head ref once (`git fetch origin pull/<N>/head:pr/<N>` — required for checkout regardless) and scan `git diff origin/main...pr/<N>`, which costs no API quota and returns the full, untruncated patch (gitlink `160000` modes, binary flags, deletion counts). Avoid `gh pr diff <N>` — it spends a REST `core` request per PR, the bucket a non-stop fleet drains first, and its API payload can be truncated for very large diffs:
 
 ### Hard stops (do not attempt fixes — report and skip)
 
@@ -201,12 +221,16 @@ If `origin/main` is already an ancestor and there are no conflicts, skip the mer
 
 ## Review Comment Resolution
 
-**Operational — posting and fetching.** Post every PR comment, review body, and final report through a temp file (`gh pr comment <N> --body-file /tmp/body.md`, `gh pr review <N> --body-file /tmp/review.md`), **never** an inline `--body "…"` string. Inline bodies are mangled by the shell — zsh strips backticked identifiers and code spans, which has silently corrupted the technical claims of a *blocking* review. Write the body to a file, then pass `--body-file`. When handling many PRs, fetch comments in one batched repo-wide sweep rather than looping per-PR `gh` calls — the per-PR pattern drains the 5,000/hr GitHub core rate limit at fleet scale:
+**Operational — posting and fetching.** Post every PR comment, review body, and final report through a temp file (`gh pr comment <N> --body-file /tmp/body.md`, `gh pr review <N> --body-file /tmp/review.md`), **never** an inline `--body "…"` string. Inline bodies are mangled by the shell — zsh strips backticked identifiers and code spans, which has silently corrupted the technical claims of a *blocking* review. Write the body to a file, then pass `--body-file`.
+
+**Fetching — gate vs triage.** For per-PR comment **resolution** (the gate), fetch `reviews` + `comments` + `reviewThreads` comprehensively via one GraphQL call per PR (the idle bucket — cheap even at fleet scale; query and pagination rules in `pr-review-comment-resolver.md` §2). Most feedback here is top-level review bodies and issue comments, which carry no resolved-flag — read every one's body for findings (Gemini posts its review as `COMMENTED` with `reviewDecision: null`, so do NOT gate on review `state`; treat `CHANGES_REQUESTED` as an additional hard block). The repo-wide `since=` REST sweep below is **only** for lightweight cross-batch triage of what changed recently — never the resolution gate, and never a per-PR un-`since`'d `--paginate` walk (that drains the 5,000/hr `core` bucket at fleet scale):
 
 ```bash
-gh api --paginate 'repos/phase-rs/phase/pulls/comments?since=<ISO8601>&per_page=100'
-gh api --paginate 'repos/phase-rs/phase/issues/comments?since=<ISO8601>&per_page=100'
+gh api --paginate 'repos/phase-rs/phase/pulls/comments?since=<ISO8601>&per_page=100'   # inline review comments
+gh api --paginate 'repos/phase-rs/phase/issues/comments?since=<ISO8601>&per_page=100'  # issue/conversation comments
 ```
+
+Derive `<ISO8601>` from the run's time window (e.g. one hour prior) rather than re-sweeping all history, filter each PR's comments locally by `pull_request_url`/`issue_url`, and **dedup by comment `id`** — `since` is inclusive, so the boundary comment re-returns. Do NOT persist a shared global high-water-mark across runs: concurrent fleet agents race on it and silently skip each other's new comments (per **Rate-Limit Discipline**).
 
 Apply `.claude/agents/pr-review-comment-resolver.md` directly:
 
@@ -376,7 +400,7 @@ gh pr edit <PR> --add-label <type-label>                              # see "## 
 gh pr merge <PR> --auto
 ```
 
-Verify via the GraphQL API (gh CLI output is unreliable under the rtk filter): `reviewDecision == APPROVED`, the type label present, and `mergeQueueEntry.state` is QUEUED or AWAITING_CHECKS. A bare `gh pr merge --auto` that prints "queued" is NOT proof — re-check the entry state, because the queue silently sheds unapproved PRs.
+Verify via the GraphQL API (gh CLI output is unreliable under the rtk filter): `reviewDecision == APPROVED`, the type label present, and `mergeQueueEntry.state` is QUEUED or AWAITING_CHECKS. A bare `gh pr merge --auto` that prints "queued" is NOT proof — re-check the entry state, because the queue silently sheds unapproved PRs. These mergeability/queue-state reads must be **live** — never serve them from a `--cache`d snapshot, because a push during handling changes them.
 
 `--auto` under a merge queue means "add to queue when required checks pass." The queue speculatively rebases the PR against the latest `main`, runs CI once on the synthesized future-main commit (batching up to the configured group size with any other queued PRs), and merges all green PRs in order. Failed PRs are bisected out of the group and kicked back to the author.
 
