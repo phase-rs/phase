@@ -113,6 +113,14 @@ pub fn phase_out_object(
         });
     }
 
+    if !phased.is_empty() {
+        // CR 613.1 + CR 702.26b/e: Phasing out changes which continuous
+        // effects apply and which affected sets may include these permanents.
+        // Mark dirty so the next SBA/public-state flush re-derives layers with
+        // phased-out objects excluded.
+        crate::game::layers::mark_layers_full(state);
+    }
+
     phased
 }
 
@@ -163,6 +171,13 @@ pub fn phase_in_object(
                 }
             }
         }
+    }
+
+    if !phased.is_empty() {
+        // CR 613.1 + CR 702.26c: Phasing in changes which continuous effects
+        // apply (aura sources re-enter the layer system). Mark dirty so the
+        // next SBA/public-state flush re-derives affected permanents.
+        crate::game::layers::mark_layers_full(state);
     }
 
     for &id in &phased {
@@ -443,6 +458,46 @@ mod tests {
 
         assert!(state.objects[&creature].is_phased_in());
         assert!(state.objects[&aura].is_phased_in());
+    }
+
+    /// CR 613.1 + CR 702.26c: Attached aura continuous effects must re-apply
+    /// after the host phases back in (issue #2373).
+    #[test]
+    fn issue_2373_attached_aura_effect_reapplies_after_phase_in() {
+        use crate::game::layers::flush_layers;
+        use crate::types::ability::{FilterProp, StaticDefinition, TargetFilter, TypedFilter};
+        use crate::types::ContinuousModification;
+
+        let mut state = GameState::new_two_player(42);
+        let creature = setup_creature(&mut state, "Bear", PlayerId(0));
+        let aura = setup_aura(&mut state, "Boon", PlayerId(0), creature);
+        if let Some(aura_obj) = state.objects.get_mut(&aura) {
+            aura_obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::AddPower { value: 2 },
+                        ContinuousModification::AddToughness { value: 2 },
+                    ]),
+            );
+        }
+        flush_layers(&mut state);
+        assert_eq!(state.objects[&creature].power, Some(4));
+
+        let mut events = Vec::new();
+        phase_out_object(&mut state, creature, PhaseOutCause::Directly, &mut events);
+        assert!(state.layers_dirty.is_dirty());
+
+        events.clear();
+        phase_in_object(&mut state, creature, &mut events);
+        flush_layers(&mut state);
+        assert_eq!(
+            state.objects[&creature].power,
+            Some(4),
+            "aura +2/+2 must re-apply after phase-in"
+        );
     }
 
     #[test]

@@ -320,6 +320,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::VoteCount { .. }
         | QuantityRef::CommanderCastFromCommandZoneCount => false,
     }
 }
@@ -489,6 +490,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::VoteCount { .. }
         | QuantityRef::CommanderCastFromCommandZoneCount => false,
     }
 }
@@ -1586,6 +1588,7 @@ fn resolve_ref(
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
+            filter,
             scope,
         } => {
             let mut count = 0;
@@ -1600,7 +1603,13 @@ fn resolve_ref(
                             ZoneRef::Exile => unreachable!(),
                         };
                         for &obj_id in zone_ids {
-                            if matches_zone_card_filter(state, obj_id, card_types) {
+                            if matches_zone_card_filter(
+                                state,
+                                obj_id,
+                                card_types,
+                                filter.as_ref(),
+                                &filter_ctx,
+                            ) {
                                 count += 1;
                             }
                         }
@@ -1612,7 +1621,14 @@ fn resolve_ref(
                         if let Some(obj) = state.objects.get(&obj_id) {
                             let owner_matches =
                                 count_scope_owner_matches(state, scope, ctx, controller, obj.owner);
-                            if owner_matches && matches_zone_card_filter(state, obj_id, card_types)
+                            if owner_matches
+                                && matches_zone_card_filter(
+                                    state,
+                                    obj_id,
+                                    card_types,
+                                    filter.as_ref(),
+                                    &filter_ctx,
+                                )
                             {
                                 count += 1;
                             }
@@ -1801,6 +1817,18 @@ fn resolve_ref(
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             usize_to_i32_saturating(distinct_counter_kinds_among(state, filter, &filter_ctx).len())
         }
+        // CR 701.38 + CR 608.2c: Number of votes tallied for `choice_index`,
+        // counting ballots (not voters) from `state.last_vote_ballots`. Summing
+        // ballots — rather than counting distinct voters — is the consequence of
+        // CR 701.38d: a player granted multiple votes casts multiple ballots, so
+        // a single player can contribute more than one to a choice's tally.
+        QuantityRef::VoteCount { choice_index } => usize_to_i32_saturating(
+            state
+                .last_vote_ballots
+                .iter()
+                .filter(|(_, ballot_choice)| *ballot_choice == *choice_index)
+                .count(),
+        ),
         // CR 305.6: Count distinct basic land types among lands controlled by
         // the referenced player. Domain counts distinct land subtypes, not
         // lands, so multiple Forests still contribute one.
@@ -2300,15 +2328,20 @@ fn matches_zone_card_filter(
     state: &GameState,
     obj_id: ObjectId,
     card_types: &[TypeFilter],
+    filter: Option<&TargetFilter>,
+    filter_ctx: &FilterContext<'_>,
 ) -> bool {
-    if card_types.is_empty() {
-        return true;
+    if !card_types.is_empty() {
+        let matches_type = state.objects.get(&obj_id).is_some_and(|obj| {
+            card_types
+                .iter()
+                .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
+        });
+        if !matches_type {
+            return false;
+        }
     }
-    state.objects.get(&obj_id).is_some_and(|obj| {
-        card_types
-            .iter()
-            .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
-    })
+    filter.is_none_or(|filter| matches_target_filter(state, obj_id, filter, filter_ctx))
 }
 
 /// CR 608.2 + CR 109.5: Resolve which player a `CountScope` variant binds to,
@@ -5647,6 +5680,7 @@ mod tests {
                     zone,
                     card_types: Vec::new(),
                     scope: CountScope::SourceChosenPlayer,
+                    filter: None,
                 },
             };
             assert_eq!(
@@ -7003,6 +7037,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
                 scope: CountScope::Controller,
+                filter: None,
             },
         };
 
@@ -9625,5 +9660,36 @@ mod tests {
             cause: PhaseOutCause::Directly,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+    }
+
+    /// CR 701.38 + CR 701.38d + CR 608.2c: `VoteCount` counts ballots, not
+    /// voters. A player granted multiple votes casts multiple ballots, so a
+    /// single player can contribute more than one to a choice's tally. Build a
+    /// ledger where P1 voted twice for choice 0 and assert the tally is 3
+    /// (P0 once + P1 twice), with choice 1 resolving to 0 (no ballots).
+    #[test]
+    fn vote_count_sums_ballots_not_voters() {
+        let mut state = GameState::new_two_player(42);
+        // (voter, choice_index): P0 → 0, P1 → 0, P1 → 0 (multi-vote player).
+        state.last_vote_ballots.push_back((PlayerId(0), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 0));
+
+        let choice0 = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 0 },
+        };
+        let choice1 = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 1 },
+        };
+        // 3 ballots for choice 0 (votes, not the 2 distinct voters).
+        assert_eq!(
+            resolve_quantity(&state, &choice0, PlayerId(0), ObjectId(0)),
+            3
+        );
+        // No ballots for choice 1.
+        assert_eq!(
+            resolve_quantity(&state, &choice1, PlayerId(0), ObjectId(0)),
+            0
+        );
     }
 }

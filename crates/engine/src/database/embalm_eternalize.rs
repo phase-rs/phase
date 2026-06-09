@@ -9,8 +9,10 @@
 //!
 //! The two keywords differ only in the per-token *override set* applied on top
 //! of the copy, so this module factors the shared shape into a single builder
-//! (`token_copy_ability`) parameterized by the keyword's mana cost and its
-//! `ContinuousModification` overrides — the "build for the class" pattern. The
+//! (`token_copy_ability`) parameterized by the keyword's activation cost (mana
+//! or a composite mana + non-mana cost, e.g. the Champion of Wits "{3}{U}{U},
+//! Discard a card") and its `ContinuousModification` overrides — the "build for
+//! the class" pattern. The
 //! overrides reuse the existing copy-exception building block
 //! (`Effect::CopyTokenOf.additional_modifications`), which the token-copy
 //! resolver bakes into the synthesized token at creation
@@ -38,8 +40,8 @@ use crate::types::ability::{
     TargetFilter,
 };
 use crate::types::card::CardFace;
-use crate::types::keywords::Keyword;
-use crate::types::mana::{ManaColor, ManaCost};
+use crate::types::keywords::{EmbalmCost, EternalizeCost, Keyword};
+use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
 /// CR 702.128a + CR 702.129a: Synthesize the graveyard-activated token-copy
@@ -50,10 +52,14 @@ pub fn synthesize_embalm_eternalize(face: &mut CardFace) {
         .keywords
         .iter()
         .filter_map(|keyword| match keyword {
-            Keyword::Embalm(cost) => Some(token_copy_ability(cost.clone(), embalm_overrides())),
-            Keyword::Eternalize(cost) => {
-                Some(token_copy_ability(cost.clone(), eternalize_overrides()))
-            }
+            Keyword::Embalm(cost) => Some(token_copy_ability(
+                embalm_cost_part(cost),
+                embalm_overrides(),
+            )),
+            Keyword::Eternalize(cost) => Some(token_copy_ability(
+                eternalize_cost_part(cost),
+                eternalize_overrides(),
+            )),
             _ => None,
         })
         .collect();
@@ -92,27 +98,53 @@ fn eternalize_overrides() -> Vec<ContinuousModification> {
     ]
 }
 
+/// CR 602.1a: Unwrap the per-keyword `EmbalmCost` to the single keyword-cost
+/// `AbilityCost` (mana or composite/non-mana) that precedes the self-exile.
+/// Cost composition itself stays in `token_copy_ability` (single authority).
+fn embalm_cost_part(cost: &EmbalmCost) -> AbilityCost {
+    match cost {
+        EmbalmCost::Mana(m) => AbilityCost::Mana { cost: m.clone() },
+        EmbalmCost::NonMana(ac) => ac.clone(),
+    }
+}
+
+/// CR 602.1a: `EternalizeCost` analogue of `embalm_cost_part`.
+fn eternalize_cost_part(cost: &EternalizeCost) -> AbilityCost {
+    match cost {
+        EternalizeCost::Mana(m) => AbilityCost::Mana { cost: m.clone() },
+        EternalizeCost::NonMana(ac) => ac.clone(),
+    }
+}
+
 /// CR 702.128a / CR 702.129a + CR 707.2: Build the activated ability
 /// "[cost], Exile this card from your graveyard: Create a token that's a copy
 /// of this card, except <overrides>. Activate only as a sorcery."
 fn token_copy_ability(
-    mana_cost: ManaCost,
+    keyword_cost: AbilityCost,
     overrides: Vec<ContinuousModification>,
 ) -> AbilityDefinition {
     // CR 602.1a: The activation cost is everything before the colon — here a
-    // composite of the keyword's mana cost plus exiling this card from the
-    // graveyard. The SelfRef graveyard exile is auto-paid by `pay_ability_cost`
-    // (no player choice). An explicit `Zone::Graveyard` validates the source's
-    // location when the cost is paid.
-    let cost = AbilityCost::Composite {
-        costs: vec![
-            AbilityCost::Mana { cost: mana_cost },
-            AbilityCost::Exile {
-                count: 1,
-                zone: Some(Zone::Graveyard),
-                filter: Some(TargetFilter::SelfRef),
-            },
-        ],
+    // composite of the keyword's cost (mana, or a composite mana + non-mana such
+    // as the Champion of Wits "{3}{U}{U}, Discard a card") plus exiling this card
+    // from the graveyard. The SelfRef graveyard exile is auto-paid by
+    // `pay_ability_cost` (no player choice). An explicit `Zone::Graveyard`
+    // validates the source's location when the cost is paid.
+    let exile_self = AbilityCost::Exile {
+        count: 1,
+        zone: Some(Zone::Graveyard),
+        filter: Some(TargetFilter::SelfRef),
+    };
+    // Flatten an already-Composite keyword cost so the self-exile joins the
+    // existing sub-costs instead of nesting (mirrors `synthesize_cycling`).
+    let cost = match keyword_cost {
+        AbilityCost::Composite { costs } => {
+            let mut flat = costs;
+            flat.push(exile_self);
+            AbilityCost::Composite { costs: flat }
+        }
+        other => AbilityCost::Composite {
+            costs: vec![other, exile_self],
+        },
     };
 
     // CR 707.2: Create a token that's a copy of this card. `SelfRef` resolves

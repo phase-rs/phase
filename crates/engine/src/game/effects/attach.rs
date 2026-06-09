@@ -228,6 +228,12 @@ pub(crate) fn attachment_illegality(
     attachment_id: ObjectId,
     host_id: ObjectId,
 ) -> Option<AttachIllegality> {
+    // CR 301.5c: "An Equipment can't equip itself." (And no permanent can be
+    // attached to itself.) Single-authority self-attach guard protecting both
+    // `can_attach_to_object` and `attach_to`.
+    if attachment_id == host_id {
+        return Some(AttachIllegality::Prohibited);
+    }
     // CR 701.3a: `CantBeAttached` blocks any attachment from being attached to
     // the host.
     if crate::game::static_abilities::object_has_static_other(state, host_id, "CantBeAttached") {
@@ -1224,6 +1230,48 @@ mod tests {
         assert_eq!(
             state.objects.get(&aura).unwrap().attached_to,
             Some(AttachTarget::Object(legendary))
+        );
+    }
+
+    /// CR 301.5c: "An Equipment can't equip itself." The single-authority
+    /// `attachment_illegality` self-attach guard makes `can_attach_to_object`
+    /// reject a self target and `attach_to(id, id)` a no-op.
+    #[test]
+    fn self_attach_is_prohibited_and_no_op() {
+        let mut state = setup();
+        // A reconfigure Equipment is itself a creature while unattached.
+        let equip = spawn_with_subtype(&mut state, "Self-Equip", "Equipment");
+        state
+            .objects
+            .get_mut(&equip)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert_eq!(
+            attachment_illegality(&state, equip, equip),
+            Some(AttachIllegality::Prohibited),
+            "self-attach is illegal (CR 301.5c)"
+        );
+        assert!(
+            !can_attach_to_object(&state, equip, equip),
+            "can_attach_to_object rejects self target"
+        );
+
+        assert_eq!(
+            attach_to(&mut state, equip, equip),
+            None,
+            "attach_to(id, id) is a no-op returning None"
+        );
+        assert_eq!(
+            state.objects.get(&equip).unwrap().attached_to,
+            None,
+            "self-attach leaves attached_to unset"
+        );
+        assert!(
+            state.objects.get(&equip).unwrap().attachments.is_empty(),
+            "self-attach adds nothing to attachments"
         );
     }
 }

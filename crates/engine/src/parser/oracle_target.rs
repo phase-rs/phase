@@ -2621,6 +2621,8 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 110.5: "tapped [type]" / "untapped [type]".
             | FilterProp::Tapped
             | FilterProp::Untapped
+            // CR 702.171b: "saddled [type]" adjective prefix.
+            | FilterProp::IsSaddled
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
             | FilterProp::Attacking
             | FilterProp::Blocking
@@ -2957,6 +2959,9 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::Blocking
                 | FilterProp::Tapped
                 | FilterProp::Untapped
+                // CR 702.171b: "saddled" designation as a type-phrase prefix
+                // ("saddled Mount", "saddled creature").
+                | FilterProp::IsSaddled
                 | FilterProp::FaceDown
                 // CR 701.60b: "suspected" is a battlefield designation that appears
                 // as an adjective prefix in type phrases ("suspected creatures").
@@ -5621,6 +5626,29 @@ mod tests {
                     .properties(vec![FilterProp::Tapped])
             )
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn saddled_type_phrase_parses_as_target() {
+        // CR 702.171b: a "saddled <type>" selector must carry FilterProp::IsSaddled
+        // through the full parse_target path (not just parse_property_filter) —
+        // guards the parse_combat_status_prefix / is_adjective_prefix_prop allowlist
+        // wiring against silent regression if the prefix allowlist is reordered.
+        let (f, rest) = parse_target("saddled creature you control");
+        if let TargetFilter::Typed(tf) = &f {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "missing Creature in {tf:?}"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::IsSaddled),
+                "missing IsSaddled in {tf:?}"
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!("expected Typed filter, got {f:?}");
+        }
         assert_eq!(rest, "");
     }
 

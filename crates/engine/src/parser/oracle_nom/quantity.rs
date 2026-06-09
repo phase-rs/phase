@@ -233,6 +233,7 @@ fn parse_your_tail(input: &str) -> OracleResult<'_, QuantityRef> {
                 zone: ZoneRef::Library,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+                filter: None,
             },
             tag("library"),
         ),
@@ -241,6 +242,7 @@ fn parse_your_tail(input: &str) -> OracleResult<'_, QuantityRef> {
                 zone: ZoneRef::Hand,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+                filter: None,
             },
             tag("hand"),
         ),
@@ -249,6 +251,7 @@ fn parse_your_tail(input: &str) -> OracleResult<'_, QuantityRef> {
                 zone: ZoneRef::Graveyard,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+                filter: None,
             },
             tag("graveyard"),
         ),
@@ -288,6 +291,7 @@ fn parse_cards_in_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> 
                 zone,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+                filter: None,
             }
         }),
     ))
@@ -952,6 +956,7 @@ fn parse_number_of_cards_in_chosen_player_zone(input: &str) -> OracleResult<'_, 
             zone,
             card_types: Vec::new(),
             scope: CountScope::SourceChosenPlayer,
+            filter: None,
         },
     ))
 }
@@ -1066,6 +1071,7 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
             zone,
             card_types,
             scope,
+            filter: None,
         },
     ))
 }
@@ -3894,6 +3900,7 @@ mod tests {
                 zone: ZoneRef::Hand,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
         assert_eq!(rest, "");
@@ -3985,6 +3992,7 @@ mod tests {
                     zone,
                     card_types: Vec::new(),
                     scope: CountScope::SourceChosenPlayer,
+                    filter: None,
                 }
             );
         }
@@ -4127,6 +4135,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
         assert_eq!(rest, " and");
@@ -4146,6 +4155,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
         assert_eq!(rest, "");
@@ -4163,6 +4173,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
         assert_eq!(rest, "");
@@ -4181,6 +4192,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Artifact, TypeFilter::Creature],
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
         assert_eq!(rest, "");
@@ -4214,6 +4226,7 @@ mod tests {
                                 zone,
                                 card_types,
                                 scope,
+                                filter: None,
                             },
                     } => {
                         assert_eq!(zone, ZoneRef::Graveyard);
@@ -4236,6 +4249,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
         assert_eq!(rest, "");
@@ -5337,7 +5351,8 @@ mod tests {
                         zone: ZoneRef::Library,
                         card_types: Vec::new(),
                         scope: CountScope::Controller,
-                    },
+                        filter: None,
+                    }
                 }),
                 divisor: 2,
                 rounding: RoundingMode::Up,
@@ -5435,6 +5450,7 @@ mod tests {
                 zone: ZoneRef::Hand,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+                filter: None,
             }
         );
         assert_eq!(rest, "");

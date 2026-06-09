@@ -1,0 +1,182 @@
+//! Saddle state model (P3) — `saddled_by` persistence + `WaitingFor::SaddleMount`
+//! cancel transition, driven through the real engine pipeline.
+//!
+//! CR 702.171a (Saddle is an activated ability, sorcery-speed), CR 702.171b
+//! (the saddled designation lasts until end of turn / leaving the battlefield),
+//! CR 702.171c (the creatures that saddled the permanent), CR 601.2c (backing
+//! out of a mid-selection choice restores priority with no state to undo).
+
+use engine::game::scenario::{GameScenario, P0};
+use engine::types::actions::GameAction;
+use engine::types::keywords::Keyword;
+use engine::types::phase::Phase;
+
+/// CR 702.171c: after a Saddle activation resolves, the Mount records the
+/// creatures that saddled it in `saddled_by`; CR 702.171b: the record clears at
+/// the end of the turn in lockstep with the saddled designation.
+#[test]
+fn saddled_by_records_payers_and_clears_at_end_of_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mount = {
+        let mut b = scenario.add_creature(P0, "Test Mount", 0, 4);
+        b.with_keyword(Keyword::Saddle(2));
+        b.id()
+    };
+    // CR 702.171a: a single 3-power creature satisfies "total power 2 or greater".
+    let rider = scenario.add_creature(P0, "Rider", 3, 3).id();
+    let second_rider = scenario.add_creature(P0, "Second Rider", 3, 3).id();
+
+    let mut runner = scenario.build();
+
+    // Announce the saddle activation (Priority → SaddleMount).
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![],
+        })
+        .expect("entering SaddleMount should succeed at sorcery speed");
+    assert_eq!(runner.waiting_for_kind(), "SaddleMount");
+
+    // Pay the cost by tapping the rider; pushes the Saddle stack entry.
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![rider],
+        })
+        .expect("announcing the saddle should succeed");
+
+    // Resolve the Saddle stack entry through the real pipeline.
+    runner.advance_until_stack_empty();
+
+    let m = runner.state().objects.get(&mount).unwrap();
+    assert!(m.is_saddled, "Mount must be saddled after resolution");
+    // CR 702.171c: the saddling creature is recorded.
+    assert_eq!(
+        m.saddled_by,
+        vec![rider],
+        "saddled_by must record the creatures that saddled the Mount"
+    );
+
+    // CR 702.171c: a later Saddle activation in the same turn adds the new
+    // saddling creature instead of replacing the earlier record.
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![],
+        })
+        .expect("entering a second SaddleMount should succeed");
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![second_rider],
+        })
+        .expect("announcing the second saddle should succeed");
+    runner.advance_until_stack_empty();
+
+    let m = runner.state().objects.get(&mount).unwrap();
+    assert_eq!(
+        m.saddled_by,
+        vec![rider, second_rider],
+        "saddled_by must accumulate creatures across same-turn Saddle activations"
+    );
+
+    // CR 702.171b: advance the real pipeline across the cleanup step (CR 514) into
+    // the next turn. Cleanup clears the designation and the saddling-creature
+    // record in lockstep. Drive the engine with its own `legal_actions` so the
+    // turn keeps moving through combat declarations and step triggers without ever
+    // casting or paying mana.
+    let start_turn = runner.state().turn_number;
+    let mut crossed_turn = false;
+    for _ in 0..400 {
+        if runner.state().turn_number > start_turn {
+            crossed_turn = true;
+            break;
+        }
+        let actions = engine::ai_support::legal_actions(runner.state());
+        let progress = actions
+            .iter()
+            .find(|a| matches!(a, GameAction::PassPriority))
+            .or_else(|| {
+                actions.iter().find(|a| {
+                    matches!(
+                        a,
+                        GameAction::DeclareAttackers { .. }
+                            | GameAction::DeclareBlockers { .. }
+                            | GameAction::SelectCards { .. }
+                            | GameAction::ChooseTarget { .. }
+                    )
+                })
+            })
+            .cloned();
+        match progress {
+            Some(action) => {
+                if runner.act(action).is_err() {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    assert!(
+        crossed_turn,
+        "harness must cross the turn boundary; parked at turn {} phase {:?} waiting {:?}",
+        runner.state().turn_number,
+        runner.state().phase,
+        runner.state().waiting_for,
+    );
+
+    let m = runner.state().objects.get(&mount).unwrap();
+    assert!(
+        !m.is_saddled,
+        "saddled designation must clear at end of turn"
+    );
+    assert!(
+        m.saddled_by.is_empty(),
+        "saddled_by must clear at end of turn alongside is_saddled"
+    );
+}
+
+/// CR 601.2c: backing out of the Saddle creature-selection state restores
+/// priority with no state to undo — no creatures are tapped and the Mount is
+/// not saddled.
+#[test]
+fn cancel_saddle_restores_priority_without_side_effects() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mount = {
+        let mut b = scenario.add_creature(P0, "Test Mount", 0, 4);
+        b.with_keyword(Keyword::Saddle(2));
+        b.id()
+    };
+    let rider = scenario.add_creature(P0, "Rider", 3, 3).id();
+
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![],
+        })
+        .expect("entering SaddleMount should succeed at sorcery speed");
+    assert_eq!(runner.waiting_for_kind(), "SaddleMount");
+
+    // CR 601.2c: cancel out of the selection.
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancelling the saddle should succeed");
+
+    assert_eq!(
+        runner.waiting_for_kind(),
+        "Priority",
+        "cancelling SaddleMount must restore priority"
+    );
+    assert!(
+        !runner.state().objects.get(&rider).unwrap().tapped,
+        "cancelling must not tap any creature (cost is paid only at announcement)"
+    );
+    assert!(
+        !runner.state().objects.get(&mount).unwrap().is_saddled,
+        "cancelling must leave the Mount unsaddled"
+    );
+}

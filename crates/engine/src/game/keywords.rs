@@ -111,6 +111,24 @@ pub fn effective_escape_data(state: &GameState, object_id: ObjectId) -> Option<(
     }
 }
 
+/// CR 702.164b: A creature's total toxic value is the sum of N over ALL its
+/// effective toxic instances (printed + granted, on or off the battlefield).
+/// Sums over the plural `effective_off_zone_keywords` primitive (battlefield →
+/// `obj.keywords`; off-battlefield → off-zone continuous-effect resolution),
+/// matching the effective view used by the sibling `object_has_effective_keyword_kind`
+/// flags rather than reading printed `obj.keywords` directly. (Toxic has no
+/// distinct `KeywordKind` — it collapses to `Unknown` — so the sum is taken over
+/// the `Keyword::Toxic` variant, not a kind filter.)
+pub fn effective_total_toxic_value(state: &GameState, object_id: ObjectId) -> u32 {
+    crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Toxic(amount) => Some(*amount),
+            _ => None,
+        })
+        .sum()
+}
+
 /// CR 702.187b: Effective Mayhem alt-cost for a card in the graveyard, honoring
 /// off-zone characteristic grants (e.g. Green Goblin's "Each nonland card in
 /// your graveyard has mayhem. The mayhem cost is equal to its mana cost.") in
@@ -673,6 +691,41 @@ mod tests {
         obj.keywords.push(Keyword::Flying);
         assert!(has_keyword(&obj, &Keyword::Flying));
         assert!(!has_keyword(&obj, &Keyword::Haste));
+    }
+
+    /// CR 702.164b: a creature's total toxic value is the sum of N over ALL its
+    /// toxic instances. `effective_total_toxic_value` must enumerate every
+    /// instance (here a distinct `Toxic(2)` + `Toxic(1)`) and sum to 3, rather
+    /// than collapsing to the first match.
+    #[test]
+    fn effective_total_toxic_value_sums_all_instances() {
+        let mut state = GameState::new_two_player(1);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Toxic Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.keywords.push(Keyword::Toxic(2));
+        obj.keywords.push(Keyword::Toxic(1));
+
+        assert_eq!(
+            effective_total_toxic_value(&state, id),
+            3,
+            "total toxic value sums all distinct instances"
+        );
+
+        // A creature with no toxic has total toxic value 0.
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Plain".to_string(),
+            Zone::Battlefield,
+        );
+        assert_eq!(effective_total_toxic_value(&state, plain), 0);
     }
 
     /// CR 702.138a: a placeholder `exile_count == 0` is a parse failure, not a
