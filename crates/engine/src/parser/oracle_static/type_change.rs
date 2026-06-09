@@ -922,15 +922,20 @@ pub(crate) fn parse_bare_becomes_type_replacement_modifications(
     modifications
 }
 
-/// CR 613.1d + CR 613.1g: "[pronoun]'s a/an <types> with power and toughness
-/// each equal to its mana value [as long as <condition>]" — a self-referential
-/// conditional animation static. Covers Animate Artifact and the class of
-/// dynamic-P/T-by-mana-value "it's a/an X creature" become-creature statics.
+/// CR 613.1d + CR 613.1g: "[pronoun]'s a/an <descriptor> [as long as <condition>]"
+/// — self-referential conditional animation static. Covers:
+///   - Dynamic-P/T-by-mana-value: "it's an artifact creature with power and
+///     toughness each equal to its mana value" (Animate Artifact)
+///   - Fixed P/T + types + keywords: "he's a 7/7 Dragon God creature with flying
+///     and indestructible" (Grand Master of Flowers — CR 613.4b fixed P/T,
+///     CR 613.1d type grant, CR 613.1g keyword grant)
 ///
-/// Scoped to the dynamic-P/T-by-MV case only. Fixed-literal P/T (`it's a 3/4
-/// …`) and keyword tails (`with flying`) are deliberately deferred to a
-/// FOLLOWUP — this function does NOT reuse `parse_animation_modifications`
-/// (which rejects `it's an` and drops the P/T clause).
+/// Accepts gender-neutral and gendered pronouns ("it's", "~'s", "they're",
+/// "he's", "she's"). Delegates body parsing to
+/// `parse_animation_spec` + `animation_modifications` (which handles fixed P/T,
+/// dynamic P/T-by-MV, types, subtypes, and keyword tails in one pass), falling
+/// back to the prior type-only + MV-dynamic-P/T path if the spec parser returns
+/// None.
 pub(crate) fn parse_pronoun_becomes_type_static(
     tp: &TextPair<'_>,
     text: &str,
@@ -944,38 +949,53 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         None => (*tp, None),
     };
 
-    // STEP B — pronoun + article prefix. `it's an` must be accepted alongside
-    // `it's a`; the existing `parse_animation_modifications` rejects `it's an`.
+    // STEP B — pronoun + article prefix. Accept gender-neutral ("it's", "~'s",
+    // "they're") and gendered ("he's", "she's") pronouns; planeswalker
+    // animation statics use gendered pronouns (Grand Master of Flowers, Kaito,
+    // Gideon classes).
     let body = nom_tag_tp(&effect_tp, "it's a ")
         .or_else(|| nom_tag_tp(&effect_tp, "it's an "))
         .or_else(|| nom_tag_tp(&effect_tp, "~'s a "))
-        .or_else(|| nom_tag_tp(&effect_tp, "~'s an "))?;
-    let mut modifications = Vec::new();
+        .or_else(|| nom_tag_tp(&effect_tp, "~'s an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "they're a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "they're an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "he's a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "he's an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "she's a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "she's an "))?;
 
-    // STEP C — split the type expression from the " with <P/T clause>" tail.
-    let (type_part, with_tail) = match body.split_around(" with ") {
-        Some((before, after)) => (before, Some(after)),
-        None => (body, None),
+    // STEP C — delegate body parsing to parse_animation_spec which handles
+    // fixed P/T (CR 613.4b), dynamic P/T-by-mana-value, types (CR 613.1d),
+    // subtypes (CR 205.3), and keyword tails (CR 613.1g) in one composable pass.
+    let body_text = body.original.trim().trim_end_matches('.');
+    let modifications = if let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        body_text,
+        &mut ParseContext::default(),
+    ) {
+        super::oracle_effect::animation::animation_modifications(&spec)
+    } else {
+        // Fallback: type-token parse + mana-value dynamic P/T. Handles edge
+        // cases where parse_animation_spec returns None (e.g., unusual clause
+        // ordering not yet covered by the animation spec parser).
+        let mut mods = Vec::new();
+        let (type_part, with_tail) = match body.split_around(" with ") {
+            Some((before, after)) => (before, Some(after)),
+            None => (body, None),
+        };
+        mods.extend(
+            super::oracle_effect::animation::parse_becomes_type_modifications(type_part.original),
+        );
+        if let Some(tail) = &with_tail {
+            push_base_pt_mana_value_dynamic_modifications(&mut mods, tail.lower);
+        }
+        mods
     };
-
-    // STEP D — types: delegate to the existing animation type-token parser.
-    modifications.extend(
-        super::oracle_effect::animation::parse_becomes_type_modifications(type_part.original),
-    );
-
-    // STEP E — P/T-by-mana-value clause only (fixed/keyword tails deferred).
-    // If a " with " tail is present but is not the P/T-by-MV clause, the
-    // helper pushes nothing and the static still carries its type
-    // modifications — acceptable for this unit's class.
-    if let Some(tail) = &with_tail {
-        push_base_pt_mana_value_dynamic_modifications(&mut modifications, tail.lower);
-    }
 
     if modifications.is_empty() {
         return None;
     }
 
-    // STEP F — attach the condition peeled in STEP A.
+    // STEP D — attach the condition peeled in STEP A.
     let mut def = StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
         .modifications(modifications)

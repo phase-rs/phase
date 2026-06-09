@@ -1768,8 +1768,8 @@ fn static_cant_be_countered_typed_subject() {
     }
 }
 
-/// CR 117.7 + CR 601.2f: "This spell costs {N} less ..." must parse into a
-/// self-scoped static — affected = SelfRef, active_zones = [Hand, Stack, Command] —
+/// CR 601.2f: "This spell costs {N} less ..." must parse into a
+/// self-scoped static — affected = SelfRef, active_zones = self_spell_cost_mod_active_zones() —
 /// so the cast-time scanner finds it on the spell itself (not on the
 /// battlefield). Regression guard for Tolarian Terror class.
 #[test]
@@ -1790,7 +1790,23 @@ fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+}
+
+/// Issue #1372: Demilich's self-spell reduction must function from the graveyard
+/// during cast-time cost determination.
+#[test]
+fn static_demilich_self_cost_reduction_includes_graveyard() {
+    let def = parse_static_line(
+        "This spell costs {U} less to cast for each instant and sorcery spell you've cast this turn.",
+    )
+    .unwrap();
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert!(
+        def.active_zones.contains(&Zone::Graveyard),
+        "Demilich must reduce its cost while in the graveyard, got {:?}",
+        def.active_zones
     );
 }
 
@@ -1851,7 +1867,7 @@ fn chandras_incinerator_self_cost_reduction_uses_noncombat_damage_to_opponents()
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
     );
 }
 
@@ -1878,7 +1894,7 @@ fn ghalta_self_cost_reduction_is_active_from_command_zone() {
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
     );
 }
 
@@ -1910,7 +1926,7 @@ fn self_cost_reduction_where_x_distinct_named_lands_uses_static_cost_seam() {
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
     );
 }
 
@@ -1944,7 +1960,7 @@ fn static_this_spell_cost_less_for_each_creature_that_attacked_this_turn() {
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
     );
 }
 
@@ -1967,7 +1983,7 @@ fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
     );
 }
 
@@ -2030,7 +2046,7 @@ fn self_cost_reduction_if_night_uses_day_night_condition() {
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
     );
 }
 
@@ -2135,7 +2151,7 @@ fn static_this_spell_cost_less_if_it_targets_creature_filter() {
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
     );
 }
 
@@ -2207,7 +2223,7 @@ fn static_this_spell_cost_less_if_it_targets_spell_or_ability_targeting_large_cr
     assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
     assert_eq!(
         def.active_zones,
-        vec![Zone::Hand, Zone::Stack, Zone::Command]
+        crate::types::zones::self_spell_cost_mod_active_zones()
     );
 }
 
@@ -4243,8 +4259,29 @@ fn static_pump_and_goaded_emits_both_defs() {
 
 #[test]
 fn static_this_creature_can_block_only_creatures_with_flying() {
+    use crate::types::statics::block_only_creatures_with_flying_filter;
+
     let def = parse_static_line("This creature can block only creatures with flying.").unwrap();
-    assert_eq!(def.mode, StaticMode::BlockRestriction);
+    assert_eq!(
+        def.mode,
+        StaticMode::BlockRestriction {
+            filter: block_only_creatures_with_flying_filter(),
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_this_token_can_block_only_creatures_with_flying() {
+    use crate::types::statics::block_only_creatures_with_flying_filter;
+
+    let def = parse_static_line("This token can block only creatures with flying.").unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::BlockRestriction {
+            filter: block_only_creatures_with_flying_filter(),
+        }
+    );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
