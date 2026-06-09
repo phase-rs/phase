@@ -37,8 +37,8 @@ use crate::types::ability::{
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, Effect, FilterProp, ObjectScope, OriginConstraint, PlayerFilter,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject, StaticCondition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier, ZoneChangeClause,
 };
 #[cfg(test)]
@@ -2812,9 +2812,20 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             // <type> counter(s) on it" are handled by the combinator-based
             // `try_extract_had_counter_condition` (composes the negation and
             // type axes) so the positive and negated forms share one authority.
-            // CR 702.112a: "if it's renowned" / "if ~ is renowned" — renown state check
-            ("if it's renowned", TriggerCondition::SourceIsRenowned),
-            ("if ~ is renowned", TriggerCondition::SourceIsRenowned),
+            // CR 702.112b: "if it's renowned" — the event-subject creature's designation.
+            // CR 702.112a: "if ~ is renowned" — the source permanent's designation.
+            (
+                "if it's renowned",
+                TriggerCondition::IsRenowned {
+                    subject: RenownSubject::EventSubject,
+                },
+            ),
+            (
+                "if ~ is renowned",
+                TriggerCondition::IsRenowned {
+                    subject: RenownSubject::Source,
+                },
+            ),
             // CR 506.2 + CR 508.1b + CR 603.4: "if none of those creatures attacked you" —
             // intervening-if for "whenever another player attacks with N or more creatures"
             // triggers that reward defensive (non-aggressor) opponents.
@@ -13697,6 +13708,33 @@ mod tests {
             // allow-noncombinator: test assertion verifying clause excision, not parsing dispatch
             !cleaned.contains("put onto the battlefield with this ability"),
             "intervening-if clause must be excised, got: {cleaned}",
+        );
+    }
+
+    /// CR 702.112: "if it's renowned" (event subject, 702.112b) and "if ~ is
+    /// renowned" (source, 702.112a) map to distinct `RenownSubject` axes.
+    #[test]
+    fn extract_if_condition_renowned_disambiguates_subject() {
+        let (_, it_cond) = extract_if_condition("if it's renowned, draw a card.");
+        assert!(
+            matches!(
+                it_cond,
+                Some(TriggerCondition::IsRenowned {
+                    subject: RenownSubject::EventSubject
+                })
+            ),
+            "expected IsRenowned {{ EventSubject }}, got {it_cond:?}",
+        );
+
+        let (_, self_cond) = extract_if_condition("if ~ is renowned, draw a card.");
+        assert!(
+            matches!(
+                self_cond,
+                Some(TriggerCondition::IsRenowned {
+                    subject: RenownSubject::Source
+                })
+            ),
+            "expected IsRenowned {{ Source }}, got {self_cond:?}",
         );
     }
 

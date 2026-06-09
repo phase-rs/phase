@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
-    ModalChoice, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-    TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, TargetFilter,
+    TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -4712,10 +4712,23 @@ pub(crate) fn check_trigger_condition(
                 crate::game::commander::controls_any_commander(state, controller)
             }
         },
-        // CR 702.112a: True when the source permanent has been made renowned.
-        TriggerCondition::SourceIsRenowned => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.is_renowned),
+        // CR 702.112: True when the referenced creature has the renowned designation.
+        TriggerCondition::IsRenowned { subject } => match subject {
+            // CR 702.112a: "if ~ is renowned" — the ability's own permanent.
+            RenownSubject::Source => source_id
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|obj| obj.is_renowned),
+            // CR 702.112b: "if it's renowned" — the renowned designation belongs to the
+            // event-subject creature, which other spells/abilities can identify. Resolve
+            // the subject object from the triggering event (same extractor that resolves
+            // TargetFilter::TriggeringSource), falling back to the source for the
+            // SelfRef-shaped case. Permissive on a missing/ambiguous object (yields false).
+            RenownSubject::EventSubject => trigger_event
+                .and_then(crate::game::targeting::extract_source_from_event)
+                .or(source_id)
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|obj| obj.is_renowned),
+        },
         // CR 711.2a + CR 711.2b: Level-up creature trigger gating — check counter count on source.
         // `CounterMatch::Any` sums across every counter type; `OfType(ct)` reads a single type.
         // Mirrors `StaticCondition::HasCounters` evaluation in `layers.rs`.
@@ -10228,6 +10241,99 @@ pub mod tests {
         ));
         // The untapped-entering case must NOT satisfy the condition.
         state.objects.get_mut(&entering).unwrap().tapped = false;
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(ability_source),
+            Some(&event),
+        ));
+    }
+
+    #[test]
+    fn is_renowned_source_reads_source_object_flag() {
+        // CR 702.112a: "if ~ is renowned" — the condition reads the ability's own
+        // permanent (source_id), independent of any triggering event.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mardu Hordechief".to_string(),
+            Zone::Battlefield,
+        );
+        let cond = TriggerCondition::IsRenowned {
+            subject: RenownSubject::Source,
+        };
+
+        state.objects.get_mut(&source).unwrap().is_renowned = true;
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+
+        state.objects.get_mut(&source).unwrap().is_renowned = false;
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+    }
+
+    #[test]
+    fn is_renowned_event_subject_reads_event_object_flag() {
+        // CR 702.112b: "if it's renowned" — the renowned designation belongs to the
+        // event-subject creature (a creature OTHER than the source), resolved from
+        // the triggering event via `extract_source_from_event`.
+        let mut state = setup();
+        // Ability source — deliberately NOT renowned, so a `source_id`-based read
+        // would yield `false`.
+        let ability_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mardu Hordechief".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&ability_source).unwrap().is_renowned = false;
+        // The event-subject permanent — a *different* object, renowned.
+        let subject = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Abbot of Keral Keep".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&subject).unwrap().is_renowned = true;
+
+        let event = GameEvent::ZoneChanged {
+            object_id: subject,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                subject,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        };
+        let cond = TriggerCondition::IsRenowned {
+            subject: RenownSubject::EventSubject,
+        };
+        // True: the *event-subject* object is renowned, even though `source_id` is not.
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(ability_source),
+            Some(&event),
+        ));
+        // The non-renowned-subject case must NOT satisfy the condition.
+        state.objects.get_mut(&subject).unwrap().is_renowned = false;
         assert!(!check_trigger_condition(
             &state,
             &cond,

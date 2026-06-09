@@ -16,10 +16,10 @@ use crate::types::ability::{
     DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, KickerVariant,
     ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
     NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
+    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -6015,7 +6015,7 @@ fn is_renown_trigger(t: &TriggerDefinition) -> bool {
             t.condition,
             Some(TriggerCondition::Not {
                 condition: ref inner,
-            }) if matches!(**inner, TriggerCondition::SourceIsRenowned)
+            }) if matches!(**inner, TriggerCondition::IsRenowned { subject: RenownSubject::Source })
         )
         && matches!(
             t.execute.as_deref().map(|a| &*a.effect),
@@ -6043,7 +6043,9 @@ fn build_renown_trigger(n: u32) -> TriggerDefinition {
         .valid_target(TargetFilter::Player)
         .damage_kind(DamageKindFilter::CombatOnly)
         .condition(TriggerCondition::Not {
-            condition: Box::new(TriggerCondition::SourceIsRenowned),
+            condition: Box::new(TriggerCondition::IsRenowned {
+                subject: RenownSubject::Source,
+            }),
         })
         .execute(execute)
         .description(format!(
@@ -11397,7 +11399,9 @@ mod undying_persist_synthesis_tests {
         };
         assert!(matches!(
             condition.as_ref(),
-            TriggerCondition::SourceIsRenowned
+            TriggerCondition::IsRenowned {
+                subject: crate::types::ability::RenownSubject::Source
+            }
         ));
 
         let execute = trigger.execute.as_deref().expect("execute body required");

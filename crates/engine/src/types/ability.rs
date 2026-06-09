@@ -11269,6 +11269,21 @@ pub(crate) fn additional_cost_payment_count_matches(
     }
 }
 
+/// CR 702.112: Which creature's renowned designation an `IsRenowned` condition reads.
+///
+/// Renowned (CR 702.112b) is a per-permanent designation other spells and abilities
+/// can identify, so a condition may reference either the ability's own permanent or a
+/// different (event-subject) creature.
+///   - `Source` — the ability's own permanent ("~"), as in Renown's own
+///     intervening-if (CR 702.112a, "if it isn't renowned" where "it" == this creature).
+///   - `EventSubject` — the creature named by the triggering event ("it"), a creature
+///     other than the source (CR 702.112b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenownSubject {
+    Source,
+    EventSubject,
+}
+
 /// Intervening-if condition for triggered abilities.
 /// Checked both when the trigger would fire and when it resolves on the stack.
 ///
@@ -11502,8 +11517,13 @@ pub enum TriggerCondition {
     /// CR 903.3d: "if you control a commander" — controller-only, any owner.
     /// The `ownership` field selects which CR condition this is.
     ControlsCommander { ownership: CommanderOwnership },
-    /// CR 702.112a: "if ~ is renowned" — true when the source has been made renowned.
-    SourceIsRenowned,
+    /// CR 702.112: True when the referenced creature has the renowned designation.
+    ///   - `RenownSubject::Source` — "if ~ is renowned" (CR 702.112a, the canonical
+    ///     Renown intervening-if; subject == the ability's own permanent).
+    ///   - `RenownSubject::EventSubject` — "if it's renowned" (CR 702.112b; the
+    ///     triggering/event creature, a creature OTHER than the source, whose
+    ///     renowned designation other spells and abilities can identify).
+    IsRenowned { subject: RenownSubject },
     /// CR 711.2a + CR 711.2b: Level-up creature trigger gating — true when the source has at least
     /// `minimum` counters (and at most `maximum` if specified) matching `counters`.
     /// `CounterMatch::Any` sums across every counter type on the source; `OfType(ct)`
