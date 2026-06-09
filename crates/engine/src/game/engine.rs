@@ -6612,6 +6612,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::ZoneManipulationKind;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
@@ -16926,9 +16927,13 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
 
         let result =
             apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
-        let WaitingFor::ScryChoice { player, cards } = result.waiting_for.clone() else {
+        let WaitingFor::ZoneManipulation {
+            player,
+            kind: ZoneManipulationKind::Scry { cards },
+        } = result.waiting_for.clone()
+        else {
             panic!(
-                "unless branch must preserve ScryChoice before watcher triggers, got {:?}",
+                "unless branch must preserve the scry prompt before watcher triggers, got {:?}",
                 result.waiting_for
             );
         };
