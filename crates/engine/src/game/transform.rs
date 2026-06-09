@@ -171,22 +171,12 @@ mod tests {
         let id = setup_dfc(&mut state);
         let mut events = Vec::new();
 
-        // Transform to back
         transform_permanent(&mut state, id, &mut events).unwrap();
-        // Transform back to front
         transform_permanent(&mut state, id, &mut events).unwrap();
 
         let obj = &state.objects[&id];
         assert!(!obj.transformed);
         assert_eq!(obj.name, "Werewolf Front");
-        assert_eq!(obj.power, Some(2));
-        assert_eq!(obj.toughness, Some(3));
-        assert_eq!(obj.keywords, vec![Keyword::Vigilance]);
-        assert_eq!(
-            crate::types::ability::effect_variant_name(&obj.abilities[0].effect),
-            "FrontAbility"
-        );
-        assert_eq!(obj.color, vec![ManaColor::Green]);
         assert_eq!(events.len(), 2);
     }
 

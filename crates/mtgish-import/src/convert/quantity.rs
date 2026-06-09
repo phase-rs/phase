@@ -268,6 +268,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                 qty: QuantityRef::ZoneCardCount {
                     zone: ZoneRef::Hand,
                     card_types: Vec::new(),
+                    filter: None,
                     scope,
                 },
             }
@@ -811,6 +812,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Exile,
                         card_types: Vec::new(),
+                        filter: None,
                         scope: CountScope::All,
                     },
                 }
@@ -836,6 +838,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                 qty: QuantityRef::ZoneCardCount {
                     zone: ZoneRef::Library,
                     card_types: Vec::new(),
+                    filter: None,
                     scope,
                 },
             }
@@ -1158,6 +1161,7 @@ fn cards_in_graveyard_to_zone_card_count(cards: &CardsInGraveyard) -> Option<Qua
     Some(QuantityRef::ZoneCardCount {
         zone: ZoneRef::Graveyard,
         card_types: parts.card_types,
+        filter: None,
         scope: parts.scope.unwrap_or(CountScope::All),
     })
 }

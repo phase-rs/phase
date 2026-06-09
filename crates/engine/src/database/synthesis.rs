@@ -17095,6 +17095,7 @@ mod idempotency_tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Creature],
                 scope: CountScope::Controller,
+                filter: None,
             },
         };
         let mut face = CardFace::default();

@@ -2919,7 +2919,8 @@ fn static_noncreature_spells_cost_less_as_long_as_lesson_threshold() {
                         zone: ZoneRef::Graveyard,
                         ref card_types,
                         scope: CountScope::Controller,
-                    },
+                        filter: None,
+                    }
                 },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 3 },
@@ -3883,6 +3884,7 @@ fn issue_1593_abomination_of_llanowar_cda_sums_battlefield_and_graveyard() {
                     zone: ZoneRef::Graveyard,
                     card_types,
                     scope: CountScope::Controller,
+                    filter: None,
                 },
         } = &exprs[1]
         else {
@@ -4018,6 +4020,7 @@ fn static_crackling_drake_counts_owned_instant_sorcery_exile_and_graveyard() {
                     zone: ZoneRef::Exile,
                     card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
                     scope: CountScope::Owner,
+                    filter: None,
                 },
             },
             QuantityExpr::Ref {
@@ -4025,6 +4028,7 @@ fn static_crackling_drake_counts_owned_instant_sorcery_exile_and_graveyard() {
                     zone: ZoneRef::Graveyard,
                     card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
                     scope: CountScope::Owner,
+                    filter: None,
                 },
             },
         ],

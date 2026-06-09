@@ -1588,6 +1588,7 @@ fn resolve_ref(
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
+            filter,
             scope,
         } => {
             let mut count = 0;
@@ -1602,7 +1603,13 @@ fn resolve_ref(
                             ZoneRef::Exile => unreachable!(),
                         };
                         for &obj_id in zone_ids {
-                            if matches_zone_card_filter(state, obj_id, card_types) {
+                            if matches_zone_card_filter(
+                                state,
+                                obj_id,
+                                card_types,
+                                filter.as_ref(),
+                                &filter_ctx,
+                            ) {
                                 count += 1;
                             }
                         }
@@ -1614,7 +1621,14 @@ fn resolve_ref(
                         if let Some(obj) = state.objects.get(&obj_id) {
                             let owner_matches =
                                 count_scope_owner_matches(state, scope, ctx, controller, obj.owner);
-                            if owner_matches && matches_zone_card_filter(state, obj_id, card_types)
+                            if owner_matches
+                                && matches_zone_card_filter(
+                                    state,
+                                    obj_id,
+                                    card_types,
+                                    filter.as_ref(),
+                                    &filter_ctx,
+                                )
                             {
                                 count += 1;
                             }
@@ -2314,15 +2328,20 @@ fn matches_zone_card_filter(
     state: &GameState,
     obj_id: ObjectId,
     card_types: &[TypeFilter],
+    filter: Option<&TargetFilter>,
+    filter_ctx: &FilterContext<'_>,
 ) -> bool {
-    if card_types.is_empty() {
-        return true;
+    if !card_types.is_empty() {
+        let matches_type = state.objects.get(&obj_id).is_some_and(|obj| {
+            card_types
+                .iter()
+                .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
+        });
+        if !matches_type {
+            return false;
+        }
     }
-    state.objects.get(&obj_id).is_some_and(|obj| {
-        card_types
-            .iter()
-            .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
-    })
+    filter.is_none_or(|filter| matches_target_filter(state, obj_id, filter, filter_ctx))
 }
 
 /// CR 608.2 + CR 109.5: Resolve which player a `CountScope` variant binds to,
@@ -5661,6 +5680,7 @@ mod tests {
                     zone,
                     card_types: Vec::new(),
                     scope: CountScope::SourceChosenPlayer,
+                    filter: None,
                 },
             };
             assert_eq!(
@@ -7017,6 +7037,7 @@ mod tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
                 scope: CountScope::Controller,
+                filter: None,
             },
         };
 

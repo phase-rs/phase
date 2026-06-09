@@ -18404,6 +18404,7 @@ mod tests {
                 dynamic_count: Some(QuantityRef::ZoneCardCount {
                     zone: ZoneRef::Graveyard,
                     card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                    filter: None,
                     scope: CountScope::Controller,
                 }),
             })

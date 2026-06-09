@@ -83,6 +83,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 // Apply the followup continuation to the defs built so far.
                 if let Some(ref continuation) = clause_ir.followup_continuation {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                    apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
                 true
             } else if let Some(ref special) = clause_ir.special {
@@ -350,6 +351,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // previous defs before building this clause's def.
         if let Some(ref continuation) = clause_ir.followup_continuation {
             apply_clause_continuation(&mut defs, continuation.clone(), kind);
+            apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
 
         // ── Build AbilityDefinition from ClauseIr ──
@@ -593,6 +595,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // Apply intrinsic continuation after extending defs with current clause's defs.
         if let Some(ref continuation) = clause_ir.intrinsic_continuation {
             apply_clause_continuation(&mut defs, continuation.clone(), kind);
+            apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }
 
         // CR 608.2c: Advance the separating boundary for the next normal-path
@@ -4727,6 +4730,20 @@ pub(super) fn apply_where_x_quantity_expression(
     where_x_expression: Option<&str>,
 ) -> QuantityExpr {
     match value {
+        // CR 107.3i: Generic "X is N or more" condition parsing defaults to
+        // CostXPaid for X-cost spells, but a surrounding "where X is ..." clause
+        // is the more specific binding and must own every X reference in the
+        // ability, including later-sentence rider conditions.
+        QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        } if where_x_expression.is_some() => {
+            let expression = where_x_expression.expect("checked is_some above");
+            parse_where_x_quantity_expression(expression).unwrap_or_else(|| QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: expression.to_string(),
+                },
+            })
+        }
         QuantityExpr::Ref {
             qty: QuantityRef::Variable { name },
         } if where_x_expression.is_some() && name.eq_ignore_ascii_case("X") => {
@@ -4858,7 +4875,22 @@ pub(super) fn apply_where_x_effect_expression(
             }
             PaymentCost::Mana { .. } | PaymentCost::AbilityCost { .. } => {}
         },
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for static_def in static_abilities.iter_mut() {
+                if let Some(condition) = static_def.condition.as_mut() {
+                    apply_where_x_static_condition(condition, where_x_expression);
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+fn apply_where_x_to_latest_def(defs: &mut [AbilityDefinition], where_x_expression: Option<&str>) {
+    if let Some(def) = defs.last_mut() {
+        apply_where_x_ability_expression(def, where_x_expression);
     }
 }
 
@@ -5000,6 +5032,27 @@ fn apply_where_x_ability_condition(cond: &mut AbilityCondition, where_x_expressi
         }
         AbilityCondition::ConditionInstead { inner } => {
             apply_where_x_ability_condition(inner, where_x_expression);
+        }
+        _ => {}
+    }
+}
+
+fn apply_where_x_static_condition(
+    condition: &mut StaticCondition,
+    where_x_expression: Option<&str>,
+) {
+    match condition {
+        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
+            *lhs = apply_where_x_quantity_expression(lhs.clone(), where_x_expression);
+            *rhs = apply_where_x_quantity_expression(rhs.clone(), where_x_expression);
+        }
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            for condition in conditions {
+                apply_where_x_static_condition(condition, where_x_expression);
+            }
+        }
+        StaticCondition::Not { condition } => {
+            apply_where_x_static_condition(condition, where_x_expression);
         }
         _ => {}
     }
