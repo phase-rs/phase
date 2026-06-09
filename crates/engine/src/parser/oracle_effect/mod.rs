@@ -14492,6 +14492,16 @@ pub(crate) fn parse_effect_chain_ir(
     // targeted player subject so the bare conjugated continuations inherit the
     // same player target rather than falling back to the ability controller.
     let mut carried_targeted_player_subject: Option<SubjectApplication> = None;
+    // CR 608.2c + CR 109.4: Chain-spanning "its controller" antecedent. Armed
+    // when a chunk's leading subject is "its/their controller may <act>"
+    // (SubjectApplication { affected: ParentTargetController, is_optional: true });
+    // a later sentence's "that player" anaphor (Star Athlete) binds to it.
+    // Unlike the Sentence-reset siblings, this MUST survive the sentence
+    // boundary between "...sacrifice it." and "If they don't, ...", so it is
+    // single-shot consumption-cleared (cleared once a downstream chunk binds a
+    // recipient through it) rather than boundary-cleared, preventing leak into
+    // an unrelated later sentence.
+    let mut chain_parent_target_controller_scope: Option<ControllerRef> = None;
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
@@ -15672,6 +15682,14 @@ pub(crate) fn parse_effect_chain_ir(
         // do" object anchor is a created/tracked referent, not a target
         // selection, so it does not count here.
         let parent_target_is_chosen = chain_prior_referent_is_chosen_target(&clauses);
+        // CR 608.2c (issue #1670): Consumption signal for the body "its
+        // controller may" antecedent. True only when the rung ladder below
+        // falls through to `chain_parent_target_controller_scope` for THIS
+        // chunk (both higher-precedence rungs are None). Independent of the
+        // lazy `.or_else` chain — pure Option inspection.
+        let seeded_parent_target_controller_this_chunk = chain_chosen_player_scope.is_none()
+            && ctx.relative_player_scope.is_none()
+            && chain_parent_target_controller_scope.is_some();
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -15690,13 +15708,23 @@ pub(crate) fn parse_effect_chain_ir(
             // CR 608.2c: a chosen-player scope set by an earlier "choose a
             // player" sentence (Gluntch) takes precedence — the "they"/"that
             // player controls" anaphor binds to the most recent choice.
-            relative_player_scope: chain_chosen_player_scope.clone().or_else(|| {
-                ctx.relative_player_scope.clone().or_else(|| {
+            relative_player_scope: chain_chosen_player_scope
+                .clone()
+                .or_else(|| ctx.relative_player_scope.clone())
+                // CR 608.2c (issue #1670): body "its controller may" antecedent
+                // (Star Athlete). Placed BELOW ctx.relative_player_scope so a
+                // trigger-CONDITION-derived scope keeps precedence — conservative
+                // non-regressive ordering. No card today has BOTH a
+                // condition-scoped player AND an independent body "its controller"
+                // antecedent; this only supplies a scope when the condition set
+                // none (e.g. "Whenever ~ attacks", where ctx.relative_player_scope
+                // is None).
+                .or_else(|| chain_parent_target_controller_scope.clone())
+                .or_else(|| {
                     player_scope
                         .is_some()
                         .then_some(ControllerRef::ScopedPlayer)
-                })
-            }),
+                }),
             // CR 608.2c + CR 109.4: chain-spanning count of `Choose(Player)`
             // clauses already finalized — supplies the next `ChosenPlayer`
             // index.
@@ -15714,6 +15742,21 @@ pub(crate) fn parse_effect_chain_ir(
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
+        // CR 608.2c + CR 109.4 (issue #1670): Path-independent consumption-clear
+        // of the single-shot "its controller" antecedent. The chunk consumed the
+        // seeded scope above when `chunk_ctx.relative_player_scope` cloned
+        // `chain_parent_target_controller_scope` (line ~15591); the loop-local
+        // itself is not read again by this iteration's parse. Clearing it here —
+        // immediately after `chunk_ctx` is built and BEFORE any special-clause
+        // early `continue` (delayed-trigger, type-setting, instead-override,
+        // search forms, etc.) — guarantees the antecedent cannot leak into a
+        // later unrelated "that player" no matter which dispatch branch this
+        // chunk takes. For an arming chunk (`seeded == false`, local was None at
+        // start) this is a no-op, so it does not pre-empt the arm below that sets
+        // the scope from `leading_subject_application`.
+        if seeded_parent_target_controller_this_chunk {
+            chain_parent_target_controller_scope = None;
+        }
         let leading_subject_application = subject::parse_leading_subject_application(&text, ctx);
         let inherits_carried_targeted_player_subject = leading_subject_application.is_none()
             && player_scope.is_none()
@@ -16580,6 +16623,22 @@ pub(crate) fn parse_effect_chain_ir(
         chain_chosen_player_count = chunk_ctx.chosen_player_count;
         if let Some(scope @ ControllerRef::ChosenPlayer { .. }) = &chunk_ctx.relative_player_scope {
             chain_chosen_player_scope = Some(scope.clone());
+        }
+
+        // CR 608.2c + CR 109.4 (issue #1670): Arm the chain-spanning "its
+        // controller" antecedent. The consuming-chunk CLEAR was hoisted above to
+        // a path-independent location (immediately after `chunk_ctx` is built) so
+        // it runs on every iteration regardless of early `continue`; this block
+        // only ARMS. The arming chunk (leading subject "its controller may
+        // <act>") has `seeded == false` (the local was None at its start), so the
+        // hoisted clear was a no-op for it and this arm fires unimpeded. Read
+        // `leading_subject_application` via `.as_ref()` because it is MOVED
+        // below in the `carried_targeted_player_subject` update.
+        if matches!(
+            leading_subject_application.as_ref(),
+            Some(app) if app.is_optional && app.affected == TargetFilter::ParentTargetController
+        ) {
+            chain_parent_target_controller_scope = Some(ControllerRef::ParentTargetController);
         }
 
         // CR 608.2e: The decline-consequence rebind scope ends at the sentence

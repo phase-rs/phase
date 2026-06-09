@@ -5345,6 +5345,12 @@ pub(crate) fn parse_reflexive_conditional_connector(
             },
             tag("if the player doesn't, "),
         ),
+        value(
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            },
+            tag("if they don't, "),
+        ),
         value(AbilityCondition::effect_performed(), tag("if you do, ")),
     ))
     .parse(input)
@@ -5441,7 +5447,7 @@ mod tests {
     // --- parse_reflexive_conditional_connector (CR 603.12 / 608.2c) ---
 
     #[test]
-    fn reflexive_connector_all_eight_variants() {
+    fn reflexive_connector_all_nine_variants() {
         let effect = AbilityCondition::effect_performed();
         let not_effect = AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
@@ -5454,6 +5460,7 @@ mod tests {
             ("if the player does, rest", effect.clone()),
             ("if that player doesn't, rest", not_effect.clone()),
             ("if the player doesn't, rest", not_effect.clone()),
+            ("if they don't, rest", not_effect.clone()),
             ("if you do, rest", effect.clone()),
         ];
         for (input, expected) in cases {
