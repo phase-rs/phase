@@ -1113,6 +1113,32 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.117a: Surge-cast permanent is tagged so "if its surge cost
+            // was paid" ETB triggers (Reckless Bushwhacker, Tyrant of Valakut)
+            // can distinguish a surge cast from a hard-cast. The intervening-if
+            // re-checks at resolution (CR 603.4) and the marker must be present.
+            if casting_variant == CastingVariant::Surge {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Surge,
+                        state.turn_number,
+                    ));
+                }
+            }
+
+            // CR 702.137a: Spectacle-cast permanent is tagged so "if its
+            // spectacle cost was paid" ETB triggers (Rafter Demon) and
+            // "...instead" clauses (Rix Maadi Reveler) can distinguish a
+            // spectacle cast from a hard-cast.
+            if casting_variant == CastingVariant::Spectacle {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Spectacle,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             // CR 702.176a: Impending-cast permanent gets the `cast_variant_paid`
             // tag re-applied after `reset_for_battlefield_entry` cleared it.
             // The "not a creature" layer fixup and the end-step counter-removal

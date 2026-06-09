@@ -4917,6 +4917,14 @@ pub enum CastVariantPaid {
     /// while any remain. Read by the end-step counter-removal trigger and
     /// the "not a creature" layer fixup.
     Impending,
+    /// CR 702.117a: Surge alternative cast cost was paid from hand. Read by the
+    /// "if its surge cost was paid" intervening-if (Reckless Bushwhacker,
+    /// Tyrant of Valakut).
+    Surge,
+    /// CR 702.137a: Spectacle alternative cast cost was paid from hand. Read by
+    /// the "if its spectacle cost was paid" intervening-if (Rafter Demon) and the
+    /// "...if its spectacle cost was paid, instead" clause (Rix Maadi Reveler).
+    Spectacle,
 }
 
 /// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
