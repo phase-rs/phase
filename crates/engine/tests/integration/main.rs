@@ -120,6 +120,7 @@ mod issue_2435_traumatic_critique;
 mod issue_2439_wayta_trigger_doubling;
 mod issue_580_solitude_evoke_prompt;
 mod issue_709_regression;
+mod issue_860_luminarch_aspirant;
 mod jace_wielder_empty_library_win;
 mod json_smoke_test;
 mod kaito_integration;
