@@ -3871,7 +3871,7 @@ fn apply_non_floor_cost_modifiers(
     object_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
-    // CR 117.7 + CR 601.2f: collect self-spell statics ("This spell costs
+    // CR 601.2f: collect self-spell statics ("This spell costs
     // {N} less ...") and battlefield statics together so all increases apply
     // before any reductions across both passes.
     let mut collected = collect_self_spell_cost_modifiers(state, player, object_id, None, false);
@@ -4071,10 +4071,9 @@ pub(super) fn recompute_pending_cast_cost(
     apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
 }
 
-/// CR 117.7 + CR 601.2f: Apply self-spell cost modifications — `ReduceCost` / `RaiseCost`
+/// CR 601.2f: Apply self-spell cost modifications — `ReduceCost` / `RaiseCost`
 /// statics printed on the spell being cast, with `affected = SelfRef` and `active_zones`
-/// covering the card's current zone (Hand for normal casting, Stack for the cost-
-/// determination step). Handles cards like Tolarian Terror where the cost reduction is
+/// covering the card's current castable zone. Handles cards like Tolarian Terror where the cost reduction is
 /// inherent to the spell and must apply before the spell resolves.
 ///
 /// Test-only isolation helper: production cost calculation now collects self-spell
@@ -4136,7 +4135,7 @@ fn collect_self_spell_cost_modifiers(
         if !def.active_zones.contains(&spell_obj.zone) {
             continue;
         }
-        // CR 117.7: Only self-referential cost statics apply here. Any other
+        // CR 601.2f: Only self-referential cost statics apply here. Any other
         // `affected` scoping would indicate a battlefield-style static that
         // should be handled by the battlefield scanner.
         if !matches!(def.affected, Some(TargetFilter::SelfRef)) {
@@ -18371,11 +18370,11 @@ mod tests {
         );
     }
 
-    /// CR 117.7 + CR 601.2f: A self-spell cost reduction printed on the card itself
+    /// CR 601.2f: A self-spell cost reduction printed on the card itself
     /// ("This spell costs {1} less to cast for each instant and sorcery card in your
     /// graveyard.") must fire while the card is in hand. Verifies the parser-emitted
-    /// static (affected = SelfRef, active_zones = [Hand, Stack, Command]) is picked up by the
-    /// casting-time scanner and reduces the spell's generic cost.
+    /// static (affected = SelfRef, active_zones = self_spell_cost_mod_active_zones()) is
+    /// picked up by the casting-time scanner and reduces the spell's generic cost.
     #[test]
     fn tolarian_terror_self_cost_reduction_applies_from_hand() {
         use crate::types::statics::StaticMode;

@@ -142,15 +142,15 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
             engine_type: "ParsedCondition",
             needed_variant: "CastEffect/CantBeCastIf (negation)".into(),
         }),
-        // CR 117.7 + CR 601.2f: Self-spell cost reduction. Mirrors the native
+        // CR 601.2f: Self-spell cost reduction. Mirrors the native
         // parser's `try_parse_cost_modification` self-spell branch
         // (oracle_static.rs:6720). Emits `StaticMode::ModifyCost` (Reduce) with
-        // `affected = SelfRef` and `active_zones = self_spell_cost_mod_active_zones()` so the
-        // casting-time scanner finds the static on the spell being cast.
+        // `affected = SelfRef` and `active_zones = self_spell_cost_mod_active_zones()`
+        // so the casting-time scanner finds the static on the spell being cast.
         E::ReduceCastingCost(reduction) => {
             push_self_reduce_cost_static(stub, reduction, None, None)
         }
-        // CR 117.7 + CR 601.2f: Self-spell cost reduction with a dynamic
+        // CR 601.2f: Self-spell cost reduction with a dynamic
         // "for each X" multiplier. The engine `StaticMode::ModifyCost.dynamic_count`
         // is `Option<QuantityRef>` — `QuantityExpr::Ref { qty }` unwraps cleanly;
         // `Fixed`/`Offset`/`Multiply`/`DivideRounded` cannot be expressed as a bare
@@ -159,7 +159,7 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
             let qty_ref = quantity_to_ref(count, "ReduceCastingCostForEach")?;
             push_self_reduce_cost_static(stub, reduction, Some(qty_ref), None)
         }
-        // CR 117.7 + CR 601.2f: X-flavored self-spell cost reduction. The X
+        // CR 601.2f: X-flavored self-spell cost reduction. The X
         // variable resolves at cast time; engine `QuantityRef::Variable { name: "X" }`
         // is the canonical encoding (used by quantity::convert for `GameNumber::ValueX`).
         E::ReduceCastingCostX(_reduction_x, count) => {
@@ -178,7 +178,7 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
                 None,
             )
         }
-        // CR 601.2f + CR 117.7: Self-cost reduction gated on a Condition.
+        // CR 601.2f: Self-cost reduction gated on a Condition.
         // Mirrors the native parser's trailing if-clause attachment in
         // `oracle_static.rs:6850-6917`: build a `StaticMode::ModifyCost` (Reduce) and
         // hang the translated `StaticCondition` off
@@ -211,7 +211,7 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
                 None,
             )
         }
-        // CR 601.2c + CR 117.7: Bargain (MKM) is a built-in condition tied
+        // CR 601.2f: Bargain (MKM) is a built-in condition tied
         // to spell-cast metadata, not a generic StaticCondition. No engine
         // primitive expresses "this spell was bargained" as a self-cost
         // reduction gate. Strict-fail.
@@ -344,7 +344,7 @@ fn require_pure_mana(cost: &Cost, idiom: &'static str) -> ConvResult<ManaCost> {
     }
 }
 
-/// CR 117.7 + CR 601.2f: Build a self-spell `StaticMode::ModifyCost` (Reduce)
+/// CR 601.2f: Build a self-spell `StaticMode::ModifyCost` (Reduce)
 /// matching the native parser's emit shape (oracle_static.rs:6720+):
 /// `affected = SelfRef`, `active_zones = self_spell_cost_mod_active_zones()`
 /// so the casting-time scanner picks it up on the spell being cast from any

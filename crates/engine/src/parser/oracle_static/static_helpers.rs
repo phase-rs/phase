@@ -173,14 +173,12 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         return None;
     }
 
-    // CR 601.2f + CR 117.7: Detect self-spell cost reduction ("this spell costs {N} less ...").
+    // CR 601.2f: Detect self-spell cost reduction ("this spell costs {N} less ...").
     // Distinct from battlefield cost modification (e.g., "creature spells you cast cost {1} less")
     // because the static must apply to the card while it is in hand (or on the stack during
     // casting), not once it has entered the battlefield. The caller wires this into
-    // `active_zones = [Hand, Stack, Command]` with `affected = SelfRef` so
-    // the casting-time scanner finds it on the spell being cast from normal
-    // hand casting, the cost-determination stack step, and commander casting
-    // from the command zone.
+    // `active_zones = self_spell_cost_mod_active_zones()` with `affected =
+    // SelfRef` so the casting-time scanner finds it on the spell being cast.
     let is_self_spell = parse_self_spell_cost_subject(lower).is_some();
 
     let amount_is_variable_x = nom_primitives::scan_contains(lower, "{x}");
@@ -457,7 +455,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     // Build the affected filter for the static definition.
     // This controls which objects are "affected" — for cost modification statics,
     // this is the source permanent's controller scope (used by the registry).
-    // CR 117.7: Self-spell cost reduction ("This spell costs {N} less ...") uses
+    // CR 601.2f: Self-spell cost reduction ("This spell costs {N} less ...") uses
     // SelfRef so the casting-time self-cost scanner matches it on the spell itself.
     let affected = if is_self_spell {
         TargetFilter::SelfRef
@@ -491,7 +489,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         .affected(affected)
         .description(text.to_string());
 
-    // CR 117.7 + CR 601.2f: A self-spell cost reduction must apply while the
+    // CR 601.2f: A self-spell cost reduction must apply while the
     // card is in hand (pre-cast affordability checks), in the command zone
     // (commander casting), in the graveyard or exile (alternative-zone casting),
     // and on the stack (final cost determination during casting). Without opting

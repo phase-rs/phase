@@ -1768,7 +1768,7 @@ fn static_cant_be_countered_typed_subject() {
     }
 }
 
-/// CR 117.7 + CR 601.2f: "This spell costs {N} less ..." must parse into a
+/// CR 601.2f: "This spell costs {N} less ..." must parse into a
 /// self-scoped static — affected = SelfRef, active_zones = self_spell_cost_mod_active_zones() —
 /// so the cast-time scanner finds it on the spell itself (not on the
 /// battlefield). Regression guard for Tolarian Terror class.
