@@ -2965,7 +2965,8 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
     }
 
     Some(Effect::CreateEmblem {
-        statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)],
+        statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)
+            .description("You have no maximum hand size.".to_string())],
         triggers: Vec::new(),
     })
 }
@@ -11098,10 +11099,17 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
         // `collect_matching_triggers` zone guard must admit them. Declare
         // `trigger_zones = [Zone::Command]` explicitly (the default empty
         // vector is interpreted as battlefield-only by the scanner).
-        let triggers: Vec<TriggerDefinition> = trig_defs
+        let mut triggers: Vec<TriggerDefinition> = trig_defs
             .into_iter()
             .map(|t| t.trigger_zones(vec![Zone::Command]))
             .collect();
+        // CR 114: retain the emblem's granted rules text so the display layer
+        // can show "what it does" in the emblem tooltip. Attach to the first
+        // trigger only — the joined display text would otherwise repeat the
+        // clause for multi-trigger emblems.
+        if let Some(first) = triggers.first_mut() {
+            first.description = Some(inner.to_string());
+        }
         return Some(Effect::CreateEmblem {
             statics: Vec::new(),
             triggers,
@@ -11109,7 +11117,10 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     }
 
     // Try to parse the emblem text as a static ability line.
-    if let Some(static_def) = super::oracle_static::parse_static_line(inner) {
+    if let Some(mut static_def) = super::oracle_static::parse_static_line(inner) {
+        // CR 114: retain the emblem's granted rules text for the display
+        // tooltip, mirroring the trigger and fallback branches.
+        static_def.description = Some(inner.to_string());
         Some(Effect::CreateEmblem {
             statics: vec![static_def],
             triggers: Vec::new(),
@@ -27319,6 +27330,16 @@ mod tests {
                     .modifications
                     .iter()
                     .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 })));
+                // CR 114: the granted rules text is retained on the static so
+                // the display layer can show "what it does" in the tooltip.
+                assert!(
+                    def.description
+                        .as_deref()
+                        // allow-noncombinator: test assertion on retained display text, not parser dispatch
+                        .is_some_and(|d| d.contains("Ninjas you control get +1/+1")),
+                    "static emblem must retain granted rules text, got {:?}",
+                    def.description
+                );
             }
             other => panic!("expected CreateEmblem, got {:?}", other),
         }
@@ -27375,6 +27396,16 @@ mod tests {
                 // CR 114.4: trigger_zones must include Command so the
                 // scanner's zone guard admits the fire.
                 assert_eq!(t.trigger_zones, vec![Zone::Command]);
+                // CR 114: the granted rules text is retained on the (first)
+                // trigger so the display layer can show "what it does".
+                assert!(
+                    t.description
+                        .as_deref()
+                        // allow-noncombinator: test assertion on retained display text, not parser dispatch
+                        .is_some_and(|d| d.contains("deals 5 damage to any target")),
+                    "trigger emblem must retain granted rules text, got {:?}",
+                    t.description
+                );
             }
             other => panic!("expected CreateEmblem with triggers, got {other:?}"),
         }
