@@ -2642,17 +2642,27 @@ pub(super) fn match_foretell(
     }
 }
 
-/// CR 702.110a: "When this creature exploits" = source is the exploiter.
+/// CR 702.110b: "exploits a creature" — fires when a creature matching the
+/// trigger's subject filter exploits. `valid_card`/`valid_source` scope the
+/// EXPLOITER: `SelfRef` ⇒ "this creature exploits", a typed/controller
+/// filter ⇒ "a creature you control exploits". With no filter, defaults to
+/// the source ("this creature exploits").
 pub(super) fn match_exploited(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::CreatureExploited { exploiter, .. } if *exploiter == source_id
-    )
+    let GameEvent::CreatureExploited { exploiter, .. } = event else {
+        return false;
+    };
+    if let Some(filter) = &trigger.valid_source {
+        return target_filter_matches_object(state, *exploiter, filter, source_id);
+    }
+    if let Some(filter) = &trigger.valid_card {
+        return target_filter_matches_object(state, *exploiter, filter, source_id);
+    }
+    *exploiter == source_id
 }
 
 /// CR 702.112b: "When [subject] becomes renowned" — fires when Renown
@@ -11225,5 +11235,119 @@ mod tests {
             std::slice::from_ref(&event),
         );
         assert_eq!(count, None);
+    }
+
+    // CR 702.110b: `match_exploited` scopes the exploiter via `valid_card` /
+    // `valid_source` rather than hard-coding `exploiter == source`.
+
+    #[test]
+    fn exploited_self_ref_matches_self_exploit() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_self_ref_rejects_other_exploiter() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: other,
+            sacrificed: other,
+        };
+
+        assert!(!match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_typed_controller_matches_other_controlled_exploiter() {
+        let mut state = setup();
+        // "Whenever a creature you control exploits a creature, …": the trigger
+        // source and the (different) exploiter share a controller.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exploit Payoff".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: other,
+            sacrificed: other,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_no_filter_defaults_to_source() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::Exploited);
+        assert!(trigger.valid_card.is_none());
+        assert!(trigger.valid_source.is_none());
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
     }
 }

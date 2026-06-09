@@ -1371,6 +1371,54 @@ fn collect_pending_triggers(
             }
         }
 
+        // CR 603.10a: Abilities that trigger when a player sacrifices a permanent
+        // look back in time. An exploit ability emits `CreatureExploited` only
+        // after the sacrifice resolves (CR 702.110b), so a creature that exploits
+        // ITSELF has already left the battlefield when this event fires. Scan the
+        // exploiter with zone_filter=Battlefield (last-known information) so its
+        // own "when ~ exploits a creature" trigger still fires. Guarded to the
+        // off-battlefield case only: when the exploiter sacrificed a DIFFERENT
+        // creature it is still on the battlefield and the live scan + per-event
+        // dedup already cover it.
+        if let GameEvent::CreatureExploited { exploiter, .. } = event {
+            if state
+                .objects
+                .get(exploiter)
+                .is_some_and(|o| o.zone != Zone::Battlefield)
+            {
+                let matched_triggers = {
+                    let obj = &state.objects[exploiter];
+                    collect_matching_triggers(
+                        state,
+                        event,
+                        events,
+                        obj,
+                        obj.entered_battlefield_turn.unwrap_or(0),
+                        Some(Zone::Battlefield),
+                        &mut batched_this_pass,
+                        &mut registered_this_event,
+                    )
+                };
+                for matched in matched_triggers {
+                    record_trigger_fired(
+                        state,
+                        matched.constraint.as_ref(),
+                        *exploiter,
+                        matched.trig_idx,
+                        event,
+                    );
+                    if matched.batched {
+                        batched_this_pass.insert((*exploiter, matched.trig_idx));
+                    }
+                    registered_this_event.insert((*exploiter, matched.trig_idx));
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
+                }
+            }
+        }
+
         // CR 603.10a (continued): an observer that left the battlefield in the
         // SAME simultaneous event as this departure observes it via last-known
         // information. The producer stamps that group onto `record.co_departed`
@@ -11926,6 +11974,61 @@ pub mod tests {
         assert_eq!(run(PlayerId(0), Phase::PostCombatMain), 1);
         assert_eq!(run(PlayerId(0), Phase::Upkeep), 0);
         assert_eq!(run(PlayerId(1), Phase::PreCombatMain), 0);
+    }
+
+    /// CR 603.10a + CR 702.110b: A creature that exploits ITSELF has already left
+    /// the battlefield (sacrificed) when `CreatureExploited` is emitted. Its own
+    /// "when ~ exploits a creature" trigger must still fire via the
+    /// last-known-information look-back in `collect_pending_triggers`. This is the
+    /// discriminating exploit-self-sac test: it flips to 0 on the stack if the
+    /// `CreatureExploited` LKI block is reverted, because the live battlefield
+    /// scan cannot find a graveyard object.
+    #[test]
+    fn self_exploit_trigger_fires_from_graveyard_via_lki() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Sidisi's Faithful", 1, 1);
+        let mut trig_def = crate::parser::oracle_trigger::parse_trigger_line(
+            "When Sidisi's Faithful exploits a creature, return target creature to its owner's hand.",
+            "Sidisi's Faithful",
+        );
+        assert_eq!(trig_def.mode, TriggerMode::Exploited);
+        assert_eq!(trig_def.valid_card, Some(TargetFilter::SelfRef));
+        trig_def.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.trigger_definitions.push(trig_def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+        }
+
+        // The exploiter sacrificed itself: it is in the graveyard, off the
+        // battlefield, when `CreatureExploited` fires (CR 702.110b emits the
+        // event after the sacrifice resolves).
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.zone = Zone::Graveyard;
+        }
+        state.battlefield.retain(|id| *id != source);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::CreatureExploited {
+                exploiter: source,
+                sacrificed: source,
+            }],
+        );
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "CR 603.10a: a self-exploiter's own exploit trigger must fire from the \
+             graveyard via last-known information"
+        );
     }
 
     /// CR 601.2h + CR 603.4: Increment intervening-if gates the counter-placement
