@@ -59,7 +59,7 @@ fn optional_cost_paid_sets_flag() {
         })
         .with_additional_cost(AdditionalCost::Optional {
             cost: AbilityCost::Blight { count: 1 },
-            repeatable: false,
+            repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
         })
         .id();
 
@@ -149,7 +149,7 @@ fn optional_cost_skipped_clears_flag() {
         })
         .with_additional_cost(AdditionalCost::Optional {
             cost: AbilityCost::Blight { count: 1 },
-            repeatable: false,
+            repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
         })
         .id();
 
@@ -221,7 +221,7 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
                 cost: AbilityCost::PayLife {
                     amount: QuantityExpr::Fixed { value: 1 },
                 },
-                repeatable: false,
+                repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
             })
             .with_static_definition(reduce_static)
             .id();
@@ -334,7 +334,7 @@ fn cancel_cast_at_optional_cost_choice() {
         })
         .with_additional_cost(AdditionalCost::Optional {
             cost: AbilityCost::Blight { count: 1 },
-            repeatable: false,
+            repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
         })
         .id();
 
@@ -1266,7 +1266,7 @@ fn optional_blight_with_no_creatures_skips_prompt() {
         })
         .with_additional_cost(AdditionalCost::Optional {
             cost: AbilityCost::Blight { count: 1 },
-            repeatable: false,
+            repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
         })
         .id();
 

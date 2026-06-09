@@ -165,7 +165,7 @@ pub(crate) fn parse_kicker_additional_cost_line(raw: &str, lower: &str) -> Optio
     if repeatable {
         return Some(AdditionalCost::Kicker {
             costs: vec![parse_kicker_cost_payload(raw_after_prefix)?],
-            repeatable: true,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
         });
     }
 
@@ -186,7 +186,7 @@ pub(crate) fn parse_kicker_additional_cost_line(raw: &str, lower: &str) -> Optio
 
     Some(AdditionalCost::Kicker {
         costs,
-        repeatable: false,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     })
 }
 
@@ -1369,6 +1369,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Wither => "wither".to_string(),
         Keyword::Infect => "infect".to_string(),
         Keyword::Afflict(n) => format!("afflict {n}"),
+        Keyword::StartingIntensity(n) => format!("starting intensity {n}"),
         Keyword::Prowess => "prowess".to_string(),
         Keyword::Undying => "undying".to_string(),
         Keyword::Persist => "persist".to_string(),

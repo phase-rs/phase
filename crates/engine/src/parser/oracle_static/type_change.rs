@@ -59,21 +59,45 @@ pub(crate) fn parse_enchanted_land_chosen_type_static_sentence(
     Ok((input, ()))
 }
 
+/// CR 607.2d: Subject scope for "<[scope]> are/is the chosen [creature] type in
+/// addition to [their/its] other types" statics (Arcane Adaptation, Lifecraft
+/// Engine, Xenograft, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChosenCreatureTypeStaticScope {
+    Creatures,
+    EachCreature,
+    VehicleCreatures,
+}
+
+impl ChosenCreatureTypeStaticScope {
+    fn target_filter(self) -> TargetFilter {
+        match self {
+            Self::Creatures | Self::EachCreature => {
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+            }
+            // CR 301.7 + CR 607.2d: Lifecraft Engine grants a creature subtype to
+            // Vehicle permanents you control — not the Creature card type.
+            Self::VehicleCreatures => TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Subtype("Vehicle".to_string()))
+                    .controller(ControllerRef::You),
+            ),
+        }
+    }
+}
+
 pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let ((), _) = nom_on_lower(
+    let (scope, _) = nom_on_lower(
         tp.original,
         tp.lower,
-        parse_chosen_creature_type_static_sentence,
+        parse_chosen_creature_type_static_sentence_with_scope,
     )?;
 
     Some(
         StaticDefinition::continuous()
-            .affected(TargetFilter::Typed(
-                TypedFilter::creature().controller(ControllerRef::You),
-            ))
+            .affected(scope.target_filter())
             .modifications(vec![ContinuousModification::AddChosenSubtype {
                 kind: ChosenSubtypeKind::CreatureType,
             }])
@@ -81,27 +105,49 @@ pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     )
 }
 
-pub(crate) fn parse_chosen_creature_type_static_sentence(input: &str) -> OracleResult<'_, ()> {
-    let (input, _) = parse_chosen_creature_type_static_prefix(input)?;
-    let (input, _) = eof.parse(input)?;
-    Ok((input, ()))
+fn parse_chosen_creature_type_static_sentence_with_scope(
+    input: &str,
+) -> OracleResult<'_, ChosenCreatureTypeStaticScope> {
+    let (input, scope) = parse_chosen_creature_type_static_scope_body(input)?;
+    Ok((input, scope))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
-    let (input, pronoun) = parse_chosen_creature_type_static_subject(input)?;
-    let (input, _) = tag(" the chosen type in addition to ").parse(input)?;
+    let (input, _) = parse_chosen_creature_type_static_scope_body(input)?;
+    Ok((input, ()))
+}
+
+fn parse_chosen_creature_type_static_scope_body(
+    input: &str,
+) -> OracleResult<'_, ChosenCreatureTypeStaticScope> {
+    let (input, (pronoun, scope)) = parse_chosen_creature_type_static_subject(input)?;
+    let (input, _) = alt((
+        tag(" the chosen type in addition to "),
+        tag(" the chosen creature type in addition to "),
+    ))
+    .parse(input)?;
     let (input, _) = tag(pronoun).parse(input)?;
     let (input, _) = tag(" other types").parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
-    Ok((input, ()))
+    Ok((input, scope))
 }
 
 pub(crate) fn parse_chosen_creature_type_static_subject(
     input: &str,
-) -> OracleResult<'_, &'static str> {
+) -> OracleResult<'_, (&'static str, ChosenCreatureTypeStaticScope)> {
     alt((
-        value("their", tag("creatures you control are")),
-        value("its", tag("each creature you control is")),
+        value(
+            ("their", ChosenCreatureTypeStaticScope::Creatures),
+            tag("creatures you control are"),
+        ),
+        value(
+            ("its", ChosenCreatureTypeStaticScope::EachCreature),
+            tag("each creature you control is"),
+        ),
+        value(
+            ("their", ChosenCreatureTypeStaticScope::VehicleCreatures),
+            tag("vehicle creatures you control are"),
+        ),
     ))
     .parse(input)
 }
@@ -142,7 +188,7 @@ pub(crate) fn parse_every_creature_type_static_sentence(input: &str) -> OracleRe
 }
 
 pub(crate) fn parse_every_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
-    let (input, _pronoun) = parse_chosen_creature_type_static_subject(input)?;
+    let (input, _) = parse_chosen_creature_type_static_subject(input)?;
     let (input, _) = tag(" every creature type").parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     Ok((input, ()))
@@ -241,7 +287,7 @@ pub(crate) fn parse_additive_type_clause_modifications(
     // chosen-type statics). Let those branches produce the correct modification.
     if matches!(
         normalized_type_words,
-        "every basic land type" | "the chosen type"
+        "every basic land type" | "the chosen type" | "the chosen creature type"
     ) {
         return None;
     }

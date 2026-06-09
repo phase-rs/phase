@@ -264,6 +264,7 @@
     "grantsProperty": "Concede una proprietà alla magia"
   },
   "zone": {
+    "commandZone": "Zona di comando",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -321,7 +322,8 @@
     "chooseAmountAria": "Scegli quanto pagare",
     "payAmount": "Paga {{value}} {{resource}}",
     "resourceEnergy": "energia",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "segnalini"
   },
   "hand": {
     "viewFullHand_one": "Vedi la mano completa ({{count}} carta)",

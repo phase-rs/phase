@@ -214,6 +214,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 mark_battlefield_display_dirty(state);
             }
             GameEvent::CounterAdded { object_id, .. }
+            | GameEvent::ObjectIntensified { object_id, .. }
             | GameEvent::CounterRemoved { object_id, .. }
             | GameEvent::Evolved { object_id } => {
                 // +1/+1 counters set `layers_dirty` (counters.rs) → Gate 1 caught

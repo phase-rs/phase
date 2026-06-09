@@ -264,6 +264,7 @@
     "grantsProperty": "Grants a property to the spell"
   },
   "zone": {
+    "commandZone": "Command Zone",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Commander",
@@ -321,7 +322,8 @@
     "chooseAmountAria": "Choose amount to pay",
     "payAmount": "Pay {{value}} {{resource}}",
     "resourceEnergy": "energy",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "counters"
   },
   "hand": {
     "viewFullHand_one": "View full hand ({{count}} card)",

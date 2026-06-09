@@ -8,6 +8,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::combinator::{map, opt, value};
+use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -417,6 +418,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_object_count_by_shared_quality,
         parse_the_number_of,
+        parse_the_total_mana_value,
         parse_distinct_card_types_exiled_with_source,
         parse_linked_exile_mana_value_ref,
         parse_distinct_card_types_in_zone,
@@ -568,10 +570,64 @@ fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
 }
 
+/// CR 122.1: Parse "[kind] counters on [object]" after "the number of".
+/// Used for patterns like "equal to the number of charge counters on it".
+/// Maps to `QuantityRef::CountersOn` with the appropriate scope and counter type.
+fn parse_number_of_counters_on_object(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, counter_type) = parse_counter_type_typed(input)?;
+    let (rest, _) = tag(" counters on ").parse(rest)?;
+    let (rest, scope) = parse_counter_object_scope(rest)?;
+    Ok((
+        rest,
+        QuantityRef::CountersOn {
+            scope,
+            counter_type: Some(counter_type),
+        },
+    ))
+}
+
+/// Parse the object scope for counter references: "it", "that creature", "that permanent", etc.
+fn parse_counter_object_scope(input: &str) -> OracleResult<'_, ObjectScope> {
+    alt((
+        value(ObjectScope::Source, tag("it")),
+        value(ObjectScope::Source, tag("~")),
+        value(ObjectScope::Target, tag("that creature")),
+        value(ObjectScope::Target, tag("that permanent")),
+        value(ObjectScope::Target, tag("that artifact")),
+        value(ObjectScope::Target, tag("that enchantment")),
+        value(ObjectScope::Target, tag("that land")),
+        value(ObjectScope::Target, tag("that planeswalker")),
+    ))
+    .parse(input)
+}
+
 /// Parse "the number of [type] you control" → ObjectCount.
 fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((tag("the total number of "), tag("the number of "))).parse(input)?;
     parse_number_of_inner(rest)
+}
+
+/// Parse "the total mana value" patterns used in "where X is the total mana value".
+/// Used for patterns like "where X is the total mana value of cards in your graveyard".
+/// Maps to `QuantityRef::Aggregate` summing mana values across the filter.
+fn parse_the_total_mana_value(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the total mana value").parse(input)?;
+    let (rest, _) = tag(" of ").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        remainder,
+        QuantityRef::Aggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::ManaValue,
+            filter,
+        },
+    ))
 }
 
 /// Parse the inner part after "the number of".
@@ -591,6 +647,10 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // generic type-filter arm so the typed player-counter ref wins over a
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
         parse_player_counter_ref_tail,
+        // CR 122.1: "[kind] counters on [object]" — counter count on an object.
+        // Must precede generic type-filter arm. Used for patterns like
+        // "equal to the number of charge counters on it".
+        parse_number_of_counters_on_object,
         // CR 700.8: "creatures in your party" must precede the generic
         // "<type> you control" arm — the trailing "in your party" is what
         // distinguishes party-size from a controlled-creature count.
@@ -1900,7 +1960,33 @@ fn parse_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Returns the quantity expression following "equal to ".
 pub fn parse_equal_to(input: &str) -> OracleResult<'_, QuantityExpr> {
     let (rest, _) = tag("equal to ").parse(input)?;
+    // Try to parse sum expressions first: "the number of X and the number of Y"
+    if let Ok((rest, sum_expr)) = parse_equal_to_sum(rest) {
+        return Ok((rest, sum_expr));
+    }
     parse_quantity(rest)
+}
+
+/// Parse sum expressions like "the number of X and the number of Y".
+/// Each summand is prefixed with "the number of" to avoid greedy type-list
+/// consumption by parse_the_number_of.
+fn parse_equal_to_sum(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (rest, refs) = separated_list1(tag(" and "), parse_the_number_of).parse(input)?;
+    if refs.len() < 2 {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        rest,
+        QuantityExpr::Sum {
+            exprs: refs
+                .into_iter()
+                .map(|qty| QuantityExpr::Ref { qty })
+                .collect(),
+        },
+    ))
 }
 
 /// Parse "for each [type] you control" from Oracle text.
@@ -1914,6 +2000,29 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Parse the inner content after "for each ".
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     parse_for_each_clause_ref_with_they_controller(input, ControllerRef::ScopedPlayer)
+}
+
+/// Parse "for each differently named <type>" patterns.
+/// Used for patterns like "for each differently named dungeon you've completed".
+/// CR 201.2: Distinct-by-name population count.
+fn parse_for_each_differently_named(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("differently named ").parse(input)?;
+    let type_text = rest.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        QuantityRef::ObjectCountDistinct {
+            filter,
+            qualities: vec![SharedQuality::Name],
+        },
+    ))
 }
 
 pub(crate) fn parse_for_each_clause_ref_with_context<'a>(
@@ -1941,6 +2050,9 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_foretold_cards_owned_in_exile,
         parse_zone_card_count,
         parse_for_each_attached_to_source,
+        // CR 201.2: "for each differently named <type>" — distinct-by-name
+        // iteration. Must precede generic type-filter arm.
+        parse_for_each_differently_named,
         // CR 700.8: "creature in your party" must precede the generic
         // "<type> you control" arm — same reason as in
         // `parse_number_of_inner`.
@@ -5583,6 +5695,125 @@ mod tests {
                 }),
             }
         );
+    }
+
+    /// Test parse_the_total_mana_value for "where X is the total mana value" patterns.
+    #[test]
+    fn parse_the_total_mana_value_basic() {
+        let (rest, q) =
+            parse_the_total_mana_value("the total mana value of cards in your graveyard").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaValue,
+                filter,
+            } => {
+                assert!(matches!(filter, TargetFilter::Typed(_)));
+            }
+            _ => panic!("expected Aggregate with Sum and ManaValue"),
+        }
+    }
+
+    /// Test parse_number_of_counters_on_object for counter count patterns.
+    #[test]
+    fn parse_number_of_counters_on_object_it() {
+        let (rest, q) = parse_number_of_counters_on_object("charge counters on it").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::CountersOn {
+                scope,
+                counter_type,
+            } => {
+                assert_eq!(scope, ObjectScope::Source);
+                assert!(counter_type.is_some());
+            }
+            _ => panic!("expected CountersOn"),
+        }
+    }
+
+    /// Test parse_number_of_counters_on_object with "that creature".
+    #[test]
+    fn parse_number_of_counters_on_object_that_creature() {
+        let (rest, q) =
+            parse_number_of_counters_on_object("+1/+1 counters on that creature").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::CountersOn {
+                scope,
+                counter_type,
+            } => {
+                assert_eq!(scope, ObjectScope::Target);
+                assert!(counter_type.is_some());
+            }
+            _ => panic!("expected CountersOn"),
+        }
+    }
+
+    /// Test parse_equal_to_sum for two-way sum expressions.
+    #[test]
+    fn parse_equal_to_sum_two_way() {
+        let (rest, expr) = parse_equal_to_sum(
+            "the number of creatures you control and the number of artifacts you control",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match expr {
+            QuantityExpr::Sum { exprs } => {
+                assert_eq!(exprs.len(), 2);
+            }
+            _ => panic!("expected Sum"),
+        }
+    }
+
+    /// Test parse_equal_to_sum for three-way sum expressions.
+    #[test]
+    fn parse_equal_to_sum_three_way() {
+        let (rest, expr) = parse_equal_to_sum(
+            "the number of creatures you control and the number of artifacts you control and the number of enchantments you control",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match expr {
+            QuantityExpr::Sum { exprs } => {
+                assert_eq!(exprs.len(), 3);
+            }
+            _ => panic!("expected Sum"),
+        }
+    }
+
+    /// A single quantity must stay on the normal parse_quantity path.
+    #[test]
+    fn parse_equal_to_sum_rejects_single_quantity() {
+        assert!(parse_equal_to_sum("the number of creatures you control").is_err());
+    }
+
+    /// Test parse_for_each_differently_named for distinct-by-name iteration.
+    #[test]
+    fn parse_for_each_differently_named_basic() {
+        let (rest, q) = parse_for_each_differently_named("differently named basic land").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCountDistinct { filter, qualities } => {
+                assert!(matches!(filter, TargetFilter::Typed(_)));
+                assert_eq!(qualities, vec![SharedQuality::Name]);
+            }
+            _ => panic!("expected ObjectCountDistinct"),
+        }
+    }
+
+    /// Test parse_for_each_differently_named with a simple type phrase.
+    #[test]
+    fn parse_for_each_differently_named_creature() {
+        let (rest, q) = parse_for_each_differently_named("differently named creature").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCountDistinct { filter, qualities } => {
+                assert!(matches!(filter, TargetFilter::Typed(_)));
+                assert_eq!(qualities, vec![SharedQuality::Name]);
+            }
+            _ => panic!("expected ObjectCountDistinct"),
+        }
     }
 
     /// CR 201.2: "named <card name>" ends before the controller suffix in a

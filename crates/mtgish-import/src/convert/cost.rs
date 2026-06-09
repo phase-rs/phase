@@ -4,7 +4,9 @@
 //! SacrificeAPermanent, PayLife, DiscardACard, And, Or, ExileAPermanent)
 //! cover the overwhelming majority of activated ability costs.
 
-use engine::types::ability::{AbilityCost, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, CounterCostSelection, QuantityExpr, TargetFilter, REMOVE_COUNTER_COST_ALL,
+};
 use engine::types::ManaCost;
 use engine::types::Zone;
 
@@ -84,8 +86,8 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
         Cost::DiscardACard => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
         // CR 701.8 + CR 117.6: "Discard <specific card>" cost. Channel
         // (Boseiju, Throat Slitter) and similar self-discard activations use
@@ -98,8 +100,8 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
             CardInHand::ThisCardInHand => AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
+                self_scope: engine::types::ability::DiscardSelfScope::SourceCard,
             },
             other => {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
@@ -113,28 +115,28 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
         Cost::DiscardACardAtRandom => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: true,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Random,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
         Cost::DiscardNumberCards(n) => AbilityCost::Discard {
             count: quantity::convert(n)?,
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
         // CR 701.9: Discard a card of a given card type.
         Cost::DiscardACardOfType(cards) => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: Some(cards_to_filter(cards)?),
-            random: false,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
         // CR 701.9: Random discard of a fixed count.
         Cost::DiscardNumberCardsAtRandom(n) => AbilityCost::Discard {
             count: quantity::convert(n)?,
             filter: None,
-            random: true,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Random,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
         },
 
         // CR 701.26 + CR 602.5b: Tap N permanents matching a filter.
@@ -156,6 +158,7 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
             count: 1,
             counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
             target: counter_target(target)?,
+            selection: CounterCostSelection::SingleObject,
         },
         // CR 122.1d: "Remove N {type} counters from ~" — fixed count form.
         // X-bound counts strict-fail with `EnginePrerequisiteMissing` since
@@ -169,14 +172,16 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
                 )?,
                 counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
                 target: counter_target(target)?,
+                selection: CounterCostSelection::SingleObject,
             }
         }
-        // CR 122.1d: "Remove all {type} counters from ~". Engine uses `u32::MAX`
-        // as the "all" sentinel (matches the native parser, see oracle_cost.rs).
+        // CR 122.1d: "Remove all {type} counters from ~". Engine uses a named
+        // sentinel distinct from literal X so this does not prompt for X.
         Cost::RemoveAllCountersOfTypeFromPermanent(ct, target) => AbilityCost::RemoveCounter {
-            count: u32::MAX,
+            count: REMOVE_COUNTER_COST_ALL,
             counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
             target: counter_target(target)?,
+            selection: CounterCostSelection::SingleObject,
         },
 
         // CR 107.3a: Pay {X} mana for an activation cost. The mtgish encoding

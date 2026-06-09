@@ -527,7 +527,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_transformed: false,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 owner_library: false,
                 enters_attacking: false,
                 up_to: false,

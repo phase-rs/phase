@@ -1433,6 +1433,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
         // trips through `GameAction::ChooseReplacement`; the drain resumes
         // via the `EmptyManaPool` arm of `handle_replacement_choice`.
         if state.pending_phase_transition_progress.is_some() {
+            state.deferred_step_trigger_resume = Some(state.phase);
             return state.waiting_for.clone();
         }
 
@@ -1634,6 +1635,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 }
             }
             Phase::CombatDamage => {
+                // CR 510.1a + CR 613.4c: Combat damage equals a creature's power as determined
+                // by the layer system (layer 7c applies P/T counters). Flush here so
+                // combat_damage_amount reads evaluated power, not stale base power. commit_attackers
+                // (combat.rs) marks layers dirty; the post-action pipeline flush runs after
+                // resolve_combat_damage returns — too late without this pre-flush.
+                super::layers::flush_layers(state);
                 // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
                 // resolve_combat_damage may pause for interactive assignment (2+ blockers).
                 if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
@@ -1978,7 +1985,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Green,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -4430,6 +4437,77 @@ mod tests {
             "state.waiting_for should be GameOver, got {:?}",
             state.waiting_for
         );
+    }
+
+    #[test]
+    fn auto_advance_combat_damage_flushes_layers_before_reading_power() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use crate::types::card_type::CoreType;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::CombatDamage;
+
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Beast".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(3);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(3);
+            obj.base_characteristics_initialized = true;
+            obj.counters.insert(CounterType::Plus1Plus1, 8);
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        let planeswalker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Professor Onyx".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&planeswalker).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            // CR 306.5b: loyalty field and counter map mirror each other.
+            obj.loyalty = Some(10);
+            obj.counters.insert(CounterType::Loyalty, 10);
+        }
+
+        state.layers_dirty.mark_full();
+        assert_eq!(
+            state.objects.get(&attacker).unwrap().power,
+            Some(1),
+            "precondition: attacker power is stale before the CombatDamage phase arm runs"
+        );
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(planeswalker),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        let mut events = Vec::new();
+        let _ = auto_advance(&mut state, &mut events);
+
+        // CR 510.1a + CR 120.3c + CR 613.4c: combat damage uses evaluated power,
+        // including +1/+1 counters from layer 7c. Without the CombatDamage pre-flush
+        // in auto_advance, this remains at 9 because stale base power dealt only 1.
+        assert_eq!(state.objects[&planeswalker].loyalty, Some(1));
+        assert_eq!(state.players[1].life, 20);
     }
 
     /// CR 800.4: When the active player is eliminated mid-turn in multiplayer,

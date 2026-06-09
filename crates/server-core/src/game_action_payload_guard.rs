@@ -335,11 +335,26 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::DistributeAmong { distribution, .. } => {
             bound_list("DistributeAmong.distribution", distribution.len())?;
         }
+        GameAction::ChooseRemoveCounterCostDistribution { distribution } => {
+            bound_list(
+                "ChooseRemoveCounterCostDistribution.distribution",
+                distribution.len(),
+            )?;
+            for (index, choice) in distribution.iter().enumerate() {
+                guard_counter_type_payload(
+                    &format!("ChooseRemoveCounterCostDistribution.distribution[{index}].counter_type"),
+                    &choice.counter_type,
+                )?;
+            }
+        }
         GameAction::RetargetSpell { new_targets, .. } => {
             bound_list("RetargetSpell.new_targets", new_targets.len())?;
         }
         GameAction::ChooseOption { choice, .. } => {
             bound_string("ChooseOption.choice", choice)?;
+        }
+        GameAction::SubmitSpellbookDraft { card } => {
+            bound_string("SubmitSpellbookDraft.card", card)?;
         }
         GameAction::Debug(debug_action) => {
             guard_debug_action_payload(debug_action)?;

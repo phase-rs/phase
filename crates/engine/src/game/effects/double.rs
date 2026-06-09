@@ -224,7 +224,7 @@ fn resolve_double_mana(
             player.mana_pool.add(ManaUnit {
                 color: mana_type,
                 source_id: ability.source_id,
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -698,7 +698,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Red,
                 source_id: ObjectId(50),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],

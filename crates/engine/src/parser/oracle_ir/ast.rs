@@ -908,6 +908,7 @@ pub(crate) enum HandRevealImperativeAst {
         random: bool,
     },
     RevealAll {
+        target: TargetFilter,
         card_filter: TargetFilter,
     },
     /// "reveals a number of cards from their hand equal to X" (CR 701.20a).

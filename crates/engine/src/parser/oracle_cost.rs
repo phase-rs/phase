@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
-use nom::combinator::{all_consuming, map, rest, value};
+use nom::combinator::{all_consuming, map, opt, rest, value};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
@@ -18,8 +18,9 @@ use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityCost, BeholdCostAction, CostReduction, FilterProp, PlayerScope, QuantityExpr,
-    QuantityRef, TargetFilter, TypedFilter,
+    AbilityCost, BeholdCostAction, CostReduction, CounterCostSelection, FilterProp, PlayerScope,
+    QuantityExpr, QuantityRef, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
+    REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -242,18 +243,26 @@ fn parse_remove_counter_quantity_and_kind(
     ))
     .parse(input)
     {
-        return Some((u32::MAX, counter_type));
+        return Some((REMOVE_COUNTER_COST_ALL, counter_type));
     }
-    // CR 601.2b / CR 602.2b: "any number of" is a casting/activation-time
-    // variable choice. u32::MAX lets the runtime clamp to the actual count via
-    // saturating subtraction.
+    // CR 601.2b / CR 602.2b: "any number of" requires a count choice just
+    // like literal X, but stays a separate sentinel for parser/data clarity.
     if let Ok((_, counter_type)) = all_consuming(preceded(
         tag::<_, _, E<'_>>("any number of "),
         parse_remove_counter_kind,
     ))
     .parse(input)
     {
-        return Some((u32::MAX, counter_type));
+        return Some((REMOVE_COUNTER_COST_ANY_NUMBER, counter_type));
+    }
+    // CR 601.2b: "X" is a variable cost announced before target selection.
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        alt((tag::<_, _, E<'_>>("x "), tag("X "))),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((REMOVE_COUNTER_COST_X, counter_type));
     }
     if let Ok((_, (count, counter_type))) = all_consuming(pair(
         terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
@@ -272,12 +281,25 @@ fn parse_remove_counter_quantity_and_kind(
     .map(|(_, counter_type)| (1, counter_type))
 }
 
-fn parse_remove_counter_target(target_text: &str) -> Option<TargetFilter> {
+fn parse_remove_counter_target(target_text: &str) -> (Option<TargetFilter>, CounterCostSelection) {
+    let (target_text, selection) = pair(opt(tag::<_, _, nom::error::Error<&str>>("among ")), rest)
+        .parse(target_text)
+        .map(|(_, (among, target_text))| {
+            (
+                target_text,
+                if among.is_some() {
+                    CounterCostSelection::AmongObjects
+                } else {
+                    CounterCostSelection::SingleObject
+                },
+            )
+        })
+        .unwrap_or((target_text, CounterCostSelection::SingleObject));
     let (target, remainder) = parse_target(target_text);
     if !remainder.trim().is_empty() || matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
-        return None;
+        return (None, CounterCostSelection::SingleObject);
     }
-    Some(target)
+    (Some(target), selection)
 }
 
 pub fn parse_single_cost(text: &str) -> AbilityCost {
@@ -475,16 +497,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
         if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         if rest_lower == "your hand" {
@@ -495,8 +517,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     },
                 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
@@ -513,8 +535,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 return AbilityCost::Discard {
                     count,
                     filter: Some(filter),
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 };
             }
         }
@@ -522,15 +544,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: n as i32 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         return AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         };
     }
 
@@ -580,17 +602,22 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("remove ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
         if scan_contains(&rest_lower, "counter") {
-            let (counter_phrase, target) = pair(
+            let (counter_phrase, target, selection) = pair(
                 terminated(take_until::<_, _, E<'_>>(" from "), tag(" from ")),
                 nom::combinator::rest,
             )
             .parse(rest_lower.as_str())
             .ok()
             .map_or(
-                (rest_lower.as_str(), None),
+                (
+                    rest_lower.as_str(),
+                    None,
+                    CounterCostSelection::SingleObject,
+                ),
                 |(_, split): (&str, (&str, &str))| {
                     let (before_from, target_text) = split;
-                    (before_from.trim(), parse_remove_counter_target(target_text))
+                    let (target, selection) = parse_remove_counter_target(target_text);
+                    (before_from.trim(), target, selection)
                 },
             );
             if let Some((count, counter_type)) =
@@ -600,6 +627,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     count,
                     counter_type,
                     target,
+                    selection,
                 };
             }
         }
@@ -718,7 +746,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 target: TargetFilter::SelfRef,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             }),
         };
@@ -1233,6 +1261,41 @@ mod tests {
         assert!(parse_or_separated_mana_costs("{G} or {W} and pay 1 life").is_none());
     }
 
+    // Tests for issue #2394: Marath, Will of the Wild - variable X counter removal
+    #[test]
+    fn parse_remove_x_counters_uses_x_sentinel() {
+        let (count, counter_type) = parse_remove_counter_quantity_and_kind("X +1/+1 counters")
+            .expect("should parse X counter removal");
+
+        assert_eq!(
+            count, REMOVE_COUNTER_COST_X,
+            "X should be encoded as the X sentinel"
+        );
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
+    #[test]
+    fn parse_remove_numeric_counters_uses_actual_value() {
+        let (count, counter_type) = parse_remove_counter_quantity_and_kind("3 +1/+1 counters")
+            .expect("should parse numeric counter removal");
+
+        assert_eq!(count, 3, "numeric value should be preserved");
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
+    #[test]
+    fn parse_any_number_of_counters_uses_any_number_sentinel() {
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("any number of +1/+1 counters")
+                .expect("should parse 'any number of' counter removal");
+
+        assert_eq!(
+            count, REMOVE_COUNTER_COST_ANY_NUMBER,
+            "'any number of' should be encoded separately from literal X"
+        );
+        assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
     #[test]
     fn cost_untap() {
         assert_eq!(parse_oracle_cost("{Q}"), AbilityCost::Untap);
@@ -1524,8 +1587,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1540,8 +1603,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(TargetFilter::Typed(TypedFilter::creature())),
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1555,8 +1618,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 2 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1568,8 +1631,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             }
         );
     }
@@ -1585,8 +1648,8 @@ mod tests {
                     },
                 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1912,9 +1975,11 @@ mod tests {
                 count,
                 counter_type,
                 target: Some(TargetFilter::Typed(filter)),
+                selection,
             } => {
                 assert_eq!(count, 1);
                 assert_eq!(counter_type, CounterMatch::Any);
+                assert_eq!(selection, CounterCostSelection::SingleObject);
                 assert_eq!(filter.controller, Some(ControllerRef::You));
                 assert!(
                     filter
@@ -1930,6 +1995,32 @@ mod tests {
     }
 
     #[test]
+    fn cost_remove_x_counters_from_among_creatures_you_control() {
+        match parse_oracle_cost("Remove X counters from among creatures you control") {
+            AbilityCost::RemoveCounter {
+                count,
+                counter_type,
+                target: Some(TargetFilter::Typed(filter)),
+                selection,
+            } => {
+                assert_eq!(count, REMOVE_COUNTER_COST_X);
+                assert_eq!(counter_type, CounterMatch::Any);
+                assert_eq!(selection, CounterCostSelection::AmongObjects);
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(
+                    filter
+                        .type_filters
+                        .iter()
+                        .any(|filter| matches!(filter, TypeFilter::Creature)),
+                    "expected creature filter, got {:?}",
+                    filter.type_filters
+                );
+            }
+            other => panic!("Expected from-among RemoveCounter cost, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn cost_remove_counter_from_self_stays_source_cost() {
         assert_eq!(
             parse_oracle_cost("Remove a +1/+1 counter from ~"),
@@ -1937,6 +2028,7 @@ mod tests {
                 count: 1,
                 counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             }
         );
     }
@@ -1946,11 +2038,12 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Remove any number of storage counters from ~"),
             AbilityCost::RemoveCounter {
-                count: u32::MAX,
+                count: REMOVE_COUNTER_COST_ANY_NUMBER,
                 counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
                     "storage".to_string()
                 ),),
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             }
         );
     }
@@ -1960,11 +2053,12 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Remove any number of charge counters from ~"),
             AbilityCost::RemoveCounter {
-                count: u32::MAX,
+                count: REMOVE_COUNTER_COST_ANY_NUMBER,
                 counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
                     "charge".to_string()
                 ),),
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             }
         );
     }
@@ -1974,9 +2068,10 @@ mod tests {
         assert_eq!(
             parse_oracle_cost("Remove any number of counters from ~"),
             AbilityCost::RemoveCounter {
-                count: u32::MAX,
+                count: REMOVE_COUNTER_COST_ANY_NUMBER,
                 counter_type: CounterMatch::Any,
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             }
         );
     }

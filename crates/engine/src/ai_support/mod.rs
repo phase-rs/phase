@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
-use crate::types::ability::AbilityKind;
+use crate::types::ability::{AbilityKind, CounterCostSelection};
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
@@ -384,15 +384,45 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(*count)),
-        // CR 118.3: RemoveCounter chooses exactly one counter source.
+        // CR 118.3: Single-object RemoveCounter chooses exactly one counter source.
         (
             WaitingFor::PayCost {
-                kind: PayCostKind::RemoveCounter { .. },
+                kind:
+                    PayCostKind::RemoveCounter {
+                        selection: CounterCostSelection::SingleObject,
+                        ..
+                    },
                 choices,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, choices, Some(1)),
+        // CR 118.3: "from among" RemoveCounter submits exact per-object
+        // counter counts, not a bare object selection.
+        (
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::RemoveCounter {
+                        selection: CounterCostSelection::AmongObjects,
+                        count,
+                        ..
+                    },
+                choices,
+                ..
+            },
+            GameAction::ChooseRemoveCounterCostDistribution { distribution },
+        ) => remove_counter_distribution_mismatch(distribution, choices, *count),
+        (
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::RemoveCounter {
+                        selection: CounterCostSelection::AmongObjects,
+                        ..
+                    },
+                ..
+            },
+            GameAction::SelectCards { .. },
+        ) => true,
         // CR 118.3: Sacrifice honors the [min_count, count] range.
         (
             WaitingFor::PayCost {
@@ -543,6 +573,27 @@ fn selection_mismatch<'a>(
     chosen
         .iter()
         .any(|card| !option_set.contains(card) || !seen.insert(*card))
+}
+
+fn remove_counter_distribution_mismatch(
+    distribution: &[crate::types::game_state::CounterCostChoice],
+    choices: &[ObjectId],
+    count: u32,
+) -> bool {
+    let mut total = 0u32;
+    let mut seen = HashSet::new();
+    distribution.is_empty()
+        || distribution.iter().any(|choice| {
+            if choice.count == 0
+                || !choices.contains(&choice.object_id)
+                || !seen.insert((choice.object_id, choice.counter_type.clone()))
+            {
+                return true;
+            }
+            total = total.saturating_add(choice.count);
+            false
+        })
+        || total != count
 }
 
 fn matches_target_choice(
@@ -938,9 +989,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect,
-        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, SearchSelectionConstraint,
-        TargetFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification,
+        ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction, QuantityExpr,
+        ResolvedAbility, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -949,6 +1000,7 @@ mod tests {
         WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1174,7 +1226,7 @@ mod tests {
         state.players[1].mana_pool.add(ManaUnit {
             color: ManaType::Black,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -1337,8 +1389,8 @@ mod tests {
                 AbilityCost::Discard {
                     count: QuantityExpr::Fixed { value: 1 },
                     filter: None,
-                    random: false,
-                    self_ref: true,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
                 },
             ],
         });
@@ -1419,6 +1471,111 @@ mod tests {
                 },
             ),
             "cycling ActivateAbility must still be offered"
+        );
+    }
+
+    #[test]
+    fn legal_actions_offer_runtime_granted_typecycling_from_homing_sliver() {
+        let mut state = setup_priority();
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+
+        let homing_sliver = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Homing Sliver".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&homing_sliver)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .subtype("Sliver".to_string())
+                            .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Typecycling {
+                            cost: ManaCost::NoCost,
+                            subtype: "Sliver".to_string(),
+                        },
+                    }]),
+            );
+
+        let hand_sliver = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Striking Sliver".to_string(),
+            Zone::Hand,
+        );
+        let printed_len = {
+            let obj = state.objects.get_mut(&hand_sliver).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Sliver".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.abilities.len()
+        };
+
+        assert!(
+            crate::game::off_zone_characteristics::off_zone_has_keyword_kind(
+                &state,
+                hand_sliver,
+                KeywordKind::Typecycling,
+            ),
+            "Homing Sliver static should grant Typecycling to the Sliver card in hand"
+        );
+
+        let transient_index = printed_len;
+        assert!(
+            crate::game::casting::can_activate_ability_now(
+                &state,
+                PlayerId(0),
+                hand_sliver,
+                transient_index,
+            ),
+            "runtime-granted Typecycling should be activatable at the first transient index"
+        );
+
+        let (_, _, grouped) = legal_actions_full(&state);
+        assert!(
+            bucket_has(
+                &grouped,
+                hand_sliver,
+                &GameAction::ActivateAbility {
+                    source_id: hand_sliver,
+                    ability_index: transient_index,
+                },
+            ),
+            "legal actions must expose the runtime-granted Slivercycling activation"
+        );
+
+        let _result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: hand_sliver,
+                ability_index: transient_index,
+            },
+        )
+        .expect("runtime-granted Typecycling activation should be accepted");
+
+        assert!(
+            state.stack.iter().any(|entry| {
+                matches!(
+                    entry.kind,
+                    StackEntryKind::ActivatedAbility { source_id, .. } if source_id == hand_sliver
+                )
+            }),
+            "activating runtime-granted Slivercycling should put the ability on the stack"
+        );
+        assert_eq!(
+            state.objects[&hand_sliver].zone,
+            Zone::Graveyard,
+            "activating runtime-granted Slivercycling should discard the source as a cost"
         );
     }
 
@@ -2316,7 +2473,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -2325,7 +2482,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],

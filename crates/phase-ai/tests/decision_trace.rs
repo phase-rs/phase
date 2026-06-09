@@ -29,7 +29,7 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::zones::{EtbTapState, Zone};
 use phase_ai::config::AiConfig;
 use phase_ai::context::AiContext;
 use phase_ai::features::{DeckFeatures, LandfallFeature};
@@ -113,7 +113,7 @@ fn make_fetch_ability() -> AbilityDefinition {
             owner_library: false,
             enter_transformed: false,
             enters_under: Some(ControllerRef::You),
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],

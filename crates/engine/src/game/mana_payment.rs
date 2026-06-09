@@ -261,7 +261,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
         let unit = ManaUnit {
             color: final_mana_type,
             source_id,
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors,
             restrictions: restrictions.to_vec(),
             grants: grants.to_vec(),
@@ -1807,7 +1807,7 @@ fn spend_snow(pool: &mut ManaPool) -> bool {
 
 /// CR 107.4h: Snow mana {S} — paid with one mana of any type from a snow source.
 fn spend_snow_unit(pool: &mut ManaPool) -> Option<ManaUnit> {
-    if let Some(pos) = pool.mana.iter().position(|m| m.snow) {
+    if let Some(pos) = pool.mana.iter().position(|m| m.is_snow()) {
         Some(pool.mana.swap_remove(pos))
     } else {
         None
@@ -1911,7 +1911,7 @@ mod tests {
         ManaUnit {
             color,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -2553,7 +2553,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Green,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
             grants: vec![],
@@ -2616,7 +2616,7 @@ mod tests {
             pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(1),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities(
                     "Colorless Eldrazi".to_string(),
@@ -2680,7 +2680,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKind(
                 crate::types::keywords::KeywordKind::Flashback,
@@ -2741,7 +2741,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForSpellWithKeywordKindFromZone(
                 crate::types::keywords::KeywordKind::Flashback,
@@ -2804,7 +2804,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Green,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![],
@@ -2836,7 +2836,7 @@ mod tests {
         pool.add(ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(1),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![],

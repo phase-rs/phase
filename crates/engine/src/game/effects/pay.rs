@@ -59,6 +59,7 @@ pub fn resolve(
                     max,
                     accumulated: 0,
                     source_id: ability.source_id,
+                    pending_mana_ability: None,
                 };
                 return Ok(());
             }
@@ -129,6 +130,7 @@ pub fn resolve(
                     max,
                     accumulated: 0,
                     source_id: ability.source_id,
+                    pending_mana_ability: None,
                 };
                 return Ok(());
             }
@@ -305,8 +307,8 @@ fn resolve_ability_cost_payment(
         AbilityCost::Discard {
             count,
             filter,
-            random: false,
-            self_ref: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         } => {
             let count = resolve_quantity_with_targets(state, count, ability).max(0) as usize;
             let eligible = casting::find_eligible_discard_targets(
@@ -417,8 +419,8 @@ fn can_pay_resolution_ability_cost(
         AbilityCost::Discard {
             count,
             filter,
-            random: _,
-            self_ref: _,
+            selection: _,
+            self_scope: _,
         } => {
             let count = u32::try_from(resolve_quantity_with_targets(state, count, ability).max(0))
                 .unwrap_or(0) as usize;
@@ -574,7 +576,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -619,7 +621,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForActivation],
             grants: vec![],
@@ -741,7 +743,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![],
@@ -779,7 +781,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![ManaRestriction::OnlyForActivation],
             grants: vec![],
@@ -808,7 +810,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -838,7 +840,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: vec![],
             grants: vec![],
@@ -1027,8 +1029,8 @@ mod tests {
                     cost: AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: false,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                     },
                 },
                 payer: TargetFilter::Controller,
@@ -1090,8 +1092,8 @@ mod tests {
                     cost: AbilityCost::Discard {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
-                        random: false,
-                        self_ref: false,
+                        selection: crate::types::ability::CardSelectionMode::Chosen,
+                        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                     },
                 },
                 payer: TargetFilter::Controller,
@@ -1320,7 +1322,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -1437,7 +1439,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -1598,7 +1600,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -1704,7 +1706,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -1811,7 +1813,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -1901,7 +1903,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -1912,7 +1914,7 @@ mod tests {
             state.players[1].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],
@@ -2131,7 +2133,7 @@ mod tests {
             state.players[player.0 as usize].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: vec![],
                 grants: vec![],

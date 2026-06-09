@@ -372,6 +372,13 @@ pub enum GameEvent {
         counter_type: CounterType,
         count: u32,
     },
+    /// Digital-only Alchemy (no CR entry): a card's intensity increased by
+    /// `amount`. Emitted per affected card so consumers (triggers that watch for
+    /// intensifying, frontend animation) can see exactly which cards changed.
+    ObjectIntensified {
+        object_id: ObjectId,
+        amount: u32,
+    },
     /// CR 702.100b: A creature evolved because one or more +1/+1 counters were
     /// put on it as a result of its evolve ability resolving.
     Evolved {

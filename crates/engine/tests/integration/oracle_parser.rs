@@ -1,7 +1,8 @@
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
 use engine::types::ability::{
     ChosenSubtypeKind, ContinuousModification, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, TargetFilter, TypeFilter,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, StaticCondition, TargetFilter,
+    TypeFilter,
 };
 use engine::types::keywords::Keyword;
 use engine::types::statics::StaticMode;
@@ -519,7 +520,7 @@ fn krosan_verge_lowers_to_dual_search_choice() {
                     engine::types::zones::Zone::Battlefield,
                     "ChangeZone destination should be Battlefield",
                 );
-                assert!(*enter_tapped, "found lands should enter tapped");
+                assert!(enter_tapped.is_tapped(), "found lands should enter tapped");
                 "ChangeZone"
             }
             Effect::Shuffle { .. } => "Shuffle",
@@ -675,4 +676,41 @@ fn snapshot_harold_and_bob_first_numens() {
         &["Troll", "Warrior"],
     );
     insta::assert_json_snapshot!(result);
+}
+
+#[test]
+fn inverted_as_long_as_flash_grant_attaches_condition() {
+    // CR 601.3b + CR 702.8a + CR 611.3a: The inverted conditional flash-grant
+    // "As long as <cond>, you may cast [type] spells as though they had flash"
+    // must lower to a `CastWithKeyword { Flash }` static carrying the condition
+    // — not silently collapse into a bare conditionless Continuous fallback.
+    let result = parse(
+        "As long as it's your turn, you may cast creature spells as though they had flash.",
+        "Test Inverted Flash Grant",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+
+    let static_def = result
+        .statics
+        .iter()
+        .find(|static_def| {
+            matches!(
+                static_def.mode,
+                StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash
+                }
+            )
+        })
+        .expect("expected inverted flash grant to lower to CastWithKeyword { Flash }");
+
+    // "it's your turn" is recognized by parse_static_condition → DuringYourTurn,
+    // not just a generic Unrecognized fallback.
+    assert!(
+        matches!(static_def.condition, Some(StaticCondition::DuringYourTurn)),
+        "expected DuringYourTurn condition on the CastWithKeyword static, \
+         got condition: {:#?}",
+        static_def.condition
+    );
 }

@@ -128,6 +128,31 @@ fn handle_activated_mode_choice(
         }
     }
 
+    if let Some(cost) = ability_cost.as_ref() {
+        if casting_costs::activation_cost_needs_x_choice(&resolved, cost) {
+            // CR 602.2b + CR 601.2f + CR 700.2: After modes are chosen, a
+            // symbolic Remove X counters activation cost uses the same pending
+            // X announcement path as non-modal activated abilities, then resumes
+            // through deferred target selection with the chosen modes preserved.
+            let (mana_cost, remaining) = casting::split_alt_cost_components(cost);
+            let mut pending_x = PendingCast::new(
+                source_id,
+                CardId(0),
+                resolved,
+                mana_cost.unwrap_or(ManaCost::NoCost),
+            );
+            pending_x.activation_cost = remaining;
+            pending_x.activation_ability_index = ability_index;
+            pending_x.target_constraints = target_constraints;
+            pending_x.deferred_target_selection = true;
+            let mut chosen_modes = indices.clone();
+            chosen_modes.sort_unstable();
+            pending_x.chosen_modes = chosen_modes;
+            state.pending_cast = Some(Box::new(pending_x));
+            return casting_costs::enter_payment_step(state, player, None, events);
+        }
+    }
+
     super::layers::flush_layers(state);
 
     // CR 700.2 / CR 601.2b: Build slots and per-mode labels together against the

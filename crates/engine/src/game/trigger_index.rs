@@ -547,6 +547,7 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::SpellCountered { .. } => {}
         GameEvent::CounterAdded { .. } => push(TriggerEventKey::CounterAdded),
         GameEvent::Evolved { .. } => {}
+        GameEvent::ObjectIntensified { .. } => {}
         GameEvent::CounterRemoved { .. } => push(TriggerEventKey::CounterRemoved),
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => {
             push(TriggerEventKey::TokenCreated);
@@ -813,6 +814,8 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
         | EffectKind::Conjure
+        | EffectKind::Intensify
+        | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
         | EffectKind::Specialize
         | EffectKind::Unimplemented

@@ -9,9 +9,10 @@ use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost, AttackSubject,
     BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
     ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
-    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
-    ModalChoice, QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
+    CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
+    KeywordAction, KickerVariant, ModalChoice, QuantityExpr, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
+    TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -25,7 +26,8 @@ use super::mana::{ManaColor, ManaCost, ManaType, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerCounterKind, PlayerId};
-use super::proposed_event::{CopyTokenSpec, EtbTapState, ProposedEvent, ReplacementId, TokenSpec};
+use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
+use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
 use crate::game::bracket_estimate::CommanderBracketTier;
@@ -916,7 +918,12 @@ pub struct PendingChangeZoneIteration {
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
     pub enter_transformed: bool,
-    pub enter_tapped: bool,
+    #[serde(
+        default,
+        with = "crate::types::zones::etb_tap_bool_compat",
+        skip_serializing_if = "EtbTapState::is_unspecified"
+    )]
+    pub enter_tapped: EtbTapState,
     /// CR 110.2a: Resolved-once controller override on ETB. `Some(pid)`
     /// routes the object to `pid`. `None` leaves the object under its
     /// owner's control. Resolved from `Effect::ChangeZone.enters_under`
@@ -1001,6 +1008,13 @@ pub struct PendingChooseOneOf {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CounterMoveChoice {
     pub destination_id: ObjectId,
+    pub counter_type: CounterType,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterCostChoice {
+    pub object_id: ObjectId,
     pub counter_type: CounterType,
     pub count: u32,
 }
@@ -1540,6 +1554,10 @@ pub struct PendingManaAbility {
     /// surfaces `WaitingFor::PayManaAbilityMana` for a genuine choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_mana_payment: Option<Vec<ManaType>>,
+    /// CR 107.1c + CR 605.3a: Chosen count for "remove any number of counters"
+    /// in a mana-ability cost. The amount is chosen before mana production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_counter_count: Option<u32>,
     /// CR 117.1 + CR 118.3: Pre-selected objects to exile as part of an
     /// `AbilityCost::Exile { filter: !SelfRef, .. }` mana ability cost. Used
     /// by Food Chain's battlefield exile cost and Titans' Nest's graveyard
@@ -2088,6 +2106,13 @@ pub enum PayCostKind {
     },
     RemoveCounter {
         counter_type: CounterMatch,
+        /// CR 118.3 + CR 122.1: number of counters to remove from the one
+        /// selected permanent, or from among selected permanents when
+        /// `selection` is `AmongObjects`. `WaitingFor::PayCost.count` remains
+        /// the number of objects to choose.
+        count: u32,
+        #[serde(default)]
+        selection: CounterCostSelection,
     },
     TapCreatures,
     Behold {
@@ -2582,7 +2607,7 @@ pub enum WaitingFor {
         cards: Vec<ObjectId>,
         primary_destination: Zone,
         primary_count: u32,
-        primary_enter_tapped: bool,
+        primary_enter_tapped: EtbTapState,
         rest_destination: Zone,
         source_id: ObjectId,
     },
@@ -2675,8 +2700,12 @@ pub enum WaitingFor {
         /// Destination zone for ChangeZone effects. None for Sacrifice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         destination: Option<Zone>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        enter_tapped: bool,
+        #[serde(
+            default,
+            with = "super::zones::etb_tap_bool_compat",
+            skip_serializing_if = "EtbTapState::is_unspecified"
+        )]
+        enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_transformed: bool,
         /// CR 110.2a: Resolved-once controller override carried through the
@@ -2769,6 +2798,17 @@ pub enum WaitingFor {
         /// The object that originated this choice (for persisting to chosen_attributes).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
+    },
+    /// Alchemy "draft a card from [card]'s spellbook": `player` chooses one card
+    /// name from `options` (the source card's spellbook list); the chosen card is
+    /// then conjured into `destination` (`tapped` if a "tapped" rider applied).
+    SpellbookDraft {
+        player: PlayerId,
+        source_id: ObjectId,
+        options: Vec<String>,
+        destination: Zone,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        tapped: bool,
     },
     /// CR 609.7a: Player must choose a source of damage from currently
     /// represented legal source objects.
@@ -3241,7 +3281,7 @@ pub enum WaitingFor {
         source_id: ObjectId,
         accept_zone: Zone,
         decline_zone: Zone,
-        enter_tapped: bool,
+        enter_tapped: EtbTapState,
         /// CR 508.4: When the accepted card goes to the battlefield, it enters
         /// attacking ("tapped and attacking"). Carried from `Effect::RevealUntil`.
         #[serde(default)]
@@ -3587,6 +3627,8 @@ pub enum WaitingFor {
         #[serde(default)]
         accumulated: u32,
         source_id: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_mana_ability: Option<Box<PendingManaAbility>>,
     },
     /// CR 115.7: Change the target(s) of a spell or ability on the stack.
     /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
@@ -3697,6 +3739,8 @@ pub enum PayableResource {
         #[serde(default = "default_one")]
         per_x: u32,
     },
+    /// CR 107.1c + CR 122.1: Choose how many counters to remove.
+    Counters,
 }
 
 fn default_one() -> u32 {
@@ -3763,6 +3807,7 @@ impl WaitingFor {
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
             WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
@@ -3894,6 +3939,7 @@ impl WaitingFor {
             | WaitingFor::BetweenGamesSideboard { player, .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
             | WaitingFor::NamedChoice { player, .. }
+            | WaitingFor::SpellbookDraft { player, .. }
             | WaitingFor::DamageSourceChoice { player, .. }
             | WaitingFor::ModeChoice { player, .. }
             | WaitingFor::DiscardToHandSize { player, .. }
@@ -5894,6 +5940,15 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_phase_transition_progress: Option<PhaseTransitionProgress>,
 
+    /// Transient: set to the phase whose beginning-of-step triggers still need
+    /// to run when `auto_advance` returns early because
+    /// `pending_phase_transition_progress` is set (CR 616.1 mana-pool choice
+    /// deferred `enter_phase`). Cleared when `handle_replacement_choice`
+    /// resumes `auto_advance` after the drain completes so beginning-of-step
+    /// triggers (CR 513.1 + CR 603.3b) still fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_step_trigger_resume: Option<Phase>,
+
     /// Transient: set by stack.rs before resolving a triggered ability, cleared after.
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6456,6 +6511,7 @@ impl GameState {
             pending_damage_replacements: Vec::new(),
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
+            deferred_step_trigger_resume: None,
             current_trigger_event: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,
@@ -7334,7 +7390,7 @@ mod tests {
             player: PlayerId(0),
             cost: AdditionalCost::Optional {
                 cost: crate::types::ability::AbilityCost::Blight { count: 1 },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             },
             times_kicked: 0,
             pending_cast: dummy_pending(),
@@ -7457,7 +7513,7 @@ mod tests {
             effect_kind: crate::types::ability::EffectKind::Sacrifice,
             zone: Zone::Battlefield,
             destination: None,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: None,
             enters_attacking: false,
@@ -7570,6 +7626,7 @@ mod tests {
                     chosen_tappers: Vec::new(),
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
+                    chosen_counter_count: None,
                     chosen_exiled: Vec::new(),
                     chosen_sacrificed_battlefield: Vec::new(),
                     cost_paid_object: None,
@@ -7699,7 +7756,7 @@ mod tests {
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             zone: Zone::Hand,
             destination: Some(Zone::Battlefield),
-            enter_tapped: true,
+            enter_tapped: EtbTapState::Tapped,
             enter_transformed: false,
             enters_under_player: Some(PlayerId(0)),
             enters_attacking: false,
@@ -7769,7 +7826,7 @@ mod tests {
             origin: None,
             destination: Zone::Battlefield,
             enter_transformed: false,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enters_under_player: Some(PlayerId(1)),
             enters_attacking: false,
             enter_with_counters: vec![],
@@ -7855,7 +7912,7 @@ mod tests {
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             zone: Zone::Hand,
             destination: Some(Zone::Battlefield),
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: Some(PlayerId(1)),
             enters_attacking: false,

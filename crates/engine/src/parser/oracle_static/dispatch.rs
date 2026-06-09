@@ -110,6 +110,28 @@ pub(crate) fn parse_static_line_inner(
             if let Some(def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip) {
                 return Some(def.description(text.to_string()));
             }
+            // CR 601.3b + CR 702.8a: Inverted flash-grant conditional:
+            // "As long as X, you may cast [type] spells as though they had flash."
+            // The recursed call above fails because `parse_cast_as_though_flash_static`
+            // uses `eof` and the canonical form carries a trailing condition clause.
+            // Try the flash parser against the isolated effect slice; if it succeeds,
+            // attach the condition from the split.
+            {
+                let effect_lower = split.effect_text.to_lowercase();
+                let tp_effect = TextPair::new(&split.effect_text, &effect_lower);
+                if let Some(mut def) =
+                    parse_cast_as_though_flash_static(&tp_effect, &split.effect_text)
+                {
+                    let condition = parse_static_condition(&split.condition_text).unwrap_or(
+                        StaticCondition::Unrecognized {
+                            text: split.condition_text.clone(),
+                        },
+                    );
+                    def.condition = Some(condition);
+                    def.description = Some(text.to_string());
+                    return Some(def);
+                }
+            }
             // Rewrite succeeded (we cleanly separated condition from effect), but the
             // recursed parser could not model the effect clause. Produce a generic
             // Continuous static whose condition is typed via `parse_static_condition`

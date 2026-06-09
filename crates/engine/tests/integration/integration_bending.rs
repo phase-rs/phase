@@ -827,7 +827,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: true,
+            enter_tapped: engine::types::zones::EtbTapState::Tapped,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -842,7 +842,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: engine::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -1163,7 +1163,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: true,
+            enter_tapped: engine::types::zones::EtbTapState::Tapped,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -1178,7 +1178,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: engine::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -1983,7 +1983,7 @@ fn build_earthbend_ability(
             owner_library: false,
             enter_transformed: false,
             enters_under: Some(ControllerRef::You),
-            enter_tapped: true,
+            enter_tapped: engine::types::zones::EtbTapState::Tapped,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -2248,7 +2248,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             destination: Zone::Exile,
             target: TargetFilter::SpecificObject { id: land_id },
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             face_down_profile: None,
         },
         vec![TargetRef::Object(land_id)],
@@ -2483,7 +2483,7 @@ fn earthbend_registers_dies_or_exiled_delayed_trigger_on_target() {
         } => {
             assert_eq!(*destination, Zone::Battlefield);
             assert!(
-                *enter_tapped,
+                enter_tapped.is_tapped(),
                 "Inner ChangeZone must carry enter_tapped=true"
             );
             assert_eq!(
