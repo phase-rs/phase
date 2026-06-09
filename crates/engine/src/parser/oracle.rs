@@ -1276,10 +1276,19 @@ fn is_spell_resolution_instruction_line(
     // token's quoted "can't block" etc. doesn't mark this resolution line static.
     // This function is already spell-scoped (caller is inside `if is_spell {`).
     // The adjacent is_replacement_pattern check below stays on the UNMASKED text.
-    if is_static_pattern(
-        &crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&effect_lower),
-    ) && !should_defer_spell_to_effect(&effect_lower)
-    {
+    //
+    // Gate the mask on a token/permanent-creation verb being present: only then is
+    // a quoted span an inline ability *of the created object* ("create ... with
+    // \"…\""). On a line with no creation verb the quote is instead a granted-
+    // ability payload ("…perpetually gain \"This spell costs {1} less\""), whose
+    // inner static shape is load-bearing for routing — masking it there misroutes
+    // the grant (coverage regression: Circadian Struggle, Absorb Energy).
+    let static_view = if scan_contains(&effect_lower, "create") {
+        crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&effect_lower)
+    } else {
+        std::borrow::Cow::Borrowed(effect_lower.as_str())
+    };
+    if is_static_pattern(&static_view) && !should_defer_spell_to_effect(&effect_lower) {
         return false;
     }
 
@@ -2801,7 +2810,14 @@ pub(crate) fn parse_oracle_ir(
         // sorcery to the static parser. Spell-scoped only — the masked view feeds
         // the gate predicate exclusively; every replacement gate below and the
         // static_line passed to parse_static_line* stay on the UNMASKED text.
-        let static_classify_view = if is_spell {
+        //
+        // Gate on a creation verb: only "create ... with \"…\"" makes the quote an
+        // inline ability of the created object. Without one, the quote is a granted-
+        // ability payload ("…perpetually gain \"This spell costs {1} less\"") whose
+        // inner static shape is load-bearing for routing — masking it there
+        // misroutes the grant (coverage regression: Circadian Struggle, Absorb
+        // Energy). Non-creation lines therefore keep the UNMASKED baseline view.
+        let static_classify_view = if is_spell && scan_contains(&lower, "create") {
             crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower)
         } else {
             std::borrow::Cow::Borrowed(lower.as_str())

@@ -870,8 +870,9 @@ pub fn scan_contains(text: &str, phrase: &str) -> bool {
 /// or a perpetually-gained spell ability). Borrowed when the text has no '"'.
 /// An unterminated quote passes the remainder through unchanged (no panic).
 pub fn strip_double_quoted_spans(text: &str) -> Cow<'_, str> {
-    // Zero-alloc fast path: no double quote means nothing to mask. A char scan
-    // (not `.find("literal")`) keeps this off the string-dispatch ban list.
+    // Zero-alloc fast path: no double quote means nothing to mask. This scans for
+    // a char (a single quote mark), not a string literal, so it is not parsing
+    // dispatch and stays off the combinator-mandate ban list.
     if text.find('"').is_none() {
         return Cow::Borrowed(text);
     }
