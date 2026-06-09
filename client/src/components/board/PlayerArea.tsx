@@ -1,16 +1,14 @@
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
-import { commanderDamageEntriesFor, commandersInZone } from "../../viewmodel/commanderColumn.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
 import { CompactStrip } from "./CompactStrip.tsx";
-import { CommanderDamage } from "./CommanderDamage.tsx";
-import { CommanderCardZone } from "../zone/CommanderCardZone.tsx";
-import { CommandZone } from "../zone/CommandZone.tsx";
+import { CommandDock } from "../zone/CommandDock.tsx";
 
 /** Base scales — used when few cards; shrinks as more are added.
  *  On compact-height (landscape phones), lands shrink hard so creatures
@@ -70,6 +68,15 @@ export function PlayerArea({
   const { t } = useTranslation("game");
   const gameState = useGameStore((s) => s.gameState);
   const isCompactHeight = useIsCompactHeight();
+  // Combined support cluster: artifacts/enchantments then planeswalkers, in ONE
+  // wrapping row (like the lands column) so it stays a single line until crowded.
+  // Keeping it one row keeps the middle-row band ~one card tall so the flex-1
+  // creature row isn't pinched. Memoized for a stable ref (BattlefieldRow perf);
+  // declared above the early return to keep hook order stable.
+  const supportGroups = useMemo(
+    () => [...(battlefieldView?.support ?? []), ...(battlefieldView?.planeswalkers ?? [])],
+    [battlefieldView?.support, battlefieldView?.planeswalkers],
+  );
 
   if (!gameState) return null;
 
@@ -94,73 +101,34 @@ export function PlayerArea({
   const partitioned = battlefieldView;
 
   const creatures = creatureOverride ?? partitioned?.creatures ?? [];
-  const hasPlaneswalkers = (partitioned?.planeswalkers.length ?? 0) > 0;
-  const hasEmblems = (gameState.command_zone ?? []).some((id) => {
-    const obj = gameState.objects[id];
-    return obj?.is_emblem && obj.controller === playerId;
-  });
-  // Scale the commander column to the land scale (not the support scale) so
-  // presence/absence of a commander doesn't change the middle-row height. The
-  // support row's height is otherwise driven by the tallest card in it, and
-  // the commander card at OTHER_BASE_SCALE (1.0) is ~28% taller than adjacent
-  // lands at LAND_BASE_SCALE (0.78), which squeezes the creatures row via
-  // flex-1. Stacked CommanderDamage entries compound the warp.
-  const commanderScale = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
-  // Render the commander column only when it has real content — a commander
-  // still in the command zone, or live commander-damage entries. Gating on the
-  // format flag alone reserved an empty column (and its divider) for the whole
-  // game once the commander was cast. These go through the same selectors
-  // CommanderCardZone and CommanderDamage render from, so the wrapper appears
-  // iff a child will (single source of truth in viewmodel/commanderColumn).
-  const hasCommanderInZone = commandersInZone(gameState, playerId).length > 0;
-  const hasActiveCommanderDamage = commanderDamageEntriesFor(gameState, playerId).length > 0;
-  const commanderSection = hasCommanderInZone || hasActiveCommanderDamage ? (
-    // No `min-w-0` here: this column holds the commander-damage labels, and
-    // allowing it to shrink below its content width lets the adjacent
-    // (non-shrinking) planeswalker row collapse it and hide the labels.
-    <div
-      className="flex flex-col items-end gap-1"
-      style={zoneStyle(commanderScale)}
-    >
-      <CommanderCardZone playerId={playerId} />
-      <CommanderDamage playerId={playerId} />
-    </div>
-  ) : null;
-  const supportExtras = (
-    <>
-      <BattlefieldRow groups={partitioned?.planeswalkers ?? []} rowType="planeswalkers" />
-      <CommandZone playerId={playerId} />
-      {commanderSection}
-    </>
-  );
-  const hasSupportExtras = hasPlaneswalkers || hasEmblems || commanderSection != null;
-  const supportSection = hasSupportExtras ? (
-    <>
-      <div className="mx-2 h-3/4 w-px shrink-0 bg-white/20" />
-      {/* No `min-w-0`: the support track is justify-end, so letting this
-          wrapper collapse below its content width pushes the right-rail cards
-          (emblems/commander) off the right edge of the screen. Holding its
-          intrinsic width clamps the right edge to the track and grows the
-          cluster leftward on-screen instead. */}
-      <div
-        className="flex items-center gap-2"
-        style={zoneStyle(isCompactHeight ? OTHER_BASE_SCALE_COMPACT : OTHER_BASE_SCALE)}
-      >
-        {supportExtras}
-      </div>
-    </>
-  ) : null;
   const landAlignClass = isCompactHeight
     ? "flex-nowrap items-center justify-start"
     : "flex-wrap items-center content-center justify-start";
+  // Support cluster mirrors the lands column but right-aligned: one wrapping row
+  // that wraps only when crowded (cards shrink with count via supportStyle).
+  const supportAlignClass = isCompactHeight
+    ? "flex-nowrap items-center justify-end"
+    : "flex-wrap items-center content-center justify-end";
 
   const landCount = partitioned?.lands.length ?? 0;
-  const supportCount = partitioned?.support.length ?? 0;
+  // Count the full support cluster (enchantments/artifacts + planeswalkers) so
+  // zoneScale shrinks the cards as it fills — mirroring lands. Counting only
+  // `support` left the planeswalkers unscaled and overflowing the column.
+  const supportLen = partitioned?.support.length ?? 0;
+  const planeswalkerLen = partitioned?.planeswalkers.length ?? 0;
+  const supportCount = supportLen + planeswalkerLen;
+  // Divider sits at the enchantment/artifact → planeswalker boundary within the
+  // single combined support row, but only when both sub-clusters are present.
+  const supportDividerIndex = supportLen > 0 && planeswalkerLen > 0 ? supportLen : undefined;
   const landBase = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
   const supportBase = isCompactHeight ? OTHER_BASE_SCALE_COMPACT : OTHER_BASE_SCALE;
   const landStyle = zoneStyle(zoneScale(landBase, landCount));
   const supportStyle = zoneStyle(zoneScale(supportBase, supportCount));
 
+  // Two-column middle row: lands (left, justify-start) and support (right,
+  // justify-end) each take a flex-1 half and meet in the center. The HUD is no
+  // longer wedged between them — it gets its own band (`hudBand`) adjacent to
+  // this row — so the two card tracks reclaim the central corridor.
   const middleRow = (
     <div className="flex min-h-0 min-w-0 items-stretch justify-between gap-2" data-debug-label="Middle Row">
       <div
@@ -175,25 +143,54 @@ export function PlayerArea({
         />
         {landColumnExtra}
       </div>
-      {hud && (
-        <div className="z-20 flex shrink-0 items-center" data-debug-label="Inline HUD">
-          {hud}
-        </div>
-      )}
+      {/* Support column: artifacts/enchantments + planeswalkers in ONE wrapping
+          row (mirrors the lands column) so the band stays ~one card tall and the
+          creature row keeps its height. A thin divider (`supportDividerIndex`)
+          separates the two sub-clusters without stacking them onto a second row. */}
       <div
-        className="z-10 flex min-w-0 basis-0 flex-1 items-center justify-end pr-2"
+        className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 ${supportAlignClass}`}
         style={supportStyle}
         data-debug-label="Support"
       >
         <BattlefieldRow
-          groups={partitioned?.support ?? []}
+          groups={supportGroups}
           rowType="support"
-          className="ml-auto w-full justify-end px-0"
+          dividerBeforeIndex={supportDividerIndex}
+          className="justify-end px-0"
         />
-        {supportSection}
+      </div>
+      {/* Command zone (CR 408) as an in-flow column on the far edge so it reserves
+          real horizontal space — support cards (`justify-end`) no longer slide
+          under it. `self-center` + `shrink-0` lets it claim width without forcing
+          the band taller than its own content: compact mode is a ~48px button
+          (shorter than a land card → zero band growth); inline grows the band
+          only when the user opts into it on a roomy screen. CommandDock renders
+          null when the command zone is empty, collapsing this column to nothing. */}
+      <div
+        className="z-10 flex shrink-0 items-center self-center pr-2"
+        data-debug-label="Command"
+      >
+        <CommandDock playerId={playerId} isMirrored={isMirrored} />
       </div>
     </div>
   );
+
+  // Player HUD (life, mana, phase arrows) overlaid below the middle row rather
+  // than wedged into its own column or lane. As a content-width absolute overlay
+  // it consumes zero vertical space, so the flex-1 creature row keeps its full
+  // height, and the box hugs the HUD instead of spanning the row. Centered
+  // horizontally (`left-1/2 -translate-x-1/2`) and dropped below the land row
+  // (`top-[200%]`), mirrored upward for the focused opponent. z-20 keeps it
+  // above resting cards (lands/support are z-10) but below a hovered card
+  // (PermanentCard lifts to z-60), so a card slides over the HUD on hover.
+  const hudBand = hud ? (
+    <div
+      className={`absolute left-1/2 z-20 -translate-x-1/2 ${isMirrored ? "bottom-[320%]" : "top-[130%] -translate-y-full"}`}
+      data-debug-label="HUD"
+    >
+      {hud}
+    </div>
+  ) : null;
 
   return (
     <div
@@ -215,8 +212,9 @@ export function PlayerArea({
         {isMirrored ? (
           <>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
-            <div className={isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}>
+            <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}
+              {hudBand}
             </div>
             <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" className="w-full" />
@@ -227,8 +225,9 @@ export function PlayerArea({
             <div className="min-h-0 flex-1 px-2" data-debug-label="Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" />
             </div>
-            <div className={isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}>
+            <div className={`relative ${isCompactHeight ? "min-h-0 max-h-[40%]" : "shrink-0"}`}>
               {middleRow}
+              {hudBand}
             </div>
             <BattlefieldRow groups={partitioned?.other ?? []} rowType="other" />
           </>
