@@ -78,26 +78,33 @@ pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec
     });
 }
 
-/// CR 701.17c + CR 603.7: For a `TrackedSet` / `TrackedSetFiltered` target,
-/// resolve the zone its members currently occupy. Tracked sets are not
-/// zone-constrained — milled cards land in the graveyard, revealed cards stay
-/// in the library/hand — so an interactive `ChangeZone` selecting "from among"
-/// such a set must scan the members' actual zone, not the battlefield default.
+/// CR 608.2c: For a `TrackedSet` / `TrackedSetFiltered` target, resolve the
+/// zones its members currently occupy. Tracked sets are not zone-constrained —
+/// milled cards land in the graveyard, revealed cards stay in the library/hand
+/// — so a `ChangeZone` selecting "from among" such a set must scan the
+/// members' actual zones, not the battlefield default.
 ///
 /// The `TrackedSetId(0)` sentinel resolves through the same chain-first binding
-/// authority as `matches_target_filter` (CR 603.7). Returns `None` when the
-/// filter is not tracked-set-backed or the set is empty/unbound.
-fn tracked_set_member_zone(state: &GameState, filter: &TargetFilter) -> Option<Zone> {
+/// authority as `matches_target_filter`. Returns `None` when the filter is not
+/// tracked-set-backed or the set is empty/unbound.
+fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<Vec<Zone>> {
     let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter.clone());
     let id = match &filter {
         TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
         _ => return None,
     };
-    state
+    let zones = state
         .tracked_object_sets
         .get(&id)?
         .iter()
-        .find_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
+        .filter_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
+        .fold(Vec::new(), |mut zones, zone| {
+            if !zones.contains(&zone) {
+                zones.push(zone);
+            }
+            zones
+        });
+    (!zones.is_empty()).then_some(zones)
 }
 
 fn resolve_enters_under_player(
@@ -876,7 +883,7 @@ pub fn resolve(
     // for "from among the milled cards" / "X cards revealed this way"
     // continuations to the most recent non-empty tracked set. Done up front so
     // every downstream path (interactive scan, `matches_target_filter`,
-    // `tracked_set_member_zone`) sees the bound id — `matches_target_filter`
+    // `tracked_set_member_zones`) sees the bound id — `matches_target_filter`
     // looks the set up by exact id and would otherwise miss the sentinel.
     let target_filter: TargetFilter = match &ability.effect {
         Effect::ChangeZone { target, .. } => {
@@ -967,17 +974,18 @@ pub fn resolve(
             return Ok(());
         }
 
-        // CR 701.17c + CR 603.7: A tracked-set filter ("from among the milled
-        // cards" / "X cards revealed this way") scopes the selection to a set
-        // of objects that may live in any zone (milled cards land in the
-        // graveyard, revealed cards in the library/hand). The tracked-set
-        // membership IS the scope — there is no fixed `InZone` constraint to
-        // extract — so derive the scan zone from the members' actual zone
-        // rather than defaulting to the battlefield (which would scan the
-        // wrong zone and silently offer nothing).
+        // CR 608.2c: A tracked-set filter ("from among the milled cards" / "X
+        // cards revealed this way") scopes the selection to a set of objects
+        // that may live in any zone. The tracked-set membership is the scope —
+        // there is no fixed `InZone` constraint to extract — so derive the scan
+        // zone from the members' actual zone rather than defaulting to the
+        // battlefield.
         let scan_zone = origin
             .or_else(|| target_filter.extract_in_zone())
-            .or_else(|| tracked_set_member_zone(state, target_filter))
+            .or_else(|| {
+                tracked_set_member_zones(state, target_filter)
+                    .and_then(|zones| zones.into_iter().next())
+            })
             .unwrap_or(Zone::Battlefield);
         // Filter-controller override is primary here: when a filter like
         // "creature you control" needs "you" to resolve to the *target* player
@@ -1418,8 +1426,8 @@ pub fn resolve_all(
                 extracted
             } else if let Some(origin) = origin {
                 vec![*origin]
-            } else if let Some(zone) = tracked_set_member_zone(state, target) {
-                vec![zone]
+            } else if let Some(zones) = tracked_set_member_zones(state, target) {
+                zones
             } else {
                 vec![Zone::Battlefield]
             };
@@ -1472,6 +1480,22 @@ pub fn resolve_all(
     // correct set.
     let effective_filter =
         crate::game::targeting::resolve_tracked_set_sentinel(state, effective_filter);
+
+    // CR 608.2c: Re-derive scan zones after the tracked-set sentinel binds —
+    // the initial `origin`/`target` snapshot may have defaulted to the
+    // battlefield before `chain_tracked_set_id` was populated (Zimone's
+    // Experiment: kept cards live in the library until routed by type).
+    let origin_zones = if matches!(&ability.effect, Effect::ChangeZoneAll { origin: None, .. }) {
+        if let Some(zones) = tracked_set_member_zones(state, &effective_filter) {
+            zones
+        } else if let Some(zones) = tracked_set_member_zones(state, &target_filter) {
+            zones
+        } else {
+            origin_zones
+        }
+    } else {
+        origin_zones
+    };
 
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
@@ -5661,6 +5685,148 @@ mod tests {
             Zone::Battlefield,
             "Exiled creature must return to the battlefield when TrackedSetId(0) is resolved"
         );
+    }
+
+    /// Zimone's Experiment: tracked-set routing must scan the members' actual zone
+    /// (library) when `origin` is None (issue #2368).
+    #[test]
+    fn issue_2368_tracked_set_filtered_scans_library_when_origin_none() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![land, creature]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let land_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Land],
+            controller: None,
+            properties: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(land_filter),
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        assert!(state.objects[&land].tapped);
+        assert_eq!(state.objects[&creature].zone, Zone::Library);
+    }
+
+    #[test]
+    fn tracked_set_filtered_with_origin_none_scans_all_member_zones() {
+        let mut state = GameState::new_two_player(42);
+        let library_land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Library Land".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&library_land)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        let graveyard_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Graveyard Land".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&graveyard_land)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        let exiled_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Exiled Creature".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&exiled_creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![library_land, graveyard_land, exiled_creature]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let land_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Land],
+            controller: None,
+            properties: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(land_filter),
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&library_land].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&graveyard_land].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&exiled_creature].zone, Zone::Exile);
     }
 
     /// CR 708.2a + CR 708.3 + CR 110.2a: Cyber-Controller's mass put-step — "Put

@@ -1395,6 +1395,7 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
                     zone: ZoneRef::Graveyard,
                     card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
                     scope: CountScope::Controller,
+                    filter: None,
                 },
             },
             comparator: Comparator::GE,

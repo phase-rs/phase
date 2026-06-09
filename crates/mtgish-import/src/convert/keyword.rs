@@ -912,6 +912,7 @@ mod tests {
                     QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Graveyard,
                         card_types,
+                        filter: None,
                         scope: CountScope::Controller,
                     },
             }) => assert_eq!(card_types, vec![TypeFilter::Creature]),
