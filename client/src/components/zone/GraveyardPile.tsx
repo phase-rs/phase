@@ -1,9 +1,11 @@
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import { cardImageLookup, type CardImageLookup } from "../../services/cardImageLookup.ts";
 
 const EMPTY: readonly number[] = [];
 
@@ -13,8 +15,17 @@ interface GraveyardPileProps {
   size?: { width: string; height: string };
 }
 
-function TopCard({ cardName }: { cardName: string }) {
-  const { src } = useCardImage(cardName, { size: "normal" });
+function TopCard({ lookup }: { lookup: CardImageLookup }) {
+  // Resolve via the engine's printed_ref (oracle_id + face) like every other
+  // object-rendering surface — name-only lookup fails for DFC / transformed /
+  // back-face cards (e.g. a transformed planeswalker) and would show the empty
+  // placeholder instead of the card art.
+  const { src } = useCardImage(lookup.name, {
+    size: "normal",
+    oracleId: lookup.oracleId,
+    faceName: lookup.faceName,
+    faceIndex: lookup.faceIndex,
+  });
 
   if (!src) {
     return (
@@ -27,7 +38,7 @@ function TopCard({ cardName }: { cardName: string }) {
   return (
     <img
       src={src}
-      alt={cardName}
+      alt={lookup.name}
       className="h-full w-full rounded-lg object-cover"
       draggable={false}
     />
@@ -39,13 +50,15 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
   const graveyard = useGameStore(
     (s) => s.gameState?.players[playerId]?.graveyard ?? EMPTY,
   );
-  const topCardName = useGameStore((s) => {
-    const state = s.gameState;
-    if (!state) return null;
-    const gy = state.players[playerId]?.graveyard;
-    if (!gy || gy.length === 0) return null;
-    return state.objects[gy[gy.length - 1]]?.name ?? null;
+  const topObject = useGameStore((s) => {
+    const gy = s.gameState?.players[playerId]?.graveyard;
+    const id = gy && gy.length > 0 ? gy[gy.length - 1] : null;
+    return id != null ? (s.gameState?.objects[id] ?? null) : null;
   });
+  const topLookup = useMemo(
+    () => (topObject ? cardImageLookup(topObject) : null),
+    [topObject],
+  );
 
   // Check if any graveyard card is selectable for the current engine prompt.
   const canActForWaitingState = useCanActForWaitingState();
@@ -87,7 +100,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
 
       {/* Top card — full card image */}
       <div className="relative h-full w-full overflow-hidden rounded-lg border border-gray-500 shadow-md group-hover:border-gray-300 transition-colors">
-        {topCardName && <TopCard cardName={topCardName} />}
+        {topLookup && <TopCard lookup={topLookup} />}
         <div className="absolute inset-0 bg-black/20 group-hover:bg-black/0 transition-colors" />
       </div>
 

@@ -136,7 +136,7 @@ fn wort_grants_conspire_offers_cost_and_copies_when_paid() {
                 cost,
                 engine::types::ability::AdditionalCost::Optional {
                     cost: engine::types::ability::AbilityCost::TapCreatures { count: 2, .. },
-                    repeatable: false,
+                    repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
                 }
             ),
             "granted Conspire must surface an optional TapCreatures{{2}} cost: {cost:?}"

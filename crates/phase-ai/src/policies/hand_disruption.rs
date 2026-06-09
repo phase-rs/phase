@@ -285,7 +285,7 @@ mod tests {
                     target: TargetFilter::Any,
                     card_filter: TargetFilter::Any,
                     count: None,
-                    random: false,
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                 },
             ),
@@ -349,7 +349,7 @@ mod tests {
                         properties: vec![],
                     }),
                     count: None,
-                    random: false,
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                 },
             )
@@ -418,7 +418,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             Vec::new(),
@@ -545,7 +545,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             Vec::new(),
@@ -635,7 +635,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             },
             Vec::new(),
@@ -697,7 +697,7 @@ mod tests {
             target: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             card_filter: TargetFilter::Any,
             count: None,
-            random: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         };
         assert!(reveal_hand_matches_chosen_player_target(
@@ -717,7 +717,7 @@ mod tests {
             target: TargetFilter::Typed(TypedFilter::creature()),
             card_filter: TargetFilter::Any,
             count: None,
-            random: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         };
         assert!(!reveal_hand_matches_chosen_player_target(

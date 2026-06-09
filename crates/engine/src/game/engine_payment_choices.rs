@@ -499,8 +499,8 @@ pub(super) fn handle_unless_payment(
             AbilityCost::Discard {
                 count,
                 filter,
-                random: _,
-                self_ref: _,
+                selection: _,
+                self_scope: _,
             } => {
                 let resolved = crate::game::quantity::resolve_quantity_with_targets(
                     state,
@@ -1612,8 +1612,8 @@ mod tests {
                 AbilityCost::Discard {
                     count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     filter: None,
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
             ],
             pending_effect: Box::new(pending),

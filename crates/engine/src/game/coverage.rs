@@ -509,7 +509,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     crate::types::ability::AttachmentKind::Aura => "aura",
                     crate::types::ability::AttachmentKind::Equipment => "equipment",
                 };
-                let qualifier = if *exclude_source { " another" } else { "" };
+                let qualifier = if exclude_source.is_exclude() {
+                    " another"
+                } else {
+                    ""
+                };
                 match controller {
                     None => parts.push(format!("attached by{qualifier} {kind_s}")),
                     Some(c) => parts.push(format!(
@@ -2014,7 +2018,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             card_filter,
             count,
-            random,
+            selection,
             ..
         } => {
             d.push(("player".into(), fmt_target(target)));
@@ -2024,7 +2028,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(c) = count {
                 d.push(("count".into(), fmt_quantity(c)));
             }
-            if *random {
+            if selection.is_random() {
                 d.push(("selection".into(), "random".into()));
             }
         }
@@ -3082,13 +3086,15 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 
     let label = match additional_cost {
         AdditionalCost::Optional {
-            repeatable: true, ..
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+            ..
         } => "AdditionalCost:Repeatable",
         AdditionalCost::Optional {
-            repeatable: false, ..
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            ..
         } => "AdditionalCost:Optional",
-        AdditionalCost::Kicker { repeatable, .. } => {
-            if *repeatable {
+        AdditionalCost::Kicker { repeatability, .. } => {
+            if repeatability.is_repeatable() {
                 "AdditionalCost:Multikicker"
             } else {
                 "AdditionalCost:Kicker"
@@ -8780,7 +8786,7 @@ mod tests {
             cost: AbilityCost::Unimplemented {
                 description: "mystery cost".to_string(),
             },
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
 
         assert!(card_face_has_unimplemented_parts(&face));

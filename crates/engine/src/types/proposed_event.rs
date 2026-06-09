@@ -18,6 +18,8 @@ use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
+pub use super::zones::EtbTapState;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
     pub source: ObjectId,
@@ -71,36 +73,6 @@ impl CounterPlacement {
             CounterPlacement::Object { actor, .. }
             | CounterPlacement::Player { actor, .. }
             | CounterPlacement::Energy { actor, .. } => *actor,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum EtbTapState {
-    #[default]
-    Unspecified,
-    Tapped,
-    Untapped,
-}
-
-impl EtbTapState {
-    pub fn from_seeded_tapped(tapped: bool) -> Self {
-        if tapped {
-            Self::Tapped
-        } else {
-            Self::Unspecified
-        }
-    }
-
-    /// Resolve to a concrete tapped state. `fallback` is used only when no
-    /// replacement has set an explicit tap-state (`Unspecified`). For
-    /// `ZoneChange` events pass `false`; for `CreateToken` pass
-    /// `spec.tapped` (the token spec's authored default).
-    pub fn resolve(self, fallback: bool) -> bool {
-        match self {
-            Self::Unspecified => fallback,
-            Self::Tapped => true,
-            Self::Untapped => false,
         }
     }
 }

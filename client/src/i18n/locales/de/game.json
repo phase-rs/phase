@@ -264,6 +264,7 @@
     "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft"
   },
   "zone": {
+    "commandZone": "Kommandozone",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Kommandeur",

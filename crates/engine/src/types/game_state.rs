@@ -26,7 +26,8 @@ use super::mana::{ManaColor, ManaCost, ManaType, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerCounterKind, PlayerId};
-use super::proposed_event::{CopyTokenSpec, EtbTapState, ProposedEvent, ReplacementId, TokenSpec};
+use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec};
+use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
 use crate::game::bracket_estimate::CommanderBracketTier;
@@ -917,7 +918,12 @@ pub struct PendingChangeZoneIteration {
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
     pub enter_transformed: bool,
-    pub enter_tapped: bool,
+    #[serde(
+        default,
+        with = "crate::types::zones::etb_tap_bool_compat",
+        skip_serializing_if = "EtbTapState::is_unspecified"
+    )]
+    pub enter_tapped: EtbTapState,
     /// CR 110.2a: Resolved-once controller override on ETB. `Some(pid)`
     /// routes the object to `pid`. `None` leaves the object under its
     /// owner's control. Resolved from `Effect::ChangeZone.enters_under`
@@ -2601,7 +2607,7 @@ pub enum WaitingFor {
         cards: Vec<ObjectId>,
         primary_destination: Zone,
         primary_count: u32,
-        primary_enter_tapped: bool,
+        primary_enter_tapped: EtbTapState,
         rest_destination: Zone,
         source_id: ObjectId,
     },
@@ -2694,8 +2700,12 @@ pub enum WaitingFor {
         /// Destination zone for ChangeZone effects. None for Sacrifice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         destination: Option<Zone>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        enter_tapped: bool,
+        #[serde(
+            default,
+            with = "super::zones::etb_tap_bool_compat",
+            skip_serializing_if = "EtbTapState::is_unspecified"
+        )]
+        enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_transformed: bool,
         /// CR 110.2a: Resolved-once controller override carried through the
@@ -3271,7 +3281,7 @@ pub enum WaitingFor {
         source_id: ObjectId,
         accept_zone: Zone,
         decline_zone: Zone,
-        enter_tapped: bool,
+        enter_tapped: EtbTapState,
         /// CR 508.4: When the accepted card goes to the battlefield, it enters
         /// attacking ("tapped and attacking"). Carried from `Effect::RevealUntil`.
         #[serde(default)]
@@ -7380,7 +7390,7 @@ mod tests {
             player: PlayerId(0),
             cost: AdditionalCost::Optional {
                 cost: crate::types::ability::AbilityCost::Blight { count: 1 },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             },
             times_kicked: 0,
             pending_cast: dummy_pending(),
@@ -7503,7 +7513,7 @@ mod tests {
             effect_kind: crate::types::ability::EffectKind::Sacrifice,
             zone: Zone::Battlefield,
             destination: None,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: None,
             enters_attacking: false,
@@ -7746,7 +7756,7 @@ mod tests {
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             zone: Zone::Hand,
             destination: Some(Zone::Battlefield),
-            enter_tapped: true,
+            enter_tapped: EtbTapState::Tapped,
             enter_transformed: false,
             enters_under_player: Some(PlayerId(0)),
             enters_attacking: false,
@@ -7816,7 +7826,7 @@ mod tests {
             origin: None,
             destination: Zone::Battlefield,
             enter_transformed: false,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enters_under_player: Some(PlayerId(1)),
             enters_attacking: false,
             enter_with_counters: vec![],
@@ -7902,7 +7912,7 @@ mod tests {
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             zone: Zone::Hand,
             destination: Some(Zone::Battlefield),
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: Some(PlayerId(1)),
             enters_attacking: false,

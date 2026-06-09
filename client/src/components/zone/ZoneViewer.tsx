@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { GameAction, GameObject } from "../../adapter/types.ts";
 import { CardImage } from "../card/CardImage.tsx";
+import { objectImageProps } from "../../services/cardImageLookup.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
 import { ScrollableCardStrip } from "../modal/ChoiceOverlay.tsx";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -224,7 +225,13 @@ function ZoneCard({
       onClick={handleClick}
       {...longPressHandlers}
     >
-      <CardImage cardName={obj.name} size="normal" />
+      {/* Resolve the image via the engine's printed_ref (oracle_id + face)
+          like every other object-rendering modal — name-only lookup fails for
+          DFC / transformed / back-face cards (e.g. a transformed planeswalker),
+          which then falls back to the broken-image div. In the zone strip that
+          fallback is sized up to ~560px, so a failed image rendered "huge" with
+          text instead of art. */}
+      <CardImage {...objectImageProps(obj)} size="normal" />
       {canCast && !isValidTarget && (
         <>
           {/* Arena-style purple "playable" affordance — same treatment as the

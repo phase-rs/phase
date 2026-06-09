@@ -3,7 +3,9 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle_cost::parse_oracle_cost;
-use engine::types::ability::{AbilityCost, QuantityExpr, TargetFilter, TypedFilter};
+use engine::types::ability::{
+    AbilityCost, CardSelectionMode, DiscardSelfScope, QuantityExpr, TargetFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{PayCostKind, WaitingFor};
@@ -22,8 +24,8 @@ fn lotleth_discard_cost_parses_creature_card_filter() {
         AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: Some(TargetFilter::Typed(TypedFilter::creature())),
-            random: false,
-            self_ref: false,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
         }
     );
 }

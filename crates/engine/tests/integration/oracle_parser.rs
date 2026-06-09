@@ -520,7 +520,7 @@ fn krosan_verge_lowers_to_dual_search_choice() {
                     engine::types::zones::Zone::Battlefield,
                     "ChangeZone destination should be Battlefield",
                 );
-                assert!(*enter_tapped, "found lands should enter tapped");
+                assert!(enter_tapped.is_tapped(), "found lands should enter tapped");
                 "ChangeZone"
             }
             Effect::Shuffle { .. } => "Shuffle",

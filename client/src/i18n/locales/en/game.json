@@ -264,6 +264,7 @@
     "grantsProperty": "Grants a property to the spell"
   },
   "zone": {
+    "commandZone": "Command Zone",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Commander",

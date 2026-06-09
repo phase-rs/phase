@@ -497,16 +497,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             };
         }
         if nom_on_lower(rest, &rest_lower, |i| value((), tag("a card")).parse(i)).is_some() {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         if rest_lower == "your hand" {
@@ -517,8 +517,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     },
                 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         // CR 701.9a + CR 608.2c: "Discard a/<N> <type> card(s)" — capture the
@@ -535,8 +535,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 return AbilityCost::Discard {
                     count,
                     filter: Some(filter),
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 };
             }
         }
@@ -544,15 +544,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             return AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: n as i32 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             };
         }
         return AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         };
     }
 
@@ -746,7 +746,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 target: TargetFilter::SelfRef,
                 card_filter: TargetFilter::Any,
                 count: None,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
             }),
         };
@@ -1587,8 +1587,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1603,8 +1603,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(TargetFilter::Typed(TypedFilter::creature())),
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1618,8 +1618,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 2 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }
@@ -1631,8 +1631,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: true,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
             }
         );
     }
@@ -1648,8 +1648,8 @@ mod tests {
                     },
                 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             }
         );
     }

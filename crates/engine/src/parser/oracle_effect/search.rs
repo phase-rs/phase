@@ -2579,7 +2579,9 @@ fn parse_search_split_destination(input: &str) -> OracleResult<'_, SearchDestina
         SearchDestinationSplit {
             primary_destination: Zone::Battlefield,
             primary_count,
-            primary_enter_tapped: tapped.is_some(),
+            primary_enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
+                tapped.is_some(),
+            ),
             rest_destination,
         },
     ))
@@ -2753,7 +2755,7 @@ mod tests {
             .expect("cultivate must populate a SearchDestinationSplit");
         assert_eq!(split.primary_destination, Zone::Battlefield);
         assert_eq!(split.primary_count, 1);
-        assert!(split.primary_enter_tapped);
+        assert!(split.primary_enter_tapped.is_tapped());
         assert_eq!(split.rest_destination, Zone::Hand);
     }
 

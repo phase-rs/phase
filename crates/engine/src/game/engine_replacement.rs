@@ -297,7 +297,7 @@ pub(super) fn handle_replacement_choice(
                             let unit = crate::types::mana::ManaUnit {
                                 color: mana_type,
                                 source_id,
-                                snow: false,
+                                supertype: None,
                                 source_could_produce_two_or_more_colors: false,
                                 restrictions: Vec::new(),
                                 grants: Vec::new(),
@@ -1335,7 +1335,7 @@ mod tests {
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: false,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
