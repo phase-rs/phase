@@ -8,7 +8,7 @@ use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, P
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
     CostResume, GameState, LandPlayRecord, PayCostKind, RetargetScope, StackEntry, StackEntryKind,
-    WaitingFor, ZoneManipulationKind,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -446,6 +446,7 @@ fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
 #[cfg(test)]
 mod auto_pass_decision_tests {
     use super::*;
+    use crate::types::game_state::ZoneManipulationKind;
     use std::sync::Arc;
 
     use crate::game::zones::create_object;
