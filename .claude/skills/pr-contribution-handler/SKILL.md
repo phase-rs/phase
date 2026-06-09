@@ -26,9 +26,20 @@ This skill lands contributor work, but **only after it meets the maintainer's ba
 
 4. **New machinery must earn its keep.** When a PR introduces a new parsing style, helper, enum surface, or abstraction, measure it: *how many cards/cases does it actually serve, and does equivalent infrastructure already exist?* A general-looking building block that serves one card while duplicating an existing helper is a special case in disguise — unify it with the existing pattern (parameterize-don't-proliferate) before merge. Keep the genuinely high-value parts; retire the redundant machinery.
 
-5. **Stress-test your own "clean" verdict (adversarial second pass).** A first-pass "CLEAN" is a hypothesis, not a conclusion. Before enqueue, re-ask: *"Would a principal engineer merge this as-is, or request changes?"* Spawn an independent adversarial reviewer (or re-review with that framing) for any PR touching a hot/shared path or introducing new machinery. The first reviewer's job is to find it correct; the second's is to find what the bar would reject.
+5. **Large refactors need an explicit value gate before rescue work or enqueue.** Any PR with broad cross-cutting churn, multiple unrelated abstraction axes, or new enum/helper surfaces must be evaluated for *pulling its weight* before spending maintainer cycles to make it compile. Write the verdict in the PR notes before enqueue:
+   - What concrete architectural debt does this retire, and at which seam?
+   - How many real cards/cases/classes become cleaner or newly possible?
+   - Does it replace a hot-path or high-confusion bool/stringly field with a domain type, or is it a cosmetic rename?
+   - Does it leave the repo with fewer concepts, clearer boundaries, and no duplicated parallel shapes?
+   - How much blast radius does it create (files/crates/touched call sites), and is that proportional to the value?
+   - Are there still sibling bools or equivalent raw fields in the same location? If yes, explain why the partial conversion is still valuable, or stop and request/split.
+   - Did maintainer handling require repeated compile/CI rescue commits across unrelated crates? If yes, re-run the value gate before enqueue; green CI after rescue is not enough.
 
-6. **Never auto-enqueue a batch on the strength of a first-pass review.** Enqueue is effectively irreversible under the merge queue. Bring the maintainer the per-PR evidence (change summary, blast radius, regression/perf findings, test-discrimination result, architecture verdict) and confirm authority. When authorized, enqueue only PRs that clear the full bar above — and improve the ones that fall short *first*.
+   Default posture: large mechanical refactors should be split or held unless the value is objective and localizable. If the best evidence is "this follows the bool-to-enum preference" but it addresses only one or two low-confusion booleans, that is not enough.
+
+6. **Stress-test your own "clean" verdict (adversarial second pass).** A first-pass "CLEAN" is a hypothesis, not a conclusion. Before enqueue, re-ask: *"Would a principal engineer merge this as-is, or request changes?"* Spawn an independent adversarial reviewer (or re-review with that framing) for any PR touching a hot/shared path, introducing new machinery, or tripping the large-refactor value gate. The first reviewer's job is to find it correct; the second's is to find what the bar would reject.
+
+7. **Never auto-enqueue a batch on the strength of a first-pass review.** Enqueue is effectively irreversible under the merge queue. Bring the maintainer the per-PR evidence (change summary, blast radius, regression/perf findings, test-discrimination result, architecture verdict, and large-refactor value verdict when applicable) and confirm authority. When authorized, enqueue only PRs that clear the full bar above — and improve the ones that fall short *first*.
 
 ### Gemini review handling
 

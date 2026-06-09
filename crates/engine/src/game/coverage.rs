@@ -433,6 +433,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
             FilterProp::Unblocked => parts.push("unblocked".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
+            FilterProp::IsSaddled => parts.push("saddled".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::HasHasteOrControlledSinceTurnBegan => {
                 parts.push("haste or controlled since turn began".into())
@@ -1080,6 +1081,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             zone,
             card_types,
             scope,
+            filter,
         } => {
             let types = if card_types.is_empty() {
                 "cards".into()
@@ -1091,11 +1093,15 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                     .join("/")
                     + " cards"
             };
-            format!(
+            let base = format!(
                 "{types} in {} {}",
                 fmt_count_scope(scope),
                 fmt_zone_ref(zone)
-            )
+            );
+            match filter {
+                Some(filter) => format!("{base} matching {}", fmt_target(filter)),
+                None => base,
+            }
         }
         QuantityRef::BasicLandTypeCount { controller } => {
             format!(
@@ -1109,6 +1115,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             format!("# of counter kinds among {}", fmt_target(filter))
         }
+        QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter } => {
@@ -5449,6 +5456,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ("DistinctColorsAmongPermanents", Handled)
         }
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
+        QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
@@ -5549,6 +5557,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
         StaticCondition::RingLevelAtLeast { .. } => ("RingLevelAtLeast", Handled),
         StaticCondition::SourceIsTapped => ("SourceIsTapped", Handled),
+        StaticCondition::SourceIsSaddled => ("SourceIsSaddled", Handled),
         StaticCondition::SourceControllerEquals { .. } => ("SourceControllerEquals", Handled),
         StaticCondition::Unrecognized { .. } => ("Unrecognized", Handled),
         StaticCondition::None => ("None", Handled),
@@ -10402,6 +10411,7 @@ mod tests {
                     zone: ZoneRef::Hand,
                     card_types: Vec::new(),
                     scope: CountScope::Controller,
+                    filter: None,
                 },
             },
             defended: None,

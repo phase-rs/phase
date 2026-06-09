@@ -3,7 +3,7 @@ use crate::game::layers::evaluate_condition;
 use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, QuantityExpr,
-    QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -65,7 +65,7 @@ pub fn resolve(
             // so `layers.rs` never re-evaluates it — the resulting grant
             // persists for `dur` (CR 611.2c) regardless of later state.
             if let Some(condition) = &static_def.condition {
-                if !evaluate_condition(state, condition, ability.controller, ability.source_id) {
+                if !evaluate_static_condition_for_ability(state, condition, ability) {
                     continue;
                 }
                 let mut snapshotted = static_def.clone();
@@ -83,6 +83,33 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+fn evaluate_static_condition_for_ability(
+    state: &GameState,
+    condition: &StaticCondition,
+    ability: &ResolvedAbility,
+) -> bool {
+    match condition {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => comparator.evaluate(
+            resolve_quantity_with_targets(state, lhs, ability),
+            resolve_quantity_with_targets(state, rhs, ability),
+        ),
+        StaticCondition::And { conditions } => conditions
+            .iter()
+            .all(|condition| evaluate_static_condition_for_ability(state, condition, ability)),
+        StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(|condition| evaluate_static_condition_for_ability(state, condition, ability)),
+        StaticCondition::Not { condition } => {
+            !evaluate_static_condition_for_ability(state, condition, ability)
+        }
+        _ => evaluate_condition(state, condition, ability.controller, ability.source_id),
+    }
 }
 
 fn register_transient_effect(

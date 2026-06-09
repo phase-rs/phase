@@ -284,6 +284,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "shriveling rot",
     "signature slam",
     "sister hospitaller",
+    "sly spy",
     "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
@@ -518,18 +519,18 @@ fn anaphoric_scope_set_is_frozen() {
     // creature, CR 603.2) — the category-2 trigger-subject fix #512 anticipated —
     // dropping both to 153. Enlist keyword synthesis then surfaced the tapped
     // creature's power anaphor for 15 Enlist cards, taking the count to 168. If
-    // #512/#511 land, this shrinks further.
+    // #512/#511 land, this shrinks further. Sly Spy added, taking count to 169.
     assert_eq!(
         observed.len(),
-        168,
-        "Expected exactly 168 cards retaining ObjectScope::Anaphoric (pronoun \
+        169,
+        "Expected exactly 169 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        168,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 168 cards."
+        169,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 169 cards."
     );
 }
 

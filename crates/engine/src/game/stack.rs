@@ -580,10 +580,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // mutable permission list is casting-time authorization, not
             // resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
-                if paid_snapshot
+                let cast_transformed = paid_snapshot
                     .as_ref()
-                    .is_some_and(|snapshot| snapshot.cast_transformed)
-                {
+                    .is_some_and(|snapshot| snapshot.cast_transformed);
+                if cast_transformed {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         enter_transformed,
                         ..
@@ -598,7 +598,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // the ZoneChange ProposedEvent so Doubling-Season-class
                 // AddCounter replacements (CR 614.1a) see and modify them as
                 // the replacement pipeline runs.
-                let intrinsic = super::printed_cards::intrinsic_etb_counters(obj);
+                // CR 712.14a: For cast_transformed (Craft / ExileWithAltCost) the
+                // spell is on the stack with the front face but enters as the back
+                // face — read loyalty/defense from the back face directly so the
+                // replacement pipeline sees the correct counter count.
+                let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
+                    (true, Some(back)) => {
+                        super::printed_cards::intrinsic_face_counters(back.loyalty, back.defense)
+                    }
+                    _ => super::printed_cards::intrinsic_etb_counters(obj),
+                };
                 if !intrinsic.is_empty() {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         enter_with_counters,
@@ -1113,6 +1122,32 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.117a: Surge-cast permanent is tagged so "if its surge cost
+            // was paid" ETB triggers (Reckless Bushwhacker, Tyrant of Valakut)
+            // can distinguish a surge cast from a hard-cast. The intervening-if
+            // re-checks at resolution (CR 603.4) and the marker must be present.
+            if casting_variant == CastingVariant::Surge {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Surge,
+                        state.turn_number,
+                    ));
+                }
+            }
+
+            // CR 702.137a: Spectacle-cast permanent is tagged so "if its
+            // spectacle cost was paid" ETB triggers (Rafter Demon) and
+            // "...instead" clauses (Rix Maadi Reveler) can distinguish a
+            // spectacle cast from a hard-cast.
+            if casting_variant == CastingVariant::Spectacle {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Spectacle,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             // CR 702.176a: Impending-cast permanent gets the `cast_variant_paid`
             // tag re-applied after `reset_for_battlefield_entry` cleared it.
             // The "not a creature" layer fixup and the end-step counter-removal
@@ -1281,6 +1316,12 @@ fn resolve_keyword_action(
             if let Some(mount) = state.objects.get_mut(&mount_id) {
                 if mount.zone == Zone::Battlefield {
                     mount.is_saddled = true;
+                    // CR 702.171c: record the creatures that saddled this permanent.
+                    for creature_id in &paid_creature_ids {
+                        if !mount.saddled_by.contains(creature_id) {
+                            mount.saddled_by.push(*creature_id);
+                        }
+                    }
                 }
             }
             events.push(GameEvent::Saddled {
@@ -2022,6 +2063,7 @@ pub(crate) fn create_warp_delayed_trigger(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::BackFaceData;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         CostPaidObjectSnapshot, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
@@ -2034,6 +2076,38 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    fn back_face_data(
+        name: &str,
+        core_type: CoreType,
+        loyalty: Option<u32>,
+        defense: Option<u32>,
+    ) -> BackFaceData {
+        let mut card_types = crate::types::card_type::CardType::default();
+        card_types.core_types.push(core_type);
+        BackFaceData {
+            name: name.to_string(),
+            power: None,
+            toughness: None,
+            loyalty,
+            defense,
+            card_types,
+            mana_cost: Default::default(),
+            keywords: vec![],
+            abilities: vec![],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            layout_kind: None,
+        }
     }
 
     fn create_aura_on_stack(state: &mut GameState, target_id: ObjectId) -> ObjectId {
@@ -6866,5 +6940,108 @@ mod tests {
         // entry resolves (mirrors the batched subject-count lifecycle).
         assert_eq!(state.die_result_this_resolution, None);
         assert_eq!(state.current_trigger_match_count, None);
+    }
+
+    /// CR 306.5b + CR 712.14a: A permanent spell cast transformed enters as its
+    /// back face, so the stack resolution path must seed loyalty counters from
+    /// that back face rather than the front-face spell object.
+    #[test]
+    fn cast_transformed_spell_seeds_back_face_loyalty_counters() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(623),
+            PlayerId(0),
+            "Front Creature".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.back_face = Some(back_face_data(
+                "Back Planeswalker",
+                CoreType::Planeswalker,
+                Some(6),
+                None,
+            ));
+        }
+        state.stack_paid_facts.insert(
+            spell_id,
+            StackPaidSnapshot {
+                cast_transformed: true,
+                ..Default::default()
+            },
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(623),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        let obj = &state.objects[&spell_id];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(obj.transformed);
+        assert_eq!(obj.counters.get(&CounterType::Loyalty).copied(), Some(6));
+        assert_eq!(obj.loyalty, Some(6));
+    }
+
+    /// CR 310.4b + CR 712.14a: The same cast-transformed stack path must use the
+    /// back face's printed defense when the resolving back face is a battle.
+    #[test]
+    fn cast_transformed_spell_seeds_back_face_defense_counters() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(624),
+            PlayerId(0),
+            "Front Creature".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.back_face = Some(back_face_data(
+                "Back Siege",
+                CoreType::Battle,
+                None,
+                Some(5),
+            ));
+        }
+        state.stack_paid_facts.insert(
+            spell_id,
+            StackPaidSnapshot {
+                cast_transformed: true,
+                ..Default::default()
+            },
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(624),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        let obj = &state.objects[&spell_id];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(obj.transformed);
+        assert_eq!(obj.counters.get(&CounterType::Defense).copied(), Some(5));
+        assert_eq!(obj.defense, Some(5));
     }
 }

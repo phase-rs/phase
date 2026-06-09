@@ -560,8 +560,13 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
                 AbilityKind::Activated,
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
+                    // CR 702.151a: "another target creature you control" —
+                    // FilterProp::Another excludes the source (a reconfigure
+                    // Equipment is itself a creature while unattached).
                     target: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another]),
                     ),
                 },
             )
@@ -588,6 +593,41 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
         );
     }
     face.abilities.extend(abilities);
+
+    // CR 702.151b + CR 613.1d: while a reconfigure Equipment is attached to a
+    // creature, it stops being a creature (Layer 4 type removal). Synthesized as a
+    // self-scoped continuous static gated on `SourceAttachedToCreature`, mirroring
+    // `synthesize_impending`. Gated on keyword presence (the `for kw` loop above has
+    // no early return) and pushed once via an `already_has_static` idempotency guard.
+    if face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Reconfigure(_)))
+    {
+        let static_condition = StaticCondition::SourceAttachedToCreature;
+        let already_has_static = face.static_abilities.iter().any(|static_def| {
+            static_def.affected == Some(TargetFilter::SelfRef)
+                && static_def.condition == Some(static_condition.clone())
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    })
+        });
+        if !already_has_static {
+            face.static_abilities.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(static_condition)
+                    .modifications(vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }])
+                    .description(
+                        "CR 702.151b + CR 613.1d: a reconfigure Equipment stops being a creature while attached to a creature (Layer 4 type removal).".to_string(),
+                    ),
+            );
+        }
+    }
 }
 
 /// CR 702.167a/b: Craft is an activated ability "[Cost], Exile this permanent,
@@ -778,6 +818,13 @@ pub fn synthesize_mentor(face: &mut CardFace) {
 /// `synthesize_mentor`.
 pub fn synthesize_training(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Training));
+}
+
+/// CR 702.130a: Synthesize the Afflict trigger ("Whenever this creature becomes blocked,
+/// defending player loses N life"). Each instance triggers separately (CR 702.130b), so one
+/// trigger is synthesized per `Keyword::Afflict` instance.
+pub fn synthesize_afflict(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Afflict(_)));
 }
 
 /// CR 603.6a + CR 205.3 + CR 105.2: Synthesize a "keyword ETB → create
@@ -8697,6 +8744,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // cost to return this card from your graveyard to your hand; otherwise
     // exile it.
     synthesize_recover(face);
+    // CR 702.130a: Afflict — becomes-blocked trigger that causes the defending
+    // player to lose N life. CR 702.130b: each instance triggers separately.
+    synthesize_afflict(face);
     // CR 702.115a: Ingest — combat-damage-to-player trigger that exiles the top
     // card of the damaged player's library.
     synthesize_ingest(face);
@@ -17045,6 +17095,7 @@ mod idempotency_tests {
                 zone: ZoneRef::Graveyard,
                 card_types: vec![TypeFilter::Creature],
                 scope: CountScope::Controller,
+                filter: None,
             },
         };
         let mut face = CardFace::default();
@@ -17272,6 +17323,62 @@ mod sorcery_speed_invariant_tests {
                 )),
             "unattach mode is legal only while attached to a creature (CR 702.151a)"
         );
+
+        // CR 702.151a: "another target creature you control" — the attach
+        // target filter must carry `FilterProp::Another` so a reconfigure
+        // Equipment (itself a creature while unattached) can't self-target.
+        match &*face.abilities[0].effect {
+            Effect::Attach { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "reconfigure attach target excludes the source (CR 702.151a)"
+                ),
+                other => panic!("expected Typed attach target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Attach, got {other:?}"),
+        }
+    }
+
+    /// CR 702.151b + CR 613.1d: reconfigure synthesizes a self-scoped continuous
+    /// Layer-4 type-removal static (RemoveType Creature) gated on
+    /// `SourceAttachedToCreature`, and re-synthesis must not duplicate it.
+    #[test]
+    fn synthesize_reconfigure_adds_type_removal_static_and_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Reconfigure(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }));
+        synthesize_reconfigure(&mut face);
+
+        let matching = |face: &CardFace| {
+            face.static_abilities
+                .iter()
+                .filter(|sd| {
+                    sd.affected == Some(TargetFilter::SelfRef)
+                        && sd.condition == Some(StaticCondition::SourceAttachedToCreature)
+                        && sd
+                            .modifications
+                            .contains(&ContinuousModification::RemoveType {
+                                core_type: CoreType::Creature,
+                            })
+                })
+                .count()
+        };
+        assert_eq!(
+            matching(&face),
+            1,
+            "reconfigure adds the type-removal static (CR 702.151b)"
+        );
+
+        let static_count = face.static_abilities.len();
+        synthesize_reconfigure(&mut face);
+        assert_eq!(
+            face.static_abilities.len(),
+            static_count,
+            "re-synthesis does not duplicate the type-removal static"
+        );
+        assert_eq!(matching(&face), 1, "still exactly one type-removal static");
     }
 
     /// CR 702.167a/b: Parsing the Oracle line "craft with creature {4}{b}" must
@@ -23038,6 +23145,53 @@ mod afflict_training_poisonous_synthesis_tests {
             &triggers[0],
             &Keyword::Flanking
         ));
+    }
+
+    #[test]
+    fn synthesize_afflict_installs_becomes_blocked_trigger() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Afflict(3));
+        synthesize_afflict(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_afflict_trigger(t, 3))
+                .count(),
+            1,
+            "a printed Afflict keyword must install exactly one afflict trigger"
+        );
+        // Confirm it is installed by `synthesize_all` too (the real card-build path).
+        let mut full = CardFace::default();
+        full.keywords.push(Keyword::Afflict(3));
+        synthesize_all(&mut full);
+        assert!(full.triggers.iter().any(|t| is_afflict_trigger(t, 3)));
+    }
+
+    #[test]
+    fn synthesize_afflict_preserves_duplicate_instances_and_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Afflict(2));
+        face.keywords.push(Keyword::Afflict(2));
+
+        synthesize_afflict(&mut face);
+        synthesize_afflict(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_afflict_trigger(t, 2))
+                .count(),
+            2,
+            "CR 702.130b requires one trigger per Afflict instance, while repeated synthesis stays idempotent"
+        );
+    }
+
+    #[test]
+    fn synthesize_afflict_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_afflict(&mut face);
+        assert!(face.triggers.is_empty());
     }
 
     // ---- Training (CR 702.149a) ----

@@ -7652,6 +7652,7 @@ mod tests {
                         zone: ZoneRef::Graveyard,
                         ref card_types,
                         scope: CountScope::Controller,
+                        filter: None,
                     }
                 },
                 target: TargetFilter::SelfRef,
@@ -10934,6 +10935,7 @@ mod snapshot_tests {
                                 zone: crate::types::ability::ZoneRef::Library,
                                 ref card_types,
                                 scope: crate::types::ability::CountScope::Controller,
+                                filter: None,
                             },
                     },
                 comparator: Comparator::EQ,

@@ -147,6 +147,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
         | FilterProp::Tapped
+        | FilterProp::IsSaddled
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::WithKeyword { .. }
@@ -338,6 +339,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
         | FilterProp::Tapped
+        | FilterProp::IsSaddled
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::WithKeyword { .. }
@@ -2394,6 +2396,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
         | FilterProp::Tapped
+        | FilterProp::IsSaddled
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::Counters { .. }
@@ -2693,6 +2696,8 @@ fn matches_filter_prop(
         // unblocked_attackers checks the permanent `blocked` flag, not the current blocker list.
         FilterProp::Unblocked => combat::unblocked_attackers(state).contains(&object_id),
         FilterProp::Tapped => obj.tapped,
+        // CR 702.171b: Matches permanents with the saddled designation.
+        FilterProp::IsSaddled => obj.is_saddled,
         // CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
         FilterProp::Untapped => !obj.tapped,
         // CR 302.6 + CR 702.10b + CR 702.154a: Enlist may tap a creature only
@@ -3526,6 +3531,7 @@ fn zone_change_record_matches_property(
             comparator.evaluate(actual, resolve_filter_threshold(state, count, source))
         }),
         FilterProp::Tapped
+        | FilterProp::IsSaddled
         | FilterProp::Untapped
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::AttackedThisTurn
@@ -5265,6 +5271,23 @@ mod tests {
 
         let filter =
             TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Tapped]));
+        assert!(matches_target_filter(&state, id, &filter, id));
+    }
+
+    // CR 702.171b: `IsSaddled` matches only objects with the saddled designation.
+    #[test]
+    fn is_saddled_property_matches_only_saddled() {
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Mount");
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::IsSaddled]));
+
+        // Not saddled → no match.
+        assert!(!matches_target_filter(&state, id, &filter, id));
+
+        // Saddled → match.
+        state.objects.get_mut(&id).unwrap().is_saddled = true;
         assert!(matches_target_filter(&state, id, &filter, id));
     }
 
