@@ -1637,6 +1637,61 @@ fn add_expensive_dragon_commander(scenario: &mut GameScenario) -> ObjectId {
     commander_id
 }
 
+/// CR 114.4 + CR 601.2b + CR 118.9a (issue #1355): Tamiyo, Field Researcher's
+/// emblem functions from the command zone and waives mana for hand spells.
+#[test]
+fn tamiyo_emblem_allows_free_cast_from_hand() {
+    use engine::game::zones::create_object;
+    use engine::parser::oracle_static::parse_static_line;
+    use engine::types::zones::Zone;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt_id = scenario.add_bolt_to_hand(P0);
+
+    let mut runner = scenario.build();
+    let emblem_id = create_object(
+        runner.state_mut(),
+        CardId(1_355),
+        P0,
+        "Emblem".to_string(),
+        Zone::Command,
+    );
+    {
+        let emblem = runner.state_mut().objects.get_mut(&emblem_id).unwrap();
+        emblem.is_emblem = true;
+        emblem.static_definitions.push(
+            parse_static_line(
+                "You may cast spells from your hand without paying their mana costs.",
+            )
+            .expect("Tamiyo emblem static should parse"),
+        );
+    }
+
+    let card_id = runner.state().objects[&bolt_id].card_id;
+    let mana_before = runner.state().players[0].mana_pool.clone();
+
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: bolt_id,
+            card_id,
+            targets: vec![],
+        })
+        .expect("Tamiyo emblem should allow casting a hand spell");
+    handle_target_selection(&mut runner, &result);
+
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "bolt should be on the stack after a free cast"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool,
+        mana_before,
+        "no mana should have been paid under Tamiyo emblem"
+    );
+}
+
 /// CR 601.2a + CR 118.9a + CR 903.8: A hand-qualified free-cast static
 /// (Omniscience class) does not replace the mana cost for a commander cast from
 /// the command zone.

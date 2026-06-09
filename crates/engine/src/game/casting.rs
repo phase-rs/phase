@@ -2276,6 +2276,18 @@ fn cast_free_origin_admits_object(
     }
 }
 
+/// CR 114.4: `CastFromHandFree` granting sources function on the battlefield
+/// (Omniscience, Zaffai, Dracogenesis) and from the command zone when they are
+/// emblems (Tamiyo, Field Researcher). `active_static_definitions` applies the
+/// CR 113.6b opt-in gate for non-emblem command-zone objects.
+fn iter_cast_free_permission_source_ids(state: &GameState) -> impl Iterator<Item = ObjectId> + '_ {
+    state
+        .battlefield
+        .iter()
+        .chain(state.command_zone.iter())
+        .copied()
+}
+
 fn cast_free_permission_from_source(
     state: &GameState,
     player: PlayerId,
@@ -2318,7 +2330,7 @@ pub(crate) fn hand_cast_free_permission_source(
     player: PlayerId,
     obj: &crate::game::game_object::GameObject,
 ) -> Option<(ObjectId, CastFrequency)> {
-    state.battlefield.iter().find_map(|&src_id| {
+    iter_cast_free_permission_source_ids(state).find_map(|src_id| {
         cast_free_permission_from_source(state, player, obj, src_id)
             .map(|frequency| (src_id, frequency))
     })
@@ -8671,32 +8683,31 @@ pub fn hand_cast_free_candidates(
 ) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
     // CR 601.2b + CR 400.7: Collect active (source_id, frequency, filter)
     // triples for OncePerTurn permissions that haven't been consumed this turn.
-    let sources: Vec<(ObjectId, TargetFilter, CastFrequency, CastFreeOrigin)> = state
-        .battlefield
-        .iter()
-        .filter_map(|&src_id| {
-            let src_obj = state.objects.get(&src_id)?;
-            if src_obj.controller != player {
-                return None;
-            }
-            active_static_definitions(state, src_obj).find_map(|s| match s.mode {
-                StaticMode::CastFromHandFree { frequency, origin } => {
-                    if frequency == CastFrequency::OncePerTurn
-                        && state.hand_cast_free_permissions_used.contains(&src_id)
-                    {
-                        None
-                    } else if frequency == CastFrequency::OncePerTurn {
-                        s.affected
-                            .as_ref()
-                            .map(|f| (src_id, f.clone(), frequency, origin))
-                    } else {
-                        None
-                    }
+    let sources: Vec<(ObjectId, TargetFilter, CastFrequency, CastFreeOrigin)> =
+        iter_cast_free_permission_source_ids(state)
+            .filter_map(|src_id| {
+                let src_obj = state.objects.get(&src_id)?;
+                if src_obj.controller != player {
+                    return None;
                 }
-                _ => None,
+                active_static_definitions(state, src_obj).find_map(|s| match s.mode {
+                    StaticMode::CastFromHandFree { frequency, origin } => {
+                        if frequency == CastFrequency::OncePerTurn
+                            && state.hand_cast_free_permissions_used.contains(&src_id)
+                        {
+                            None
+                        } else if frequency == CastFrequency::OncePerTurn {
+                            s.affected
+                                .as_ref()
+                                .map(|f| (src_id, f.clone(), frequency, origin))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
             })
-        })
-        .collect();
+            .collect();
 
     if sources.is_empty() {
         return Vec::new();
@@ -21329,6 +21340,125 @@ mod tests {
         assert!(
             !matches!(cost, ManaCost::NoCost),
             "Omniscience must not apply to command-zone commanders, got {cost:?}"
+        );
+    }
+
+    /// CR 114.4 + CR 601.2b + CR 118.9a (issue #1355): Tamiyo, Field
+    /// Researcher's emblem grants `CastFromHandFree` from the command zone.
+    #[test]
+    fn tamiyo_emblem_free_casts_spells_from_hand() {
+        let mut state = setup_game_at_main_phase();
+
+        let emblem_id = create_object(
+            &mut state,
+            CardId(920),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem_id).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions.push(
+                parse_static_line(
+                    "You may cast spells from your hand without paying their mana costs.",
+                )
+                .expect("Tamiyo emblem static should parse"),
+            );
+        }
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(921),
+            PlayerId(0),
+            "Counterspell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Counterspell".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), spell_id)
+            .expect("hand spell cost should compute");
+        assert!(
+            matches!(cost, ManaCost::NoCost),
+            "Tamiyo emblem should zero the hand spell's mana cost, got {cost:?}"
+        );
+        assert!(can_cast_object_now(&state, PlayerId(0), spell_id));
+        assert_eq!(
+            hand_cast_free_permission_source(
+                &state,
+                PlayerId(0),
+                state.objects.get(&spell_id).unwrap()
+            ),
+            Some((emblem_id, CastFrequency::Unlimited)),
+            "permission source should be the command-zone emblem"
+        );
+    }
+
+    /// Issue #1355 regression: Tamiyo emblem's hand qualifier must not free-cast
+    /// commanders from the command zone (mirrors Omniscience guard).
+    #[test]
+    fn tamiyo_emblem_does_not_free_cast_commander_from_command_zone() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.command_zone = true;
+
+        let emblem_id = create_object(
+            &mut state,
+            CardId(922),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem_id).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions.push(
+                parse_static_line(
+                    "You may cast spells from your hand without paying their mana costs.",
+                )
+                .expect("Tamiyo emblem static should parse"),
+            );
+        }
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(923),
+            PlayerId(0),
+            "Dragon Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(5);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Commander".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cost should compute");
+        assert!(
+            !matches!(cost, ManaCost::NoCost),
+            "Tamiyo emblem must not apply to command-zone commanders, got {cost:?}"
         );
     }
 

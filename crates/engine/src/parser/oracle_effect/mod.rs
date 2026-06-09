@@ -110,6 +110,8 @@ use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{ActivationExemption, CastFrequency, StaticMode};
+#[cfg(test)]
+use crate::types::statics::CastFreeOrigin;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -27471,6 +27473,33 @@ mod tests {
                         .is_some_and(|d| d.contains("Ninjas you control get +1/+1")),
                     "static emblem must retain granted rules text, got {:?}",
                     def.description
+                );
+            }
+            other => panic!("expected CreateEmblem, got {:?}", other),
+        }
+    }
+
+    /// CR 114.1 + CR 601.2b (issue #1355): Tamiyo, Field Researcher's ultimate
+    /// emblem text parses as `CastFromHandFree` static, not `EmblemStatic`.
+    #[test]
+    fn effect_emblem_tamiyo_field_researcher_hand_free_cast() {
+        let e = parse_effect(
+            "You get an emblem with \"You may cast spells from your hand without paying their mana costs.\"",
+        );
+        match e {
+            Effect::CreateEmblem { statics, triggers } => {
+                assert!(triggers.is_empty());
+                assert_eq!(statics.len(), 1);
+                assert!(
+                    matches!(
+                        statics[0].mode,
+                        StaticMode::CastFromHandFree {
+                            frequency: CastFrequency::Unlimited,
+                            origin: CastFreeOrigin::Hand,
+                        }
+                    ),
+                    "expected CastFromHandFree static, got {:?}",
+                    statics[0].mode
                 );
             }
             other => panic!("expected CreateEmblem, got {:?}", other),
