@@ -1371,6 +1371,61 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
+    // CR 614.12 + CR 604.1 + CR 702.136a: replacement-on-grant (seam 3).
+    // A Continuous static that grants an as-enters replacement keyword (Riot)
+    // contributes its as-enters `Moved` replacement from the GRANTING permanent,
+    // scoped to the static's `affected` filter — not as a SelfRef replacement on
+    // the recipient (CR 614.12: a grant to "a general subset of permanents that
+    // includes it" comes from the granting source). Build-time `synthesize_riot`
+    // installs this once on `face.replacements`; the per-pass reset above
+    // (CR 613.1) discards persistent installs, so the replacement must be
+    // re-derived each pass onto the source's live `replacement_definitions`. This
+    // runs AFTER Layer 6 (Ability) so a Riot-granting static that was itself
+    // granted to the source is visible in `static_definitions`. The runtime
+    // gather (`find_applicable_replacements`) then applies the affected-filter
+    // replacement to matching entering creatures with no further change.
+    for &id in &bf_ids {
+        let derived: Vec<crate::types::ability::ReplacementDefinition> = {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            obj.static_definitions
+                .iter_all()
+                .filter_map(|def| {
+                    // Cheap discriminator FIRST: `entry_replacement_for_grant_static`
+                    // is a couple of field checks returning `None` for ~every
+                    // static, whereas `source_condition_gate_passes` can scan all
+                    // objects (e.g. `IsPresent`). Run the condition gate only once
+                    // an as-enters keyword grant is confirmed, so the layer hot
+                    // path pays no board-wide condition tax for non-Riot statics.
+                    let replacement =
+                        crate::database::synthesis::entry_replacement_for_grant_static(def)?;
+                    let active = def.condition.as_ref().is_none_or(|condition| {
+                        source_condition_gate_passes(state, condition, obj.controller, id)
+                    });
+                    active.then_some(replacement)
+                })
+                .collect()
+        };
+        if derived.is_empty() {
+            continue;
+        }
+        if let Some(obj) = state.objects.get_mut(&id) {
+            for replacement in derived {
+                // Idempotent: the per-pass reset already cleared derived
+                // replacements, but a static that also appears in the base set
+                // (printed Riot grant) could double-install otherwise.
+                if !obj
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|r| r == &replacement)
+                {
+                    obj.replacement_definitions.push(replacement);
+                }
+            }
+        }
+    }
+
     // CR 613.11: Rule-changing continuous effects are applied after object
     // characteristics are determined. These flags feed CR 510.1 combat damage
     // assignment and must observe final post-layer characteristics.
@@ -5105,6 +5160,125 @@ mod tests {
                 .unwrap()
                 .has_keyword(&Keyword::Flying),
             "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
+        );
+    }
+
+    /// CR 604.1 + CR 702.123a/b: a runtime grant of `Fabricate N` via a
+    /// continuous `AddKeyword` static must install the Fabricate ETB trigger
+    /// onto the recipient's `trigger_definitions` (the trigger-on-grant seam at
+    /// `KeywordTriggerInstaller::triggers_for`). Before the `Fabricate` arm
+    /// existed, the recipient gained the bare keyword but no trigger, so this
+    /// assertion would have found zero installed Fabricate triggers.
+    #[test]
+    fn granted_fabricate_installs_etb_trigger_on_recipient() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Anthem-style static: grants Fabricate 2 to all creatures.
+        let anthem_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Fabricate(2),
+            }]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fabricate Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(anthem_static);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let recipient = state.objects.get(&bear).unwrap();
+        assert!(
+            recipient.has_keyword(&Keyword::Fabricate(2)),
+            "granted Fabricate keyword must land on the recipient"
+        );
+        let fabricate_triggers = recipient
+            .trigger_definitions
+            .iter_all()
+            .filter(|t| {
+                KeywordTriggerInstaller::trigger_matches_keyword_kind(t, &Keyword::Fabricate(2))
+            })
+            .count();
+        assert_eq!(
+            fabricate_triggers, 1,
+            "granted Fabricate must install exactly one ETB ChooseOneOf trigger"
+        );
+    }
+
+    /// CR 614.12 + CR 604.1 + CR 702.136a (seam 3, replacement-on-grant): a
+    /// battlefield permanent whose Continuous static grants `AddKeyword{Riot}` to
+    /// a subset of permanents must, after a layer pass, carry the affected-filter
+    /// as-enters Riot replacement on its OWN `replacement_definitions` (scoped to
+    /// the static's `affected` filter, NOT SelfRef per CR 614.12). Before the
+    /// runtime-derivation pass existed, `AddKeyword` installed only the keyword +
+    /// triggers, never a replacement, so this assertion found none.
+    #[test]
+    fn granted_riot_static_derives_affected_filter_replacement_on_source() {
+        let mut state = setup();
+
+        let affected = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+        let riot_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(affected.clone())
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Riot,
+            }]);
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Riot Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(riot_static);
+            obj.base_static_definitions = obj.static_definitions.as_slice().to_vec().into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let expected =
+            crate::database::synthesis::keyword_entry_replacement(&Keyword::Riot, affected.clone())
+                .expect("Riot must map to an entry replacement");
+        let source = state.objects.get(&grantor).unwrap();
+        let installed = source
+            .replacement_definitions
+            .iter_all()
+            .filter(|r| **r == expected)
+            .count();
+        assert_eq!(
+            installed, 1,
+            "granting permanent must carry exactly one affected-filter Riot replacement"
+        );
+
+        // Idempotency across re-evaluation (the per-pass reset + re-derive must
+        // not accumulate duplicates).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let source = state.objects.get(&grantor).unwrap();
+        assert_eq!(
+            source
+                .replacement_definitions
+                .iter_all()
+                .filter(|r| **r == expected)
+                .count(),
+            1,
+            "re-evaluation must not duplicate the derived replacement"
         );
     }
 
