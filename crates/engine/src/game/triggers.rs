@@ -11976,60 +11976,13 @@ pub mod tests {
         assert_eq!(run(PlayerId(1), Phase::PreCombatMain), 0);
     }
 
-    /// CR 603.10a + CR 702.110b: A creature that exploits ITSELF has already left
-    /// the battlefield (sacrificed) when `CreatureExploited` is emitted. Its own
-    /// "when ~ exploits a creature" trigger must still fire via the
-    /// last-known-information look-back in `collect_pending_triggers`. This is the
-    /// discriminating exploit-self-sac test: it flips to 0 on the stack if the
-    /// `CreatureExploited` LKI block is reverted, because the live battlefield
-    /// scan cannot find a graveyard object.
-    #[test]
-    fn self_exploit_trigger_fires_from_graveyard_via_lki() {
-        let mut state = setup();
-        let source = make_creature(&mut state, PlayerId(0), "Sidisi's Faithful", 1, 1);
-        let mut trig_def = crate::parser::oracle_trigger::parse_trigger_line(
-            "When Sidisi's Faithful exploits a creature, return target creature to its owner's hand.",
-            "Sidisi's Faithful",
-        );
-        assert_eq!(trig_def.mode, TriggerMode::Exploited);
-        assert_eq!(trig_def.valid_card, Some(TargetFilter::SelfRef));
-        trig_def.execute = Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Database,
-            Effect::Draw {
-                count: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-            },
-        )));
-        {
-            let obj = state.objects.get_mut(&source).unwrap();
-            obj.trigger_definitions.push(trig_def.clone());
-            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
-        }
-
-        // The exploiter sacrificed itself: it is in the graveyard, off the
-        // battlefield, when `CreatureExploited` fires (CR 702.110b emits the
-        // event after the sacrifice resolves).
-        {
-            let obj = state.objects.get_mut(&source).unwrap();
-            obj.zone = Zone::Graveyard;
-        }
-        state.battlefield.retain(|id| *id != source);
-
-        process_triggers(
-            &mut state,
-            &[GameEvent::CreatureExploited {
-                exploiter: source,
-                sacrificed: source,
-            }],
-        );
-
-        assert_eq!(
-            state.stack.len(),
-            1,
-            "CR 603.10a: a self-exploiter's own exploit trigger must fire from the \
-             graveyard via last-known information"
-        );
-    }
+    // NOTE: The discriminating real-pipeline test for the `CreatureExploited` LKI
+    // look-back lives in `effects::exploit::tests::self_exploit_dependent_trigger_lands_on_stack`.
+    // That test drives the actual exploit resolution (real sacrifice → real zone
+    // change → real trigger collection), so it exercises CR 400.7 graveyard
+    // clearing faithfully. A previous unit test here manually set `obj.zone =
+    // Graveyard` while leaving the object's triggers/continuous effects intact,
+    // which masked the very clearing it claimed to cover (Gemini [MED]).
 
     /// CR 601.2h + CR 603.4: Increment intervening-if gates the counter-placement
     /// trigger on the amount of mana spent to cast the triggering spell exceeding

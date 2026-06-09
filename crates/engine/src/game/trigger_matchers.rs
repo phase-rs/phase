@@ -2656,13 +2656,50 @@ pub(super) fn match_exploited(
     let GameEvent::CreatureExploited { exploiter, .. } = event else {
         return false;
     };
-    if let Some(filter) = &trigger.valid_source {
-        return target_filter_matches_object(state, *exploiter, filter, source_id);
+    // `valid_source`/`valid_card` scope the EXPLOITER's subject filter. With no
+    // filter, "this creature exploits" — match the source by identity.
+    match trigger
+        .valid_source
+        .as_ref()
+        .or(trigger.valid_card.as_ref())
+    {
+        Some(filter) => exploiter_matches_subject_filter(state, *exploiter, filter, source_id),
+        None => *exploiter == source_id,
     }
-    if let Some(filter) = &trigger.valid_card {
-        return target_filter_matches_object(state, *exploiter, filter, source_id);
+}
+
+/// CR 603.10a + CR 400.7: Match an exploiter against the trigger's subject
+/// filter. Exploit emits `CreatureExploited` only AFTER the sacrifice resolves
+/// (CR 702.110b), so a creature that exploited ITSELF is already in the
+/// graveyard and its live object has had all battlefield characteristics
+/// (control, types, granted abilities) stripped. A typed filter like "a
+/// creature you control" would then fail to match. When the exploiter has left
+/// the battlefield, evaluate the filter against its last-known battlefield
+/// snapshot (`lki_cache`) instead of the stripped graveyard object. An exploiter
+/// that sacrificed a DIFFERENT creature is still on the battlefield and matches
+/// on the live path.
+fn exploiter_matches_subject_filter(
+    state: &GameState,
+    exploiter: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> bool {
+    if target_filter_matches_object(state, exploiter, filter, source_id) {
+        return true;
     }
-    *exploiter == source_id
+    if state
+        .objects
+        .get(&exploiter)
+        .is_none_or(|o| o.zone != Zone::Battlefield)
+    {
+        if let Some(lki) = state.lki_cache.get(&exploiter) {
+            let ctx = super::filter::FilterContext::from_source(state, source_id);
+            return super::filter::matches_target_filter_on_lki_snapshot(
+                state, exploiter, lki, filter, &ctx,
+            );
+        }
+    }
+    false
 }
 
 /// CR 702.112b: "When [subject] becomes renowned" — fires when Renown
@@ -11349,5 +11386,59 @@ mod tests {
         };
 
         assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    /// CR 603.10a + CR 400.7: a creature that exploits ITSELF satisfies a typed
+    /// subject filter ("a creature you control") via its last-known battlefield
+    /// snapshot. Drives the REAL zone-change pipeline (`move_to_zone`) so the
+    /// graveyard object is genuinely stripped (control/types cleared) and
+    /// `lki_cache` is populated exactly as it is in a live game. This flips to
+    /// `false` if the LKI fallback in `exploiter_matches_subject_filter` is
+    /// reverted, because `target_filter_matches_object` reads the stripped
+    /// graveyard object.
+    #[test]
+    fn exploited_typed_filter_matches_self_sacrificed_exploiter_via_lki() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sidisi's Faithful".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Real zone-change pipeline: snapshots LKI and strips the graveyard object.
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        assert!(state.lki_cache.contains_key(&source));
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        let mut you = make_trigger(TriggerMode::Exploited);
+        you.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(
+            match_exploited(&event, &you, source, &state),
+            "CR 603.10a: self-sacrificed exploiter matches 'a creature you control' via LKI"
+        );
+
+        let mut opponent = make_trigger(TriggerMode::Exploited);
+        opponent.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        assert!(
+            !match_exploited(&event, &opponent, source, &state),
+            "an opponent-controlled subject filter must NOT match the controller's own exploiter"
+        );
     }
 }
