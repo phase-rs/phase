@@ -453,7 +453,15 @@ pub fn resolved_targets(
     // don't accidentally inherit the parent's targets via the chain target
     // propagation in `effects::mod.rs::resolve_chain`.
     if matches!(target_filter, TargetFilter::SelfRef) {
-        return vec![TargetRef::Object(ability.source_id)];
+        // CR 400.7: The self-reference resolves to the source only while it is
+        // still the same object. A source that left and re-entered the
+        // battlefield (blink/flicker) since the ability was created is a new
+        // object (higher incarnation), so the self-reference finds nothing.
+        return if ability.source_is_current(state) {
+            vec![TargetRef::Object(ability.source_id)]
+        } else {
+            Vec::new()
+        };
     }
     if matches!(target_filter, TargetFilter::SourceOrPaired) {
         return state
@@ -507,7 +515,13 @@ pub(crate) fn resolved_object_ids_for_filter(
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     match filter {
-        TargetFilter::SelfRef => vec![ability.source_id],
+        // CR 400.7: self-reference resolves only while the source is the same
+        // object; a blinked-and-returned source (higher incarnation) finds nothing.
+        TargetFilter::SelfRef => ability
+            .source_is_current(state)
+            .then_some(ability.source_id)
+            .into_iter()
+            .collect(),
         TargetFilter::ParentTarget => object_targets(&ability.targets).collect(),
         TargetFilter::ParentTargetSlot { index } => ability
             .targets
