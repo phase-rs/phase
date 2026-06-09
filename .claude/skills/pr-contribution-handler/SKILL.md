@@ -429,6 +429,7 @@ Every 30 seconds, in parallel:
 1. **CI status.**
 
    ```bash
+   gh --version  # must be 2.46.0 or newer for `gh pr checks --json`
    gh pr checks <N> --repo phase-rs/phase --json bucket,name,link
    ```
 

@@ -104,6 +104,8 @@ replay_dtypes.py
 parser-batch-plan.md
 parser-fallback-plan.md
 tmp/
+test-results/
+test-screenshots/
 
 # External reference / scratch
 mtgish/

@@ -173,23 +173,27 @@ follow-up and pick a different scenario that exercises the same code path.
 
 ### Capturing engine state evidence
 
-Beyond screenshots, the dev console and the `gameStore` expose evidence:
+Beyond screenshots, capture store state only when the running dev build exposes
+a debug store global such as `window.__gameStore`. Zustand stores are
+module-scoped imports by default; do not assume `useGameStore` exists on
+`window` unless the app explicitly exposes it for that run.
 
 ```bash
-# Get current game state from the store (browser console eval)
+# Get current game state from the debug store (browser console eval)
 agent-browser --session-name phase-e2e eval \
-  "JSON.stringify(useGameStore.getState().state, null, 2)" \
+  "JSON.stringify(window.__gameStore?.getState?.().gameState ?? null, null, 2)" \
   > $RESULTS_DIR/0X-state-before.json
 
 # Same after the action
 agent-browser --session-name phase-e2e eval \
-  "JSON.stringify(useGameStore.getState().state, null, 2)" \
+  "JSON.stringify(window.__gameStore?.getState?.().gameState ?? null, null, 2)" \
   > $RESULTS_DIR/0X-state-after.json
 ```
 
 For each state-changing scenario, capture both the screenshot pair AND the
-JSON state pair. The JSON catches bugs the screenshot can't (wrong life total,
-wrong P/T, wrong zone membership) and lets you diff state precisely.
+JSON state pair when the debug store is available. The JSON catches bugs the
+screenshot can't (wrong life total, wrong P/T, wrong zone membership) and lets
+you diff state precisely.
 
 ### Screenshot naming
 
@@ -397,7 +401,8 @@ or use `--no-hmr` if you've configured it in `vite.config.ts`.
 The `WasmAdapter` serializes engine actions through an async queue. After
 clicking an action button, wait 100-300ms before snapshotting / capturing
 state. For longer actions (full turn resolution with cascading triggers), wait
-longer or poll `useGameStore.getState().pending` for completion.
+longer or, when a debug store global is explicitly exposed, poll
+`window.__gameStore?.getState?.().pending` for completion.
 
 ### Caddy HTTPS proxy vs raw Vite
 

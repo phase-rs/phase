@@ -188,7 +188,7 @@ Only after `clean_polls == 2` do you report `POLISH:READY-TO-ENQUEUE`.
 
 ### Concrete CI fetch (don't parse `gh pr checks` text columns)
 
-The `fetch_check_buckets(PR)` step above must use `--json`, not the default text output. Job names can contain spaces and parentheses, so `gh pr checks $PR | awk '{print $2}'` extracts garbage instead of status.
+The `fetch_check_buckets(PR)` step above must use `gh pr checks --json`, which requires GitHub CLI 2.46.0 or newer. Do not use the default text output: job names can contain spaces and parentheses, so `gh pr checks $PR | awk '{print $2}'` extracts garbage instead of status.
 
 ```bash
 ci_json=$(gh pr checks $PR --repo phase-rs/phase --json name,state,bucket)
