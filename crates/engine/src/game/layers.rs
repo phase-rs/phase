@@ -7924,6 +7924,98 @@ mod tests {
         );
     }
 
+    /// CR 114.3 + CR 613.1f: End-to-end test for Koth of the Hammer's −5
+    /// emblem. The emblem text nests the granted activated ability in single
+    /// quotes one level deep (`"Mountains you control have '{T}: …'"`); if the
+    /// emblem parser corrupts or drops those quotes the static lowers to an
+    /// inert `EmblemStatic` blob and the Mountains never receive the ability
+    /// (the reported bug). This drives the real parser, installs the parsed
+    /// static on a command-zone emblem, and verifies a Mountain you control
+    /// actually gains the activated damage ability (layer-6 ability-adding)
+    /// while an opponent's Mountain and a non-Mountain land do not.
+    #[test]
+    fn koth_emblem_grants_activated_ability_to_controlled_mountains() {
+        use crate::types::ability::AbilityKind;
+
+        let mut state = setup();
+
+        let make_basic_land =
+            |state: &mut GameState, name: &str, subtype: &str, player: PlayerId| {
+                let id = create_object(
+                    state,
+                    CardId(0),
+                    player,
+                    name.to_string(),
+                    Zone::Battlefield,
+                );
+                let ts = state.next_timestamp();
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push(subtype.to_string());
+                obj.base_card_types = obj.card_types.clone();
+                obj.timestamp = ts;
+                id
+            };
+
+        let my_mountain = make_basic_land(&mut state, "Mountain", "Mountain", PlayerId(0));
+        let opp_mountain = make_basic_land(&mut state, "Opp Mountain", "Mountain", PlayerId(1));
+        let my_forest = make_basic_land(&mut state, "Forest", "Forest", PlayerId(0));
+
+        // Drive the real parser on Koth's emblem Oracle text.
+        let effect = crate::parser::oracle_effect::parse_effect(
+            "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
+        );
+        let crate::types::ability::Effect::CreateEmblem { statics, triggers } = effect else {
+            panic!("expected CreateEmblem effect from Koth's emblem text");
+        };
+        assert!(triggers.is_empty(), "Koth emblem is a static grant");
+        assert_eq!(
+            statics.len(),
+            1,
+            "expected the granted static, got {statics:?}"
+        );
+
+        // CR 114.4: Install on a command-zone emblem controlled by Player 0;
+        // an emblem's abilities function from the command zone.
+        let emblem_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem_id).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions = statics.into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let grants_damage_ability = |state: &GameState, id: ObjectId| {
+            state.objects.get(&id).unwrap().abilities.iter().any(|a| {
+                a.kind == AbilityKind::Activated
+                    && matches!(&*a.effect, crate::types::ability::Effect::DealDamage { .. })
+            })
+        };
+
+        assert!(
+            grants_damage_ability(&state, my_mountain),
+            "a Mountain you control must gain the granted '{{T}}: deal 1 damage' ability"
+        );
+        // CR 613.1f: the layer-6 grant is scoped to permanents the emblem's
+        // controller controls.
+        assert!(
+            !grants_damage_ability(&state, opp_mountain),
+            "an opponent's Mountain must NOT gain the ability"
+        );
+        assert!(
+            !grants_damage_ability(&state, my_forest),
+            "a non-Mountain land must NOT gain the ability"
+        );
+    }
+
     /// CR 305.7: SetBasicLandType replaces old land subtypes and adds the new one.
     #[test]
     fn set_basic_land_type_replaces_subtypes() {

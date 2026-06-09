@@ -11057,6 +11057,66 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
     }
 }
 
+/// Strip a single matching pair of outer quotes (`"…"`, `'…'`, or curly
+/// `“…”`) from `s`, if present. Only ONE pair is removed so that quotes nested
+/// inside the body survive — an emblem's granted ability is itself quoted one
+/// level deeper (`"… have '{T}: …'"`), and the old
+/// `trim_matches('"').trim_matches('\'')` over-stripped the granted ability's
+/// closing quote, leaving it unbalanced and unparseable.
+fn strip_balanced_outer_quotes(s: &str) -> &str {
+    let s = s.trim();
+    const PAIRS: [(char, char); 3] = [('"', '"'), ('\'', '\''), ('\u{201c}', '\u{201d}')];
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return s;
+    };
+    // `next_back` returns `None` when only one char remained (already consumed
+    // by `next`), so this also guards against a degenerate single-quote string.
+    let Some(last) = chars.next_back() else {
+        return s;
+    };
+    for (open, close) in PAIRS {
+        if first == open && last == close {
+            return &s[open.len_utf8()..s.len() - close.len_utf8()];
+        }
+    }
+    s
+}
+
+/// An emblem grants its ability one quote-nesting level deep, so a granted
+/// ability is single-quoted (Koth of the Hammer: `Mountains you control have
+/// '{T}: ~ deals 1 damage to any target.'`). Every downstream grant parser
+/// (`parse_static_line`, `parse_quoted_ability_modifications`) recognises only
+/// double-quoted ability bodies — single quotes are ambiguous with
+/// apostrophes — so promote the nested pair to double quotes. The opening
+/// quote is anchored on a grant verb
+/// (`have '` / `has '` / `gain '` / `gains '`) so a possessive apostrophe in
+/// the subject phrase is never mistaken for the delimiter; the closing quote is
+/// the final `'` in the body. Bodies without a nested single-quoted ability are
+/// returned unchanged.
+fn promote_nested_ability_quotes(body: &str) -> String {
+    const OPEN_ANCHORS: [&str; 4] = [" have '", " has '", " gain '", " gains '"];
+    // Grant verbs are mid-sentence and therefore lowercase in Oracle text, so
+    // they can be matched against `body` directly without lowercasing.
+    let open_quote = OPEN_ANCHORS
+        .iter()
+        .filter_map(|anchor| body.find(anchor).map(|pos| pos + anchor.len() - 1))
+        .min();
+    let (Some(open_quote), Some(close_quote)) = (open_quote, body.rfind('\'')) else {
+        return body.to_string();
+    };
+    if close_quote <= open_quote {
+        return body.to_string();
+    }
+    let mut promoted = String::with_capacity(body.len());
+    promoted.push_str(&body[..open_quote]);
+    promoted.push('"');
+    promoted.push_str(&body[open_quote + 1..close_quote]);
+    promoted.push('"');
+    promoted.push_str(&body[close_quote + 1..]);
+    promoted
+}
+
 /// CR 114.1: Parse emblem creation from Oracle text.
 /// Handles both full form "you get an emblem with \"[text]\"" and
 /// subject-stripped form "get an emblem with \"[text]\"".
@@ -11070,14 +11130,13 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
         .parse(i)
     })?;
 
-    // Extract the quoted emblem text (handles both "..." and '...' quoting)
-    let inner = rest
-        .trim()
-        .trim_end_matches('.')
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim_matches('\u{201c}')
-        .trim_matches('\u{201d}');
+    // Remove only the emblem's OUTER quote wrapper, then promote any nested
+    // single-quoted granted ability to double quotes so the standard grant
+    // parsers recognise it (Koth of the Hammer's "Mountains you control have
+    // '{T}: ~ deals 1 damage to any target.'").
+    let body = strip_balanced_outer_quotes(rest);
+    let promoted = promote_nested_ability_quotes(body);
+    let inner = promoted.trim().trim_end_matches('.').trim();
 
     if inner.is_empty() {
         return None;
@@ -27508,6 +27567,63 @@ mod tests {
             }
             other => panic!("expected CreateEmblem static-only, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn effect_koth_emblem_grants_activated_ability_to_mountains() {
+        // CR 114.1 + CR 114.4: Koth of the Hammer's −5 emblem grants an
+        // activated ability to a class of lands. The granted ability is nested
+        // one quote level deep ('{T}: …') inside the emblem's own quotes, so the
+        // emblem must strip only its OUTER quotes and promote the nested
+        // single-quoted ability to a double-quoted body the grant parser
+        // recognises — otherwise it falls back to an inert `EmblemStatic` blob
+        // that grants nothing (the bug seen in game-state turn 34).
+        let e = parse_effect(
+            "You get an emblem with \"Mountains you control have '{T}: This land deals 1 damage to any target.'\"",
+        );
+        let Effect::CreateEmblem { statics, triggers } = e else {
+            panic!("expected CreateEmblem, got {e:?}");
+        };
+        assert!(
+            triggers.is_empty(),
+            "Koth emblem is a static grant, not a trigger, got {triggers:?}"
+        );
+        assert_eq!(
+            statics.len(),
+            1,
+            "expected one granted static, got {statics:?}"
+        );
+        let def = &statics[0];
+        assert_eq!(
+            def.mode,
+            StaticMode::Continuous,
+            "granted ability must be a Continuous layer-6 static, not the inert EmblemStatic fallback"
+        );
+        // CR 613.1f: layer-6 ability-adding grant affects the Mountains the
+        // emblem's controller controls.
+        let affected = def.affected.as_ref().expect("affected filter present");
+        assert!(
+            matches!(
+                affected,
+                TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::You)
+            ),
+            "granted ability must be scoped to permanents you control, got {affected:?}"
+        );
+        // CR 602.1: the granted ability is an activated ability (GrantAbility),
+        // not a keyword or P/T buff, and it deals damage.
+        let definition = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::GrantAbility { definition } => Some(definition),
+                _ => None,
+            })
+            .expect("expected a GrantAbility modification granting the {T} ability");
+        assert!(
+            matches!(&*definition.effect, Effect::DealDamage { .. }),
+            "granted ability must deal damage, got {:?}",
+            definition.effect
+        );
     }
 
     #[test]
