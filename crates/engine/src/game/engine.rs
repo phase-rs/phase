@@ -8,7 +8,7 @@ use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, P
 use crate::types::game_state::{
     ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
     CostResume, GameState, LandPlayRecord, PayCostKind, RetargetScope, StackEntry, StackEntryKind,
-    WaitingFor,
+    WaitingFor, ZoneManipulationKind,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -867,8 +867,9 @@ mod auto_pass_decision_tests {
 
         assert!(matches!(
             result.waiting_for,
-            WaitingFor::ScryChoice {
+            WaitingFor::ZoneManipulation {
                 player: PlayerId(0),
+                kind: ZoneManipulationKind::Scry { .. },
                 ..
             }
         ));
