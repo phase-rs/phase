@@ -1825,9 +1825,13 @@ pub(crate) fn handle_exile_materials_for_cost(
         pending.object_id,
         &materials,
     );
+    // Capture the crafting source id before `pending` is moved into the helper.
+    // The craft source self-exiles and returns with the same ObjectId (CR
+    // 702.167a), so this id is also the returned permanent's id.
+    let source_id = pending.object_id;
     // CR 702.167a/b + CR 601.2h: chosen materials are revalidated against the
     // live battlefield/graveyard union immediately before payment.
-    finish_exile_selection_for_cost(
+    let result = finish_exile_selection_for_cost(
         state,
         player,
         pending,
@@ -1845,7 +1849,21 @@ pub(crate) fn handle_exile_materials_for_cost(
             }
             Ok(())
         },
-    )
+    )?;
+    // CR 702.167c: link each exiled material to the crafting source so a
+    // "cares what was used to craft it" ability can read them after the
+    // permanent returns transformed (same ObjectId across the exile round-trip;
+    // the link survives the source's battlefield exit via the zones.rs preserve
+    // arm). `push_with_kind` is idempotent on (exiled_id, source_id).
+    for &material_id in chosen {
+        crate::game::exile_links::push_with_kind(
+            state,
+            material_id,
+            source_id,
+            crate::types::game_state::ExileLinkKind::CraftMaterial,
+        );
+    }
+    Ok(result)
 }
 
 /// Push an activated ability to the stack after costs are paid.

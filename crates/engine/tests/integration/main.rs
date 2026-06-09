@@ -83,6 +83,7 @@ mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
 mod invoke_calamity_free_cast;
+mod issue_1305_thalisse_tokens_created_this_turn;
 mod issue_1308_unstoppable_plan;
 mod issue_1312_prepared_spell_cast_triggers;
 mod issue_1509_sorcery_main_phase_cast;
