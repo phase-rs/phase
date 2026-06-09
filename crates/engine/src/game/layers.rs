@@ -604,6 +604,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsMonstrous
@@ -718,6 +719,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsMonstrous
@@ -906,6 +908,10 @@ fn evaluate_condition_with_context(
         // Callous Oppressor dying while tapped) fails this predicate and any
         // `ForAsLongAs { SourceIsTapped }` continuous effect (gain-control, etc.) ends.
         StaticCondition::SourceIsTapped => eval_source_is_tapped_on_battlefield(state, source_id),
+        // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
+        StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {
+            obj.zone == crate::types::zones::Zone::Battlefield && obj.is_saddled
+        }),
         // CR 702.62a + CR 611.2b: True when the source object's current controller
         // equals the stored player. Drives the Suspend haste duration: when a
         // suspended creature spell resolves, a transient continuous effect with
@@ -1124,14 +1130,14 @@ fn rebuild_static_index_at_top() -> bool {
 pub fn evaluate_layers(state: &mut GameState) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // CR 302.6 + CR 613.1b + CR 702.26c: Snapshot effective controllers for
+    // CR 302.6 + CR 613.1b + CR 702.26b: Snapshot effective controllers for
     // phased-in permanents BEFORE the Step 1 reset below wipes them. The
     // post-pass diff at the end of this function compares against this
     // snapshot to detect effective-controller transitions (Layer 2 control-
     // changing effect start/end, exchange-control, gain-control expiry) and
     // re-applies summoning sickness per CR 302.6 ("continuously under that
     // player's control since that player's most recent turn began").
-    // Phased-out permanents are excluded per CR 702.26c.
+    // Phased-out permanents are excluded per CR 702.26b.
     let prev_controllers: Vec<(ObjectId, PlayerId)> = state
         .battlefield_phased_in_ids()
         .into_iter()
@@ -1147,7 +1153,12 @@ pub fn evaluate_layers(state: &mut GameState) {
     // taken by AI search or snapshot diffing retain their own roots, so this
     // does not break structural sharing across `GameState` clones.
     state.attribution.clear();
-    let bf_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+    // CR 702.26b + CR 702.26e: Phased-out permanents are treated as though
+    // they do not exist and are not included in continuous-effect affected
+    // sets. Exclude them from the whole layer pass so the reset/apply invariant
+    // remains intact; they are frozen until phase-in marks layers dirty and
+    // re-includes them.
+    let bf_ids: Vec<ObjectId> = state.battlefield_phased_in_ids();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.sync_missing_base_characteristics();
@@ -6643,6 +6654,83 @@ mod tests {
         );
     }
 
+    /// CR 702.151b + CR 613.1d: A reconfigure Equipment is a creature while
+    /// unattached, stops being a creature while attached to a creature, and
+    /// becomes a creature again when unattached. Drives the synthesized
+    /// `synthesize_reconfigure` Layer-4 RemoveType static through
+    /// `evaluate_layers`. This is the discriminating test for the type-removal
+    /// fix: it flips to a hard failure if Step 2 of the fix is reverted (the
+    /// Equipment would remain a creature while attached).
+    #[test]
+    fn reconfigure_equipment_loses_creature_type_while_attached() {
+        use crate::database::synthesis::synthesize_reconfigure;
+        use crate::game::effects::attach::{attach_to, unattach};
+        use crate::types::card::CardFace;
+        use crate::types::keywords::Keyword;
+
+        // Synthesize the reconfigure statics from the typed keyword (real path).
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Reconfigure(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }));
+        synthesize_reconfigure(&mut face);
+
+        let mut state = setup();
+        // The reconfigure Equipment is itself an Artifact Creature (Equipment).
+        let equip = make_creature(&mut state, "Reconfigure Equipment", 0, 0, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&equip).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            // Apply the synthesized continuous static onto the base set so the
+            // Step-1 layer reset preserves it across passes.
+            obj.base_static_definitions = Arc::new(face.static_abilities.clone());
+        }
+        let host = make_creature(&mut state, "Host Creature", 2, 2, PlayerId(0));
+
+        // Unattached: still a creature.
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "unattached reconfigure Equipment is a creature"
+        );
+
+        // Attached to a creature: stops being a creature (CR 702.151b).
+        attach_to(&mut state, equip, host);
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "CR 702.151b: attached reconfigure Equipment stops being a creature"
+        );
+        // Still an Artifact Equipment — only the Creature type is removed.
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Artifact),
+            "only the Creature type is removed (Layer 4 RemoveType)"
+        );
+
+        // Unattached again: a creature once more.
+        unattach(&mut state, equip);
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "unattaching restores the creature type"
+        );
+    }
+
     #[test]
     fn test_type_change_reverts_to_base_when_source_leaves() {
         let mut state = setup();
@@ -8238,6 +8326,42 @@ mod tests {
             &StaticCondition::Not {
                 condition: Box::new(StaticCondition::SourceIsTapped),
             },
+            PlayerId(0),
+            id,
+        ));
+    }
+
+    // CR 702.171b: `SourceIsSaddled` gates a continuous modification on the
+    // saddled designation. Not saddled → no gather; saddled → gathered;
+    // off-battlefield → false (CR 110.5d, no designation off the battlefield).
+    #[test]
+    fn source_is_saddled_gates_continuous_effect() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Mount", 2, 2, PlayerId(0));
+
+        // Not saddled → condition false (no bonus).
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
+            PlayerId(0),
+            id,
+        ));
+
+        // Saddled → condition true (regression for "mounts always behave as if saddled").
+        state.objects.get_mut(&id).unwrap().is_saddled = true;
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
+            PlayerId(0),
+            id,
+        ));
+
+        // CR 110.5d: off the battlefield there is no saddled designation.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert!(state.objects.get(&id).unwrap().is_saddled);
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
             PlayerId(0),
             id,
         ));

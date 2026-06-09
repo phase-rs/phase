@@ -23,7 +23,7 @@ use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
-use super::sacrifice::apply_sacrifice_after_replacement;
+use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
 use super::zones;
 
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
@@ -341,11 +341,17 @@ pub(super) fn handle_replacement_choice(
                         return Ok(state.waiting_for.clone());
                     }
                 }
-                // CR 701.21a + CR 614: Sacrifice accepted after replacement choice —
-                // delegate to the shared helper. Regeneration cannot apply (CR
-                // 701.21a) but Moved replacements on the graveyard transfer still do.
+                // CR 701.21a + CR 614.1: Sacrifice accepted after replacement
+                // choice — delegate to the shared helper. Regeneration cannot
+                // apply (CR 701.21a) but Moved replacements on the inner graveyard
+                // transfer do; if that inner transfer itself needs a choice, the
+                // helper sets `state.waiting_for` and we propagate it back.
                 sacrifice @ ProposedEvent::Sacrifice { .. } => {
-                    apply_sacrifice_after_replacement(state, sacrifice, events);
+                    if let SacrificeApply::NeedsChoice(_) =
+                        apply_sacrifice_after_replacement(state, sacrifice, events)
+                    {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 111.1 + CR 614.1a: CreateToken accepted after replacement choice
                 // — the `spec` field carries the full self-describing token

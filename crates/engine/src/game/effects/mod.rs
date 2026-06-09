@@ -13952,6 +13952,97 @@ mod tests {
         );
     }
 
+    /// CR 400.7i + CR 603.7: Issue #1549 — ExileTop(3) chained to
+    /// `GrantCastingPermission { PlayFromExile, TrackedSet }` must attach
+    /// exactly one permission per exiled card (no double-grant).
+    #[test]
+    fn exile_top_three_impulse_grant_applies_once_per_card() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "The Legend of Roku".to_string(),
+            Zone::Battlefield,
+        );
+        let mut exiled_ids = Vec::new();
+        for i in 0..3 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Lib Card {i}"),
+                Zone::Library,
+            );
+            exiled_ids.push(id);
+        }
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "Exile the top three cards of your library. Until the end of your next turn, you may play those cards.",
+            AbilityKind::Spell,
+        );
+        fn count_grant_subs(ability: &AbilityDefinition) -> usize {
+            let mut n = matches!(
+                ability.effect.as_ref(),
+                Effect::GrantCastingPermission { .. }
+            ) as usize;
+            if let Some(sub) = &ability.sub_ability {
+                n += count_grant_subs(sub);
+            }
+            n
+        }
+        assert_eq!(
+            count_grant_subs(&def),
+            1,
+            "parsed chain must contain exactly one GrantCastingPermission, got tree {:?}",
+            def.effect
+        );
+        assert!(
+            def.repeat_for.is_none(),
+            "impulse exile-top chain must not carry repeat_for, got {:?}",
+            def.repeat_for
+        );
+        let resolved =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+
+        let exile_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::ZoneChanged { object_id, to, .. } if *to == Zone::Exile => {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            exile_events, exiled_ids,
+            "expected one exile ZoneChanged per library card"
+        );
+
+        let tracked: Vec<_> = state
+            .tracked_object_sets
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        for id in exiled_ids {
+            let obj = &state.objects[&id];
+            assert_eq!(
+                obj.zone,
+                Zone::Exile,
+                "card {id:?} should be exiled; tracked={tracked:?}"
+            );
+            assert_eq!(
+                obj.casting_permissions.len(),
+                1,
+                "card {id:?} should receive exactly one PlayFromExile grant, got {:?}",
+                obj.casting_permissions
+            );
+        }
+    }
+
     // CR 603.4: Runtime tests for `AbilityCondition::NthResolutionThisTurn`.
 
     /// Build a minimal `ResolvedAbility` with a stamped `ability_index` for

@@ -470,6 +470,46 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
             );
         }
     }
+    if body.is_none() && scan_contains_phrase(&lower, "surge cost was paid") {
+        if let Some(after) = tp.strip_after("instead ") {
+            return (
+                Some(AbilityCondition::CastVariantPaidInstead {
+                    variant: CastVariantPaid::Surge,
+                }),
+                after.original.to_string(),
+            );
+        }
+        // CR 702.117a: "if its surge cost was paid, [effect]" — non-"instead"
+        // variant that gates a sub-ability on surge payment.
+        if let Some(after) = tp.strip_after("surge cost was paid, ") {
+            return (
+                Some(AbilityCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Surge,
+                }),
+                after.original.to_string(),
+            );
+        }
+    }
+    if body.is_none() && scan_contains_phrase(&lower, "spectacle cost was paid") {
+        if let Some(after) = tp.strip_after("instead ") {
+            return (
+                Some(AbilityCondition::CastVariantPaidInstead {
+                    variant: CastVariantPaid::Spectacle,
+                }),
+                after.original.to_string(),
+            );
+        }
+        // CR 702.137a: "if its spectacle cost was paid, [effect]" — non-"instead"
+        // variant that gates a sub-ability on spectacle payment.
+        if let Some(after) = tp.strip_after("spectacle cost was paid, ") {
+            return (
+                Some(AbilityCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Spectacle,
+                }),
+                after.original.to_string(),
+            );
+        }
+    }
 
     match body {
         Some(body) => {
@@ -2313,6 +2353,9 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceIsMonstrous
+        // CR 702.171b: the saddled designation is a static-only predicate with no
+        // effect-resolution (`AbilityCondition`) equivalent.
+        | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
@@ -3828,6 +3871,7 @@ mod tests {
                 "if the player doesn't, draw a card",
                 Some(not_effect.clone()),
             ),
+            ("if they don't, draw a card", Some(not_effect.clone())),
             ("if you do, draw a card", Some(effect.clone())),
         ];
         for (input, expected) in cases {
@@ -4368,6 +4412,40 @@ mod tests {
         let (cond, body) = strip_additional_cost_conditional("If a Dragon was beheld, surveil 2.");
         assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
         assert_eq!(body, "surveil 2.");
+    }
+
+    /// CR 702.137a + CR 603.4: Rix Maadi Reveler — "If this creature's
+    /// spectacle cost was paid, instead [effect]" → CastVariantPaidInstead
+    /// { Spectacle }, stripping the leading "instead ".
+    #[test]
+    fn spectacle_instead_emits_cast_variant_paid_instead() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If this creature's spectacle cost was paid, instead discard your hand, then draw three cards.",
+        );
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::CastVariantPaidInstead {
+                variant: CastVariantPaid::Spectacle,
+            })
+        );
+        assert_eq!(body, "discard your hand, then draw three cards.");
+    }
+
+    /// CR 702.117a + CR 603.4: surge "...instead" rider mirrors the spectacle
+    /// path — building-block coverage of the parameterized condition over a
+    /// second variant.
+    #[test]
+    fn surge_instead_emits_cast_variant_paid_instead() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If its surge cost was paid, instead draw two cards.",
+        );
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::CastVariantPaidInstead {
+                variant: CastVariantPaid::Surge,
+            })
+        );
+        assert_eq!(body, "draw two cards.");
     }
 
     /// CR 702.33b + CR 603.4: "if it was kicked twice, …" → min_count = 2.

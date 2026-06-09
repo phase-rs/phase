@@ -27,6 +27,28 @@ pub enum FlashbackCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.128a + CR 602.1a: Embalm cost — either a mana cost ("Embalm {3}{W}")
+/// or a non-mana/composite cost ("Embalm—{2}{W}{W}, Discard a card."). Mirrors
+/// `CyclingCost`/`FlashbackCost` so a composite non-mana cost composes through
+/// the existing `AbilityCost::Composite` activated-ability pipeline in
+/// `database::embalm_eternalize::token_copy_ability`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EmbalmCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+/// CR 702.129a + CR 602.1a: Eternalize cost — either a mana cost or a
+/// non-mana/composite cost ("Eternalize—{3}{U}{U}, Discard a card." — the
+/// Champion of Wits family). Mirrors `EmbalmCost`/`CyclingCost`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EternalizeCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// CR 702.29a: Cycling cost — either a mana cost or a non-mana cost
 /// (e.g., Street Wraith's "Pay 2 life"). Mirrors `FlashbackCost` so the
 /// synthesis in `database::synthesis::synthesize_cycling` can route
@@ -529,8 +551,8 @@ pub enum Keyword {
     Bestow(ManaCost),
 
     // Graveyard
-    Embalm(ManaCost),
-    Eternalize(ManaCost),
+    Embalm(EmbalmCost),
+    Eternalize(EternalizeCost),
 
     // Token / counter
     Fading(u32),
@@ -1711,8 +1733,16 @@ impl FromStr for Keyword {
                 "afterlife" => return Ok(Keyword::Afterlife(p.parse().unwrap_or(1))),
                 "reconfigure" => return Ok(Keyword::Reconfigure(parse_keyword_mana_cost(p))),
                 "bestow" => return Ok(Keyword::Bestow(parse_keyword_mana_cost(p))),
-                "embalm" => return Ok(Keyword::Embalm(parse_keyword_mana_cost(p))),
-                "eternalize" => return Ok(Keyword::Eternalize(parse_keyword_mana_cost(p))),
+                "embalm" => {
+                    return Ok(Keyword::Embalm(EmbalmCost::Mana(parse_keyword_mana_cost(
+                        p,
+                    ))))
+                }
+                "eternalize" => {
+                    return Ok(Keyword::Eternalize(EternalizeCost::Mana(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "unearth" => return Ok(Keyword::Unearth(parse_keyword_mana_cost(p))),
                 "prowl" => return Ok(Keyword::Prowl(parse_keyword_mana_cost(p))),
                 "morph" => return Ok(Keyword::Morph(parse_keyword_mana_cost(p))),
@@ -2471,8 +2501,22 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "CommanderNinjutsu" => Ok(Keyword::CommanderNinjutsu(mana(data)?)),
         "Reconfigure" => Ok(Keyword::Reconfigure(mana(data)?)),
         "Bestow" => Ok(Keyword::Bestow(mana(data)?)),
-        "Embalm" => Ok(Keyword::Embalm(mana(data)?)),
-        "Eternalize" => Ok(Keyword::Eternalize(mana(data)?)),
+        "Embalm" => {
+            // Accept both legacy ManaCost format and new EmbalmCost tagged format.
+            if let Ok(embalm_cost) = serde_json::from_value::<EmbalmCost>(data.clone()) {
+                Ok(Keyword::Embalm(embalm_cost))
+            } else {
+                Ok(Keyword::Embalm(EmbalmCost::Mana(mana(data)?)))
+            }
+        }
+        "Eternalize" => {
+            // Accept both legacy ManaCost format and new EternalizeCost tagged format.
+            if let Ok(eternalize_cost) = serde_json::from_value::<EternalizeCost>(data.clone()) {
+                Ok(Keyword::Eternalize(eternalize_cost))
+            } else {
+                Ok(Keyword::Eternalize(EternalizeCost::Mana(mana(data)?)))
+            }
+        }
         "Unearth" => Ok(Keyword::Unearth(mana(data)?)),
         "Prowl" => Ok(Keyword::Prowl(mana(data)?)),
         "Morph" => Ok(Keyword::Morph(mana(data)?)),

@@ -19,8 +19,8 @@ use crate::types::ability::{
     TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
-    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost,
-    Keyword, WardCost,
+    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
+    EternalizeCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -713,6 +713,48 @@ fn parse_cycling_cost(cost_text: &str) -> Option<CyclingCost> {
     }
 }
 
+/// CR 702.128a + CR 602.1a: Parse an Embalm em-dash cost ("embalm—{2}{W}{W},
+/// discard a card" → `EmbalmCost::NonMana(Composite[..])`). Mirrors
+/// `parse_cycling_cost`: reminder-strip, delegate to `parse_oracle_cost`, wrap a
+/// single `Mana` cost in `Mana`, anything composite/non-mana in `NonMana`, and
+/// reject `Unimplemented`.
+fn parse_embalm_cost(cost_text: &str) -> Option<EmbalmCost> {
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    match super::oracle_cost::parse_oracle_cost(clean) {
+        AbilityCost::Mana { cost: mana_cost } => Some(EmbalmCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(EmbalmCost::NonMana(other)),
+    }
+}
+
+/// CR 702.129a + CR 602.1a: Parse an Eternalize em-dash cost
+/// ("eternalize—{3}{U}{U}, discard a card" → `EternalizeCost::NonMana(..)`,
+/// Champion of Wits family). Mirrors `parse_embalm_cost`/`parse_cycling_cost`.
+fn parse_eternalize_cost(cost_text: &str) -> Option<EternalizeCost> {
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    match super::oracle_cost::parse_oracle_cost(clean) {
+        AbilityCost::Mana { cost: mana_cost } => Some(EternalizeCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(EternalizeCost::NonMana(other)),
+    }
+}
+
 fn parse_bloodthirst_keyword_line(line: &str) -> Option<Keyword> {
     let lower = line.to_ascii_lowercase();
     let stripped = strip_reminder_text(&lower);
@@ -1138,6 +1180,27 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("echo\u{2014}").parse(text) {
         if let Some(echo_cost) = parse_echo_cost(rest) {
             return Some(Keyword::Echo(echo_cost));
+        }
+    }
+
+    // CR 702.128a + CR 602.1a: Embalm with em-dash cost — composite mana +
+    // non-mana ("embalm—{2}{W}{W}, discard a card"). Pure-mana embalm
+    // ("Embalm {3}{W}") arrives via MTGJSON's keywords array (FromStr path).
+    // `parse_embalm_cost` delegates to `parse_oracle_cost` so comma-separated
+    // parts compose into `AbilityCost::Composite`; synthesis then appends the
+    // mandatory self-exile sub-cost.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("embalm\u{2014}").parse(text) {
+        if let Some(embalm_cost) = parse_embalm_cost(rest) {
+            return Some(Keyword::Embalm(embalm_cost));
+        }
+    }
+
+    // CR 702.129a + CR 602.1a: Eternalize with em-dash cost — composite mana +
+    // non-mana ("eternalize—{3}{U}{U}, discard a card", Champion of Wits family).
+    // Pure-mana eternalize arrives via the FromStr path above.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("eternalize\u{2014}").parse(text) {
+        if let Some(eternalize_cost) = parse_eternalize_cost(rest) {
+            return Some(Keyword::Eternalize(eternalize_cost));
         }
     }
 
@@ -3207,6 +3270,61 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 }
             }
         );
+    }
+
+    /// CR 702.129a + CR 602.1a: Champion of Wits family —
+    /// "eternalize—{3}{U}{U}, discard a card" must parse to
+    /// `Eternalize(EternalizeCost::NonMana(Composite[Mana{3UU}, Discard]))`,
+    /// i.e. the discard suffix is NOT dropped.
+    #[test]
+    fn parse_keyword_from_oracle_eternalize_em_dash_discard() {
+        use crate::types::mana::ManaCostShard;
+
+        let kw = parse_keyword_from_oracle("eternalize\u{2014}{3}{u}{u}, discard a card").unwrap();
+        let Keyword::Eternalize(EternalizeCost::NonMana(AbilityCost::Composite { costs })) = kw
+        else {
+            panic!("expected Eternalize NonMana(Composite), got {kw:?}");
+        };
+        assert_eq!(
+            costs.len(),
+            2,
+            "mana + discard, no exile-self yet (synthesis)"
+        );
+        let AbilityCost::Mana { cost: mana } = &costs[0] else {
+            panic!("expected Mana sub-cost, got {:?}", costs[0]);
+        };
+        assert_eq!(
+            mana,
+            &ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            }
+        );
+        assert!(
+            matches!(&costs[1], AbilityCost::Discard { .. }),
+            "discard suffix must survive, got {:?}",
+            costs[1]
+        );
+    }
+
+    /// CR 702.128a: Embalm em-dash composite cost parses the discard suffix.
+    #[test]
+    fn parse_keyword_from_oracle_embalm_em_dash_discard() {
+        let kw = parse_keyword_from_oracle("embalm\u{2014}{2}{w}{w}, discard a card").unwrap();
+        let Keyword::Embalm(EmbalmCost::NonMana(AbilityCost::Composite { costs })) = kw else {
+            panic!("expected Embalm NonMana(Composite), got {kw:?}");
+        };
+        assert_eq!(costs.len(), 2);
+        assert!(matches!(&costs[0], AbilityCost::Mana { .. }));
+        assert!(matches!(&costs[1], AbilityCost::Discard { .. }));
+    }
+
+    /// Regression: pure-mana embalm/eternalize still dispatch through the direct
+    /// `FromStr` path to the `Mana` variant (backward compat at the keyword level).
+    #[test]
+    fn parse_keyword_from_oracle_eternalize_mana_backward_compat() {
+        let kw = parse_keyword_from_oracle("eternalize {3}{b}{b}").unwrap();
+        assert!(matches!(kw, Keyword::Eternalize(EternalizeCost::Mana(_))));
     }
 
     /// CR 702.34a regression: Battle Screech's tap-creatures flashback shape

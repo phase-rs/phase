@@ -515,12 +515,13 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
 
     // CR 715.3d + CR 400.7i: Cards in exile with casting permissions are
     // castable by their owner, except PlayFromExile binds to the player the
-    // resolving effect granted the permission to.
+    // resolving effect granted the permission to. CR 305.1 land exclusion lives
+    // in `exile_object_castable_by_permission`.
     objects.extend(state.exile.iter().copied().filter(|&obj_id| {
         state
             .objects
             .get(&obj_id)
-            .is_some_and(|obj| has_exile_cast_permission(state, obj, player, state.turn_number))
+            .is_some_and(|obj| exile_object_castable_by_permission(state, obj, player))
     }));
 
     // CR 601.2a + CR 611.2a: Opponent's exiled cards with an alt-cost
@@ -1227,6 +1228,25 @@ fn has_exile_cast_permission(
         || exile_cast_permission_source(state, player, obj.id).is_some()
 }
 
+/// CR 305.1 + CR 601.2a: Lands in exile may be played by permissions that say
+/// "play", but they never enter the spell-cast path.
+fn exile_object_can_enter_cast_path(obj: &GameObject) -> bool {
+    obj.zone == Zone::Exile
+        && !obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+}
+
+fn exile_object_castable_by_permission(
+    state: &GameState,
+    obj: &GameObject,
+    player: PlayerId,
+) -> bool {
+    exile_object_can_enter_cast_path(obj)
+        && has_exile_cast_permission(state, obj, player, state.turn_number)
+}
+
 pub(super) fn cast_permission_constraint_allows_cast(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -1752,19 +1772,7 @@ fn exile_objects_castable_by_permission(
             let Some(obj) = state.objects.get(&exiled_id) else {
                 continue;
             };
-            if obj.zone != Zone::Exile {
-                continue;
-            }
-            // CR 305.1 + CR 116.1: Land cards are never offered through the
-            // cast path — they are "played", not "cast". For `Play` sources
-            // (The Matrix of Time) lands are surfaced via
-            // `exile_lands_playable_by_permission`; for `Cast` sources lands
-            // are never eligible.
-            if obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-            {
+            if !exile_object_can_enter_cast_path(obj) {
                 continue;
             }
             if super::filter::matches_target_filter(state, exiled_id, source.filter, &ctx) {
@@ -1807,7 +1815,7 @@ pub(crate) fn exile_cast_permission_source(
     exiled_id: ObjectId,
 ) -> Option<(ObjectId, CastFrequency, ExileCastCost)> {
     let obj = state.objects.get(&exiled_id)?;
-    if obj.zone != Zone::Exile {
+    if !exile_object_can_enter_cast_path(obj) {
         return None;
     }
     // Same empty-pool fast exit as `exile_objects_castable_by_permission`: with
@@ -1824,17 +1832,6 @@ pub(crate) fn exile_cast_permission_source(
         // CR 117.1c: A `YourTurnOnly` permission does not authorize a cast
         // outside the controller's turn.
         if !exile_permission_timing_active(state, &source, player) {
-            return None;
-        }
-        // CR 305.1 + CR 116.1: Lands are played, not cast — the cast-finalize
-        // path never authorizes a land here. The land-play path
-        // (`exile_lands_playable_by_permission`) admits lands for `Play`
-        // sources.
-        if obj
-            .card_types
-            .core_types
-            .contains(&crate::types::card_type::CoreType::Land)
-        {
             return None;
         }
         let pool = exile_permission_pool(state, &source);
@@ -41066,6 +41063,42 @@ mod tests {
         assert!(
             !spell_objects_available_to_cast(&state, player).contains(&land),
             "lands are never offered on the cast path"
+        );
+    }
+
+    /// CR 305.1 + CR 400.7i: Object-tagged `PlayFromExile` impulse grants (The
+    /// Legend of Roku chapter I, Act on Impulse class) surface exiled lands on
+    /// the play-land path only — never on `spell_objects_available_to_cast`.
+    #[test]
+    fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let land = add_exiled_land(&mut state, player, "Exiled Forest");
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
+                granted_to: player,
+                frequency: CastFrequency::Unlimited,
+                source_id: Some(ObjectId(999)),
+                exiled_by_ability_controller: Some(player),
+                mana_spend_permission: None,
+            });
+
+        assert!(
+            exile_lands_playable_by_permission(&state, player)
+                .iter()
+                .any(|(id, _)| *id == land),
+            "impulse-granted exiled land must be playable"
+        );
+        assert!(
+            !spell_objects_available_to_cast(&state, player).contains(&land),
+            "impulse-granted lands must not surface on the cast path"
         );
     }
 

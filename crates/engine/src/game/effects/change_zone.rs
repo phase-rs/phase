@@ -6581,4 +6581,106 @@ mod tests {
             "the chosen milled card moves to hand"
         );
     }
+
+    /// Regression test for issue #2382: a DFC that enters the battlefield
+    /// transformed (front face = non-PW, back face = PW with loyalty 3) must
+    /// enter with the correct loyalty counters so the layer system derives
+    /// the right loyalty and the planeswalker survives its own -1 activation.
+    #[test]
+    fn enter_transformed_seeds_back_face_loyalty_counters() {
+        use crate::game::game_object::BackFaceData;
+        use crate::types::ability::TargetRef;
+        use crate::types::card_type::{CardType, CoreType};
+        use crate::types::mana::ManaCost;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sorin of House Markov".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            // Front face: Vampire, no loyalty
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Vampire".to_string()],
+            };
+            obj.loyalty = None;
+            obj.base_characteristics_initialized = true;
+            // Back face: Sorin, Ravenous Neonate — planeswalker with loyalty 3
+            obj.back_face = Some(BackFaceData {
+                name: "Sorin, Ravenous Neonate".to_string(),
+                power: None,
+                toughness: None,
+                loyalty: Some(3),
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
+                    subtypes: vec!["Sorin".to_string()],
+                },
+                mana_cost: ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: None,
+            });
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: true,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).ok();
+        crate::game::layers::flush_layers(&mut state);
+
+        let obj = state.objects.get(&obj_id).expect("object on battlefield");
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "Sorin must be on the battlefield"
+        );
+        assert!(obj.transformed, "Sorin must show back face");
+        assert_eq!(
+            obj.counters
+                .get(&CounterType::Loyalty)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "back-face loyalty counters must be seeded (issue #2382)"
+        );
+        assert_eq!(
+            obj.loyalty,
+            Some(3),
+            "layer-derived loyalty must equal the seeded loyalty counters"
+        );
+    }
 }

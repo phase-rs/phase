@@ -2354,6 +2354,9 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     if target_relative_clause_owns_suffix(lower.as_str()) {
         return (text, None);
     }
+    // Per-turn quantity clauses can own "this turn" themselves (for example,
+    // "where X is the number of tokens you created this turn"). In that shape the
+    // suffix belongs to the quantity grammar, not to the outer effect duration.
     for (suffix, duration) in [
         (" this turn", Duration::UntilEndOfTurn),
         (" until end of turn", Duration::UntilEndOfTurn),
@@ -2408,6 +2411,9 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         ),
     ] {
         if lower.ends_with(suffix) {
+            if suffix == " this turn" && quantity_clause_owns_this_turn_suffix(&lower) {
+                continue;
+            }
             let end = duration_text.len() - suffix.len();
             return (
                 duration_text[..end].trim_end_matches(',').trim(),
@@ -2476,6 +2482,51 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     }
 
     (text, None)
+}
+
+fn quantity_clause_owns_this_turn_suffix(lower: &str) -> bool {
+    where_x_quantity_clause_owns_this_turn_suffix(lower)
+        || for_each_quantity_clause_owns_this_turn_suffix(lower)
+}
+
+fn where_x_quantity_clause_owns_this_turn_suffix(lower: &str) -> bool {
+    let Ok((where_clause, _)) = preceded(
+        take_until::<_, _, OracleError<'_>>("where x is "),
+        tag::<_, _, OracleError<'_>>("where x is "),
+    )
+    .parse(lower) else {
+        return false;
+    };
+    let normalized = where_clause.trim();
+    let Ok((_, quantity_before_this_turn)) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" this turn"),
+        tag::<_, _, OracleError<'_>>(" this turn"),
+    ))
+    .parse(normalized) else {
+        return false;
+    };
+    let expression_end = quantity_before_this_turn.len() + " this turn".len();
+    parse_where_x_quantity_expression(&normalized[..expression_end]).is_some()
+}
+
+fn for_each_quantity_clause_owns_this_turn_suffix(lower: &str) -> bool {
+    let Ok((for_each_clause, _)) = preceded(
+        take_until::<_, _, OracleError<'_>>(" for each "),
+        tag::<_, _, OracleError<'_>>(" for each "),
+    )
+    .parse(lower) else {
+        return false;
+    };
+    let normalized = for_each_clause.trim();
+    let Ok((_, quantity_before_this_turn)) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" this turn"),
+        tag::<_, _, OracleError<'_>>(" this turn"),
+    ))
+    .parse(normalized) else {
+        return false;
+    };
+    let expression_end = quantity_before_this_turn.len() + " this turn".len();
+    parse_for_each_clause(&normalized[..expression_end]).is_some()
 }
 
 fn target_relative_clause_owns_suffix(input: &str) -> bool {
@@ -5295,7 +5346,8 @@ mod tests {
 mod where_x_tests {
     use super::parse_where_x_quantity_expression;
     use crate::types::ability::{
-        ControllerRef, ObjectScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        ControllerRef, Duration, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
+        TypeFilter,
     };
 
     /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
@@ -5313,6 +5365,37 @@ mod where_x_tests {
         );
     }
 
+    #[test]
+    fn where_x_tokens_created_this_turn_binds_typed_quantity() {
+        use crate::types::ability::{FilterProp, PlayerScope, TargetFilter, TypedFilter};
+
+        assert_eq!(
+            parse_where_x_quantity_expression("the number of tokens you created this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::TokensCreatedThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: None,
+                        properties: vec![FilterProp::Token],
+                    }),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn where_x_life_lost_this_turn_binds_typed_quantity() {
+        assert_eq!(
+            parse_where_x_quantity_expression("the life you've lost this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller
+                },
+            })
+        );
+    }
+
     /// Issue #1993: Halana and Alena, Partners — "where X is [name]'s power".
     #[test]
     fn where_x_printed_name_possessive_power_is_source() {
@@ -5324,6 +5407,68 @@ mod where_x_tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn strip_trailing_duration_preserves_tokens_created_this_turn_phrase() {
+        use super::strip_trailing_duration;
+
+        let text = "create X 1/1 white Spirit creature tokens with flying, where X is the number of tokens you created this turn.";
+        let (stripped, duration) = strip_trailing_duration(text);
+        assert!(
+            duration.is_none(),
+            "quantity tracker must not become a duration"
+        );
+        assert_eq!(stripped, text);
+    }
+
+    #[test]
+    fn strip_trailing_duration_preserves_where_x_life_lost_this_turn_phrase() {
+        use super::strip_trailing_duration;
+
+        let text = "draw X cards, where X is the life you've lost this turn.";
+        let (stripped, duration) = strip_trailing_duration(text);
+        assert!(
+            duration.is_none(),
+            "quantity tracker must not become a duration"
+        );
+        assert_eq!(stripped, text);
+    }
+
+    #[test]
+    fn strip_trailing_duration_preserves_life_lost_this_turn_phrase() {
+        use super::strip_trailing_duration;
+
+        let text = "draw a card for each opponent who lost life this turn.";
+        let (stripped, duration) = strip_trailing_duration(text);
+        assert!(duration.is_none());
+        assert_eq!(stripped, text);
+    }
+
+    #[test]
+    fn strip_trailing_duration_still_strips_outer_duration_after_where_x_clause() {
+        use super::strip_trailing_duration;
+
+        let text = "draw X cards, where X is the life you've lost this turn, then target creature gets +1/+1 this turn.";
+        let (stripped, duration) = strip_trailing_duration(text);
+        assert_eq!(
+            duration,
+            Some(Duration::UntilEndOfTurn),
+            "outer duration must still be recognized"
+        );
+        assert_eq!(
+            stripped,
+            "draw X cards, where X is the life you've lost this turn, then target creature gets +1/+1"
+        );
+    }
+
+    #[test]
+    fn strip_trailing_duration_still_strips_genuine_this_turn_duration() {
+        use super::strip_trailing_duration;
+
+        let (stripped, duration) = strip_trailing_duration("that creature gains haste this turn.");
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(stripped, "that creature gains haste");
     }
 
     /// The new delegation must NOT shadow `parse_cda_quantity`: "the number of

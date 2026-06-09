@@ -320,6 +320,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::VoteCount { .. }
         | QuantityRef::CommanderCastFromCommandZoneCount => false,
     }
 }
@@ -489,6 +490,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::VoteCount { .. }
         | QuantityRef::CommanderCastFromCommandZoneCount => false,
     }
 }
@@ -1801,6 +1803,18 @@ fn resolve_ref(
         QuantityRef::DistinctCounterKindsAmong { filter } => {
             usize_to_i32_saturating(distinct_counter_kinds_among(state, filter, &filter_ctx).len())
         }
+        // CR 701.38 + CR 608.2c: Number of votes tallied for `choice_index`,
+        // counting ballots (not voters) from `state.last_vote_ballots`. Summing
+        // ballots — rather than counting distinct voters — is the consequence of
+        // CR 701.38d: a player granted multiple votes casts multiple ballots, so
+        // a single player can contribute more than one to a choice's tally.
+        QuantityRef::VoteCount { choice_index } => usize_to_i32_saturating(
+            state
+                .last_vote_ballots
+                .iter()
+                .filter(|(_, ballot_choice)| *ballot_choice == *choice_index)
+                .count(),
+        ),
         // CR 305.6: Count distinct basic land types among lands controlled by
         // the referenced player. Domain counts distinct land subtypes, not
         // lands, so multiple Forests still contribute one.
@@ -9625,5 +9639,36 @@ mod tests {
             cause: PhaseOutCause::Directly,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+    }
+
+    /// CR 701.38 + CR 701.38d + CR 608.2c: `VoteCount` counts ballots, not
+    /// voters. A player granted multiple votes casts multiple ballots, so a
+    /// single player can contribute more than one to a choice's tally. Build a
+    /// ledger where P1 voted twice for choice 0 and assert the tally is 3
+    /// (P0 once + P1 twice), with choice 1 resolving to 0 (no ballots).
+    #[test]
+    fn vote_count_sums_ballots_not_voters() {
+        let mut state = GameState::new_two_player(42);
+        // (voter, choice_index): P0 → 0, P1 → 0, P1 → 0 (multi-vote player).
+        state.last_vote_ballots.push_back((PlayerId(0), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 0));
+
+        let choice0 = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 0 },
+        };
+        let choice1 = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 1 },
+        };
+        // 3 ballots for choice 0 (votes, not the 2 distinct voters).
+        assert_eq!(
+            resolve_quantity(&state, &choice0, PlayerId(0), ObjectId(0)),
+            3
+        );
+        // No ballots for choice 1.
+        assert_eq!(
+            resolve_quantity(&state, &choice1, PlayerId(0), ObjectId(0)),
+            0
+        );
     }
 }

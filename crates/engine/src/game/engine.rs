@@ -3717,6 +3717,11 @@ fn apply_action(
             &creature_ids,
             &mut events,
         )?,
+        // CR 601.2c: no cost is paid until the saddle announcement, so backing out
+        // restores priority with no state to undo.
+        (WaitingFor::SaddleMount { player, .. }, GameAction::CancelCast) => {
+            WaitingFor::Priority { player: *player }
+        }
         (WaitingFor::Priority { player }, GameAction::Transform { object_id }) => {
             let p = *player;
             let obj = state
