@@ -16,8 +16,11 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::statics::StaticMode;
 
+// Self-reference inside the token's quoted text is normalized to `~` in the
+// shipped card data (`client/public/card-data.json`), so the regression uses the
+// `~` form verbatim — the exact string the cast pipeline sees in a real game.
 const ORACLE: &str = "You gain X life. Create X 1/1 colorless Phyrexian Mite artifact \
-creature tokens with toxic 1 and \"This token can't block.\" If X is 5 or more, destroy \
+creature tokens with toxic 1 and \"~ can't block.\" If X is 5 or more, destroy \
 all other creatures.";
 
 fn mana(color: ManaType) -> ManaUnit {
