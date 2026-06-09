@@ -930,8 +930,8 @@ pub(crate) fn parse_bare_becomes_type_replacement_modifications(
 ///     and indestructible" (Grand Master of Flowers — CR 613.4b fixed P/T,
 ///     CR 613.1d type grant, CR 613.1g keyword grant)
 ///
-/// Accepts all gender-neutral and gendered pronouns that appear on Oracle cards
-/// ("it's", "~'s", "he's", "she's"). Delegates body parsing to
+/// Accepts gender-neutral and gendered pronouns ("it's", "~'s", "they're",
+/// "he's", "she's"). Delegates body parsing to
 /// `parse_animation_spec` + `animation_modifications` (which handles fixed P/T,
 /// dynamic P/T-by-MV, types, subtypes, and keyword tails in one pass), falling
 /// back to the prior type-only + MV-dynamic-P/T path if the spec parser returns
@@ -949,13 +949,16 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         None => (*tp, None),
     };
 
-    // STEP B — pronoun + article prefix. Accept gender-neutral ("it's", "~'s")
-    // and gendered ("he's", "she's") pronouns; planeswalker animation statics
-    // use gendered pronouns (Grand Master of Flowers, Kaito, Gideon classes).
+    // STEP B — pronoun + article prefix. Accept gender-neutral ("it's", "~'s",
+    // "they're") and gendered ("he's", "she's") pronouns; planeswalker
+    // animation statics use gendered pronouns (Grand Master of Flowers, Kaito,
+    // Gideon classes).
     let body = nom_tag_tp(&effect_tp, "it's a ")
         .or_else(|| nom_tag_tp(&effect_tp, "it's an "))
         .or_else(|| nom_tag_tp(&effect_tp, "~'s a "))
         .or_else(|| nom_tag_tp(&effect_tp, "~'s an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "they're a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "they're an "))
         .or_else(|| nom_tag_tp(&effect_tp, "he's a "))
         .or_else(|| nom_tag_tp(&effect_tp, "he's an "))
         .or_else(|| nom_tag_tp(&effect_tp, "she's a "))

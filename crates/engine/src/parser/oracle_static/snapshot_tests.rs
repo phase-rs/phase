@@ -983,3 +983,41 @@ fn gendered_pronoun_she_becomes_creature_static() {
         "expected a HasCounters condition; got None"
     );
 }
+
+/// CR 613.1d + CR 613.4b + CR 613.1g: neutral-plural "they're a" pronoun
+/// variant stays on the same composable animation path as he/she/it forms.
+#[test]
+fn neutral_plural_pronoun_they_becomes_creature_static() {
+    let text = "they're a 4/4 Angel creature with vigilance.";
+    let def = parse_static_line(text).unwrap_or_else(|| {
+        panic!("neutral-plural they're-a animation static must parse; text = {text:?}")
+    });
+    let mods = &def.modifications;
+
+    assert!(
+        mods.contains(&ContinuousModification::SetPower { value: 4 }),
+        "expected SetPower(4) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetToughness { value: 4 }),
+        "expected SetToughness(4) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature
+        }),
+        "expected AddType(Creature) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Angel".to_string()
+        }),
+        "expected AddSubtype(Angel) in {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Vigilance
+        }),
+        "expected AddKeyword(Vigilance) in {mods:?}"
+    );
+}
