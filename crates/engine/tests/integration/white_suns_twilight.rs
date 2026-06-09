@@ -104,8 +104,10 @@ fn opponent_creature(runner: &GameRunner) -> Option<engine::types::identifiers::
 ///
 /// CR 111.3 + CR 111.4: the token's quoted "can't block" is the token's text,
 /// not a host static — so the spell's gain/create/destroy chain must run.
-/// CR 109.1: "other" excludes the same-resolution created tokens. CR 119.3: life
-/// gain. CR 701.7: destroy. CR 702.164: Toxic.
+/// CR 109.1 (object identity, the basis for "another"/"other"): the official
+/// ruling resolves "other" to exclude the same-resolution created tokens.
+/// CR 119.3: life gain. CR 701.7: create tokens. CR 701.8: destroy.
+/// CR 702.164: Toxic.
 #[test]
 fn white_suns_twilight_x5_gains_creates_and_spares_own_mites() {
     let (runner, outcome) = cast_white_suns_twilight(5);
