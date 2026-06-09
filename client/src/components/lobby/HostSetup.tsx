@@ -8,6 +8,7 @@ import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStor
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { expandParsedDeck } from "../../services/deckParser";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { SelectField } from "../ui/SelectField";
 
 export type { AiSeatConfig };
 export type HostSettings = HostingSettings;
@@ -410,11 +411,12 @@ export function HostSetup({
                 win: iOS/Android render touch-optimized pickers from <select>.
                 <optgroup>s mirror the engine's FormatGroup taxonomy. */}
             <Field label={t("hostSetup.format")} htmlFor="host-setup-format" hint={formatMeta?.description}>
-              <select
+              <SelectField
+                wrapperClassName="w-full"
                 id="host-setup-format"
                 value={selectedFormat}
                 onChange={(e) => handleFormatSelect(e.target.value as GameFormat)}
-                className={`${inp} min-h-[44px] cursor-pointer font-medium`}
+                className={`${inp} min-h-[44px] w-full cursor-pointer font-medium`}
               >
                 {(Object.keys(GROUP_ORDER) as FormatGroup[])
                   .sort((a, b) => GROUP_ORDER[a] - GROUP_ORDER[b])
@@ -431,7 +433,7 @@ export function HostSetup({
                       </optgroup>
                     );
                   })}
-              </select>
+              </SelectField>
             </Field>
 
             <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
@@ -599,17 +601,19 @@ export function HostSetup({
                         {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
                       </button>
                       {aiSeat ? (
-                        <select
+                        <SelectField
+                          chevronSize="sm"
+                          wrapperClassName="ml-auto"
                           value={aiSeat.difficulty}
                           onChange={(e) => setAiDifficulty(seatIndex, e.target.value)}
-                          className="ml-auto rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] text-white outline-none"
+                          className="rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] text-white outline-none"
                         >
                           {DIFFICULTY_OPTIONS.map((d) => (
                             <option key={d} value={d} className="bg-[#0a0f1b] text-slate-100">
                               {d}
                             </option>
                           ))}
-                        </select>
+                        </SelectField>
                       ) : (
                         <span className="ml-auto text-[11px] text-fg-meta">{t("hostSetup.waitingForPlayer")}</span>
                       )}

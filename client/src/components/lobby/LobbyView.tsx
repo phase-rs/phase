@@ -11,6 +11,7 @@ import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
 import { ServerFlag } from "./ServerFlag";
 import { ServerPicker } from "./ServerPicker";
+import { SelectField } from "../ui/SelectField";
 
 interface LobbyViewProps {
   onHostGame: () => void;
@@ -321,7 +322,7 @@ export function LobbyView({
           <span className="text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
             {t("lobbyView.format")}
           </span>
-          <select
+          <SelectField
             id="lobby-format-filter"
             value={formatFilter ?? FILTER_ALL_SENTINEL}
             onChange={(e) =>
@@ -343,7 +344,7 @@ export function LobbyView({
                 ))}
               </optgroup>
             ))}
-          </select>
+          </SelectField>
         </label>
       )}
 

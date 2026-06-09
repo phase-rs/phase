@@ -13,6 +13,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { CardPreview } from "../components/card/CardPreview";
+import { SelectField } from "../components/ui/SelectField";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
@@ -242,7 +243,7 @@ function PodSetup() {
         {/* Pod size */}
         <div className="flex flex-col gap-1">
           <label className="text-sm font-medium text-white/60">{t("podSetup.podSize")}</label>
-          <select
+          <SelectField
             value={config.podSize}
             onChange={(e) => setConfig({ podSize: Number(e.target.value) })}
             className="w-32 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-white outline-none focus:border-emerald-400/40"
@@ -252,7 +253,7 @@ function PodSetup() {
                 {t("podSetup.playerCount", { count: n })}
               </option>
             ))}
-          </select>
+          </SelectField>
           <p className="text-xs text-white/40">{podSizeDescription}</p>
         </div>
 

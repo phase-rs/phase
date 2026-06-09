@@ -12,6 +12,7 @@ import {
 } from "../../stores/multiplayerStore";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { expandParsedDeck } from "../../services/deckParser";
+import { SelectField } from "../ui/SelectField";
 
 const AI_DIFFICULTIES = ["Easy", "Medium", "Hard", "VeryHard"] as const;
 const RANDOM_DECK: DeckChoice = { type: "Random" };
@@ -123,7 +124,8 @@ function SeatRow({
           )}
           {slot.kind.type === "Ai" && (
             <>
-              <select
+              <SelectField
+                chevronSize="sm"
                 value={slot.kind.data.difficulty}
                 onChange={(e) =>
                   mutate({
@@ -147,8 +149,9 @@ function SeatRow({
                     {t(`menu:aiDifficulty.levels.${difficulty}`)}
                   </option>
                 ))}
-              </select>
-              <select
+              </SelectField>
+              <SelectField
+                chevronSize="sm"
                 value={selectedDeckKey}
                 onChange={(e) =>
                   mutate({
@@ -176,7 +179,7 @@ function SeatRow({
                     {label}
                   </option>
                 ))}
-              </select>
+              </SelectField>
               <button
                 type="button"
                 onClick={() =>

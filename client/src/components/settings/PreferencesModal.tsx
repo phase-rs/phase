@@ -38,6 +38,7 @@ import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
+import { SelectField } from "../ui/SelectField";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
@@ -344,7 +345,8 @@ export function PreferencesModal({
                     }`}
                   >
                     <SettingGroup label={t("gameplay.boardBackground")}>
-                      <select
+                      <SelectField
+                        wrapperClassName="w-full"
                         value={boardBackground}
                         onChange={(e) => setBoardBackground(e.target.value)}
                         className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
@@ -358,7 +360,7 @@ export function PreferencesModal({
                             ))}
                           </optgroup>
                         ))}
-                      </select>
+                      </SelectField>
                       {boardBackground === "custom" && (
                         <input
                           type="url"
@@ -544,7 +546,8 @@ export function PreferencesModal({
 
                 <SettingsSection title={t("audioTheme.title")}>
                   <SettingGroup label={t("audioTheme.theme")}>
-                    <select
+                    <SelectField
+                      wrapperClassName="w-full"
                       value={audioThemeId}
                       onChange={(e) => handleThemeChange(e.target.value)}
                       className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 focus:border-sky-400/40 focus:outline-none"
@@ -555,7 +558,7 @@ export function PreferencesModal({
                       {customThemeUrls.map((t) => (
                         <option key={t.id} value={t.id}>{t.id}</option>
                       ))}
-                    </select>
+                    </SelectField>
                   </SettingGroup>
 
                   <SettingGroup label={t("audioTheme.importTheme")}>

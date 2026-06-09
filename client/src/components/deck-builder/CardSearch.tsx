@@ -6,6 +6,7 @@ import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { useSetList } from "../../hooks/useSetList";
 import { hasSearchCriteria } from "./searchFilters";
+import { SelectField } from "../ui/SelectField";
 
 const DEBOUNCE_MS = 300;
 const MANA_COLORS = ["W", "U", "B", "R", "G"] as const;
@@ -301,7 +302,7 @@ export function CardSearch({
         ))}
       </div>
 
-      <select
+      <SelectField
         value={filters.type}
         onChange={(e) => handleTypeChange(e.target.value)}
         className="rounded-[16px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:border-white/20 focus:outline-none"
@@ -312,7 +313,7 @@ export function CardSearch({
             {cardType}
           </option>
         ))}
-      </select>
+      </SelectField>
 
       <div className="flex items-center gap-2">
         <label className="text-xs text-gray-400">{t("search.cmcMax")}</label>
@@ -326,7 +327,7 @@ export function CardSearch({
         />
       </div>
 
-      <select
+      <SelectField
         value={filters.browseFormat}
         onChange={(e) => handleBrowseFormatChange(e.target.value as BrowserLegalityFilter)}
         className="rounded-[16px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:border-white/20 focus:outline-none"
@@ -336,7 +337,7 @@ export function CardSearch({
             {label}
           </option>
         ))}
-      </select>
+      </SelectField>
 
       <div className="space-y-2">
         <label className="text-xs text-gray-400">{t("search.sets")}</label>
