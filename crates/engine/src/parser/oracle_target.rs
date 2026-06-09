@@ -3961,9 +3961,20 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
         }
     }
 
+    // CR 702.113: "card with awaken" (and the other parameterized graveyard/cast
+    // keywords) is a keyword-presence meta-reference that must match by
+    // discriminant, not exact payload — a `WithKeyword(Awaken { count, cost })`
+    // would never match a real instance. Route to `KeywordMatch::Kind`.
     if matches!(
         text,
-        "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
+        "flashback"
+            | "cycling"
+            | "escape"
+            | "embalm"
+            | "eternalize"
+            | "harmonize"
+            | "unearth"
+            | "awaken"
     ) {
         let kind = match text {
             "flashback" => KeywordKind::Flashback,
@@ -3973,6 +3984,7 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             "eternalize" => KeywordKind::Eternalize,
             "harmonize" => KeywordKind::Harmonize,
             "unearth" => KeywordKind::Unearth,
+            "awaken" => KeywordKind::Awaken, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
             _ => unreachable!(),
         };
         return Some(KeywordMatch::Kind(kind));
@@ -7524,6 +7536,18 @@ mod tests {
         let (filter, rest) = parse_target("each of two target creatures");
         assert_eq!(filter, TargetFilter::Typed(TypedFilter::creature()));
         assert_eq!(rest, "");
+    }
+
+    /// CR 702.113: "card with awaken" is a parameterized-keyword presence
+    /// meta-reference and must map to `KeywordMatch::Kind(Awaken)` (matched by
+    /// discriminant), not an exact-payload `WithKeyword` that never matches a
+    /// real `Awaken { count, cost }`. Mirrors the flashback/cycling/escape arms.
+    #[test]
+    fn parse_keyword_match_awaken_is_kind() {
+        assert!(matches!(
+            parse_keyword_match("awaken"),
+            Some(KeywordMatch::Kind(KeywordKind::Awaken))
+        ));
     }
 
     #[test]

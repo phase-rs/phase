@@ -771,6 +771,15 @@ pub fn synthesize_mentor(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Mentor));
 }
 
+/// CR 702.149a: Install the printed Training trigger ("Whenever this creature and
+/// at least one other creature with greater power attack, put a +1/+1 counter on
+/// this creature"). `install_matching` dedupes and emits one trigger per
+/// instance (CR 702.149b: each instance triggers separately), mirroring
+/// `synthesize_mentor`.
+pub fn synthesize_training(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Training));
+}
+
 /// CR 603.6a + CR 205.3 + CR 105.2: Synthesize a "keyword ETB → create
 /// typed token → attach this Equipment" trigger. Shared shape for any
 /// keyword whose CR text follows the template:
@@ -8550,6 +8559,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.134a: Mentor — attack trigger placing a +1/+1 counter on a
     // lesser-power attacking creature.
     synthesize_mentor(face);
+    // CR 702.149a: Training — attack trigger placing a +1/+1 counter when a
+    // greater-power creature also attacks.
+    synthesize_training(face);
     synthesize_job_select(face);
     // CR 702.92a: Living weapon — Equipment ETB trigger creating a 0/0
     // black Phyrexian Germ creature token, then attaching this Equipment
@@ -11068,6 +11080,72 @@ mod fabricate_runtime_tests {
         }
     }
 
+    /// CR 702.123a + CR 608.2a/608.2b: Fabricate is a non-targeted trigger with
+    /// NO intervening-if, so when the source leaves the battlefield before the
+    /// ETB trigger resolves, the trigger is NOT removed (608.2a needs a false
+    /// intervening-if; 608.2b needs all-illegal targets — neither applies). The
+    /// controller keeps the free branch choice; the servo branch creates tokens
+    /// independent of the source. (Auto-defaulting to servos would violate
+    /// CR 702.123a — it is a genuine free choice.)
+    #[test]
+    fn fabricate_e2e_source_gone_servo_branch_still_creates_tokens() {
+        let face = fabricate_creature_face("Cultivator of Blades", 2);
+        let (mut state, obj_id) = cast_and_resolve_fabricate_to_choice(&face, PlayerId(0));
+
+        // Bounce the source out of the battlefield while the choice is pending.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Hand, &mut events);
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().zone,
+            Zone::Hand,
+            "source must have left the battlefield"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "the trigger must NOT abort when the source leaves; the choice is still pending"
+        );
+
+        // Servo branch resolves with the source gone — tokens still created.
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
+            .expect("servo branch must resolve with the source gone");
+
+        let servos = state
+            .objects
+            .values()
+            .filter(|obj| obj.name == "Servo" && obj.is_token)
+            .count();
+        assert_eq!(
+            servos, 2,
+            "Fabricate 2 servo branch must create 2 Servos even with the source gone"
+        );
+    }
+
+    /// CR 702.123a: with the source gone, choosing the +1/+1 counter branch
+    /// resolves gracefully (no fizzle, no panic) — the trigger is not aborted
+    /// and the choice is honored. (The counter branch targets the source via
+    /// SelfRef; whether counters land is governed by CR 400.7 zone identity and
+    /// is not asserted here — the point is the trigger resolves, not fizzles.)
+    #[test]
+    fn fabricate_e2e_source_gone_counter_branch_resolves_gracefully() {
+        let face = fabricate_creature_face("Cultivator of Blades", 2);
+        let (mut state, obj_id) = cast_and_resolve_fabricate_to_choice(&face, PlayerId(0));
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Hand, &mut events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
+
+        // Counter branch must resolve without error when the source is gone.
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .expect("counter branch must resolve gracefully with the source gone");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }),
+            "the choice must be consumed; the trigger must not be stuck"
+        );
+    }
+
     /// CR 702.123a with Fabricate 1 — Ambitious Aetherborn shape — exercises
     /// the same flow with N=1 to guard against off-by-one collapse of the
     /// branch construction.
@@ -13190,6 +13268,56 @@ mod mentor_synthesis_tests {
             &triggers[0],
             &Keyword::Mentor
         ));
+    }
+
+    /// CR 702.149a: a printed Training creature must get its trigger INSTALLED
+    /// onto the face by `synthesize_all` — asserting `triggers_for()` (the
+    /// lookup) can never catch a missing install, so this drives the install.
+    #[test]
+    fn synthesize_training_installs_attack_trigger() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Training);
+        synthesize_training(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_training_trigger(t))
+                .count(),
+            1,
+            "a printed Training keyword must install exactly one training trigger"
+        );
+        // Confirm it is installed by `synthesize_all` too (the real card-build path).
+        let mut full = CardFace::default();
+        full.keywords.push(Keyword::Training);
+        synthesize_all(&mut full);
+        assert!(full.triggers.iter().any(is_training_trigger));
+    }
+
+    #[test]
+    fn synthesize_training_preserves_duplicate_instances_and_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Training);
+        face.keywords.push(Keyword::Training);
+
+        synthesize_training(&mut face);
+        synthesize_training(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_training_trigger(t))
+                .count(),
+            2,
+            "CR 702.149b requires one trigger per Training instance, while repeated synthesis stays idempotent"
+        );
+    }
+
+    #[test]
+    fn synthesize_training_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_training(&mut face);
+        assert!(face.triggers.is_empty());
     }
 }
 
