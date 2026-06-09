@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::multispace0;
-use nom::combinator::{eof, value};
+use nom::character::complete::{multispace0, space1};
+use nom::combinator::{eof, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
 
@@ -221,6 +221,21 @@ fn resolve_counter_placement_target<'a>(
             let on_offset = lower.len() - on_rest.len();
             (&text[on_offset..], None)
         }
+    } else if let Some((count, after_target)) = nom_on_lower(on_rest, on_rest, |i| {
+        // CR 601.2c: "each of <N|X> target <type>" — an EXACT-count multi-target
+        // distribution (not "up to"). The count binds the number of targets; X
+        // resolves from the activation cost's {X}. `peek("target")` does not
+        // consume, so the downstream `parse_target_with_ctx` still sees
+        // "target <type>". The `space1` + `peek("target")` requirement excludes
+        // "each of those creatures" / "each creature" from this arm.
+        let (i, ()) = value((), tag("each of ")).parse(i)?;
+        let (i, count) = super::parse_multi_target_count_expr(i)?;
+        let (i, ()) = value((), space1).parse(i)?;
+        let (i, _) = peek(tag("target")).parse(i)?;
+        Ok((i, count))
+    }) {
+        let on_offset = lower.len() - after_target.len();
+        (&text[on_offset..], Some(MultiTargetSpec::exact(count)))
     } else {
         let on_offset = lower.len() - on_rest.len();
         (&text[on_offset..], None)
@@ -1505,6 +1520,46 @@ mod tests {
                     name: "X".to_string()
                 }
             }))
+        );
+    }
+
+    /// CR 601.2c: "each of X target creatures" (no "up to") is an EXACT-count
+    /// multi-target — exactly X chosen targets, X bound from the activation
+    /// cost. Must be `MultiTargetSpec::exact(Variable("X"))`, NOT `up_to` and
+    /// NOT an unconstrained all-creatures filter (the misparse this fixes).
+    #[test]
+    fn put_counter_each_of_x_target_creatures_exact_count() {
+        let (_effect, _, multi) = try_parse_put_counter(
+            "put a -1/-1 counter on each of x target creatures",
+            "put a -1/-1 counter on each of x target creatures",
+            &mut default_ctx(),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            multi,
+            Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }))
+        );
+    }
+
+    /// CR 601.2c: fixed-count form "each of two target creatures" ⇒
+    /// `MultiTargetSpec::exact(Fixed(2))`.
+    #[test]
+    fn put_counter_each_of_two_target_creatures_exact_count() {
+        let (_effect, _, multi) = try_parse_put_counter(
+            "put a -1/-1 counter on each of two target creatures",
+            "put a -1/-1 counter on each of two target creatures",
+            &mut default_ctx(),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            multi,
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 }))
         );
     }
 
