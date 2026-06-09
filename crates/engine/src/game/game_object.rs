@@ -773,6 +773,12 @@ pub struct GameObject {
     #[serde(default)]
     pub is_saddled: bool,
 
+    /// CR 702.171c: The creatures that saddled this permanent (tapped to pay the
+    /// saddle cost). Cleared in lockstep with `is_saddled` at end of turn or when
+    /// the permanent leaves the battlefield.
+    #[serde(default)]
+    pub saddled_by: Vec<ObjectId>,
+
     /// CR 613.11 + CR 510.1a: This creature assigns combat damage equal to its
     /// toughness rather than its power. Set after object-characteristic layers.
     #[serde(default)]
@@ -1100,6 +1106,7 @@ impl GameObject {
             monstrous: false,
             prepared: None,
             is_saddled: false,
+            saddled_by: Vec::new(),
             assigns_damage_from_toughness: false,
             assigns_damage_as_though_unblocked: false,
             assigns_no_combat_damage: false,
@@ -1190,6 +1197,7 @@ impl GameObject {
         // state. Assign when WotC publishes SOS CR update.
         self.prepared = None;
         self.is_saddled = false;
+        self.saddled_by.clear();
         self.paired_with = None;
         self.pair_controller = None;
         self.chosen_attributes.clear();
@@ -1272,6 +1280,7 @@ impl GameObject {
         self.phyrexian_life_paid = 0;
         // CR 702.171b: Saddled clears when the Mount leaves the battlefield.
         self.is_saddled = false;
+        self.saddled_by.clear();
         // CR 702.xxx: Prepared (Strixhaven) is a battlefield-only designation —
         // clears on BF exit, paralleling monstrous/suspected. CR 400.7: a
         // re-entering permanent is a new object with no memory of its previous

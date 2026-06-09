@@ -170,6 +170,7 @@ mod ripples_of_undeath_regression;
 mod rite_of_consumption_damage;
 mod roots_of_wisdom_if_you_cant_draw;
 mod rules;
+mod saddle_state_model;
 mod scarab_god_regression;
 mod screaming_nemesis_life_lock;
 mod seasoned_dungeoneer_initiative_room_trigger;

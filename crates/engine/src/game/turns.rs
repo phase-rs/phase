@@ -1139,7 +1139,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // at cleanup (CR 514).
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if obj.is_saddled {
+            // CR 702.171b: the designation (and the saddling-creature record) ends at end of turn.
             obj.is_saddled = false;
+            obj.saddled_by.clear();
         }
     }
 

@@ -604,6 +604,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsMonstrous
@@ -718,6 +719,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsMonstrous
@@ -906,6 +908,10 @@ fn evaluate_condition_with_context(
         // Callous Oppressor dying while tapped) fails this predicate and any
         // `ForAsLongAs { SourceIsTapped }` continuous effect (gain-control, etc.) ends.
         StaticCondition::SourceIsTapped => eval_source_is_tapped_on_battlefield(state, source_id),
+        // CR 702.171b + CR 110.5d: off-battlefield permanents have no saddled designation.
+        StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {
+            obj.zone == crate::types::zones::Zone::Battlefield && obj.is_saddled
+        }),
         // CR 702.62a + CR 611.2b: True when the source object's current controller
         // equals the stored player. Drives the Suspend haste duration: when a
         // suspended creature spell resolves, a transient continuous effect with
@@ -8238,6 +8244,42 @@ mod tests {
             &StaticCondition::Not {
                 condition: Box::new(StaticCondition::SourceIsTapped),
             },
+            PlayerId(0),
+            id,
+        ));
+    }
+
+    // CR 702.171b: `SourceIsSaddled` gates a continuous modification on the
+    // saddled designation. Not saddled → no gather; saddled → gathered;
+    // off-battlefield → false (CR 110.5d, no designation off the battlefield).
+    #[test]
+    fn source_is_saddled_gates_continuous_effect() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Mount", 2, 2, PlayerId(0));
+
+        // Not saddled → condition false (no bonus).
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
+            PlayerId(0),
+            id,
+        ));
+
+        // Saddled → condition true (regression for "mounts always behave as if saddled").
+        state.objects.get_mut(&id).unwrap().is_saddled = true;
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
+            PlayerId(0),
+            id,
+        ));
+
+        // CR 110.5d: off the battlefield there is no saddled designation.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert!(state.objects.get(&id).unwrap().is_saddled);
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsSaddled,
             PlayerId(0),
             id,
         ));

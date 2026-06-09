@@ -887,6 +887,14 @@ fn parse_source_is_monstrous(input: &str) -> OracleResult<'_, StaticCondition> {
     value(StaticCondition::SourceIsMonstrous, tag("is monstrous")).parse(rest)
 }
 
+/// CR 702.171b: Parse "<subject> is saddled" → SourceIsSaddled.
+/// Affirmative only — Saddle has no negated Oracle idiom; "as long as ~ is not
+/// saddled" would compose `Not { SourceIsSaddled }` but no current card prints it.
+fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_source_subject(input)?;
+    value(StaticCondition::SourceIsSaddled, tag("is saddled")).parse(rest)
+}
+
 /// CR 301.5 + CR 303.4: Parse "<subject> is attached to a creature" → SourceAttachedToCreature.
 fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_subject(input)?;
@@ -911,6 +919,8 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         parse_source_is_equipped,
         // CR 701.37: "~ is monstrous" / "this creature is monstrous" / etc.
         parse_source_is_monstrous,
+        // CR 702.171b: "~ is saddled" / "this creature is saddled" / etc.
+        parse_source_is_saddled,
         // CR 301.5 + CR 303.4: "~ is attached to a creature" / "this equipment is attached to a creature".
         // Must precede `parse_source_is_type` so the specific "is attached to a creature"
         // predicate wins over generic "is <type>" dispatch.
@@ -5563,6 +5573,14 @@ mod tests {
         let (rest, c) = parse_condition("as long as ~ is tapped").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::SourceIsTapped));
+    }
+
+    // CR 702.171b: "as long as ~ is saddled" → SourceIsSaddled.
+    #[test]
+    fn test_parse_condition_as_long_as_saddled() {
+        let (rest, c) = parse_condition("as long as ~ is saddled").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(c, StaticCondition::SourceIsSaddled));
     }
 
     #[test]

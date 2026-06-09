@@ -2567,6 +2567,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceIsMonstrous
+        // CR 702.171b: the saddled designation has no intervening-if
+        // (`TriggerCondition`) equivalent.
+        | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }

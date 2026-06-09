@@ -2116,6 +2116,8 @@ pub enum FilterProp {
     Tapped,
     /// CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
     Untapped,
+    /// CR 702.171b: Matches permanents with the saddled designation.
+    IsSaddled,
     /// CR 302.6 + CR 702.10b + CR 702.154a: Matches creatures that either have
     /// haste or have been under their controller's control continuously since
     /// that player's most recent turn began. Used by Enlist's tap eligibility.
@@ -4546,6 +4548,8 @@ pub enum StaticCondition {
     /// CR 110.5b: True when the source object is tapped.
     /// Used for "for as long as ~ remains tapped" duration conditions.
     SourceIsTapped,
+    /// CR 702.171b: True when the source permanent is saddled. Negation via Not { SourceIsSaddled }.
+    SourceIsSaddled,
     /// CR 702.62a + CR 611.2b: True when the source object's current controller
     /// equals the stored player. General-purpose "while you control this"
     /// predicate; the runtime-installed Suspend haste static uses
