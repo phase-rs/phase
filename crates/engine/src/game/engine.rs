@@ -5743,7 +5743,10 @@ fn handle_crew_activation(
                     .map(|o| {
                         o.controller == player
                             && !o.tapped
-                            && super::static_abilities::object_can_contribute_to_crew(state, id)
+                            && o.card_types
+                                .core_types
+                                .contains(&crate::types::card_type::CoreType::Creature)
+                            && !super::static_abilities::object_has_cant_crew(state, id)
                     })
                     .unwrap_or(false)
         })
@@ -5859,9 +5862,9 @@ fn handle_crew_announcement(
                 "Creature is no longer eligible for crewing".to_string(),
             ));
         }
-        if !super::static_abilities::object_can_contribute_to_crew(state, cid) {
+        if super::static_abilities::object_has_cant_crew(state, cid) {
             return Err(EngineError::InvalidAction(
-                "Creature is not eligible to crew Vehicles".to_string(),
+                "Creature can't crew Vehicles".to_string(),
             ));
         }
         // CR 702.122c: apply any crew power-contribution modifier.
@@ -20629,61 +20632,8 @@ mod crew_tests {
         }
     }
 
-    // CR 301.7 + CR 702.122b: Uncrewed Vehicles are artifacts, not creatures.
-    // A misparsed Lifecraft Engine static that adds CoreType::Creature must not
-    // make Vehicles eligible to crew one another.
-    #[test]
-    fn test_uncrewed_vehicle_with_creature_type_not_eligible_to_crew() {
-        let (mut state, vehicle_a, _creature_a, _creature_b) = setup_crew_scenario();
-
-        let vehicle_b = create_object(
-            &mut state,
-            CardId(203),
-            PlayerId(0),
-            "Second Vehicle".to_string(),
-            Zone::Battlefield,
-        );
-        {
-            let obj = state.objects.get_mut(&vehicle_b).unwrap();
-            obj.card_types.core_types.push(CoreType::Artifact);
-            obj.card_types.subtypes.push("Vehicle".to_string());
-            obj.keywords.push(crate::types::keywords::Keyword::Crew {
-                power: 3,
-                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
-            });
-            obj.power = Some(4);
-            obj.toughness = Some(4);
-            // Simulate the Lifecraft Engine misparses: Vehicle gains Creature type.
-            obj.card_types.core_types.push(CoreType::Creature);
-        }
-
-        assert!(
-            !crate::game::static_abilities::object_can_contribute_to_crew(&state, vehicle_b),
-            "uncrewed Vehicle must not contribute to crew even with Creature type"
-        );
-
-        apply_as_current(
-            &mut state,
-            GameAction::CrewVehicle {
-                vehicle_id: vehicle_a,
-                creature_ids: vec![],
-            },
-        )
-        .unwrap();
-
-        match &state.waiting_for {
-            WaitingFor::CrewVehicle {
-                eligible_creatures, ..
-            } => assert!(
-                !eligible_creatures.contains(&vehicle_b),
-                "uncrewed Vehicle must not be offered as crew even with Creature type"
-            ),
-            other => panic!("Expected CrewVehicle, got {:?}", other),
-        }
-    }
-
-    // CR 702.122d: A Vehicle that has become an artifact creature via Crew may
-    // contribute to crewing another Vehicle.
+    // CR 702.122a + CR 702.122b: A Vehicle that has become an artifact creature
+    // via Crew may contribute to crewing another Vehicle.
     #[test]
     fn test_crewed_vehicle_may_crew_another_vehicle() {
         let (mut state, vehicle_a, creature_a, _creature_b) = setup_crew_scenario();

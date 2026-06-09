@@ -1161,54 +1161,6 @@ pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
     })
 }
 
-/// CR 702.122b: Whether an object may be tapped to crew a Vehicle.
-/// Uncrewed Vehicles are artifacts (CR 301.7), not creatures, even when
-/// continuous effects grant them creature subtypes (Lifecraft Engine). A
-/// Vehicle becomes a creature only while crewed (CR 702.122d).
-pub fn object_can_contribute_to_crew(state: &GameState, object_id: ObjectId) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    if !obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Creature)
-    {
-        return false;
-    }
-    if obj
-        .card_types
-        .subtypes
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case("Vehicle"))
-        && !vehicle_has_crew_creature_effect(state, object_id)
-    {
-        return false;
-    }
-    !object_has_cant_crew(state, object_id)
-}
-
-/// CR 702.122d: Detect the UntilEndOfTurn `AddType(Creature)` transient a
-/// Vehicle receives when its own Crew ability resolves.
-fn vehicle_has_crew_creature_effect(state: &GameState, vehicle_id: ObjectId) -> bool {
-    use crate::types::ability::{ContinuousModification, TargetFilter};
-    use crate::types::card_type::CoreType;
-
-    state.transient_continuous_effects.iter().any(|tce| {
-        matches!(
-            &tce.affected,
-            TargetFilter::SpecificObject { id } if *id == vehicle_id
-        ) && tce.modifications.iter().any(|m| {
-            matches!(
-                m,
-                ContinuousModification::AddType {
-                    core_type: CoreType::Creature
-                }
-            )
-        })
-    })
-}
-
 /// CR 702.122c / 702.171a / 702.184a: The power a creature contributes toward a
 /// crew / saddle / station cost, after applying any active `CrewContribution`
 /// static whose action list contains `action`. "Using its toughness rather than
