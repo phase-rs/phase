@@ -1354,6 +1354,15 @@ pub fn evaluate_layers(state: &mut GameState) {
     // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
     // (P/T counters are applied in-loop at Layer::CounterPT above, in layer 7c
     // before the 7d switch.)
+    //
+    // Loyalty is HYBRID: a counter-tracked planeswalker's loyalty IS its counter
+    // count (present entry wins, including 0); an un-counter-tracked planeswalker
+    // (a clone whose loyalty comes from the Copy layer, an in-place transform, an
+    // off-battlefield/pre-seed object) keeps the base/copy-layer value. So the
+    // `if let Some` is load-bearing: an ABSENT entry means "not counter-tracked,
+    // keep the field", while a PRESENT 0 means "drained to 0, must die" (CR
+    // 704.5i). `apply_counter_removal` is what keeps the 0 entry alive for a
+    // genuinely-tracked walker so this re-derive can see it.
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {

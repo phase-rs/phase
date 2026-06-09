@@ -649,7 +649,23 @@ pub(crate) fn execute_zone_move(
     // reanimate, blink, etc.). Spell-cast entry is handled in stack.rs.
     if dest_zone == Zone::Battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
-            let intrinsic = crate::game::printed_cards::intrinsic_etb_counters(obj);
+            // CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
+            // double-faced card exiled and returned with its back face up, like
+            // a creature-front // planeswalker-back DFC) will have its back
+            // face's characteristics on the battlefield. The physical face swap
+            // happens later in `deliver_replaced_zone_change`, so `obj` still
+            // shows its front face here — read the back face's printed
+            // loyalty/defense directly so CR 306.5b/310.4b seeds the counter map
+            // (the source of truth per CR 306.5c). Without this a transforming
+            // planeswalker enters with 0 loyalty counters and dies immediately
+            // to CR 704.5i. Ravenous (front-face cast-time) does not apply to an
+            // effect-driven transformed entry, so only face counters are seeded.
+            let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
+                (true, Some(back)) => {
+                    crate::game::printed_cards::intrinsic_face_counters(back.loyalty, back.defense)
+                }
+                _ => crate::game::printed_cards::intrinsic_etb_counters(obj),
+            };
             if !intrinsic.is_empty() {
                 if let ProposedEvent::ZoneChange {
                     enter_with_counters,
