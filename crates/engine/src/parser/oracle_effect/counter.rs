@@ -409,18 +409,31 @@ pub(super) fn try_parse_put_counter<'a>(
                 remainder = after_clause.trim_start();
             }
             Err(_) => {
-                // CR 122.1 + CR 608.2c: A "a number of {type} counters" body with
-                // no in-line "equal to {qty}" clause carries its count externally
-                // (e.g. a vote-tally clause binds it via `Effect::count_expr_mut`).
-                // Emit the same survivable `Variable { "count" }` placeholder the
-                // token path uses (token.rs `parse_token_count` "a number of"
-                // branch) instead of returning None, so the PutCounter/
-                // PutCounterAll effect still builds and is available for the
-                // external bind. An unbound `Variable { "count" }` resolves to 0
-                // at runtime (quantity.rs `resolve_ref` — no `last_named_choice`),
-                // so leaving it unbound is inert rather than wrong-count; the
-                // external bind is what gives it meaning. Symmetric with the
-                // token path's ungated placeholder.
+                // CR 122.1 + CR 608.2c: Emit the survivable `Variable { "count" }`
+                // placeholder ONLY when there is no in-line "equal to {qty}" clause
+                // — i.e. the count is carried externally (a vote-tally head whose
+                // "equal to ... votes" suffix was stripped before parsing). Then
+                // the PutCounter/PutCounterAll effect still builds and is available
+                // for the external bind (`Effect::count_expr_mut`); an unbound
+                // `Variable { "count" }` resolves to 0 (quantity.rs `resolve_ref`),
+                // so it is inert until bound. Symmetric with the token path's
+                // "a number of" placeholder, which is likewise only reached when
+                // no inline count was found.
+                //
+                // If an "equal to" clause IS present but its quantity failed to
+                // parse, fall through (return None) to preserve prior dispatch.
+                // Emitting a placeholder here would bind a wrong 0-count AND orphan
+                // the unparsed quantity / trailing conditional as a swallowed
+                // clause — the regression this guard prevents: Drizzt Do'Urden
+                // ("...equal to the difference") and Jared Carthalion ("...equal to
+                // the number of colors it is") left their following intervening-if
+                // / conditional clauses swallowed (Condition_If) when the count
+                // silently became a placeholder.
+                if nom_on_lower(trimmed, trimmed, |i| value((), tag("equal to ")).parse(i))
+                    .is_some()
+                {
+                    return None;
+                }
                 count_expr = QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "count".to_string(),
