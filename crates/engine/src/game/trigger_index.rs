@@ -813,6 +813,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
         | EffectKind::Conjure
+        | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
         | EffectKind::Specialize
         | EffectKind::Unimplemented

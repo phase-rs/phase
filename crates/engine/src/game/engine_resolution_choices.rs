@@ -119,6 +119,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
+            | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseDungeon { .. }
@@ -2558,6 +2559,31 @@ pub(super) fn handle_resolution_choice(
             }
             state.last_named_choice = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // Alchemy spellbook draft: the player chose a card from the source's
+        // spellbook — conjure it, then resume the rest of the ability chain.
+        (
+            WaitingFor::SpellbookDraft {
+                player,
+                source_id,
+                options,
+                destination,
+                tapped,
+            },
+            GameAction::SubmitSpellbookDraft { card },
+        ) => {
+            crate::game::effects::spellbook::complete_draft(
+                state,
+                player,
+                source_id,
+                &options,
+                &card,
+                destination,
+                tapped,
+                events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("spellbook draft: {e:?}")))?;
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
             WaitingFor::DamageSourceChoice {

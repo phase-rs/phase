@@ -1144,6 +1144,19 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             choice_type,
             source_id,
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        // Alchemy spellbook draft: one candidate per card in the spellbook list.
+        WaitingFor::SpellbookDraft {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|card| {
+                candidate(
+                    GameAction::SubmitSpellbookDraft { card: card.clone() },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::DamageSourceChoice {
             player, options, ..
         } => options

@@ -341,6 +341,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::ChooseOption { choice, .. } => {
             bound_string("ChooseOption.choice", choice)?;
         }
+        GameAction::SubmitSpellbookDraft { card } => {
+            bound_string("SubmitSpellbookDraft.card", card)?;
+        }
         GameAction::Debug(debug_action) => {
             guard_debug_action_payload(debug_action)?;
         }

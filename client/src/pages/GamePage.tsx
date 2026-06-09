@@ -1403,6 +1403,7 @@ function GamePageContent({
         <ChooseOneOfBranchModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
+        <SpellbookDraftModal />
         <FreeCastWindowModal />
         <ModalFaceModal />
         <MiracleRevealModal />
@@ -2485,6 +2486,38 @@ function AbilityChoiceModal() {
         setPending(null);
       }}
       onClose={() => setPending(null)}
+    />
+  );
+}
+
+function SpellbookDraftModal() {
+  const { t } = useTranslation("game");
+  const canActForWaitingState = useCanActForWaitingState();
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const source = useGameStore((s) =>
+    waitingFor?.type === "SpellbookDraft"
+      ? s.gameState?.objects[waitingFor.data.source_id]
+      : undefined,
+  );
+
+  if (waitingFor?.type !== "SpellbookDraft") return null;
+  if (!canActForWaitingState) return null;
+
+  return (
+    <ChoiceModal
+      title={t("cardChoice.dig.title")}
+      subtitle={source?.name}
+      previewCardName={source?.name}
+      previewCardTypes={source?.card_types}
+      previewObjectId={waitingFor.data.source_id}
+      options={waitingFor.data.options.map((name) => ({
+        id: name,
+        label: name,
+      }))}
+      onChoose={(card) =>
+        dispatch({ type: "SubmitSpellbookDraft", data: { card } })
+      }
     />
   );
 }

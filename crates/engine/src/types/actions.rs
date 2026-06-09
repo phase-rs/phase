@@ -282,6 +282,12 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// Alchemy spellbook draft: the player's chosen card name in response to
+    /// `WaitingFor::SpellbookDraft`. The named card is conjured into the
+    /// pending destination.
+    SubmitSpellbookDraft {
+        card: String,
+    },
     /// CR 700.3 + CR 700.3a: Submit one pile (pile A) of a
     /// `SeparateIntoPiles` partition. Pile B is derived by the engine as
     /// `eligible \ pile_a` — CR 700.3a requires the partition to be
@@ -1277,6 +1283,7 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::SubmitSpellbookDraft { .. }
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }
             | GameAction::ChooseBranch { .. }

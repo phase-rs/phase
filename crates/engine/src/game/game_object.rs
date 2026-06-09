@@ -388,6 +388,12 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_related_token_ids: Vec<String>,
 
+    /// Alchemy spellbook — the fixed list of card names this object can draft
+    /// from, copied from `CardFace::metadata.spellbook`. Read by the
+    /// `DraftFromSpellbook` resolver to present the choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spellbook: Vec<String>,
+
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
 
@@ -996,6 +1002,7 @@ impl GameObject {
             base_printed_ref: None,
             token_image_ref: None,
             source_related_token_ids: Vec::new(),
+            spellbook: Vec::new(),
             back_face: None,
             specialize_faces: None,
             specialized_color: None,
