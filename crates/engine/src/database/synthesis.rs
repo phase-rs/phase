@@ -780,6 +780,13 @@ pub fn synthesize_training(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Training));
 }
 
+/// CR 702.130a: Synthesize the Afflict trigger ("Whenever this creature becomes blocked,
+/// defending player loses N life"). Each instance triggers separately (CR 702.130b), so one
+/// trigger is synthesized per `Keyword::Afflict` instance.
+pub fn synthesize_afflict(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Afflict(_)));
+}
+
 /// CR 603.6a + CR 205.3 + CR 105.2: Synthesize a "keyword ETB → create
 /// typed token → attach this Equipment" trigger. Shared shape for any
 /// keyword whose CR text follows the template:
@@ -8697,6 +8704,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // cost to return this card from your graveyard to your hand; otherwise
     // exile it.
     synthesize_recover(face);
+    // CR 702.130a: Afflict — becomes-blocked trigger that causes the defending
+    // player to lose N life. CR 702.130b: each instance triggers separately.
+    synthesize_afflict(face);
     // CR 702.115a: Ingest — combat-damage-to-player trigger that exiles the top
     // card of the damaged player's library.
     synthesize_ingest(face);
@@ -23038,6 +23048,53 @@ mod afflict_training_poisonous_synthesis_tests {
             &triggers[0],
             &Keyword::Flanking
         ));
+    }
+
+    #[test]
+    fn synthesize_afflict_installs_becomes_blocked_trigger() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Afflict(3));
+        synthesize_afflict(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_afflict_trigger(t, 3))
+                .count(),
+            1,
+            "a printed Afflict keyword must install exactly one afflict trigger"
+        );
+        // Confirm it is installed by `synthesize_all` too (the real card-build path).
+        let mut full = CardFace::default();
+        full.keywords.push(Keyword::Afflict(3));
+        synthesize_all(&mut full);
+        assert!(full.triggers.iter().any(|t| is_afflict_trigger(t, 3)));
+    }
+
+    #[test]
+    fn synthesize_afflict_preserves_duplicate_instances_and_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Afflict(2));
+        face.keywords.push(Keyword::Afflict(2));
+
+        synthesize_afflict(&mut face);
+        synthesize_afflict(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_afflict_trigger(t, 2))
+                .count(),
+            2,
+            "CR 702.130b requires one trigger per Afflict instance, while repeated synthesis stays idempotent"
+        );
+    }
+
+    #[test]
+    fn synthesize_afflict_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_afflict(&mut face);
+        assert!(face.triggers.is_empty());
     }
 
     // ---- Training (CR 702.149a) ----

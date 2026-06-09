@@ -4155,7 +4155,80 @@ fn normalize_compound_pronouns(text: &str) -> String {
 /// 2-way scanner; this preserves the prior dispatch order exactly.
 fn split_shared_subject_event_list(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
     split_serial_event_compound(cond_lower, condition)
+        .or_else(|| split_cross_subject_event_compound(cond_lower, condition))
         .or_else(|| split_or_event_compound(cond_lower, condition))
+}
+
+/// Split compound events with different subjects — the cross-subject branch.
+///
+/// Handles patterns like "Whenever a player casts a spell or a creature attacks"
+/// (Norin the Wary) where the two halves have different subjects ("a player" vs
+/// "a creature"). Each half is a complete trigger line with its own subject.
+///
+/// CR 603.1: Each event is an independent trigger condition.
+fn split_cross_subject_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
+    use super::oracle_nom::primitives::split_once_on;
+
+    // Look for " or " that separates two complete subject-verb phrases.
+    // The pattern is: "Whenever <subject1> <verb1> ... or <subject2> <verb2> ..."
+    // We detect this by checking if what follows " or " starts with a known subject phrase.
+    let Ok((_, (before, after))) = split_once_on(cond_lower, " or ") else {
+        return None;
+    };
+
+    // Check if what follows " or " starts with a valid subject phrase
+    // (a/an/the + type word, or "a player", "an opponent", etc.)
+    let after_trimmed = after.trim_start();
+    if !starts_with_subject_phrase(after_trimmed) {
+        return None;
+    }
+
+    // Extract the trigger keyword from the first half
+    // allow-noncombinator: trigger keyword extraction for compound split
+    let keyword = extract_trigger_keyword(cond_lower)?;
+
+    // Split into two complete trigger lines
+    let first = condition[..before.len()].trim().to_string();
+    let second = format!("{}{}", keyword, condition[before.len() + 4..].trim());
+
+    Some(vec![first, second])
+}
+
+/// Check if text starts with a valid subject phrase for a trigger.
+/// Returns true for patterns like "a creature", "an opponent", "the player", etc.
+fn starts_with_subject_phrase(text: &str) -> bool {
+    let text = text.trim_start();
+    // Check for article + noun pattern: "a", "an", "the"
+    // allow-noncombinator: subject-phrase prefix check for cross-subject compound detection
+    if text.starts_with("a ") || text.starts_with("an ") || text.starts_with("the ") {
+        return true;
+    }
+    // Check for specific player references
+    // allow-noncombinator: subject-phrase prefix check for cross-subject compound detection
+    if text.starts_with("player ") || text.starts_with("opponent ") {
+        return true;
+    }
+    // Check for "you" as subject
+    // allow-noncombinator: subject-phrase prefix check for cross-subject compound detection
+    if text.starts_with("you ") {
+        return true;
+    }
+    false
+}
+
+/// Extract the trigger keyword ("When " or "Whenever ") from a condition string.
+/// Returns None if no valid trigger keyword is found.
+fn extract_trigger_keyword(cond_lower: &str) -> Option<&'static str> {
+    // allow-noncombinator: trigger keyword extraction for compound split — extracts
+    // the literal trigger word from an already-lowercased structural prefix, not
+    // parsing dispatch.
+    if cond_lower.starts_with("whenever ") { // allow-noncombinator: trigger keyword extraction for compound split
+        Some("Whenever ")
+    } else if cond_lower.starts_with("when ") { // allow-noncombinator: trigger keyword extraction for compound split
+        Some("When ")
+    } else {
+        None
+    }
 }
 
 /// Split serial compound events sharing one subject — the N-way branch of
@@ -6044,8 +6117,24 @@ fn try_parse_event(
         }
         let attack_target_filter = parse_attack_target.parse(after).ok().map(|(_, f)| f);
         let mut def = make_base();
+        // CR 508.3d: "Whenever [a player] attacks" triggers fire once per attack declaration,
+        // not once per attacker. This applies to "opponent attacks you" patterns (e.g., Lulu,
+        // Cunning Rhetoric) where the subject is an opponent and the target is "you".
+        let is_opponent_attacks_you =
+            matches!(
+                subject,
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                })
+            ) && matches!(
+                attack_target_filter,
+                Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
+            ) && tag::<_, _, OracleError<'_>>(" you").parse(after).is_ok();
         def.mode = if attacks_and_isnt_blocked && matches!(subject, TargetFilter::SelfRef) {
             TriggerMode::AttackerUnblocked
+        } else if is_opponent_attacks_you {
+            TriggerMode::AttackersDeclared
         } else {
             TriggerMode::Attacks
         };
@@ -6058,7 +6147,8 @@ fn try_parse_event(
         {
             def.valid_target = Some(TargetFilter::Controller);
         }
-        return Some((TriggerMode::Attacks, def));
+        let mode = def.mode.clone();
+        return Some((mode, def));
     }
 
     // "blocks" — fires for the blocking creature.
@@ -12466,7 +12556,7 @@ mod tests {
             "Whenever an opponent attacks you and/or one or more planeswalkers you control, exile the top card of that player's library.",
             "Cunning Rhetoric",
         );
-        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.mode, TriggerMode::AttackersDeclared);
         assert_eq!(
             def.attack_target_filter,
             Some(AttackTargetFilter::PlayerOrPlaneswalker)
@@ -12485,6 +12575,17 @@ mod tests {
             "expected ExileTop to bind to TriggeringPlayer, got {:?}",
             execute.effect
         );
+    }
+
+    #[test]
+    fn opponent_attacks_you_uses_attackers_declared() {
+        let def = parse_trigger_line(
+            "Whenever an opponent attacks you, choose target creature attacking you. Put a stun counter on that creature.",
+            "Lulu, Stern Guardian",
+        );
+        assert_eq!(def.mode, TriggerMode::AttackersDeclared);
+        assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
     /// Issue #594 — Maralen, Fae Ascendant's ETB trigger: the full Oracle
@@ -12812,6 +12913,34 @@ mod tests {
                 ..Default::default()
             }))
         );
+    }
+
+    #[test]
+    fn trigger_cross_subject_player_casts_or_creature_attacks() {
+        // Norin the Wary: "Whenever a player casts a spell or a creature attacks, exile ~,
+        // then return it to the battlefield under its owner's control at the beginning of
+        // the next end step."
+        // This should split into two separate triggers: one for spell cast, one for attack.
+        let triggers = parse_trigger_lines(
+            "Whenever a player casts a spell or a creature attacks, exile ~, then return it to the battlefield under its owner's control at the beginning of the next end step.",
+            "Norin the Wary",
+        );
+
+        assert_eq!(triggers.len(), 2, "should split into two triggers");
+
+        // First trigger: "Whenever a player casts a spell"
+        let spell_trigger = &triggers[0];
+        assert_eq!(spell_trigger.mode, TriggerMode::SpellCast);
+        // "a player casts a spell" fires for any player's spell, so valid_target is None
+        assert_eq!(spell_trigger.valid_target, None);
+
+        // Second trigger: "Whenever a creature attacks"
+        let attack_trigger = &triggers[1];
+        assert_eq!(attack_trigger.mode, TriggerMode::Attacks);
+        assert!(matches!(
+            attack_trigger.valid_card,
+            Some(TargetFilter::Typed(_))
+        ));
     }
 
     #[test]
