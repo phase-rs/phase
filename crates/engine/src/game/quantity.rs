@@ -909,20 +909,29 @@ pub fn resolve_quantity_with_targets_slice(
 ///
 /// Used by `DamageEachPlayer` to evaluate per-player quantities like
 /// "the number of nonbasic lands that player controls".
-/// `scope_player` overrides `controller` for `ObjectCount` (ControllerRef::You)
-/// and `SpellsCastThisTurn` resolution.
+/// `scope_player` binds `ControllerRef::ScopedPlayer` during the per-player
+/// iteration; the ability controller (from the source object) is used for
+/// `ControllerRef::You` ("creatures you control").
 pub(crate) fn resolve_quantity_scoped(
     state: &GameState,
     expr: &QuantityExpr,
     source_id: ObjectId,
     scope_player: PlayerId,
 ) -> i32 {
+    // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
+    // controller, not to the current DamageEachPlayer recipient.
+    let ability_controller = state
+        .objects
+        .get(&source_id)
+        .map(|obj| obj.controller)
+        .unwrap_or(scope_player);
+
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(
             state,
             qty,
-            scope_player,
+            ability_controller,
             QuantityContext {
                 entering: None,
                 source: source_id,
@@ -1041,7 +1050,13 @@ fn resolve_ref(
             a,
             a.original_controller.unwrap_or(a.controller),
         ),
-        None => FilterContext::from_source_with_controller(source_id, controller),
+        None => {
+            let mut fc = FilterContext::from_source_with_controller(source_id, controller);
+            // CR 120.3: DamageEachPlayer binds ControllerRef::ScopedPlayer to
+            // the current recipient while ControllerRef::You stays on `controller`.
+            fc.scoped_iteration_player = ctx.scoped_player;
+            fc
+        }
     };
     filter_ctx.recipient_id = ctx.recipient;
     let player = state.players.iter().find(|p| p.id == controller);
