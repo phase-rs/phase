@@ -13866,6 +13866,32 @@ mod tests {
         };
         assert_eq!(draw.count_expr(), Some(&fixed(2)));
 
+        // Token and mass-counter vote tally forms bind through the same count slot.
+        let token = Effect::Token {
+            name: "Treasure".to_string(),
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(0),
+            types: vec!["Artifact".to_string()],
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            tapped: false,
+            count: fixed(4),
+            owner: default_target_filter_controller(),
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        };
+        assert_eq!(token.count_expr(), Some(&fixed(4)));
+
+        let counters = Effect::PutCounterAll {
+            counter_type: CounterType::Plus1Plus1,
+            count: fixed(6),
+            target: default_target_filter_any(),
+        };
+        assert_eq!(counters.count_expr(), Some(&fixed(6)));
+
         // `amount:` family — DealDamage exposes its amount through the same API.
         let damage = Effect::DealDamage {
             amount: fixed(5),
