@@ -5457,23 +5457,62 @@ fn auto_tap_mana_sources_inner(
         assigned[idx] = true;
     }
 
-    // Phase 2: satisfy generic cost + deferred shards with any remaining sources.
-    // Skip combination sources — their value is in covering colored shards;
-    // spending a full 2-mana combination on a single generic is wasteful.
+    // Phase 2: satisfy generic cost + deferred shards. CR 107.4b: generic mana
+    // in costs can be paid with any type of mana — including colorless — so a
+    // multi-mana source such as Sol Ring (`{T}: Add {C}{C}`) is valid generic
+    // filler. Sources are spent in a fixed priority so the plan both stays
+    // payable and matches player expectation:
+    //   class 0 — color-locked sources (every unit colorless): usable ONLY for
+    //             generic, so spend them first and keep flexible colored
+    //             sources open. This is why a colorless rock (Sol Ring, Mind
+    //             Stone) fills generic before a colored land is tapped.
+    //   class 1 — flexible single-mana sources (one colored mana each).
+    //   class 2 — flexible (colored) combination sources: last resort. Burning
+    //             a 2-mana colored combo on generic wastes half its output when
+    //             a cheaper line exists, so a filter land's `{T}: Add {C}`
+    //             (class 0) is preferred over its colored combo for pure
+    //             generic (see `auto_tap_does_not_use_combo_for_pure_generic`).
+    // A combination source credits its full atomic width toward generic — one
+    // activation yields every unit at once. Previously ALL combination sources
+    // were skipped here, which stranded Sol Ring (a combo with no non-combo
+    // sibling ability) and made spells payable only by colorless rocks read as
+    // uncastable in the shared affordability preview.
     let mut remaining_generic = generic as usize + deferred_generic;
-    for option in &available {
+    let generic_priority = |option: &ManaSourceOption| -> u8 {
+        let color_locked = match &option.atomic_combination {
+            Some(combo) => combo.iter().all(|m| *m == ManaType::Colorless),
+            None => option.mana_type == ManaType::Colorless,
+        };
+        if color_locked {
+            0
+        } else if option.atomic_combination.is_none() {
+            1
+        } else {
+            2
+        }
+    };
+    for class in 0u8..=2 {
         if remaining_generic == 0 {
             break;
         }
-        if option.atomic_combination.is_some() {
-            continue;
-        }
-        if !option_allowed_for_context(option, effective_ctx) {
-            continue;
-        }
-        if used_sources.insert(option.object_id) {
-            to_tap.push(option.clone());
-            remaining_generic = remaining_generic.saturating_sub(1);
+        for option in &available {
+            if remaining_generic == 0 {
+                break;
+            }
+            if generic_priority(option) != class {
+                continue;
+            }
+            if !option_allowed_for_context(option, effective_ctx) {
+                continue;
+            }
+            if used_sources.insert(option.object_id) {
+                let width = option
+                    .atomic_combination
+                    .as_ref()
+                    .map_or(1, |combo| combo.len());
+                to_tap.push(option.clone());
+                remaining_generic = remaining_generic.saturating_sub(width);
+            }
         }
     }
 
@@ -8206,6 +8245,118 @@ mod tests {
         );
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 0);
+    }
+
+    /// CR 605.1b: A non-land permanent's `{T}: Add {C}{C}` mana ability
+    /// (Sol Ring's shape). One activation produces two colorless mana, so the
+    /// source surfaces as a single atomic combination row.
+    fn create_colorless_rock(state: &mut GameState, name: &str, count: i32) -> ObjectId {
+        let rock = create_object(
+            state,
+            CardId(950),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&rock).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: count },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        rock
+    }
+
+    #[test]
+    fn auto_tap_uses_colorless_combo_for_pure_generic() {
+        // CR 107.4b: generic mana can be paid with any type of mana, including
+        // colorless. Sol Ring's `{T}: Add {C}{C}` is a combination with no
+        // non-combo sibling ability, so it must still be tapped for a pure
+        // generic `{2}` — the regression was that Phase 2 skipped every
+        // combination source, leaving the cost unpayable (and the spell
+        // reported uncastable by the shared affordability preview).
+        let mut state = GameState::new_two_player(42);
+        let sol_ring = create_colorless_rock(&mut state, "Sol Ring", 2);
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            &mut events,
+            None,
+        );
+
+        assert!(
+            state.objects.get(&sol_ring).unwrap().tapped,
+            "Sol Ring must be tapped to pay the generic cost"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            2,
+            "`{{T}}: Add {{C}}{{C}}` must contribute both colorless mana to generic"
+        );
+    }
+
+    #[test]
+    fn auto_tap_prefers_colorless_rock_over_colored_lands_for_generic() {
+        // "Use Sol Ring first": for a generic cost, color-locked colorless
+        // mana is spent before flexible colored lands, so the colored sources
+        // stay open. A single Sol Ring tap covers `{2}` and both Forests are
+        // left untapped.
+        let mut state = GameState::new_two_player(42);
+        let sol_ring = create_colorless_rock(&mut state, "Sol Ring", 2);
+        let mut forests = Vec::new();
+        for i in 0..2 {
+            let forest = create_object(
+                &mut state,
+                CardId(960 + i),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            forests.push(forest);
+        }
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            &mut events,
+            None,
+        );
+
+        assert!(
+            state.objects.get(&sol_ring).unwrap().tapped,
+            "the colorless rock should fill generic before any colored land"
+        );
+        for forest in &forests {
+            assert!(
+                !state.objects.get(forest).unwrap().tapped,
+                "colored lands must stay open when colorless mana covers the generic"
+            );
+        }
     }
 
     #[test]
