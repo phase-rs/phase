@@ -12,7 +12,7 @@ use super::support::*;
 /// 3. Global taxing: "Noncreature spells cost {1} more to cast" (Thalia)
 /// 4. Broad: "Spells you cast cost {1} less to cast"
 /// 5. Self-spell: "This spell costs {N} less to cast for each ..." (Tolarian Terror)
-///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack, Command]`.
+///    — emitted with `affected = SelfRef`, `active_zones = self_spell_cost_mod_active_zones()`.
 ///
 /// CR 601.2f: Parse the spell-type prefix of a cost-modification line before
 /// `"cost"`. Handles compound subjects such as Goblin Anarchomancer's
@@ -493,12 +493,12 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
 
     // CR 117.7 + CR 601.2f: A self-spell cost reduction must apply while the
     // card is in hand (pre-cast affordability checks), in the command zone
-    // (commander casting), and on the stack (final cost determination during
-    // casting). Without opting in via `active_zones`, layer collection would
-    // ignore the static outside the battlefield, and the card would never
-    // reduce its own cost.
+    // (commander casting), in the graveyard or exile (alternative-zone casting),
+    // and on the stack (final cost determination during casting). Without opting
+    // in via `active_zones`, layer collection would ignore the static outside
+    // the battlefield, and the card would never reduce its own cost.
     if is_self_spell {
-        definition.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+        definition.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
     }
     if let Some(filter) = first_qualified_spell_filter.as_ref() {
         definition.condition = Some(first_qualified_spell_condition(filter));

@@ -30,7 +30,7 @@ use engine::types::ability::{
     SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
 };
 use engine::types::statics::{CostModifyMode, StaticMode};
-use engine::types::{ManaCost, Zone};
+use engine::types::ManaCost;
 
 use crate::convert::condition as condition_conv;
 use crate::convert::cost as cost_conv;
@@ -145,7 +145,7 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
         // CR 117.7 + CR 601.2f: Self-spell cost reduction. Mirrors the native
         // parser's `try_parse_cost_modification` self-spell branch
         // (oracle_static.rs:6720). Emits `StaticMode::ModifyCost` (Reduce) with
-        // `affected = SelfRef` and `active_zones = [Hand, Stack]` so the
+        // `affected = SelfRef` and `active_zones = self_spell_cost_mod_active_zones()` so the
         // casting-time scanner finds the static on the spell being cast.
         E::ReduceCastingCost(reduction) => {
             push_self_reduce_cost_static(stub, reduction, None, None)
@@ -346,9 +346,10 @@ fn require_pure_mana(cost: &Cost, idiom: &'static str) -> ConvResult<ManaCost> {
 
 /// CR 117.7 + CR 601.2f: Build a self-spell `StaticMode::ModifyCost` (Reduce)
 /// matching the native parser's emit shape (oracle_static.rs:6720+):
-/// `affected = SelfRef`, `active_zones = [Hand, Stack]` so the
-/// casting-time scanner picks it up on the spell being cast. The amount
-/// is derived from the mtgish `CostReduction` symbol list.
+/// `affected = SelfRef`, `active_zones = self_spell_cost_mod_active_zones()`
+/// so the casting-time scanner picks it up on the spell being cast from any
+/// legal source zone. The amount is derived from the mtgish `CostReduction`
+/// symbol list.
 fn push_self_reduce_cost_static(
     stub: &mut EngineFaceStub,
     reduction: &CostReduction,
@@ -405,7 +406,7 @@ fn push_self_reduce_cost_static_with_amount_and_filter(
         dynamic_count,
     })
     .affected(TargetFilter::SelfRef);
-    def.active_zones = vec![Zone::Hand, Zone::Stack];
+    def.active_zones = engine::types::zones::self_spell_cost_mod_active_zones();
     def.condition = condition;
     stub.statics.push(def);
     Ok(())
@@ -469,7 +470,10 @@ mod tests {
         assert_eq!(stub.statics.len(), 1);
         let static_def = &stub.statics[0];
         assert_eq!(static_def.affected, Some(TargetFilter::SelfRef));
-        assert_eq!(static_def.active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert_eq!(
+            static_def.active_zones,
+            engine::types::zones::self_spell_cost_mod_active_zones()
+        );
 
         let StaticMode::ModifyCost {
             mode: CostModifyMode::Reduce,
