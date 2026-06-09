@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::ability_utils::append_to_sub_chain;
+use crate::game::effects::player_counter;
 use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
 use crate::game::filter;
 use crate::game::keywords;
@@ -18,8 +19,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::player::PlayerId;
+use crate::types::keywords::KeywordKind;
+use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
 
 /// Source attributes needed for damage application (CR 120.3).
@@ -47,6 +48,24 @@ fn player_context_target(
             .map(TargetRef::Player);
     }
 
+    // CR 608.2c + CR 109.4: A "that player" / "its controller" anaphor bound to a
+    // chosen parent target (e.g. Star Athlete's "choose up to one target nonland
+    // permanent. Its controller may sacrifice it. If they don't, this creature
+    // deals 5 damage to that player.") has no referent when no target was chosen
+    // — "up to one target" with zero chosen. The damage must then do nothing.
+    // Resolve strictly from the chosen parent target so an absent referent yields
+    // `None` (no damage), rather than routing through `resolve_player_for_context_ref`
+    // whose event-context fallback would mis-deal the damage to the trigger
+    // source's own controller. The normal (target-chosen) path is unchanged:
+    // `resolve_player_for_context_ref` already resolves this case via
+    // `parent_target_controller` first. `ParentTargetOwner` is intentionally NOT
+    // routed here — it relies on its AttachedTo fallback for Aura phase triggers
+    // (Enslave's "enchanted creature deals 1 damage to its owner").
+    if matches!(target_filter, TargetFilter::ParentTargetController) {
+        return crate::game::ability_utils::parent_target_controller(ability, state)
+            .map(TargetRef::Player);
+    }
+
     if matches!(
         target_filter,
         TargetFilter::Controller
@@ -56,7 +75,6 @@ fn player_context_target(
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
-            | TargetFilter::ParentTargetController
             | TargetFilter::ParentTargetOwner
             | TargetFilter::PostReplacementSourceController
     ) {
@@ -103,14 +121,11 @@ impl DamageContext {
                 source_id,
                 KeywordKind::Infect,
             ),
-            combat_damage_poison: obj
-                .keywords
-                .iter()
-                .filter_map(|keyword| match keyword {
-                    Keyword::Toxic(amount) => Some(*amount),
-                    _ => None,
-                })
-                .sum(),
+            // CR 702.164b: total toxic value = sum of N over ALL effective toxic
+            // instances (printed + granted, on/off battlefield), matching the
+            // sibling effective-keyword flags above rather than reading printed
+            // `obj.keywords` directly.
+            combat_damage_poison: keywords::effective_total_toxic_value(state, source_id),
         })
     }
 
@@ -419,9 +434,19 @@ pub(crate) fn apply_damage_after_replacement(
                 return DamageResult::Applied(0);
             }
             if ctx.has_infect {
-                // CR 702.90: Infect deals damage to players as poison counters.
-                if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
-                    player.poison_counters += actual_amount;
+                // CR 120.3b + CR 614.17: Infect deals damage to players as poison
+                // counters. Route through the player-counter replacement pipeline
+                // so "players can't get poison counters" / poison-doublers apply;
+                // the actor is the source's controller.
+                if !player_counter::add_player_counter_with_replacement(
+                    state,
+                    ctx.controller,
+                    *player_id,
+                    PlayerCounterKind::Poison,
+                    actual_amount,
+                    events,
+                ) {
+                    return DamageResult::NeedsChoice;
                 }
             } else {
                 // CR 120.3a: Damage to a player causes life loss.
@@ -437,10 +462,19 @@ pub(crate) fn apply_damage_after_replacement(
                 && ctx.source_is_creature
                 && ctx.combat_damage_poison > 0
             {
-                // CR 702.164c: Toxic adds poison counters when a creature
-                // deals combat damage to a player.
-                if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
-                    player.poison_counters += ctx.combat_damage_poison;
+                // CR 120.3g + CR 702.164c + CR 614.17: Toxic adds poison counters
+                // when a creature deals combat damage to a player. Route through
+                // the player-counter replacement pipeline (prevention/doublers);
+                // the actor is the source's controller.
+                if !player_counter::add_player_counter_with_replacement(
+                    state,
+                    ctx.controller,
+                    *player_id,
+                    PlayerCounterKind::Poison,
+                    ctx.combat_damage_poison,
+                    events,
+                ) {
+                    return DamageResult::NeedsChoice;
                 }
             }
         }
@@ -2169,6 +2203,108 @@ mod tests {
         );
     }
 
+    /// Issue #1670 (zero-target follow-up) — Star Athlete: "Whenever this
+    /// creature attacks, choose up to one target nonland permanent. Its
+    /// controller may sacrifice it. If they don't, this creature deals 5 damage
+    /// to that player." When zero targets are chosen ("up to one target"), the
+    /// "that player" anaphor has no referent, so the damage must do nothing
+    /// (CR 608.2c). It must NOT fall back through event-context to the attacking
+    /// creature's own controller (the pre-fix behavior this guards against).
+    #[test]
+    fn parent_target_controller_damage_no_ops_when_no_target_chosen() {
+        let mut state = GameState::new_two_player(42);
+        let star_athlete = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Star Athlete".to_string(),
+            Zone::Battlefield,
+        );
+        // The attacks trigger is live: its source is Star Athlete, controlled by
+        // PlayerId(0). Resolving ParentTargetController through event-context
+        // would therefore (wrongly) pick PlayerId(0) as "that player".
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![star_athlete],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        });
+        // Zero targets chosen for "up to one target nonland permanent".
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTargetController,
+                damage_source: None,
+            },
+            vec![],
+            star_athlete,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].life, 20,
+            "no chosen target → no referent for 'that player'; the attacker's \
+             controller must not take the damage"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "no chosen target → the damage does nothing for any player"
+        );
+    }
+
+    /// Issue #1670 — companion positive case: when a nonland permanent IS chosen,
+    /// "that player" binds to that permanent's controller (CR 109.4) and the 5
+    /// damage is dealt to that player, not to the attacker's controller. Proves
+    /// the no-op fix above leaves the normal (target-chosen) path intact.
+    #[test]
+    fn parent_target_controller_damage_hits_chosen_permanents_controller() {
+        let mut state = GameState::new_two_player(42);
+        let star_athlete = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Star Athlete".to_string(),
+            Zone::Battlefield,
+        );
+        // The chosen "target nonland permanent" is controlled by PlayerId(1).
+        let chosen = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Chosen Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![star_athlete],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTargetController,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(chosen)],
+            star_athlete,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[1].life, 15,
+            "'that player' is the chosen permanent's controller (PlayerId(1)), who takes 5"
+        );
+        assert_eq!(
+            state.players[0].life, 20,
+            "the attacker's controller must not take the damage"
+        );
+    }
+
     #[test]
     fn lifelink_spell_damage_to_creature() {
         let mut state = GameState::new_two_player(42);
@@ -2220,7 +2356,7 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: spell_id },
             vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Lifelink,
+                keyword: crate::types::keywords::Keyword::Lifelink,
             }],
             None,
         );

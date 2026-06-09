@@ -733,6 +733,18 @@ pub enum ExileLinkKind {
     /// redacted. Pruned on exile-exit / source-exit like `Cipher` (not an
     /// `UntilSourceLeaves` link, so no automatic return).
     HideawayLookable,
+    /// CR 702.167c: Craft material — the card (`exiled_id`) was exiled to pay the
+    /// craft activation cost of the permanent (`source_id`) that returns to the
+    /// battlefield transformed. "An ability of a permanent may refer to the
+    /// exiled cards used to craft it." Unlike `TrackedBySource`, this link is
+    /// **preserved** when the craft source leaves the battlefield — the source
+    /// self-exiles mid-activation (CR 702.167a) and returns with the SAME
+    /// ObjectId, so the link must survive its battlefield exit for the returned
+    /// permanent to read it. Unlike `UntilSourceLeaves` it triggers NO automatic
+    /// return (the materials stay in exile). Read by the kind-agnostic
+    /// `ExiledBySource` / `CardsExiledBySource` consumers; pruned only when a
+    /// material itself leaves exile (`zones.rs` exile-exit).
+    CraftMaterial,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

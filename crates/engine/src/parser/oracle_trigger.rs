@@ -26477,6 +26477,105 @@ mod tests {
             );
         }
     }
+
+    /// Walk an ability chain (effect + every `sub_ability`) collecting a
+    /// reference to each `AbilityDefinition` node so tests can inspect both the
+    /// effect and the per-node `condition`.
+    fn ability_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        let mut out = Vec::new();
+        let mut node = Some(def);
+        while let Some(d) = node {
+            out.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+
+    /// Issue #1670 — Star Athlete: "Whenever this creature attacks, choose up to
+    /// one target nonland permanent. Its controller may sacrifice it. If they
+    /// don't, this creature deals 5 damage to that player." The "that player"
+    /// recipient of the DealDamage is the chosen permanent's controller (the
+    /// body "its controller may" antecedent), NOT the attacker's own controller
+    /// (TriggeringPlayer). And the "If they don't" decline gate must lower to a
+    /// negated optional-effect-performed condition, not be swallowed.
+    /// CR 608.2c (read the whole text) + CR 109.4 (controller) + CR 603.12
+    /// (reflexive "if [a player] doesn't" trigger).
+    #[test]
+    fn star_athlete_decline_damage_binds_parent_target_controller() {
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, choose up to one target nonland permanent. \
+             Its controller may sacrifice it. If they don't, this creature deals 5 damage to that player.",
+            "Star Athlete",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        let chain = ability_chain(execute);
+        let damage_node = chain
+            .iter()
+            .find(|d| matches!(d.effect.as_ref(), Effect::DealDamage { .. }))
+            .expect("chain must contain a DealDamage node");
+        match damage_node.effect.as_ref() {
+            Effect::DealDamage { target, amount, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTargetController,
+                    "'that player' must bind to the chosen permanent's controller, not the attacker"
+                );
+                assert_eq!(*amount, QuantityExpr::Fixed { value: 5 });
+            }
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
+        assert_eq!(
+            damage_node.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::effect_performed()),
+            }),
+            "'If they don't' must lower to a negated optional-effect-performed gate"
+        );
+    }
+
+    /// Issue #1670 (leak guard) — an "its controller may" body antecedent must
+    /// NOT leak into an unrelated later sentence's "that player". After the
+    /// DealDamage sentence binds (and consumes) the antecedent, the following
+    /// "That player discards a card." has no live antecedent and falls back to
+    /// the default TriggeringPlayer recipient.
+    /// CR 608.2c + CR 109.4.
+    #[test]
+    fn star_athlete_its_controller_antecedent_does_not_leak_to_later_that_player() {
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, choose up to one target nonland permanent. \
+             Its controller may sacrifice it. If they don't, this creature deals 5 damage to that player. \
+             That player discards a card.",
+            "Star Athlete",
+        );
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        let chain = ability_chain(execute);
+        let damage_node = chain
+            .iter()
+            .find(|d| matches!(d.effect.as_ref(), Effect::DealDamage { .. }))
+            .expect("chain must contain a DealDamage node");
+        match damage_node.effect.as_ref() {
+            Effect::DealDamage { target, .. } => assert_eq!(
+                *target,
+                TargetFilter::ParentTargetController,
+                "DealDamage 'that player' binds to the chosen permanent's controller"
+            ),
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
+        let discard_node = chain
+            .iter()
+            .find(|d| matches!(d.effect.as_ref(), Effect::Discard { .. }))
+            .expect("chain must contain a Discard node");
+        match discard_node.effect.as_ref() {
+            Effect::Discard { target, .. } => assert_eq!(
+                *target,
+                TargetFilter::TriggeringPlayer,
+                "the later 'That player' must NOT leak the consumed antecedent — \
+                 it falls back to the default TriggeringPlayer recipient"
+            ),
+            other => panic!("expected Discard, got {other:?}"),
+        }
+    }
 }
 
 /// Snapshot tests locking current trigger parser output before the IR split.

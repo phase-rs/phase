@@ -3828,6 +3828,7 @@ mod tests {
                 "if the player doesn't, draw a card",
                 Some(not_effect.clone()),
             ),
+            ("if they don't, draw a card", Some(not_effect.clone())),
             ("if you do, draw a card", Some(effect.clone())),
         ];
         for (input, expected) in cases {
