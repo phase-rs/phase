@@ -26,7 +26,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, CastingVariant, CastingVariantChoiceOption, ConvokeMode,
-    GameState, PendingCast, WaitingFor,
+    GameState, PendingCast, WaitingFor, ZoneManipulationKind,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -2387,7 +2387,11 @@ fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
                 super::triggers::drain_order_triggers_with_identity(&mut runner.state);
             }
             // CR 701.22a: default scry policy keeps the looked-at cards on top.
-            WaitingFor::ScryChoice { cards, .. } => {
+            WaitingFor::ScryChoice { cards, .. }
+            | WaitingFor::ZoneManipulation {
+                kind: ZoneManipulationKind::Scry { cards },
+                ..
+            } => {
                 let cards = cards.clone();
                 runner
                     .act(GameAction::SelectCards { cards })
