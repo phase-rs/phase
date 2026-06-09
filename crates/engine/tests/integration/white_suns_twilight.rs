@@ -96,17 +96,18 @@ fn opponent_creature(runner: &GameRunner) -> Option<engine::types::identifiers::
 }
 
 /// X=5: caster gains 5 life; the `If X is 5 or more` clause fires, destroying
-/// all OTHER creatures. Per the official ruling, the Mites this spell just
-/// created are themselves "other creatures" and are destroyed in the same
-/// resolution — so the battlefield ends with zero Mites and no opponent
-/// creature. (Per-token characteristics are asserted in the X=3 case, where
-/// the Mites survive to be inspected.)
+/// all OTHER creatures. Per the official ruling (shared with Martial Coup, the
+/// same template), "all other creatures" means creatures that are NOT the tokens
+/// this spell just created — so the 5 Mites SURVIVE while the opponent's seeded
+/// creature is destroyed. The Mites are not "other": they were created earlier in
+/// this same resolution.
 ///
 /// CR 111.3 + CR 111.4: the token's quoted "can't block" is the token's text,
 /// not a host static — so the spell's gain/create/destroy chain must run.
-/// CR 119.3: life gain. CR 701.7: destroy. CR 702.164: Toxic.
+/// CR 109.1: "other" excludes the same-resolution created tokens. CR 119.3: life
+/// gain. CR 701.7: destroy. CR 702.164: Toxic.
 #[test]
-fn white_suns_twilight_x5_gains_creates_and_wipes() {
+fn white_suns_twilight_x5_gains_creates_and_spares_own_mites() {
     let (runner, outcome) = cast_white_suns_twilight(5);
 
     // Life gain happens before the wipe and is unaffected by it.
@@ -117,13 +118,12 @@ fn white_suns_twilight_x5_gains_creates_and_wipes() {
         opponent_creature(&runner).is_none(),
         "X>=5 must destroy the opponent's Grizzly Bears"
     );
-    // The freshly created Mites are also "other creatures" (FilterProp::Another
-    // excludes only the sorcery source, which is not on the battlefield), so they
-    // are destroyed in the same resolution and none remain.
+    // The 5 Mites this spell created are NOT "other creatures" — they were created
+    // earlier in this same resolution — so the board wipe spares them.
     assert_eq!(
         mite_tokens(&runner).len(),
-        0,
-        "the Mites created at X=5 are also destroyed by the board wipe"
+        5,
+        "the Mites created at X=5 must survive the spell's own \"destroy all other creatures\""
     );
 }
 
