@@ -55,23 +55,26 @@ Accept:
 Fetch all feedback in ONE GraphQL call. **Most actionable feedback on this repo is top-level — PR review bodies (where Gemini's summary review and most human reviews land) and issue/conversation comments — not file/line-anchored inline threads.** GraphQL is the idle rate-limit bucket, so one query avoids the per-PR REST `--paginate` walk that drains `core`; more importantly it fetches all three feedback objects **comprehensively**, which the "all blocking review comments resolved" gate requires:
 
 ```bash
+# First page: omit the cursor vars (they default to null = from the start).
+# To paginate, pass the connection's endCursor back via -F <conn>Cursor=<endCursor>.
 gh api graphql -F owner=phase-rs -F name=phase -F pr=<PR> -f query='
-query($owner:String!,$name:String!,$pr:Int!) {
+query($owner:String!,$name:String!,$pr:Int!,$reviewsCursor:String,$commentsCursor:String,$threadsCursor:String) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$pr) {
       reviewDecision
-      reviews(first:100) {                    # top-level review bodies (Gemini summary, human reviews) — the MAJORITY
+      reviews(first:100, after:$reviewsCursor) {              # top-level review bodies (Gemini summary, human reviews) — the MAJORITY
         pageInfo { hasNextPage endCursor }
         nodes { author{login} body state submittedAt url }
       }
-      comments(first:100) {                   # top-level issue/conversation comments
+      comments(first:100, after:$commentsCursor) {            # top-level issue/conversation comments
         pageInfo { hasNextPage endCursor }
         nodes { author{login} body url createdAt }
       }
-      reviewThreads(first:100) {              # inline (file/line) threads + resolved state — the minority
+      reviewThreads(first:100, after:$threadsCursor) {        # inline (file/line) threads + resolved state — the minority
         pageInfo { hasNextPage endCursor }
         nodes { isResolved isOutdated path line
-                comments(first:50) { nodes { author{login} body url createdAt } } }
+                comments(first:50) { pageInfo { hasNextPage endCursor }
+                                     nodes { author{login} body url createdAt } } }
       }
     }
   }
@@ -82,7 +85,7 @@ Comprehensiveness rules for the gate:
 
 - **Top-level `reviews` and `comments` have no `isResolved` flag** — read every one's **body** for actionable findings and judge whether each is addressed in the current commits. Do NOT gate on review `state`: the dominant reviewer here (Gemini) posts its findings in a `COMMENTED` review with `reviewDecision: null` (verified on live PRs), so a `state`-based gate would skip the majority of review content. Treat `state == CHANGES_REQUESTED` as an *additional* hard block, never the sole blocking signal. Compare reviews by each author's **latest** `submittedAt` — a later approval from the same author supersedes their earlier change-request, and vice-versa.
 - **Inline `reviewThreads`** are the minority here but still binding: filter to `isResolved == false` for actionable items.
-- If ANY connection's `pageInfo.hasNextPage` is true, paginate with `endCursor` — do not stop at the first page; this is the comprehensive gate, not a triage slice. Truncating `reviews`/`comments` would silently hide top-level blockers, the majority case. (The nested per-thread `comments(first:50)` cap only matters for a single thread with 50+ replies — rare; refetch that thread if it hits the cap.)
+- If ANY connection's `pageInfo.hasNextPage` is true, paginate by passing that connection's `endCursor` back via its cursor variable (`-F reviewsCursor=<endCursor>`, `-F commentsCursor=…`, `-F threadsCursor=…`) and re-running — do not stop at the first page; this is the comprehensive gate, not a triage slice. Truncating `reviews`/`comments` would silently hide top-level blockers, the majority case. The nested per-thread `comments` connection also exposes `pageInfo`: if a single thread's `comments.pageInfo.hasNextPage` is true (50+ replies — rare), refetch that thread's comments with its own `after` cursor.
 
 Never substitute a per-PR `gh api .../pulls/<PR>/comments --paginate` REST walk (drains `core`, inline-only, lacks resolved-state) or a time-windowed `since=` sweep (risks dropping old unaddressed top-level feedback).
 
