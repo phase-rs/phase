@@ -25,6 +25,7 @@ fn saddled_by_records_payers_and_clears_at_end_of_turn() {
     };
     // CR 702.171a: a single 3-power creature satisfies "total power 2 or greater".
     let rider = scenario.add_creature(P0, "Rider", 3, 3).id();
+    let second_rider = scenario.add_creature(P0, "Second Rider", 3, 3).id();
 
     let mut runner = scenario.build();
 
@@ -55,6 +56,29 @@ fn saddled_by_records_payers_and_clears_at_end_of_turn() {
         m.saddled_by,
         vec![rider],
         "saddled_by must record the creatures that saddled the Mount"
+    );
+
+    // CR 702.171c: a later Saddle activation in the same turn adds the new
+    // saddling creature instead of replacing the earlier record.
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![],
+        })
+        .expect("entering a second SaddleMount should succeed");
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: mount,
+            creature_ids: vec![second_rider],
+        })
+        .expect("announcing the second saddle should succeed");
+    runner.advance_until_stack_empty();
+
+    let m = runner.state().objects.get(&mount).unwrap();
+    assert_eq!(
+        m.saddled_by,
+        vec![rider, second_rider],
+        "saddled_by must accumulate creatures across same-turn Saddle activations"
     );
 
     // CR 702.171b: advance the real pipeline across the cleanup step (CR 514) into

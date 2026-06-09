@@ -1308,7 +1308,11 @@ fn resolve_keyword_action(
                 if mount.zone == Zone::Battlefield {
                     mount.is_saddled = true;
                     // CR 702.171c: record the creatures that saddled this permanent.
-                    mount.saddled_by = paid_creature_ids.clone();
+                    for creature_id in &paid_creature_ids {
+                        if !mount.saddled_by.contains(creature_id) {
+                            mount.saddled_by.push(*creature_id);
+                        }
+                    }
                 }
             }
             events.push(GameEvent::Saddled {
