@@ -64,20 +64,20 @@ pub(crate) fn parse_enchanted_land_chosen_type_static_sentence(
 /// Engine, Xenograft, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChosenCreatureTypeStaticScope {
-    CreaturesYouControl,
-    EachCreatureYouControl,
-    VehicleCreaturesYouControl,
+    Creatures,
+    EachCreature,
+    VehicleCreatures,
 }
 
 impl ChosenCreatureTypeStaticScope {
     fn target_filter(self) -> TargetFilter {
         match self {
-            Self::CreaturesYouControl | Self::EachCreatureYouControl => {
+            Self::Creatures | Self::EachCreature => {
                 TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
             }
             // CR 301.7 + CR 607.2d: Lifecraft Engine grants a creature subtype to
             // Vehicle permanents you control — not the Creature card type.
-            Self::VehicleCreaturesYouControl => TargetFilter::Typed(
+            Self::VehicleCreatures => TargetFilter::Typed(
                 TypedFilter::new(TypeFilter::Subtype("Vehicle".to_string()))
                     .controller(ControllerRef::You),
             ),
@@ -137,18 +137,15 @@ pub(crate) fn parse_chosen_creature_type_static_subject(
 ) -> OracleResult<'_, (&'static str, ChosenCreatureTypeStaticScope)> {
     alt((
         value(
-            ("their", ChosenCreatureTypeStaticScope::CreaturesYouControl),
+            ("their", ChosenCreatureTypeStaticScope::Creatures),
             tag("creatures you control are"),
         ),
         value(
-            ("its", ChosenCreatureTypeStaticScope::EachCreatureYouControl),
+            ("its", ChosenCreatureTypeStaticScope::EachCreature),
             tag("each creature you control is"),
         ),
         value(
-            (
-                "their",
-                ChosenCreatureTypeStaticScope::VehicleCreaturesYouControl,
-            ),
+            ("their", ChosenCreatureTypeStaticScope::VehicleCreatures),
             tag("vehicle creatures you control are"),
         ),
     ))
