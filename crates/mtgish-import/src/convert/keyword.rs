@@ -172,10 +172,16 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
             "Rule::Echo",
             path,
         )?)),
-        Rule::Embalm(c) => Keyword::Embalm(pure_mana(c, "Rule::Embalm", path)?),
+        Rule::Embalm(c) => Keyword::Embalm(engine::types::keywords::EmbalmCost::Mana(pure_mana(
+            c,
+            "Rule::Embalm",
+            path,
+        )?)),
         Rule::Emerge(c) => Keyword::Emerge(pure_mana(c, "Rule::Emerge", path)?),
         Rule::Encore(c) => Keyword::Encore(pure_mana(c, "Rule::Encore", path)?),
-        Rule::Eternalize(c) => Keyword::Eternalize(pure_mana(c, "Rule::Eternalize", path)?),
+        Rule::Eternalize(c) => Keyword::Eternalize(engine::types::keywords::EternalizeCost::Mana(
+            pure_mana(c, "Rule::Eternalize", path)?,
+        )),
         Rule::Evoke(c) => Keyword::Evoke(engine::types::keywords::EvokeCost::Mana(pure_mana(
             c,
             "Rule::Evoke",

@@ -10,13 +10,14 @@ use crate::game::casting::{can_activate_ability_now, handle_activate_ability};
 use crate::game::stack::resolve_top;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityCost, AbilityKind, ContinuousModification, Effect, QuantityExpr, TargetFilter,
+    AbilityCost, AbilityKind, CardSelectionMode, ContinuousModification, DiscardSelfScope, Effect,
+    QuantityExpr, TargetFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{EmbalmCost, EternalizeCost, Keyword};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -87,7 +88,7 @@ fn synthesize_embalm_builds_white_zombie_no_mana_cost_copy() {
         shards: vec![ManaCostShard::White],
         generic: 3,
     };
-    let mut face = face_with(Keyword::Embalm(cost.clone()));
+    let mut face = face_with(Keyword::Embalm(EmbalmCost::Mana(cost.clone())));
     synthesize_embalm_eternalize(&mut face);
 
     let mods = assert_token_copy_ability_shape(&face, &cost);
@@ -115,7 +116,7 @@ fn synthesize_eternalize_builds_4_4_black_zombie_no_mana_cost_copy() {
         shards: vec![ManaCostShard::Black, ManaCostShard::Black],
         generic: 4,
     };
-    let mut face = face_with(Keyword::Eternalize(cost.clone()));
+    let mut face = face_with(Keyword::Eternalize(EternalizeCost::Mana(cost.clone())));
     synthesize_embalm_eternalize(&mut face);
 
     let mods = assert_token_copy_ability_shape(&face, &cost);
@@ -144,6 +145,79 @@ fn synthesize_is_noop_without_keyword() {
     let mut face = face_with(Keyword::Flying);
     synthesize_embalm_eternalize(&mut face);
     assert!(face.abilities.is_empty());
+}
+
+/// CR 602.1a + CR 702.129a: Champion of Wits family —
+/// `EternalizeCost::NonMana(Composite[Mana{3UU}, Discard])` must synthesize a
+/// cost `Composite[Mana, Discard, Exile-self]`: the discard sub-cost survives
+/// (it is NOT dropped) and the self-exile is appended flat (not nested).
+#[test]
+fn synthesize_eternalize_nonmana_composite_keeps_discard_and_appends_exile_self() {
+    let mana = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        generic: 3,
+    };
+    let discard = AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter: None,
+        selection: CardSelectionMode::Chosen,
+        self_scope: DiscardSelfScope::FromHand,
+    };
+    let keyword = Keyword::Eternalize(EternalizeCost::NonMana(AbilityCost::Composite {
+        costs: vec![AbilityCost::Mana { cost: mana.clone() }, discard.clone()],
+    }));
+    let mut face = face_with(keyword);
+    synthesize_embalm_eternalize(&mut face);
+
+    assert_eq!(face.abilities.len(), 1);
+    let AbilityCost::Composite { costs } = face.abilities[0]
+        .cost
+        .as_ref()
+        .expect("synthesized ability must have a cost")
+    else {
+        panic!("expected Composite cost");
+    };
+    assert_eq!(
+        costs.len(),
+        3,
+        "mana + discard + exile-self, flattened (not nested)"
+    );
+    assert!(matches!(&costs[0], AbilityCost::Mana { cost } if cost == &mana));
+    assert_eq!(
+        costs[1], discard,
+        "the discard activation cost must survive synthesis"
+    );
+    assert!(matches!(
+        &costs[2],
+        AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::SelfRef),
+        }
+    ));
+}
+
+/// Backward-compat: a legacy bare-`ManaCost` JSON keyword payload (MTGJSON
+/// shape, lacking the `type` discriminant) deserializes to the `Mana` variant.
+#[test]
+fn legacy_bare_mana_json_parses_to_eternalize_mana_variant() {
+    // Legacy externally-tagged keyword: the value under "Eternalize" is a bare
+    // ManaCost (no `EternalizeCost` `{type, data}` discriminant). The JSON arm
+    // must fall back to EternalizeCost::Mana for this shape. Serialize a real
+    // ManaCost so the legacy payload's exact serde shape is used.
+    let legacy_mana = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        generic: 3,
+    };
+    let json = serde_json::json!({
+        "Eternalize": serde_json::to_value(&legacy_mana).unwrap()
+    });
+    let kw: Keyword =
+        serde_json::from_value(json).expect("legacy bare-mana eternalize must deserialize");
+    let Keyword::Eternalize(EternalizeCost::Mana(mana)) = kw else {
+        panic!("expected Eternalize(Mana), got {kw:?}");
+    };
+    assert_eq!(mana, legacy_mana);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +271,10 @@ fn main_phase_state() -> GameState {
 #[test]
 fn token_copy_keyword_activatable_from_graveyard_at_sorcery_speed() {
     let mut state = main_phase_state();
-    let source = setup_graveyard_source(&mut state, Keyword::Embalm(ManaCost::default()));
+    let source = setup_graveyard_source(
+        &mut state,
+        Keyword::Embalm(EmbalmCost::Mana(ManaCost::default())),
+    );
     assert!(
         can_activate_ability_now(&state, PlayerId(0), source, 0),
         "Embalm must be activatable from graveyard in the sorcery window"
@@ -209,7 +286,10 @@ fn token_copy_keyword_activatable_from_graveyard_at_sorcery_speed() {
 fn token_copy_keyword_rejects_instant_speed() {
     let mut state = main_phase_state();
     state.phase = Phase::Upkeep;
-    let source = setup_graveyard_source(&mut state, Keyword::Embalm(ManaCost::default()));
+    let source = setup_graveyard_source(
+        &mut state,
+        Keyword::Embalm(EmbalmCost::Mana(ManaCost::default())),
+    );
     assert!(
         !can_activate_ability_now(&state, PlayerId(0), source, 0),
         "Embalm must reject activation outside the sorcery-speed window"
@@ -230,7 +310,10 @@ fn created_token(state: &GameState) -> ObjectId {
 #[test]
 fn embalm_activation_creates_white_zombie_copy_with_no_mana_cost() {
     let mut state = main_phase_state();
-    let source = setup_graveyard_source(&mut state, Keyword::Embalm(ManaCost::default()));
+    let source = setup_graveyard_source(
+        &mut state,
+        Keyword::Embalm(EmbalmCost::Mana(ManaCost::default())),
+    );
 
     let mut events = Vec::new();
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events)
@@ -262,7 +345,10 @@ fn embalm_activation_creates_white_zombie_copy_with_no_mana_cost() {
 #[test]
 fn eternalize_activation_creates_4_4_black_zombie_copy_with_no_mana_cost() {
     let mut state = main_phase_state();
-    let source = setup_graveyard_source(&mut state, Keyword::Eternalize(ManaCost::default()));
+    let source = setup_graveyard_source(
+        &mut state,
+        Keyword::Eternalize(EternalizeCost::Mana(ManaCost::default())),
+    );
 
     let mut events = Vec::new();
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events)
