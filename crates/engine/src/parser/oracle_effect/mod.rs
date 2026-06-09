@@ -109,9 +109,9 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{ActivationExemption, CastFrequency, StaticMode};
 #[cfg(test)]
 use crate::types::statics::CastFreeOrigin;
+use crate::types::statics::{ActivationExemption, CastFrequency, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
