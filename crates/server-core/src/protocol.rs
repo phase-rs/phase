@@ -265,6 +265,14 @@ pub enum ServerMessage {
         build_commit: String,
         protocol_version: u32,
         mode: ServerMode,
+        /// Public base URL clients should advertise when sharing a join code
+        /// (e.g. `https://x.ngrok-free.app` from an embedded tunnel, or a
+        /// `PUBLIC_URL` reverse proxy). Lets a host connected over `localhost`
+        /// still surface a reachable `<code>@<host>` string. Additive and
+        /// optional: older clients ignore it, older servers omit it. `None` for
+        /// LobbyOnly brokers and for servers with no advertised address.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        public_url: Option<String>,
     },
     GameCreated {
         game_code: String,
@@ -1200,7 +1208,8 @@ mod tests {
             server_version: "0.1.11".to_string(),
             build_commit: "abc1234".to_string(),
             protocol_version: PROTOCOL_VERSION,
-            mode: ServerMode::LobbyOnly,
+            mode: ServerMode::Full,
+            public_url: Some("https://x.ngrok-free.app".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1210,14 +1219,32 @@ mod tests {
                 build_commit,
                 protocol_version,
                 mode,
+                public_url,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
-                assert_eq!(mode, ServerMode::LobbyOnly);
+                assert_eq!(mode, ServerMode::Full);
+                assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn server_hello_omits_public_url_when_none() {
+        // `skip_serializing_if` keeps the wire identical to a server with no
+        // advertised URL — and identical to the lobby-broker ServerHello, which
+        // has no such field (asserted by the lobby wire-contract test).
+        let msg = ServerMessage::ServerHello {
+            server_version: "0.1.11".to_string(),
+            build_commit: "abc1234".to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            mode: ServerMode::LobbyOnly,
+            public_url: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("public_url"), "None must be omitted: {json}");
     }
 
     #[test]
