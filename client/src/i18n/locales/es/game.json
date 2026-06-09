@@ -321,7 +321,8 @@
     "chooseAmountAria": "Elige la cantidad a pagar",
     "payAmount": "Pagar {{value}} {{resource}}",
     "resourceEnergy": "energía",
-    "resourceMana": "maná"
+    "resourceMana": "maná",
+    "resourceCounters": "contadores"
   },
   "hand": {
     "viewFullHand_one": "Ver la mano completa ({{count}} carta)",
