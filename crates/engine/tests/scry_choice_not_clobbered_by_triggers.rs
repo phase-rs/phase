@@ -1,13 +1,13 @@
 //! Regression: a scry that triggers 2+ simultaneous "whenever you scry"
-//! abilities must still surface the `ScryChoice` prompt — and the triggers must
+//! abilities must still surface the scry prompt — and the triggers must
 //! still fire after the choice resolves.
 //!
 //! Reported in-game (Track Down with Matoya, Archon Elder + Elrond, Master of
 //! Healing both on the battlefield): "Scry is now a no-op, the modal never
-//! appeared." Root cause: when a scry effect set `WaitingFor::ScryChoice`
+//! appeared." Root cause: when a scry effect set a scry `WaitingFor`
 //! mid-resolution, the post-resolution trigger scan collected the scry-watching
 //! triggers and — with 2+ same-controller triggers — set
-//! `WaitingFor::OrderTriggers`, overwriting the pending `ScryChoice` (CR 603.3b
+//! `WaitingFor::OrderTriggers`, overwriting the pending scry choice (CR 603.3b
 //! violation: those triggers must wait until the spell finishes resolving). A
 //! single trigger used the non-ordering dispatch path and didn't clobber, so
 //! the bug only manifested with two or more — which is why plain scry (and Opt
@@ -20,12 +20,13 @@
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{WaitingFor, ZoneManipulationKind};
 use engine::types::phase::Phase;
 
 /// CR 603.3b + CR 701.22a: With two "whenever you scry" triggers on the
-/// battlefield, casting a scry spell must still pause at `ScryChoice` (the
-/// modal the user picks from), not jump straight into trigger handling.
+/// battlefield, casting a scry spell must still pause at `ZoneManipulation`
+/// with `ZoneManipulationKind::Scry` (the modal the user picks from), not jump
+/// straight into trigger handling.
 #[test]
 fn scry_with_two_watchers_still_prompts_and_fires_triggers() {
     let mut scenario = GameScenario::new();
@@ -33,7 +34,8 @@ fn scry_with_two_watchers_still_prompts_and_fires_triggers() {
 
     // Two DISTINCT "whenever you scry" watchers (draw vs. gain life). They must
     // differ so the two same-controller scry-watcher triggers still surface the
-    // CR 603.3b OrderTriggers prompt — the exact path that clobbered ScryChoice
+    // CR 603.3b OrderTriggers prompt — the exact path that clobbered the scry
+    // choice.
     // (identical no-input triggers now auto-order, which would bypass the
     // clobber path this test guards).
     scenario.add_creature_from_oracle(
@@ -72,9 +74,13 @@ fn scry_with_two_watchers_still_prompts_and_fires_triggers() {
 
     // The spell left the hand on cast; after it resolves the engine MUST be
     // paused on the scry choice, not on a trigger-ordering / target prompt.
-    let WaitingFor::ScryChoice { player, cards } = runner.state().waiting_for.clone() else {
+    let WaitingFor::ZoneManipulation {
+        player,
+        kind: ZoneManipulationKind::Scry { cards },
+    } = runner.state().waiting_for.clone()
+    else {
         panic!(
-            "scry must pause at ScryChoice even with two scry-watchers, got {}",
+            "scry must pause at ZoneManipulation/Scry even with two scry-watchers, got {}",
             runner.waiting_for_kind()
         );
     };

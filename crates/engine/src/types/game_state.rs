@@ -2180,7 +2180,7 @@ pub enum ZoneManipulationKind {
         #[serde(default)]
         enter_tapped: bool,
     },
-    /// CR 701.46a: Surveil N — library top to graveyard or leave on top.
+    /// CR 701.25a: Surveil N — library top to graveyard or leave on top.
     Surveil { cards: Vec<ObjectId> },
     /// CR 701.20a: Reveal from hand and optionally act on revealed cards.
     Reveal {
@@ -2301,14 +2301,6 @@ pub enum ZoneManipulationKind {
 impl ZoneManipulationKind {
     pub fn scry(cards: Vec<ObjectId>) -> Self {
         Self::Scry { cards }
-    }
-
-    pub fn surveil(cards: Vec<ObjectId>) -> Self {
-        Self::Surveil { cards }
-    }
-
-    pub fn top_or_bottom(object_id: ObjectId) -> Self {
-        Self::TopOrBottom { object_id }
     }
 }
 
@@ -4318,32 +4310,10 @@ impl WaitingFor {
             )
     }
 
-    /// Whether this pause is a zone/manipulation choice (unified or legacy shape).
-    pub fn is_zone_manipulation(&self) -> bool {
-        matches!(
-            self,
-            WaitingFor::ZoneManipulation { .. }
-                | WaitingFor::ScryChoice { .. }
-                | WaitingFor::DigChoice { .. }
-                | WaitingFor::SurveilChoice { .. }
-                | WaitingFor::RevealChoice { .. }
-                | WaitingFor::SearchChoice { .. }
-                | WaitingFor::SearchPartitionChoice { .. }
-                | WaitingFor::OutsideGameChoice { .. }
-                | WaitingFor::ChooseFromZoneChoice { .. }
-                | WaitingFor::EffectZoneChoice { .. }
-                | WaitingFor::TopOrBottomChoice { .. }
-                | WaitingFor::RevealUntilKeptChoice { .. }
-        )
-    }
-
     /// Normalize legacy zone/manipulation variants to `WaitingFor::ZoneManipulation`.
     pub fn normalize_zone_manipulation(self) -> Self {
-        if matches!(self, WaitingFor::ZoneManipulation { .. }) {
-            return self;
-        }
         match self {
-            WaitingFor::ZoneManipulation { .. } => unreachable!(),
+            WaitingFor::ZoneManipulation { .. } => self,
             WaitingFor::ScryChoice { player, cards } => {
                 WaitingFor::zone_manipulation_waiting(player, ZoneManipulationKind::Scry { cards })
             }
@@ -7494,6 +7464,86 @@ mod tests {
             cards: vec![],
         }
         .accepts_freeform_card_selection());
+    }
+
+    #[test]
+    fn normalize_zone_manipulation_preserves_dig_fields() {
+        let legacy = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(1),
+            cards: vec![ObjectId(10), ObjectId(11), ObjectId(12)],
+            keep_count: 2,
+            up_to: true,
+            selectable_cards: vec![ObjectId(10), ObjectId(12)],
+            kept_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Graveyard),
+            source_id: Some(ObjectId(99)),
+            enter_tapped: true,
+        };
+
+        assert_eq!(
+            legacy.normalize_zone_manipulation(),
+            WaitingFor::ZoneManipulation {
+                player: PlayerId(0),
+                kind: ZoneManipulationKind::Dig {
+                    library_owner: PlayerId(1),
+                    cards: vec![ObjectId(10), ObjectId(11), ObjectId(12)],
+                    keep_count: 2,
+                    up_to: true,
+                    selectable_cards: vec![ObjectId(10), ObjectId(12)],
+                    kept_destination: Some(Zone::Hand),
+                    rest_destination: Some(Zone::Graveyard),
+                    source_id: Some(ObjectId(99)),
+                    enter_tapped: true,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_zone_manipulation_preserves_effect_zone_fields() {
+        let legacy = WaitingFor::EffectZoneChoice {
+            player: PlayerId(1),
+            cards: vec![ObjectId(20), ObjectId(21)],
+            count: 2,
+            min_count: 1,
+            up_to: true,
+            source_id: ObjectId(88),
+            effect_kind: crate::types::ability::EffectKind::ChangeZone,
+            zone: Zone::Graveyard,
+            destination: Some(Zone::Battlefield),
+            enter_tapped: EtbTapState::Tapped,
+            enter_transformed: true,
+            enters_under_player: Some(PlayerId(0)),
+            enters_attacking: true,
+            owner_library: true,
+            track_exiled_by_source: true,
+            count_param: 3,
+        };
+
+        assert_eq!(
+            legacy.normalize_zone_manipulation(),
+            WaitingFor::ZoneManipulation {
+                player: PlayerId(1),
+                kind: ZoneManipulationKind::EffectZone {
+                    cards: vec![ObjectId(20), ObjectId(21)],
+                    count: 2,
+                    min_count: 1,
+                    up_to: true,
+                    source_id: ObjectId(88),
+                    effect_kind: crate::types::ability::EffectKind::ChangeZone,
+                    zone: Zone::Graveyard,
+                    destination: Some(Zone::Battlefield),
+                    enter_tapped: EtbTapState::Tapped,
+                    enter_transformed: true,
+                    enters_under_player: Some(PlayerId(0)),
+                    enters_attacking: true,
+                    owner_library: true,
+                    track_exiled_by_source: true,
+                    count_param: 3,
+                },
+            }
+        );
     }
 
     #[test]

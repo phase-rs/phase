@@ -635,21 +635,6 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
-        // both accept (put onto the battlefield) and decline (hand / rest pile)
-        // are legitimate plays, so emit both for the search to explore.
-        WaitingFor::RevealUntilKeptChoice { player, .. } => vec![
-            candidate(
-                GameAction::DecideOptionalEffect { accept: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::DecideOptionalEffect { accept: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
         // CR 107.1c: "you may repeat this process any number of times" — both
         // repeating and stopping are legitimate plays, so emit both for the
         // search to explore.
@@ -778,8 +763,7 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             ));
             actions
         }
-        WaitingFor::TopOrBottomChoice { player, .. }
-        | WaitingFor::ClashCardPlacement { player, .. } => vec![
+        WaitingFor::ClashCardPlacement { player, .. } => vec![
             candidate(
                 GameAction::ChooseTopOrBottom { top: true },
                 TacticalClass::Selection,
@@ -1058,7 +1042,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 }
             }
         }
-        WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
         WaitingFor::CoinFlipKeepChoice {
             player,
             results,
@@ -1084,194 +1067,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Vec::new()
             }
         }
-        WaitingFor::DigChoice {
-            player,
-            keep_count,
-            up_to,
-            selectable_cards,
-            ..
-        } => {
-            // Use pre-filtered selectable_cards for combination generation
-            let max_keep = (*keep_count).min(selectable_cards.len());
-            if *up_to {
-                // Generate combinations for all valid sizes 0..=max_keep
-                bounded_select_card_candidates(*player, selectable_cards, 0..=max_keep)
-            } else {
-                bounded_select_card_candidates(*player, selectable_cards, [max_keep])
-            }
-        }
-        WaitingFor::SurveilChoice { player, cards } => select_cards_variants(*player, cards, None),
-        WaitingFor::RevealChoice {
-            player,
-            cards,
-            optional,
-            ..
-        } => {
-            // CR 701.20a: Normal reveal forces exactly one pick. Optional reveal
-            // (e.g., reveal-lands) additionally permits an empty selection to
-            // signal "I decline to reveal" — the source's decline branch fires.
-            let mut variants = select_cards_variants(*player, cards, Some(1));
-            if *optional {
-                variants.push(candidate(
-                    GameAction::SelectCards { cards: vec![] },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ));
-            }
-            variants
-        }
-        WaitingFor::SearchChoice {
-            player,
-            cards,
-            count,
-            up_to,
-            constraint,
-            ..
-        } => {
-            // CR 107.1c + CR 701.23d: "any number of" / "up to N" searches enumerate
-            // combination sizes 0..=count; exact-count searches enumerate only `count`.
-            let sizes: Vec<usize> = if *up_to {
-                (0..=*count).collect()
-            } else {
-                vec![*count]
-            };
-            // Engine-side beam cap. Required (not optional) because every candidate
-            // returned here flows into `PlannerServices::validate_candidates`, which
-            // clones state + applies the action per candidate. Without a cap, a
-            // count=4 search against an 80-card library produces ~C(80,4) ≈ 1.6M
-            // combinations and stalls validation for hours. The cap is constraint-
-            // aware so distinct-name searches collapse duplicate-named entries
-            // before combinatorial explosion (Gifts Ungiven against an 80-card pool
-            // with 8 distinct names → 8 candidate ids, C(8,4)=70 legal combos).
-            //
-            // Correctness note: the cap may exclude legal moves the AI could
-            // theoretically prefer, so it is a perf-bounded approximation, not a
-            // legality filter. Player-driven SearchChoice flows through the
-            // engine's submission guard regardless of what this list contains.
-            const ENGINE_CANDIDATE_CAP: usize = 12;
-            let beam_cards = cap_search_choice_pool(state, cards, constraint, ENGINE_CANDIDATE_CAP);
-            sizes
-                .into_iter()
-                .flat_map(|size| combinations(&beam_cards, size))
-                // CR 608.2c: Drop combinations that violate the printed-text
-                // selection restriction (e.g., Gifts Ungiven's "with different
-                // names") so the AI never scores or submits an illegal pick.
-                .filter(|combo| {
-                    crate::game::effects::search_library::selection_satisfies_constraint(
-                        state, combo, constraint,
-                    )
-                })
-                .map(|combo| {
-                    candidate(
-                        GameAction::SelectCards { cards: combo },
-                        TacticalClass::Selection,
-                        Some(*player),
-                    )
-                })
-                .collect()
-        }
-        // CR 701.23a + CR 608.2c: Cultivate-class partition pick — choose exactly
-        // `primary_count` of the found cards for the battlefield (the rest go to
-        // hand). C(found, primary_count) is small (found <= 4), so enumerate every
-        // exact-size combination as a candidate.
-        WaitingFor::SearchPartitionChoice {
-            player,
-            cards,
-            primary_count,
-            ..
-        } => combinations(cards, *primary_count as usize)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        WaitingFor::OutsideGameChoice {
-            player,
-            choices,
-            count,
-            up_to,
-            ..
-        } => {
-            // CR 400.11 + CR 406.3: Expand each offered choice into one
-            // selection per available copy (sideboard copies multiply, face-up
-            // exile is always count=1 — a unique in-game object).
-            use crate::types::game_state::OutsideGameChoiceSource;
-            let mut pool: Vec<OutsideGameSelection> = Vec::new();
-            for choice in choices.iter() {
-                match &choice.source {
-                    OutsideGameChoiceSource::Sideboard {
-                        sideboard_index, ..
-                    } => {
-                        for _ in 0..choice.count {
-                            pool.push(OutsideGameSelection::Sideboard {
-                                sideboard_index: *sideboard_index,
-                            });
-                        }
-                    }
-                    OutsideGameChoiceSource::FaceUpExile { object_id } => {
-                        pool.push(OutsideGameSelection::FaceUpExile {
-                            object_id: *object_id,
-                        });
-                    }
-                }
-            }
-            let sizes = if *up_to {
-                (0..=*count).collect()
-            } else {
-                vec![*count]
-            };
-            bounded_combinations_generic(&pool, sizes, SELECTION_POOL_CAP, SELECTION_CANDIDATE_CAP)
-                .into_iter()
-                .map(|selections| {
-                    candidate(
-                        GameAction::ChooseOutsideGameCards { selections },
-                        TacticalClass::Selection,
-                        Some(*player),
-                    )
-                })
-                .collect()
-        }
-        // CR 700.2: Choose card(s) from a tracked set (exiled/revealed cards).
-        WaitingFor::ChooseFromZoneChoice {
-            player,
-            cards,
-            count,
-            up_to,
-            constraint,
-            ..
-        } => {
-            let sizes = if *up_to {
-                (0..=*count).collect()
-            } else {
-                vec![*count]
-            };
-            bounded_combinations_for_sizes(
-                cards,
-                sizes,
-                SELECTION_POOL_CAP,
-                SELECTION_CANDIDATE_CAP,
-            )
-            .into_iter()
-            .filter(|combo| {
-                crate::game::effects::choose_from_zone::selection_satisfies_constraint(
-                    state,
-                    combo,
-                    constraint.as_ref(),
-                )
-            })
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect()
-        }
         WaitingFor::ChooseOneOfBranch {
             player, branches, ..
         } => (0..branches.len())
@@ -1283,21 +1078,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        WaitingFor::EffectZoneChoice {
-            player,
-            cards,
-            count,
-            min_count,
-            up_to,
-            ..
-        } => {
-            let sizes = if *up_to {
-                (*min_count..=*count).collect()
-            } else {
-                vec![*count]
-            };
-            bounded_select_card_candidates(*player, cards, sizes)
-        }
         WaitingFor::DrawnThisTurnTopdeckChoice {
             player,
             cards,
