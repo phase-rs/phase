@@ -580,10 +580,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // mutable permission list is casting-time authorization, not
             // resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
-                if paid_snapshot
+                let cast_transformed = paid_snapshot
                     .as_ref()
-                    .is_some_and(|snapshot| snapshot.cast_transformed)
-                {
+                    .is_some_and(|snapshot| snapshot.cast_transformed);
+                if cast_transformed {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         enter_transformed,
                         ..
@@ -598,7 +598,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // the ZoneChange ProposedEvent so Doubling-Season-class
                 // AddCounter replacements (CR 614.1a) see and modify them as
                 // the replacement pipeline runs.
-                let intrinsic = super::printed_cards::intrinsic_etb_counters(obj);
+                // CR 712.14a: For cast_transformed (Craft / ExileWithAltCost) the
+                // spell is on the stack with the front face but enters as the back
+                // face — read loyalty/defense from the back face directly so the
+                // replacement pipeline sees the correct counter count.
+                let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
+                    (true, Some(back)) => {
+                        super::printed_cards::intrinsic_face_counters(back.loyalty, back.defense)
+                    }
+                    _ => super::printed_cards::intrinsic_etb_counters(obj),
+                };
                 if !intrinsic.is_empty() {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         enter_with_counters,
