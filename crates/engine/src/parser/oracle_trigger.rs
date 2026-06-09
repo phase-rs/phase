@@ -4167,67 +4167,48 @@ fn split_shared_subject_event_list(cond_lower: &str, condition: &str) -> Option<
 ///
 /// CR 603.1: Each event is an independent trigger condition.
 fn split_cross_subject_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
-    use super::oracle_nom::primitives::split_once_on;
-
-    // Look for " or " that separates two complete subject-verb phrases.
-    // The pattern is: "Whenever <subject1> <verb1> ... or <subject2> <verb2> ..."
-    // We detect this by checking if what follows " or " starts with a known subject phrase.
-    let Ok((_, (before, after))) = split_once_on(cond_lower, " or ") else {
-        return None;
-    };
+    let (after_lower, _) = parse_cross_subject_or_split(cond_lower).ok()?;
+    let (after_original, before_original) = parse_cross_subject_or_split(condition).ok()?;
 
     // Check if what follows " or " starts with a valid subject phrase
     // (a/an/the + type word, or "a player", "an opponent", etc.)
-    let after_trimmed = after.trim_start();
-    if !starts_with_subject_phrase(after_trimmed) {
+    if parse_cross_subject_phrase_start(after_lower.trim_start()).is_err() {
         return None;
     }
 
-    // Extract the trigger keyword from the first half
-    // allow-noncombinator: trigger keyword extraction for compound split
-    let keyword = extract_trigger_keyword(cond_lower)?;
+    let (_, keyword) = parse_trigger_keyword_prefix(cond_lower).ok()?;
 
-    // Split into two complete trigger lines
-    let first = condition[..before.len()].trim().to_string();
-    let second = format!("{}{}", keyword, condition[before.len() + 4..].trim());
+    let first = before_original.trim().to_string();
+    let second = format!("{keyword}{}", after_original.trim());
 
     Some(vec![first, second])
 }
 
-/// Check if text starts with a valid subject phrase for a trigger.
-/// Returns true for patterns like "a creature", "an opponent", "the player", etc.
-fn starts_with_subject_phrase(text: &str) -> bool {
-    let text = text.trim_start();
-    // Check for article + noun pattern: "a", "an", "the"
-    // allow-noncombinator: subject-phrase prefix check for cross-subject compound detection
-    if text.starts_with("a ") || text.starts_with("an ") || text.starts_with("the ") {
-        return true;
-    }
-    // Check for specific player references
-    // allow-noncombinator: subject-phrase prefix check for cross-subject compound detection
-    if text.starts_with("player ") || text.starts_with("opponent ") {
-        return true;
-    }
-    // Check for "you" as subject
-    // allow-noncombinator: subject-phrase prefix check for cross-subject compound detection
-    if text.starts_with("you ") {
-        return true;
-    }
-    false
+fn parse_cross_subject_or_split(input: &str) -> OracleResult<'_, &str> {
+    terminated(take_until(" or "), tag(" or ")).parse(input)
 }
 
-/// Extract the trigger keyword ("When " or "Whenever ") from a condition string.
-/// Returns None if no valid trigger keyword is found.
-fn extract_trigger_keyword(cond_lower: &str) -> Option<&'static str> {
-    // allow-noncombinator: structural prefix read on already-lowercased string, not parsing dispatch
-    if cond_lower.starts_with("whenever ") {
-        return Some("Whenever ");
-    }
-    // allow-noncombinator: structural prefix read on already-lowercased string, not parsing dispatch
-    if cond_lower.starts_with("when ") {
-        return Some("When ");
-    }
-    None
+fn parse_cross_subject_phrase_start(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("a "),
+            tag("an "),
+            tag("the "),
+            tag("player "),
+            tag("opponent "),
+            tag("you "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_trigger_keyword_prefix(input: &str) -> OracleResult<'_, &'static str> {
+    alt((
+        value("Whenever ", tag("whenever ")),
+        value("When ", tag("when ")),
+    ))
+    .parse(input)
 }
 
 /// Split serial compound events sharing one subject — the N-way branch of
