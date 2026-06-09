@@ -13848,6 +13848,64 @@ mod tests {
         assert!(benign_json.get("consumes_source").is_none());
     }
 
+    /// #1446: `Effect::count_expr`/`count_expr_mut` are the building block the
+    /// vote-tally assembly layer uses to bind a typed `QuantityRef::VoteCount`
+    /// into a per-choice effect's magnitude slot. Exercise the accessor directly
+    /// across all three structural families (`count:`, `amount:`,
+    /// `Option<count>`) plus a magnitude-free effect, rather than only through
+    /// the vote path, so a future single-target/draw/damage vote-tally form
+    /// binds against verified field mappings.
+    #[test]
+    fn count_expr_maps_each_magnitude_family() {
+        let fixed = |v| QuantityExpr::Fixed { value: v };
+
+        // `count:` family — Draw exposes its count, mutably and immutably.
+        let mut draw = Effect::Draw {
+            count: fixed(2),
+            target: default_target_filter_controller(),
+        };
+        assert_eq!(draw.count_expr(), Some(&fixed(2)));
+
+        // `amount:` family — DealDamage exposes its amount through the same API.
+        let damage = Effect::DealDamage {
+            amount: fixed(5),
+            target: default_target_filter_any(),
+            damage_source: None,
+        };
+        assert_eq!(damage.count_expr(), Some(&fixed(5)));
+
+        // `Option<count>` family — None when absent, Some when present.
+        let mut bounce_none = Effect::BounceAll {
+            target: default_target_filter_none(),
+            destination: None,
+            count: None,
+        };
+        assert_eq!(bounce_none.count_expr(), None);
+        assert_eq!(bounce_none.count_expr_mut(), None);
+        let bounce_some = Effect::BounceAll {
+            target: default_target_filter_none(),
+            destination: None,
+            count: Some(fixed(3)),
+        };
+        assert_eq!(bounce_some.count_expr(), Some(&fixed(3)));
+
+        // Magnitude-free effect — no count slot to bind.
+        let destroy = Effect::Destroy {
+            target: default_target_filter_any(),
+            cant_regenerate: false,
+        };
+        assert_eq!(destroy.count_expr(), None);
+
+        // The vote-layer use case: rebind the count slot to a typed VoteCount.
+        *draw.count_expr_mut().expect("Draw has a count slot") = QuantityExpr::Ref {
+            qty: QuantityRef::VoteCount { choice_index: 0 },
+        };
+        assert!(draw
+            .count_expr()
+            .expect("count slot present")
+            .contains_vote_count());
+    }
+
     #[test]
     fn per_counter_cost_delegates_categories_to_base() {
         let base = AbilityCost::Mana {

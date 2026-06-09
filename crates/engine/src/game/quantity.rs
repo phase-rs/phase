@@ -1808,14 +1808,13 @@ fn resolve_ref(
         // ballots — rather than counting distinct voters — is the consequence of
         // CR 701.38d: a player granted multiple votes casts multiple ballots, so
         // a single player can contribute more than one to a choice's tally.
-        QuantityRef::VoteCount { choice_index } => i32::try_from(
+        QuantityRef::VoteCount { choice_index } => usize_to_i32_saturating(
             state
                 .last_vote_ballots
                 .iter()
                 .filter(|(_, ballot_choice)| *ballot_choice == *choice_index)
                 .count(),
-        )
-        .unwrap_or(i32::MAX),
+        ),
         // CR 305.6: Count distinct basic land types among lands controlled by
         // the referenced player. Domain counts distinct land subtypes, not
         // lands, so multiple Forests still contribute one.
