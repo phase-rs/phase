@@ -4184,6 +4184,18 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
         let lower = remaining.to_lowercase();
         let tp = TextPair::new(&remaining, &lower);
 
+        // CR 602.5b: A printed "Once each turn" activation restriction stays
+        // attached to this activated ability even if the object changes control.
+        if let Some(((), rest_original)) = nom_on_lower(&remaining, &lower, |i| {
+            value((), tag("once each turn, ")).parse(i)
+        }) {
+            constraints
+                .restrictions
+                .push(ActivationRestriction::OnlyOnceEachTurn);
+            remaining = rest_original.trim().to_string();
+            continue;
+        }
+
         if let Some((before, after)) = tp.rsplit_around(" and only if ") {
             if !before.original.trim().is_empty() {
                 let mut condition_text = after.original.trim().to_string();

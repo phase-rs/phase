@@ -11432,6 +11432,9 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
     alt((
         tag::<_, _, E>("~"),
         tag("this creature"),
+        tag("this artifact"),
+        tag("this permanent"),
+        tag("this card"),
         tag("this spell"),
         tag("it"),
     ))

@@ -1511,14 +1511,21 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
     // `SELF_REF_TYPE_PHRASES` (this creature, this permanent, …) but left
     // verbatim for `SELF_REF_PARSE_ONLY_PHRASES` ("this card"). Accept either
     // form so the static covers future cards that lean on the parse-only set.
-    let after_source = std::iter::once("~")
-        .chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied())
-        .find_map(|phrase| nom_tag_lower(trailing, trailing, phrase))?;
+    let after_source = strip_self_reference(trailing)?;
 
-    // CR 113.6b: The "this turn" suffix is structural — without it the
-    // permission would not be per-turn-scoped and would belong to the
-    // open-ended `ExiledBySource` class instead.
-    let after_this_turn = nom_tag_lower(after_source, after_source, " this turn")?;
+    // CR 113.6b: Optional "this turn" suffix selects the per-turn rolling pool
+    // (Maralen). Without it the permission reads the persistent `exile_links`
+    // pool (Serpent's Soul-Jar).
+    let (after_this_turn, pool) =
+        if let Some(rest) = nom_tag_lower(after_source, after_source, " this turn") {
+            (rest, ExileCardPool::ThisTurn)
+        } else {
+            let tail = after_source.trim().trim_start_matches('.').trim();
+            if !tail.is_empty() {
+                return None;
+            }
+            (after_source, ExileCardPool::Persistent)
+        };
 
     // CR 118.9a: Optional " without paying its mana cost" / "their mana costs"
     // alt-cost rider selects the `WithoutPayingManaCost` shape; absence leaves
@@ -1540,7 +1547,7 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
             // CR 113.6b: The "this turn" suffix scoped the pool to the per-turn
             // rolling list; this Maralen-class permission has no turn-of-use
             // restriction beyond its once-each-turn frequency.
-            pool: ExileCardPool::ThisTurn,
+            pool,
             timing: ExileCastTiming::AnyTime,
         })
         .affected(filter)
@@ -1644,6 +1651,14 @@ fn strip_look_at_exiled_preamble(lower: &str) -> Option<&str> {
 fn strip_self_reference(lower: &str) -> Option<&str> {
     std::iter::once("~")
         .chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied())
+        .chain([
+            "this artifact",
+            "this permanent",
+            "this creature",
+            "this equipment",
+            "this land",
+            "it",
+        ])
         .find_map(|phrase| nom_tag_lower(lower, lower, phrase))
 }
 

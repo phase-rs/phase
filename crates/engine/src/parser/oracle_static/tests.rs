@@ -6455,6 +6455,26 @@ fn persistent_exile_play_permission_rejects_maralen_this_turn() {
     );
 }
 
+/// Issue #1524 — Serpent's Soul-Jar: persistent exile pool without "this turn".
+#[test]
+fn exile_cast_permission_soul_jar_persistent_creature_pool() {
+    let text = "Once each turn, you may cast a creature spell from among cards \
+                exiled with this artifact.";
+    let def = parse_static_line(text).expect("Soul-Jar static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::OncePerTurn,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::AnyTime,
+        },
+        "expected persistent ExileCastPermission, got {:?}",
+        def.mode
+    );
+}
+
 #[test]
 fn graveyard_cast_permission_no_rider_leaves_filter_clean() {
     // Lurrus / Muldrotha / Karador / Conduit / Yawgmoth's Will regression:

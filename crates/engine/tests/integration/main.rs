@@ -89,6 +89,7 @@ mod issue_1308_unstoppable_plan;
 mod issue_1312_prepared_spell_cast_triggers;
 mod issue_1499_arabella;
 mod issue_1509_sorcery_main_phase_cast;
+mod issue_1524_serpents_soul_jar;
 mod issue_1526_harvest_season;
 mod issue_1549_legend_of_roku_impulse;
 mod issue_1961_joel_token_dies;
