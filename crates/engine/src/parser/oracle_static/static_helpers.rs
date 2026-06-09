@@ -525,7 +525,11 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
                 if rest.trim().is_empty() || rest.trim() == "." {
                     definition.condition = Some(sc);
                 }
-            } else if let Some(filter) = parse_it_targets_that_targets_spell_filter(cond_text) {
+            } else if tag::<_, _, OracleError<'_>>("it targets ")
+                .parse(cond_text)
+                .is_ok()
+            {
+                let filter = parse_it_targets_that_targets_spell_filter(cond_text)?;
                 // CR 115.9b: "if it targets a spell or ability that targets a [type]
                 // you control [with power N or greater]" — wire the parsed nested
                 // target filter into spell_filter so the reduction only applies when
@@ -707,9 +711,11 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
     let power_prop = if trimmed.is_empty() {
         None
     } else {
-        nom_filter::parse_pt_comparison(trimmed)
-            .ok()
-            .and_then(|(rest, prop)| rest.trim().is_empty().then_some(prop))
+        let (rest, prop) = nom_filter::parse_pt_comparison(trimmed).ok()?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        Some(prop)
     };
 
     // Build the innermost creature/permanent filter

@@ -4116,17 +4116,20 @@ fn cost_filter_has_target_ref(filter: &TargetFilter) -> bool {
 
 fn target_ref_matches_cost_filter(
     state: &GameState,
-    source_id: ObjectId,
     source_controller: PlayerId,
+    ability: &ResolvedAbility,
     target: &TargetRef,
     filter: &TargetFilter,
 ) -> bool {
     match target {
         TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_source_with_controller(
-                source_id,
+            let ctx = super::filter::FilterContext::from_ability_with_controller(
+                ability,
                 source_controller,
             );
+            if super::filter::matches_stack_target_filter(state, *object_id, filter, &ctx) {
+                return true;
+            }
             super::filter::matches_target_filter(state, *object_id, filter, &ctx)
         }
         TargetRef::Player(player_id) => super::filter::player_matches_target_filter_in_state(
@@ -4140,7 +4143,6 @@ fn target_ref_matches_cost_filter(
 
 fn selected_targets_match_filter(
     state: &GameState,
-    source_id: ObjectId,
     source_controller: PlayerId,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
@@ -4153,11 +4155,11 @@ fn selected_targets_match_filter(
 
     if require_all {
         targets.iter().all(|target| {
-            target_ref_matches_cost_filter(state, source_id, source_controller, target, filter)
+            target_ref_matches_cost_filter(state, source_controller, ability, target, filter)
         })
     } else {
         targets.iter().any(|target| {
-            target_ref_matches_cost_filter(state, source_id, source_controller, target, filter)
+            target_ref_matches_cost_filter(state, source_controller, ability, target, filter)
         })
     }
 }
@@ -4199,24 +4201,10 @@ fn spell_matches_cost_filter_with_selected_targets(
 
             tf.properties.iter().all(|prop| match prop {
                 crate::types::ability::FilterProp::Targets { filter } => {
-                    selected_targets_match_filter(
-                        state,
-                        source_id,
-                        source_controller,
-                        ability,
-                        filter,
-                        false,
-                    )
+                    selected_targets_match_filter(state, source_controller, ability, filter, false)
                 }
                 crate::types::ability::FilterProp::TargetsOnly { filter } => {
-                    selected_targets_match_filter(
-                        state,
-                        source_id,
-                        source_controller,
-                        ability,
-                        filter,
-                        true,
-                    )
+                    selected_targets_match_filter(state, source_controller, ability, filter, true)
                 }
                 _ => true,
             })
@@ -12421,10 +12409,10 @@ mod tests {
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
         CostCategory, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
         ManaSpendPermission, ManaSpendRestriction, ModalChoice, ModalSelectionCondition,
-        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtValue,
-        QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
-        TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtStat,
+        PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -18859,6 +18847,213 @@ mod tests {
             &mut blue_cost,
         );
         assert_eq!(blue_cost, ManaCost::generic(3));
+    }
+
+    #[test]
+    fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_object(
+            &mut state,
+            CardId(994),
+            PlayerId(0),
+            "Not of This World".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::generic(7);
+            let large_creature_filter = TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Current,
+                        comparator: Comparator::GE,
+                        value: QuantityExpr::Fixed { value: 7 },
+                    }]),
+            );
+            let stack_target_filter = TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::StackSpell,
+                            TargetFilter::StackAbility { controller: None },
+                        ],
+                    },
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::Targets {
+                            filter: Box::new(large_creature_filter),
+                        },
+                    ])),
+                ],
+            };
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::generic(7),
+                spell_filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Targets {
+                        filter: Box::new(stack_target_filter),
+                    },
+                ]))),
+                dynamic_count: None,
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+            obj.static_definitions.push(def);
+        }
+
+        let large_creature = create_object(
+            &mut state,
+            CardId(995),
+            PlayerId(0),
+            "Large Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&large_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(7);
+            obj.toughness = Some(7);
+            obj.base_power = Some(7);
+            obj.base_toughness = Some(7);
+        }
+        let smaller_creature = create_object(
+            &mut state,
+            CardId(996),
+            PlayerId(0),
+            "Smaller Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&smaller_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(6);
+            obj.toughness = Some(6);
+            obj.base_power = Some(6);
+            obj.base_toughness = Some(6);
+        }
+        let opposing_bolt = create_object(
+            &mut state,
+            CardId(997),
+            PlayerId(1),
+            "Targeted Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&opposing_bolt).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+        }
+        state.stack.push_back(StackEntry {
+            id: opposing_bolt,
+            source_id: opposing_bolt,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(997),
+                ability: Some(ResolvedAbility::new(
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        cant_regenerate: false,
+                    },
+                    vec![TargetRef::Object(large_creature)],
+                    opposing_bolt,
+                    PlayerId(1),
+                )),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 1,
+            },
+        });
+
+        let mut early_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers(
+            &state,
+            PlayerId(0),
+            spell_id,
+            &mut early_cost,
+        );
+        assert_eq!(early_cost, ManaCost::generic(7));
+
+        let not_of_this_world_targeting_bolt = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                source_rider: None,
+            },
+            vec![TargetRef::Object(opposing_bolt)],
+            spell_id,
+            PlayerId(0),
+        );
+        let mut reduced_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers_with_selected_targets(
+            &state,
+            PlayerId(0),
+            spell_id,
+            &not_of_this_world_targeting_bolt,
+            &mut reduced_cost,
+        );
+        assert_eq!(reduced_cost, ManaCost::generic(0));
+
+        let ability_source = create_object(
+            &mut state,
+            CardId(998),
+            PlayerId(1),
+            "Targeted Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let stack_ability_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: stack_ability_id,
+            source_id: ability_source,
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ability_source,
+                ability: ResolvedAbility::new(
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        cant_regenerate: false,
+                    },
+                    vec![TargetRef::Object(large_creature)],
+                    ability_source,
+                    PlayerId(1),
+                ),
+            },
+        });
+        let not_of_this_world_targeting_ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackAbility { controller: None },
+                source_rider: None,
+            },
+            vec![TargetRef::Object(stack_ability_id)],
+            spell_id,
+            PlayerId(0),
+        );
+        let mut reduced_ability_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers_with_selected_targets(
+            &state,
+            PlayerId(0),
+            spell_id,
+            &not_of_this_world_targeting_ability,
+            &mut reduced_ability_cost,
+        );
+        assert_eq!(reduced_ability_cost, ManaCost::generic(0));
+
+        state
+            .stack
+            .iter_mut()
+            .find(|entry| entry.id == opposing_bolt)
+            .expect("expected stack spell entry")
+            .ability_mut()
+            .unwrap()
+            .targets = vec![TargetRef::Object(smaller_creature)];
+        let mut unreduced_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers_with_selected_targets(
+            &state,
+            PlayerId(0),
+            spell_id,
+            &not_of_this_world_targeting_bolt,
+            &mut unreduced_cost,
+        );
+        assert_eq!(unreduced_cost, ManaCost::generic(7));
     }
 
     /// CR 601.2f: Cost reductions are applied during cost determination (before
