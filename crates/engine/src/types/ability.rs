@@ -3698,6 +3698,13 @@ pub enum QuantityRef {
     /// dual because counters (CR 122.1) and colors (CR 105/106) are distinct
     /// rule sections the engine resolves independently.
     DistinctCounterKindsAmong { filter: TargetFilter },
+    /// CR 701.38 + CR 608.2c: Number of votes tallied for this choice index,
+    /// summed from `state.last_vote_ballots`. Counts votes, not voters — a
+    /// consequence of CR 701.38d (a player granted multiple votes casts
+    /// multiple ballots, so a single player can contribute more than one to
+    /// the tally). Used by vote-tally effects ("for each X vote, do Y") whose
+    /// per-choice count is bound to this ref during vote-block parsing.
+    VoteCount { choice_index: u8 },
 }
 
 /// CR 107.1a: Rounding direction for fractional Oracle-text expressions.
@@ -4114,6 +4121,35 @@ impl QuantityExpr {
             } => inner.contains_x(),
             QuantityExpr::Sum { exprs } => exprs.iter().any(QuantityExpr::contains_x),
             QuantityExpr::Difference { left, right } => left.contains_x() || right.contains_x(),
+            QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+        }
+    }
+
+    /// Returns true if this expression resolves through a
+    /// `QuantityRef::VoteCount { .. }` anywhere in its tree — i.e. its value
+    /// is a vote tally bound during vote-block parsing. Mirrors `contains_x`:
+    /// the match is exhaustive so a new `QuantityExpr` variant forces every
+    /// consumer to reconsider vote-tally dependence rather than silently
+    /// defaulting to false. Used by `Effect::resolve_tally` (CR 701.38) to
+    /// decide whether a tally body resolves once as an aggregate (the count
+    /// ref sums the whole tally) versus once per vote.
+    pub fn contains_vote_count(&self) -> bool {
+        match self {
+            QuantityExpr::Ref {
+                qty: QuantityRef::VoteCount { .. },
+            } => true,
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => inner.contains_vote_count(),
+            QuantityExpr::Sum { exprs } => exprs.iter().any(QuantityExpr::contains_vote_count),
+            QuantityExpr::Difference { left, right } => {
+                left.contains_vote_count() || right.contains_vote_count()
+            }
             QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
         }
     }
@@ -8846,6 +8882,409 @@ impl Effect {
             // CR 701.23a: SearchLibrary has an optional player target for opponent search.
             Effect::SearchLibrary { target_player, .. } => target_player.as_ref(),
             Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => Some(player),
+        }
+    }
+
+    /// CR 107.3 + CR 608.2c: Returns the `QuantityExpr` carrying this effect's
+    /// primary count/amount, for the full class of count- and amount-bearing
+    /// effects (token creation, counters, draws, damage, mill, discard, etc.).
+    /// Returns `None` for effects whose magnitude is not a `QuantityExpr`
+    /// (fixed structural effects, choices, zone-level operations).
+    ///
+    /// Single authority used to bind and inspect a dynamic count after an
+    /// effect body has been parsed — e.g. vote-tally parsing binds the
+    /// per-choice `QuantityRef::VoteCount` into this slot (`count_expr_mut`),
+    /// and `Effect::resolve_tally` reads it back (`count_expr`) to decide
+    /// aggregate vs. per-vote resolution.
+    ///
+    /// Exhaustive match — no wildcards — so the compiler forces an update when
+    /// a new count/amount-bearing Effect variant is added.
+    pub fn count_expr(&self) -> Option<&QuantityExpr> {
+        match self {
+            // --- Effects whose magnitude is a `count: QuantityExpr` ---
+            Effect::Draw { count, .. }
+            | Effect::Token { count, .. }
+            | Effect::AddCounter { count, .. }
+            | Effect::Sacrifice { count, .. }
+            | Effect::Mill { count, .. }
+            | Effect::Scry { count, .. }
+            | Effect::Dig { count, .. }
+            | Effect::Surveil { count, .. }
+            | Effect::CopyTokenOf { count, .. }
+            | Effect::PutCounter { count, .. }
+            | Effect::PutCounterAll { count, .. }
+            | Effect::Discard { count, .. }
+            | Effect::SearchLibrary { count, .. }
+            | Effect::SearchOutsideGame { count, .. }
+            | Effect::ExileTop { count, .. }
+            | Effect::AddPendingETBCounters { count, .. }
+            | Effect::RollDie { count, .. }
+            | Effect::FlipCoins { count, .. }
+            | Effect::GivePlayerCounter { count, .. }
+            | Effect::PutAtLibraryPosition { count, .. }
+            | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
+            | Effect::Manifest { count, .. }
+            | Effect::SkipNextTurn { count, .. }
+            | Effect::SkipNextStep { count, .. }
+            | Effect::AdditionalPhase { count, .. }
+            | Effect::Incubate { count, .. }
+            | Effect::Amass { count, .. }
+            | Effect::Monstrosity { count, .. }
+            | Effect::Renown { count, .. }
+            | Effect::Bolster { count, .. }
+            | Effect::Adapt { count, .. }
+            | Effect::Seek { count, .. } => Some(count),
+
+            // --- Effects whose magnitude is an `amount: QuantityExpr` ---
+            Effect::ChangeSpeed { amount, .. }
+            | Effect::DealDamage { amount, .. }
+            | Effect::GainLife { amount, .. }
+            | Effect::LoseLife { amount, .. }
+            | Effect::DamageAll { amount, .. }
+            | Effect::DamageEachPlayer { amount, .. }
+            | Effect::GainEnergy { amount, .. }
+            | Effect::GrantExtraLoyaltyActivations { amount, .. }
+            | Effect::SetLifeTotal { amount, .. }
+            | Effect::Intensify { amount, .. } => Some(amount),
+
+            // --- Effects whose count/amount is an `Option<QuantityExpr>` ---
+            Effect::BounceAll { count, .. }
+            | Effect::MoveCounters { count, .. }
+            | Effect::RevealHand { count, .. } => count.as_ref(),
+
+            // --- Effects with no QuantityExpr count/amount ---
+            Effect::StartYourEngines { .. }
+            | Effect::Pump { .. }
+            | Effect::PairWith { .. }
+            | Effect::Destroy { .. }
+            | Effect::Regenerate { .. }
+            | Effect::Counter { .. }
+            | Effect::CounterAll { .. }
+            | Effect::Tap { .. }
+            | Effect::Untap { .. }
+            | Effect::TapAll { .. }
+            | Effect::UntapAll { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::GainControl { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::Attach { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Fight { .. }
+            | Effect::Bounce { .. }
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            | Effect::Investigate
+            | Effect::Tribute { .. }
+            | Effect::TimeTravel
+            | Effect::BecomeMonarch
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::EndTheTurn
+            | Effect::EndCombatPhase
+            | Effect::Populate
+            | Effect::Clash
+            | Effect::Vote { .. }
+            | Effect::SeparateIntoPiles { .. }
+            | Effect::SwitchPT { .. }
+            | Effect::CopySpell { .. }
+            | Effect::EpicCopy { .. }
+            | Effect::CastCopyOfCard { .. }
+            | Effect::Myriad
+            | Effect::Encore
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::Animate { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::GenericEffect { .. }
+            | Effect::PumpAll { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::GoadAll { .. }
+            | Effect::Goad { .. }
+            | Effect::Detain { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::Transform { .. }
+            | Effect::RevealTop { .. }
+            | Effect::Reveal { .. }
+            | Effect::TargetOnly { .. }
+            | Effect::Suspect { .. }
+            | Effect::Connive { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::ForceAttack { .. }
+            | Effect::BecomePrepared { .. }
+            | Effect::BecomeUnprepared { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::PreventDamage { .. }
+            | Effect::Exploit { .. }
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::Double { .. }
+            | Effect::GiveControl { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::Cascade
+            | Effect::Choose { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::ChooseOneOf { .. }
+            | Effect::Cleanup { .. }
+            | Effect::CollectEvidence { .. }
+            | Effect::Conjure { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::Discover { .. }
+            | Effect::DraftFromSpellbook { .. }
+            | Effect::Endure { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::FlipCoin { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::Forage
+            | Effect::FreeCastFromZones { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::GrantCastingPermission { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::Learn
+            | Effect::LoseTheGame { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::Mana { .. }
+            | Effect::ManifestDread
+            | Effect::MiracleCast { .. }
+            | Effect::OpenAttractions { .. }
+            | Effect::PayCost { .. }
+            | Effect::ProcessRadCounters
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::RevealFromHand { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::RingTemptsYou
+            | Effect::Ripple { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::RuntimeHandled { .. }
+            | Effect::SetClassLevel { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::Shuffle { .. }
+            | Effect::SolveCase
+            | Effect::Specialize
+            | Effect::TakeTheInitiative
+            | Effect::Unimplemented { .. }
+            | Effect::VentureInto { .. }
+            | Effect::VentureIntoDungeon
+            | Effect::WinTheGame { .. } => None,
+        }
+    }
+
+    /// Mutable counterpart of [`Effect::count_expr`]. Returns a mutable handle
+    /// to this effect's count/amount `QuantityExpr` so callers can rebind it
+    /// after the effect body has been parsed (vote-tally binding writes the
+    /// per-choice `QuantityRef::VoteCount` here). Exhaustive — mirrors
+    /// `count_expr` arm-for-arm.
+    pub fn count_expr_mut(&mut self) -> Option<&mut QuantityExpr> {
+        match self {
+            // --- Effects whose magnitude is a `count: QuantityExpr` ---
+            Effect::Draw { count, .. }
+            | Effect::Token { count, .. }
+            | Effect::AddCounter { count, .. }
+            | Effect::Sacrifice { count, .. }
+            | Effect::Mill { count, .. }
+            | Effect::Scry { count, .. }
+            | Effect::Dig { count, .. }
+            | Effect::Surveil { count, .. }
+            | Effect::CopyTokenOf { count, .. }
+            | Effect::PutCounter { count, .. }
+            | Effect::PutCounterAll { count, .. }
+            | Effect::Discard { count, .. }
+            | Effect::SearchLibrary { count, .. }
+            | Effect::SearchOutsideGame { count, .. }
+            | Effect::ExileTop { count, .. }
+            | Effect::AddPendingETBCounters { count, .. }
+            | Effect::RollDie { count, .. }
+            | Effect::FlipCoins { count, .. }
+            | Effect::GivePlayerCounter { count, .. }
+            | Effect::PutAtLibraryPosition { count, .. }
+            | Effect::ChooseDrawnThisTurnPayOrTopdeck { count, .. }
+            | Effect::Manifest { count, .. }
+            | Effect::SkipNextTurn { count, .. }
+            | Effect::SkipNextStep { count, .. }
+            | Effect::AdditionalPhase { count, .. }
+            | Effect::Incubate { count, .. }
+            | Effect::Amass { count, .. }
+            | Effect::Monstrosity { count, .. }
+            | Effect::Renown { count, .. }
+            | Effect::Bolster { count, .. }
+            | Effect::Adapt { count, .. }
+            | Effect::Seek { count, .. } => Some(count),
+
+            // --- Effects whose magnitude is an `amount: QuantityExpr` ---
+            Effect::ChangeSpeed { amount, .. }
+            | Effect::DealDamage { amount, .. }
+            | Effect::GainLife { amount, .. }
+            | Effect::LoseLife { amount, .. }
+            | Effect::DamageAll { amount, .. }
+            | Effect::DamageEachPlayer { amount, .. }
+            | Effect::GainEnergy { amount, .. }
+            | Effect::GrantExtraLoyaltyActivations { amount, .. }
+            | Effect::SetLifeTotal { amount, .. }
+            | Effect::Intensify { amount, .. } => Some(amount),
+
+            // --- Effects whose count/amount is an `Option<QuantityExpr>` ---
+            Effect::BounceAll { count, .. }
+            | Effect::MoveCounters { count, .. }
+            | Effect::RevealHand { count, .. } => count.as_mut(),
+
+            // --- Effects with no QuantityExpr count/amount ---
+            Effect::StartYourEngines { .. }
+            | Effect::Pump { .. }
+            | Effect::PairWith { .. }
+            | Effect::Destroy { .. }
+            | Effect::Regenerate { .. }
+            | Effect::Counter { .. }
+            | Effect::CounterAll { .. }
+            | Effect::Tap { .. }
+            | Effect::Untap { .. }
+            | Effect::TapAll { .. }
+            | Effect::UntapAll { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::GainControl { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::Attach { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Fight { .. }
+            | Effect::Bounce { .. }
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            | Effect::Investigate
+            | Effect::Tribute { .. }
+            | Effect::TimeTravel
+            | Effect::BecomeMonarch
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::EndTheTurn
+            | Effect::EndCombatPhase
+            | Effect::Populate
+            | Effect::Clash
+            | Effect::Vote { .. }
+            | Effect::SeparateIntoPiles { .. }
+            | Effect::SwitchPT { .. }
+            | Effect::CopySpell { .. }
+            | Effect::EpicCopy { .. }
+            | Effect::CastCopyOfCard { .. }
+            | Effect::Myriad
+            | Effect::Encore
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::Animate { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::GenericEffect { .. }
+            | Effect::PumpAll { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::GoadAll { .. }
+            | Effect::Goad { .. }
+            | Effect::Detain { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::Transform { .. }
+            | Effect::RevealTop { .. }
+            | Effect::Reveal { .. }
+            | Effect::TargetOnly { .. }
+            | Effect::Suspect { .. }
+            | Effect::Connive { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::ForceAttack { .. }
+            | Effect::BecomePrepared { .. }
+            | Effect::BecomeUnprepared { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::PreventDamage { .. }
+            | Effect::Exploit { .. }
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::Double { .. }
+            | Effect::GiveControl { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::Cascade
+            | Effect::Choose { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::ChooseOneOf { .. }
+            | Effect::Cleanup { .. }
+            | Effect::CollectEvidence { .. }
+            | Effect::Conjure { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::Discover { .. }
+            | Effect::DraftFromSpellbook { .. }
+            | Effect::Endure { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::FlipCoin { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::Forage
+            | Effect::FreeCastFromZones { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::GrantCastingPermission { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::Learn
+            | Effect::LoseTheGame { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::Mana { .. }
+            | Effect::ManifestDread
+            | Effect::MiracleCast { .. }
+            | Effect::OpenAttractions { .. }
+            | Effect::PayCost { .. }
+            | Effect::ProcessRadCounters
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::RevealFromHand { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::RingTemptsYou
+            | Effect::Ripple { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::RuntimeHandled { .. }
+            | Effect::SetClassLevel { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::Shuffle { .. }
+            | Effect::SolveCase
+            | Effect::Specialize
+            | Effect::TakeTheInitiative
+            | Effect::Unimplemented { .. }
+            | Effect::VentureInto { .. }
+            | Effect::VentureIntoDungeon
+            | Effect::WinTheGame { .. } => None,
         }
     }
 }

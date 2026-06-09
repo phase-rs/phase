@@ -221,7 +221,20 @@ pub fn resolve_tally(
         let per_choice_player_scope = per_choice_effect[idx].player_scope.clone();
         let repeat_for = if per_choice_player_scope.is_some() {
             None
+        } else if per_choice_effect[idx]
+            .effect
+            .count_expr()
+            .is_some_and(QuantityExpr::contains_vote_count)
+        {
+            // CR 111.1 / CR 122.1 + CR 701.38 + CR 608.2c: aggregate-tally body
+            // (Emissary Green). Its count slot is bound to a
+            // `QuantityRef::VoteCount`, so the effect resolves as ONE aggregate
+            // event whose `resolve_ref` sums the full tally — do NOT repeat it
+            // per ballot, which would multiply the tally by itself.
+            None
         } else {
+            // Classic "For each <choice> vote, <effect>" (Tivit / Capital
+            // Punishment): the body has a fixed count and fires once per ballot.
             Some(QuantityExpr::Fixed {
                 value: *votes as i32,
             })
