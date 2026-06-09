@@ -104,8 +104,8 @@ fn opponent_creature(runner: &GameRunner) -> Option<engine::types::identifiers::
 ///
 /// CR 111.3 + CR 111.4: the token's quoted "can't block" is the token's text,
 /// not a host static — so the spell's gain/create/destroy chain must run.
-/// CR 109.1 (object identity, the basis for "another"/"other"): the official
-/// ruling resolves "other" to exclude the same-resolution created tokens.
+/// The "other"-excludes-self-created-tokens behavior is the official Martial Coup /
+/// White Sun's Twilight Gatherer ruling (the CR has no numbered "other" entry).
 /// CR 119.3: life gain. CR 701.7: create tokens. CR 701.8: destroy.
 /// CR 702.164: Toxic.
 #[test]

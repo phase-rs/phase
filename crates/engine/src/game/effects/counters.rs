@@ -419,7 +419,7 @@ fn apply_pending_counter_post_action(
                     }
                 }
             }
-            push_token_entry_events(state, events, object_id, name);
+            push_token_entry_events(state, events, object_id, name, source_id);
             if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
                 state.delayed_triggers.push(DelayedTrigger {
                     condition: DelayedTriggerCondition::AtNextPhase {
@@ -486,7 +486,7 @@ fn apply_pending_counter_post_action(
             crate::game::layers::mark_layers_entered(state, object_id);
             crate::game::restrictions::record_battlefield_entry(state, object_id);
             crate::game::restrictions::record_token_created(state, object_id);
-            push_token_entry_events(state, events, object_id, name);
+            push_token_entry_events(state, events, object_id, name, source_id);
             state.last_created_token_ids.push(object_id);
             if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
                 pending.created_ids.push(object_id);
@@ -615,6 +615,7 @@ fn push_token_entry_events(
     events: &mut Vec<GameEvent>,
     object_id: ObjectId,
     name: String,
+    source_id: ObjectId,
 ) {
     let Some(obj) = state.objects.get(&object_id) else {
         return;
@@ -627,7 +628,11 @@ fn push_token_entry_events(
         to: crate::types::zones::Zone::Battlefield,
         record: Box::new(zone_change_record),
     });
-    events.push(GameEvent::TokenCreated { object_id, name });
+    events.push(GameEvent::TokenCreated {
+        object_id,
+        name,
+        source_id,
+    });
 }
 
 /// CR 122.1 + CR 122.6: Apply an already-accepted counter addition and record

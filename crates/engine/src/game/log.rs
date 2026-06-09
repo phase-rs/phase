@@ -717,7 +717,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![text("Day/Night changed to "), text(new_state)]
         }
 
-        GameEvent::TokenCreated { object_id, name } => vec![
+        GameEvent::TokenCreated {
+            object_id, name, ..
+        } => vec![
             text("Token created: "),
             LogSegment::CardName {
                 name: name.clone(),
@@ -1319,6 +1321,7 @@ mod tests {
             GameEvent::TokenCreated {
                 object_id: ObjectId(1),
                 name: "Zombie".to_string(),
+                source_id: ObjectId(0),
             },
             GameEvent::PowerToughnessChanged {
                 object_id: ObjectId(1),
