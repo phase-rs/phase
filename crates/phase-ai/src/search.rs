@@ -528,6 +528,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
+        // Spellbook draft: pick the first card in the list.
+        WaitingFor::SpellbookDraft { options, .. } => options
+            .first()
+            .map(|card| GameAction::SubmitSpellbookDraft { card: card.clone() }),
+
         // Damage source choice: pick the first option.
         WaitingFor::DamageSourceChoice { options, .. } => options
             .first()

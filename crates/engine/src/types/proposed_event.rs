@@ -9,7 +9,7 @@ use super::counter::CounterType;
 use super::ability::{
     ContinuousModification, CopiableValues, Duration, FaceDownProfile, StaticDefinition, TargetRef,
 };
-use super::card::PrintedCardRef;
+use super::card::{PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
@@ -185,6 +185,12 @@ pub struct CopyTokenSpec {
     pub display_source: DisplaySource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// CR 111.1 + CR 707.2: exact token-art pointer of the copy source when it
+    /// is itself a true token (`display_source == Token`). Carried so a
+    /// token-copy of a token resolves the source token's art instead of falling
+    /// back to a name+filter Scryfall search. `None` for printed-card sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_keywords: Vec<Keyword>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

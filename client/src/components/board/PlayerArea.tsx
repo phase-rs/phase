@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { commanderDamageEntriesFor, commandersInZone } from "../../viewmodel/commanderColumn.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
 import { BattlefieldRow } from "./BattlefieldRow.tsx";
@@ -84,8 +85,6 @@ export function PlayerArea({
   }
 
   const player = gameState.players[playerId];
-  const hasCommandZoneCards = gameState.format_config?.command_zone === true;
-  const hasCommanderDamage = gameState.format_config?.commander_damage_threshold != null;
   const isEliminated = player?.is_eliminated ?? false;
   // CR 702.26-style player phasing: while phased out, dim the player area
   // to mirror the engine-side exclusion (targeting/damage/attack/SBA). Use
@@ -107,18 +106,29 @@ export function PlayerArea({
   // lands at LAND_BASE_SCALE (0.78), which squeezes the creatures row via
   // flex-1. Stacked CommanderDamage entries compound the warp.
   const commanderScale = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
-  const commanderSection = hasCommandZoneCards ? (
+  // Render the commander column only when it has real content — a commander
+  // still in the command zone, or live commander-damage entries. Gating on the
+  // format flag alone reserved an empty column (and its divider) for the whole
+  // game once the commander was cast. These go through the same selectors
+  // CommanderCardZone and CommanderDamage render from, so the wrapper appears
+  // iff a child will (single source of truth in viewmodel/commanderColumn).
+  const hasCommanderInZone = commandersInZone(gameState, playerId).length > 0;
+  const hasActiveCommanderDamage = commanderDamageEntriesFor(gameState, playerId).length > 0;
+  const commanderSection = hasCommanderInZone || hasActiveCommanderDamage ? (
+    // No `min-w-0` here: this column holds the commander-damage labels, and
+    // allowing it to shrink below its content width lets the adjacent
+    // (non-shrinking) planeswalker row collapse it and hide the labels.
     <div
-      className="flex min-w-0 flex-col items-end gap-1"
+      className="flex flex-col items-end gap-1"
       style={zoneStyle(commanderScale)}
     >
       <CommanderCardZone playerId={playerId} />
-      {hasCommanderDamage && <CommanderDamage playerId={playerId} />}
+      <CommanderDamage playerId={playerId} />
     </div>
   ) : null;
   const supportExtras = (
     <>
-      <BattlefieldRow groups={partitioned?.planeswalkers ?? []} rowType="support" />
+      <BattlefieldRow groups={partitioned?.planeswalkers ?? []} rowType="planeswalkers" />
       <CommandZone playerId={playerId} />
       {commanderSection}
     </>
@@ -127,8 +137,13 @@ export function PlayerArea({
   const supportSection = hasSupportExtras ? (
     <>
       <div className="mx-2 h-3/4 w-px shrink-0 bg-white/20" />
+      {/* No `min-w-0`: the support track is justify-end, so letting this
+          wrapper collapse below its content width pushes the right-rail cards
+          (emblems/commander) off the right edge of the screen. Holding its
+          intrinsic width clamps the right edge to the track and grows the
+          cluster leftward on-screen instead. */}
       <div
-        className="flex min-w-0 items-center gap-2"
+        className="flex items-center gap-2"
         style={zoneStyle(isCompactHeight ? OTHER_BASE_SCALE_COMPACT : OTHER_BASE_SCALE)}
       >
         {supportExtras}

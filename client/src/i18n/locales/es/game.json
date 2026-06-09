@@ -283,6 +283,8 @@
     "graveyardShort": "CE",
     "graveyardTitle": "Cementerio ({{count}})",
     "libraryAlt": "Biblioteca",
+    "library": "Biblioteca",
+    "libraryLower": "biblioteca",
     "libraryCount_one": "Biblioteca ({{count}} carta)",
     "libraryCount_other": "Biblioteca ({{count}} cartas)",
     "playFromTop": "Juega {{name}} desde la parte superior de la biblioteca",

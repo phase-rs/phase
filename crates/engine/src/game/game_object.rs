@@ -10,7 +10,7 @@ use crate::types::ability::{
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
-use crate::types::counter::CounterType;
+use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
 use crate::types::game_state::{AttackDeclarationRecord, GameState, LKISnapshot};
 use crate::types::identifiers::{CardId, ObjectId};
@@ -334,6 +334,7 @@ pub struct GameObject {
     pub pair_controller: Option<PlayerId>,
 
     // Counters
+    #[serde(with = "counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
 
     // Characteristics
@@ -386,6 +387,12 @@ pub struct GameObject {
     /// metadata copied from `CardFace`; game rules never read it directly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_related_token_ids: Vec<String>,
+
+    /// Alchemy spellbook — the fixed list of card names this object can draft
+    /// from, copied from `CardFace::metadata.spellbook`. Read by the
+    /// `DraftFromSpellbook` resolver to present the choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spellbook: Vec<String>,
 
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
@@ -995,6 +1002,7 @@ impl GameObject {
             base_printed_ref: None,
             token_image_ref: None,
             source_related_token_ids: Vec::new(),
+            spellbook: Vec::new(),
             back_face: None,
             specialize_faces: None,
             specialized_color: None,

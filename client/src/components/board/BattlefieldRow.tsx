@@ -25,6 +25,7 @@ const ROW_JUSTIFY: Record<string, string> = {
   creatures: "justify-center",
   lands: "justify-start",
   support: "justify-end",
+  planeswalkers: "justify-end",
   other: "justify-end",
 };
 
@@ -207,10 +208,17 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
     ? "flex-wrap items-end content-end"
     : "flex-nowrap items-end";
 
+  // Planeswalkers in the support area stay on a single horizontal line —
+  // wrapping them stacks vertically and warps the surrounding board rows.
+  // All other non-creature rows keep wrapping.
+  const nonCreatureClass = rowType === "planeswalkers"
+    ? "flex-nowrap items-center gap-2"
+    : "flex-wrap items-center gap-2";
+
   return (
     <div
       ref={containerRef}
-      className={`relative flex ${minH} ${rowType === "creatures" ? `${creatureClass} ${creatureWrap ? "gap-x-2 gap-y-3" : "gap-2"}` : "flex-wrap items-center gap-2"} ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
+      className={`relative flex ${minH} ${rowType === "creatures" ? `${creatureClass} ${creatureWrap ? "gap-x-2 gap-y-3" : "gap-2"}` : nonCreatureClass} ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
       style={rowStyle}
     >
       {rowType === "creatures" && expandedGroupIds.size > 0 && (
