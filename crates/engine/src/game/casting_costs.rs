@@ -5832,20 +5832,61 @@ pub(super) fn max_x_value_excluding(
     // `concretize_x` adds `x * x_count` generic; non-floor and target-dependent
     // reductions subtract an X-independent amount capped via `saturating_sub`
     // (never below {0}, CR 601.2f); floors are `max(., N)`. The composition of
-    // these monotonic non-decreasing maps is monotonic non-decreasing, so we may
-    // ascend from X=0 to the first X whose total overshoots `available` and
-    // return the prior X. Termination: `mana_value(x) >= x * x_count - C` for the
-    // fixed total reduction cap C, which grows without bound, so the overshoot is
-    // always reached.
-    let mut x = 0u32;
-    loop {
-        let probe =
-            super::casting::concrete_cost_for_x(state, player, spell_id, &ability, &base, x);
-        if probe.mana_value() > available {
-            return x.saturating_sub(1);
-        }
-        x += 1;
+    // these monotonic non-decreasing maps is monotonic non-decreasing, so the
+    // predicate `P(x) := concrete_cost_for_x(x).mana_value() <= available` is a
+    // monotone gate: once false it stays false. The answer is the largest X with
+    // `P(x)` true. A linear ascent finds it in O(maxX) cost recomputations; an
+    // exponential probe + bisection over the same monotone predicate finds the
+    // identical value in O(log maxX). `concrete_cost_for_x` is pure read-only
+    // (clones `base`, mutates only the local), so probing X out of ascending
+    // order is safe. The explicit `!probe(0)` early return below reproduces the
+    // old linear loop's `saturating_sub(1)` floor exactly: when even X=0
+    // overshoots, the cap is 0 (not an underflow).
+    largest_x_satisfying(formula_max, |x| {
+        super::casting::concrete_cost_for_x(state, player, spell_id, &ability, &base, x)
+            .mana_value()
+            <= available
+    })
+}
+
+/// Largest `x` for which `predicate(x)` holds, given `predicate` is a monotone
+/// gate — true for an initial prefix `[0, cap]` and false above it. This is the
+/// search underlying the X-cost cap (CR 601.2f): the per-X concrete cost is
+/// monotonic non-decreasing, so "the largest affordable X" is the top of the
+/// true-prefix.
+///
+/// `formula_max` is only a starting estimate for the exponential probe;
+/// correctness does NOT depend on it (the true cap can be lower — Trinisphere
+/// floor — or higher — reductions exceeding the fixed generic). Returns `0` when
+/// even `predicate(0)` is false, reproducing the linear ascent's
+/// `saturating_sub(1)` floor at the `X=0` boundary. O(log cap) evaluations of
+/// `predicate` versus the linear scan's O(cap); identical result by monotonicity.
+fn largest_x_satisfying(formula_max: u32, predicate: impl Fn(u32) -> bool) -> u32 {
+    if !predicate(0) {
+        return 0;
     }
+
+    // Exponential probe: grow `hi` off `formula_max` until `predicate(hi)` is
+    // false, yielding a proven upper bound above the true cap regardless of
+    // whether `formula_max` under- or over-states it. `saturating_mul` guards
+    // overflow; `max(saturating_add(1))` guards `hi == 0`.
+    let mut hi = formula_max.max(1);
+    while predicate(hi) {
+        hi = hi.saturating_mul(2).max(hi.saturating_add(1));
+    }
+
+    // Bisect `[lo, hi]` with invariant `predicate(lo)` true, `predicate(hi)`
+    // false. `lo` starts at 0 (proven true above). Returns the top of the prefix.
+    let mut lo = 0u32;
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if predicate(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 /// Single authority for transitioning into the payment step of a cast.
@@ -6642,6 +6683,54 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
+
+    /// Reference implementation of the X-cap search: the pre-refactor linear
+    /// ascent. Returns the largest `x` with `predicate(x)` true, clamped at 0.
+    fn linear_x_reference(predicate: impl Fn(u32) -> bool) -> u32 {
+        let mut x = 0u32;
+        loop {
+            if !predicate(x) {
+                return x.saturating_sub(1);
+            }
+            x += 1;
+        }
+    }
+
+    /// `largest_x_satisfying` (exponential probe + bisection) must return the
+    /// byte-identical X cap of the old linear ascent for every monotone cost
+    /// shape. Each shape models `concrete_cost_for_x(x).mana_value()` as a
+    /// monotone-non-decreasing function of X, then asserts the two searches agree.
+    #[test]
+    fn largest_x_satisfying_matches_linear_reference() {
+        // cost(x) = max(fixed + x * x_count - reduction, floor); predicate is
+        // cost(x) <= available. `reduction` and `floor` exercise the understate
+        // (reduction > fixed) and overstate (Trinisphere floor) cases the cap
+        // computation warns about.
+        let cost = |fixed: u32, x_count: u32, reduction: u32, floor: u32, x: u32| -> u32 {
+            (fixed + x * x_count).saturating_sub(reduction).max(floor)
+        };
+
+        for available in [0u32, 1, 2, 3, 5, 8, 13, 50, 100] {
+            for fixed in [0u32, 1, 3, 6] {
+                for x_count in [1u32, 2] {
+                    for reduction in [0u32, 2, 9] {
+                        for floor in [0u32, 3, 9] {
+                            let predicate =
+                                |x: u32| cost(fixed, x_count, reduction, floor, x) <= available;
+                            // The arithmetic estimate the real function passes in.
+                            let formula_max = available.saturating_sub(fixed) / x_count;
+                            assert_eq!(
+                                largest_x_satisfying(formula_max, predicate),
+                                linear_x_reference(predicate),
+                                "mismatch at available={available} fixed={fixed} \
+                                 x_count={x_count} reduction={reduction} floor={floor}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn make_pending(source_id: ObjectId) -> PendingCast {
         PendingCast {
