@@ -4588,8 +4588,23 @@ pub(crate) fn check_trigger_condition(
                 false
             }
         }
-        // CR 400.7: "if it had counters on it" — check LKI for counters.
-        TriggerCondition::HadCounters { counter_type } => source_id
+        // CR 603.10 + CR 608.2h: "if it had counters on it" — "it" is the
+        // triggering object (the creature that left/died), not the trigger
+        // source. Counters cease to exist when a permanent changes zones
+        // (CR 122.2), so this look-back reads the counters the object had as it
+        // left from its last-known information. For a watcher that observes
+        // OTHER permanents leaving (The Ozolith: "Whenever a creature you
+        // control leaves the battlefield, if IT had counters on it"), the
+        // triggering object is the leaving creature, extracted from the event;
+        // its LKI is keyed by its own ObjectId, not the source's. For a
+        // self-referential trigger (Undying's "When this creature dies, if it
+        // had no +1/+1 counters on it"), the triggering object IS the source,
+        // so the event source equals `source_id` and the `or(source_id)`
+        // fallback (also covering event-less Phase/reflexive triggers) yields
+        // identical behavior. Mirrors the `ManaSpentCondition` resolution above.
+        TriggerCondition::HadCounters { counter_type } => trigger_event
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .or(source_id)
             .and_then(|id| state.lki_cache.get(&id))
             .is_some_and(|lki| match counter_type {
                 Some(ct) => lki.counters.get(ct).is_some_and(|&v| v > 0),
