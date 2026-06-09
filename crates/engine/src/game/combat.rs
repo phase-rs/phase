@@ -592,6 +592,37 @@ fn blocker_has_cant_block_static(state: &GameState, blocker_id: ObjectId) -> boo
         .is_some()
 }
 
+/// CR 509.1b: Static abilities on the blocker (or on another source whose
+/// `affected` filter matches the blocker) that restrict which attackers it
+/// may block — e.g. "This creature can block only creatures with flying."
+fn blocker_block_allowed_statics_for<'a>(
+    state: &'a GameState,
+    blocker_id: ObjectId,
+) -> impl Iterator<Item = (&'a GameObject, &'a StaticDefinition)> + 'a {
+    super::functioning_abilities::game_functioning_statics(state)
+        .filter(|(_, def)| matches!(def.mode, StaticMode::BlockRestriction { .. }))
+        .filter(move |(src, def)| match def.affected.as_ref() {
+            None => src.id == blocker_id,
+            Some(filter) => matches_target_filter(
+                state,
+                blocker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ),
+        })
+        .filter(move |(src, def)| {
+            def.condition.as_ref().is_none_or(|condition| {
+                crate::game::layers::evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    src.controller,
+                    src.id,
+                    blocker_id,
+                )
+            })
+        })
+}
+
 /// CR 509.1c: Static abilities that force blockers onto `attacker_id` — e.g.
 /// "must be blocked if able" on the attacker itself, or on an Aura/Equipment
 /// whose `affected` filter matches the enchanted/equipped creature (Predatory
@@ -915,6 +946,23 @@ pub fn validate_blockers_for_player(
                 "{:?} cannot block {:?} (landwalk: defending player controls a matching land)",
                 blocker_id, attacker_id
             ));
+        }
+
+        // CR 509.1b: blocker-side "can block only <filter>" restrictions.
+        for (src, sd) in blocker_block_allowed_statics_for(state, blocker_id) {
+            let StaticMode::BlockRestriction { filter } = &sd.mode else {
+                continue;
+            };
+            if !matches_target_filter(
+                state,
+                attacker_id,
+                filter,
+                &FilterContext::from_source(state, src.id),
+            ) {
+                return Err(format!(
+                    "{blocker_id:?} can block only creatures matching the block restriction"
+                ));
+            }
         }
 
         blockers_per_attacker
@@ -2656,6 +2704,20 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
     // controller per CR 509.1a) controls a land of the matching type.
     if is_landwalk_unblockable(state, attacker, blocker.controller) {
         return false;
+    }
+    // CR 509.1b: blocker-side "can block only <filter>" restrictions.
+    for (src, sd) in blocker_block_allowed_statics_for(state, blocker_id) {
+        let StaticMode::BlockRestriction { filter } = &sd.mode else {
+            continue;
+        };
+        if !matches_target_filter(
+            state,
+            attacker_id,
+            filter,
+            &FilterContext::from_source(state, src.id),
+        ) {
+            return false;
+        }
     }
     true
 }
@@ -6219,6 +6281,54 @@ mod tests {
         assert!(validate_blockers(&state, &[(ground_blocker, attacker)]).is_err());
         // Flying creature can block (matches the exception filter)
         assert!(validate_blockers(&state, &[(flying_blocker, attacker)]).is_ok());
+    }
+
+    /// Issue #2364: Pinnacle Emissary Drone tokens carry "can block only
+    /// creatures with flying" — a blocker-side BlockRestriction, distinct
+    /// from attacker-side CantBeBlockedExceptBy.
+    #[test]
+    fn issue_2364_block_restriction_limits_blocker_to_flying_attackers() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::{block_only_creatures_with_flying_filter, StaticMode};
+
+        let mut state = setup();
+        let ground_attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let flying_attacker = create_creature(&mut state, PlayerId(0), "Bird", 2, 2);
+        state
+            .objects
+            .get_mut(&flying_attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        let drone = create_creature(&mut state, PlayerId(1), "Drone", 1, 1);
+        {
+            let drone_obj = state.objects.get_mut(&drone).unwrap();
+            drone_obj.keywords.push(Keyword::Flying);
+            drone_obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::BlockRestriction {
+                    filter: block_only_creatures_with_flying_filter(),
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        assert!(
+            validate_blockers(&state, &[(drone, ground_attacker)]).is_err(),
+            "Drone must not block non-flying attackers"
+        );
+        assert!(
+            !can_block_pair(&state, drone, ground_attacker),
+            "can_block_pair must reject non-flying attacker"
+        );
+        assert!(
+            validate_blockers(&state, &[(drone, flying_attacker)]).is_ok(),
+            "Drone may block flying attackers"
+        );
+        assert!(
+            can_block_pair(&state, drone, flying_attacker),
+            "can_block_pair must accept flying attacker"
+        );
     }
 
     /// Issue #496: "can't be blocked except by three or more creatures" must

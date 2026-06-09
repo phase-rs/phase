@@ -56,9 +56,11 @@ pub(crate) fn lower_rule_static(
             .affected(affected)
             .description(description.to_string()),
         RuleStaticPredicate::BlockOnlyCreaturesWithFlying => {
-            StaticDefinition::new(StaticMode::BlockRestriction)
-                .affected(affected)
-                .description(description.to_string())
+            StaticDefinition::new(StaticMode::BlockRestriction {
+                filter: crate::types::statics::block_only_creatures_with_flying_filter(),
+            })
+            .affected(affected)
+            .description(description.to_string())
         }
         RuleStaticPredicate::Shroud if rule_static_affected_is_player_scope(&affected) => {
             StaticDefinition::new(StaticMode::Shroud)
@@ -1498,7 +1500,7 @@ pub(crate) fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCo
 /// a spell reduces/raises its own cast cost (e.g., Tolarian Terror:
 /// "This spell costs {1} less to cast for each instant and sorcery card in
 /// your graveyard."). Callers use this to flag self-reference so the static
-/// is emitted with `affected = SelfRef` and `active_zones = [Hand, Stack, Command]`
+/// is emitted with `affected = SelfRef` and `active_zones = self_spell_cost_mod_active_zones()`
 /// instead of the default battlefield scope.
 pub(crate) fn parse_self_spell_cost_subject(lower: &str) -> Option<()> {
     nom_on_lower(lower, lower, |i| {

@@ -7493,7 +7493,9 @@ mod tests {
         assert_eq!(r.statics.len(), 1);
         assert_eq!(
             r.statics[0].mode,
-            crate::types::statics::StaticMode::BlockRestriction
+            crate::types::statics::StaticMode::BlockRestriction {
+                filter: crate::types::statics::block_only_creatures_with_flying_filter(),
+            }
         );
     }
 
@@ -13611,7 +13613,7 @@ mod tests {
         assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
         assert_eq!(
             r.statics[0].active_zones,
-            vec![Zone::Hand, Zone::Stack, Zone::Command]
+            crate::types::zones::self_spell_cost_mod_active_zones()
         );
         assert!(
             r.parse_warnings
