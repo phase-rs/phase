@@ -2245,8 +2245,8 @@ fn ability_cost_to_payment_cost(
             amount: amount.clone(),
         },
         AC::Discard {
-            random: false,
-            self_ref: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+            self_scope: engine::types::ability::DiscardSelfScope::FromHand,
             ..
         } => PC::AbilityCost { cost: cost.clone() },
         _ => {

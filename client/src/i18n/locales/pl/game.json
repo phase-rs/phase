@@ -264,6 +264,7 @@
     "grantsProperty": "Nadaje czarowi właściwość"
   },
   "zone": {
+    "commandZone": "Strefa dowodzenia",
     "emblem": "Emblemat",
     "emblemFallback": "Emblemat",
     "commander": "Dowódca",
@@ -283,6 +284,8 @@
     "graveyardShort": "CM",
     "graveyardTitle": "Cmentarz ({{count}})",
     "libraryAlt": "Biblioteka",
+    "library": "Biblioteka",
+    "libraryLower": "biblioteka",
     "libraryCount_one": "Biblioteka ({{count}} karta)",
     "libraryCount_other": "Biblioteka ({{count}} kart)",
     "playFromTop": "Zagraj {{name}} z wierzchu biblioteki",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Wybierz kwotę do zapłaty",
     "payAmount": "Zapłać {{value}} {{resource}}",
     "resourceEnergy": "energii",
-    "resourceMana": "many"
+    "resourceMana": "many",
+    "resourceCounters": "znaczników"
   },
   "hand": {
     "viewFullHand_one": "Zobacz całą rękę ({{count}} karta)",
@@ -1254,6 +1258,16 @@
     "decline": "Odmów",
     "discoverDeclineSuffix": "(połóż resztę na spód)",
     "cascadeDeclineSuffix": "(przetasuj wszystkie wygnane karty na spód)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Darmowe rzucenie",
+    "title": "Rzuć czar za darmo",
+    "subtitle": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}). Pozostała łączna wartość many: {{budget}}.",
+    "subtitleNoBudget": "Wybierz czar do rzucenia bez płacenia jego kosztu many (pozostało: {{remaining}}).",
+    "castNamed": "Rzuć {{name}}",
+    "castSuffix": "(bez płacenia jego kosztu many)",
+    "done": "Gotowe",
+    "doneSuffix": "(przestań rzucać czary w ten sposób)"
   },
   "castingVariant": {
     "eyebrow": "Rzuć",

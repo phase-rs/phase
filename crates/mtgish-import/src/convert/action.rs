@@ -2310,7 +2310,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target: TargetFilter::Controller,
                     card_filter: filter_mod::cards_to_filter(cards)?,
                     count: None,
-                    random: false,
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                 },
                 Effect::DiscardCard {
@@ -2339,7 +2339,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target: TargetFilter::Controller,
                     card_filter: filter_mod::cards_to_filter(cards)?,
                     count: None,
-                    random: false,
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                 },
                 Effect::ChangeZone {
@@ -2349,7 +2349,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -2379,7 +2379,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2394,7 +2394,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -2824,7 +2824,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -2837,7 +2837,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -2856,7 +2856,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -2878,7 +2878,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2983,7 +2983,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -3003,7 +3003,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -3241,7 +3241,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -3477,7 +3477,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -3599,7 +3599,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: TargetFilter::Controller,
             card_filter: TargetFilter::Any,
             count: None,
-            random: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
         },
 
@@ -3666,7 +3666,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 },
             },
             target: TargetFilter::Controller,
-            random: false,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
             unless_filter: None,
             filter: None,
         },
@@ -5498,14 +5498,14 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
         Effect::RevealHand {
             card_filter,
             count,
-            random,
+            selection,
             choice_optional,
             ..
         } => Effect::RevealHand {
             target: target_filter,
             card_filter,
             count,
-            random,
+            selection,
             choice_optional,
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
@@ -6262,7 +6262,7 @@ fn group_filter_tag(group: &GroupFilter) -> String {
 #[derive(Debug, Default, Clone)]
 struct EnterReplacements {
     /// CR 614.1: Object enters tapped.
-    enter_tapped: bool,
+    enter_tapped: engine::types::zones::EtbTapState,
     /// CR 110.2a: Object enters under the ability controller's control
     /// (rather than its owner's). Local bool carrier — mapped at the
     /// `Effect::ChangeZone` boundary via
@@ -6304,7 +6304,7 @@ fn extract_enter_replacements(
     for r in repls {
         match r {
             R::EntersNormally | R::EntersUnderOwnersControl => {}
-            R::EntersTapped => out.enter_tapped = true,
+            R::EntersTapped => out.enter_tapped = engine::types::zones::EtbTapState::Tapped,
             R::EntersTransformed => out.enter_transformed = true,
             R::EntersAttacking => out.enters_attacking = true,
             R::EntersWithACounter(ct) => {
@@ -6752,8 +6752,8 @@ mod tests {
                 cost: AbilityCost::Discard {
                     count: QuantityExpr::Fixed { value: 1 },
                     filter: None,
-                    random: false,
-                    self_ref: false,
+                    selection: engine::types::ability::CardSelectionMode::Chosen,
+                    self_scope: engine::types::ability::DiscardSelfScope::FromHand,
                 },
             }
         ));
@@ -7118,7 +7118,7 @@ mod tests {
             Effect::ChangeZone {
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
-                enter_tapped: true,
+                enter_tapped: engine::types::zones::EtbTapState::Tapped,
                 ..
             }
         ));
@@ -7156,7 +7156,7 @@ mod tests {
             &effects[1],
             Effect::ChangeZone {
                 destination: Zone::Battlefield,
-                enter_tapped: true,
+                enter_tapped: engine::types::zones::EtbTapState::Tapped,
                 ..
             }
         ));
@@ -7278,7 +7278,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
-                random: false,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },

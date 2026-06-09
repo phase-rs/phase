@@ -9,7 +9,7 @@ use super::counter::CounterType;
 use super::ability::{
     ContinuousModification, CopiableValues, Duration, FaceDownProfile, StaticDefinition, TargetRef,
 };
-use super::card::PrintedCardRef;
+use super::card::{PrintedCardRef, TokenImageRef};
 use super::card_type::{CoreType, Supertype};
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
@@ -17,6 +17,8 @@ use super::mana::{ManaColor, ManaType, UnitDecision};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
+
+pub use super::zones::EtbTapState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
@@ -71,36 +73,6 @@ impl CounterPlacement {
             CounterPlacement::Object { actor, .. }
             | CounterPlacement::Player { actor, .. }
             | CounterPlacement::Energy { actor, .. } => *actor,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum EtbTapState {
-    #[default]
-    Unspecified,
-    Tapped,
-    Untapped,
-}
-
-impl EtbTapState {
-    pub fn from_seeded_tapped(tapped: bool) -> Self {
-        if tapped {
-            Self::Tapped
-        } else {
-            Self::Unspecified
-        }
-    }
-
-    /// Resolve to a concrete tapped state. `fallback` is used only when no
-    /// replacement has set an explicit tap-state (`Unspecified`). For
-    /// `ZoneChange` events pass `false`; for `CreateToken` pass
-    /// `spec.tapped` (the token spec's authored default).
-    pub fn resolve(self, fallback: bool) -> bool {
-        match self {
-            Self::Unspecified => fallback,
-            Self::Tapped => true,
-            Self::Untapped => false,
         }
     }
 }
@@ -185,6 +157,12 @@ pub struct CopyTokenSpec {
     pub display_source: DisplaySource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// CR 111.1 + CR 707.2: exact token-art pointer of the copy source when it
+    /// is itself a true token (`display_source == Token`). Carried so a
+    /// token-copy of a token resolves the source token's art instead of falling
+    /// back to a name+filter Scryfall search. `None` for printed-card sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_keywords: Vec<Keyword>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

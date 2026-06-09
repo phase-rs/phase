@@ -367,7 +367,7 @@ fn translate_change_zone(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
     })
 }
@@ -513,7 +513,7 @@ fn translate_bounce(params: &ForgeParams) -> Result<Effect, ForgeTranslateError>
         owner_library: false,
         enter_transformed: false,
         enters_under: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
     })
 }

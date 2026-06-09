@@ -19,7 +19,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
     AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
-    SpellCastRecord, ZoneChangeRecord,
+    SpellCastRecord, StackEntryKind, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -688,6 +688,122 @@ pub fn matches_target_filter(
     )
 }
 
+/// CR 405.1 + CR 115.9b: Match filters against a spell or ability on the
+/// stack, including nested "targets ..." predicates on that stack entry.
+pub(crate) fn matches_stack_target_filter(
+    state: &GameState,
+    stack_obj_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let Some(entry) = state.stack.iter().find(|entry| entry.id == stack_obj_id) else {
+        return false;
+    };
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::StackSpell => matches!(&entry.kind, StackEntryKind::Spell { .. }),
+        TargetFilter::StackAbility { controller } => {
+            matches!(
+                &entry.kind,
+                StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
+            ) && stack_entry_controller_matches(state, controller.as_ref(), entry.controller, ctx)
+        }
+        TargetFilter::Typed(tf) => {
+            if !tf.type_filters.is_empty() {
+                return state.objects.contains_key(&stack_obj_id)
+                    && matches_target_filter(state, stack_obj_id, filter, ctx);
+            }
+            if !stack_entry_controller_matches(state, tf.controller.as_ref(), entry.controller, ctx)
+            {
+                return false;
+            }
+            tf.properties.iter().all(|prop| match prop {
+                FilterProp::Targets { filter } => stack_entry_targets_satisfy(
+                    state,
+                    stack_obj_id,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    filter,
+                    false,
+                ),
+                FilterProp::TargetsOnly { filter } => stack_entry_targets_satisfy(
+                    state,
+                    stack_obj_id,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    filter,
+                    true,
+                ),
+                _ => {
+                    state.objects.contains_key(&stack_obj_id)
+                        && matches_target_filter(state, stack_obj_id, filter, ctx)
+                }
+            })
+        }
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|inner| matches_stack_target_filter(state, stack_obj_id, inner, ctx)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|inner| matches_stack_target_filter(state, stack_obj_id, inner, ctx)),
+        TargetFilter::Not { filter } => {
+            !matches_stack_target_filter(state, stack_obj_id, filter, ctx)
+        }
+        _ => {
+            state.objects.contains_key(&stack_obj_id)
+                && matches_target_filter(state, stack_obj_id, filter, ctx)
+        }
+    }
+}
+
+fn stack_entry_controller_matches(
+    state: &GameState,
+    controller: Option<&ControllerRef>,
+    entry_controller: PlayerId,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    match controller {
+        None => true,
+        Some(ControllerRef::You) => ctx.source_controller == Some(entry_controller),
+        Some(ControllerRef::Opponent) => ctx
+            .source_controller
+            .is_some_and(|controller| controller != entry_controller),
+        Some(ControllerRef::ScopedPlayer) => {
+            scoped_player_or_controller(state, ctx.ability, ctx.source_controller)
+                .is_some_and(|pid| pid == entry_controller)
+        }
+        Some(ControllerRef::TargetPlayer) => ctx
+            .ability
+            .and_then(|ability| {
+                ability.targets.iter().find_map(|target| match target {
+                    TargetRef::Player(pid) => Some(*pid),
+                    TargetRef::Object(_) => None,
+                })
+            })
+            .is_some_and(|pid| pid == entry_controller),
+        Some(ControllerRef::ParentTargetController) => {
+            parent_target_controller_player(state, ctx.ability)
+                .is_some_and(|pid| pid == entry_controller)
+        }
+        Some(ControllerRef::DefendingPlayer) => {
+            crate::game::combat::defending_player_for_attacker(state, ctx.source_id)
+                .is_some_and(|pid| pid == entry_controller)
+        }
+        Some(ControllerRef::SourceChosenPlayer) => {
+            crate::game::game_object::source_chosen_player(state, ctx.source_id)
+                .is_some_and(|pid| pid == entry_controller)
+        }
+        Some(ControllerRef::ChosenPlayer { index }) => ctx
+            .ability
+            .and_then(|ability| ability.chosen_players.get(*index as usize).copied())
+            .is_some_and(|pid| pid == entry_controller),
+        Some(ControllerRef::TriggeringPlayer) => {
+            crate::game::quantity::triggering_event_player(state)
+                .is_some_and(|pid| pid == entry_controller)
+        }
+    }
+}
+
 /// CR 702.26b exception: evaluate `filter` against `object_id` **without** the
 /// phased-out exclusion that [`matches_target_filter`] applies at its choke
 /// point. Phasing-in is one of the rare "rules and effects that specifically
@@ -1255,8 +1371,21 @@ fn filter_inner_for_object(
                 controller_lookup,
             )
         }),
-        // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
-        TargetFilter::StackAbility { .. } | TargetFilter::StackSpell => false,
+        // CR 405.1 + CR 115.9b: stack-target predicates can be composed inside
+        // normal object filters, e.g. "spell or ability that targets ...".
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => {
+            matches_stack_target_filter(
+                state,
+                object_id,
+                filter,
+                &FilterContext {
+                    source_id,
+                    source_controller,
+                    ability,
+                    recipient_id,
+                },
+            )
+        }
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
         // SpecificPlayer scopes to players, not objects — no object matches.
         TargetFilter::SpecificPlayer { .. } => false,
@@ -2823,7 +2952,7 @@ fn matches_filter_prop(
             controller,
             exclude_source,
         } => obj.attachments.iter().any(|att_id| {
-            if *exclude_source && *att_id == source.id {
+            if exclude_source.is_exclude() && *att_id == source.id {
                 return false;
             }
             let Some(att) = state.objects.get(att_id) else {
@@ -3071,15 +3200,76 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
-        FilterProp::TargetsOnly { .. } => true,
-        // CR 115.9b: Permissive at per-object level; validated by trigger matchers against
-        // the stack entry's actual targets.
-        FilterProp::Targets { .. } => true,
+        // CR 115.9c: If the object is a stack entry, ALL of its targets must match
+        // the inner filter. Falls back permissive for non-stack objects so trigger
+        // matchers remain the primary authority (they validate separately).
+        FilterProp::TargetsOnly { filter } => stack_entry_targets_satisfy(
+            state,
+            object_id,
+            source.id,
+            source.controller,
+            filter,
+            true,
+        ),
+        // CR 115.9b: Stack entry has at least one target matching the inner filter.
+        FilterProp::Targets { filter } => stack_entry_targets_satisfy(
+            state,
+            object_id,
+            source.id,
+            source.controller,
+            filter,
+            false,
+        ),
         // CR 903.3d: "If an effect refers to controlling a commander, it refers
         // to a permanent on the battlefield that is a commander." `is_commander`
         // is the deck-construction designation per CR 903.3.
         FilterProp::IsCommander => obj.is_commander,
         FilterProp::Other { .. } => false, // Fail-closed for unrecognized properties
+    }
+}
+
+/// CR 115.9b/115.9c: Check whether a stack entry's targets satisfy a filter.
+///
+/// Used by `FilterProp::Targets` and `FilterProp::TargetsOnly` in
+/// `matches_filter_prop` when the object being evaluated is a stack entry.
+/// If `require_all` is `true` (TargetsOnly / CR 115.9c), every target must
+/// match `filter`; if `false` (Targets / CR 115.9b), at least one must.
+///
+/// Non-stack objects return `true` (permissive fallback) so trigger matchers,
+/// which validate targets through `stack_entry_targets_any`, remain the primary
+/// authority. Stack entries with no ability targets return `false` because
+/// "targets X" cannot be satisfied with an empty target list.
+fn stack_entry_targets_satisfy(
+    state: &GameState,
+    stack_obj_id: ObjectId,
+    source_id: ObjectId,
+    source_controller: Option<PlayerId>,
+    filter: &TargetFilter,
+    require_all: bool,
+) -> bool {
+    let Some(entry) = state.stack.iter().find(|e| e.id == stack_obj_id) else {
+        return true; // Not a stack entry — permissive.
+    };
+    let Some(ability) = entry.ability() else {
+        return true; // KeywordAction entries carry no ability targets — permissive.
+    };
+    if ability.targets.is_empty() {
+        return false; // "targets X" with no targets cannot be satisfied.
+    }
+    let ctx = match source_controller {
+        Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
+        None => FilterContext::from_source(state, source_id),
+    };
+    let check = |t: &TargetRef| match t {
+        TargetRef::Object(id) => matches_target_filter(state, *id, filter, &ctx),
+        TargetRef::Player(pid) => {
+            player_matches_target_filter_in_state(state, filter, *pid, ctx.source_controller)
+        }
+    };
+    if require_all {
+        ability.targets.iter().all(check)
+    } else {
+        ability.targets.iter().any(check)
     }
 }
 
@@ -3291,7 +3481,7 @@ fn zone_change_record_matches_property(
             controller,
             exclude_source,
         } => record.attachments.iter().any(|att| {
-            (!*exclude_source || att.object_id != source.id)
+            (exclude_source.is_include() || att.object_id != source.id)
                 && att.kind == *kind
                 && attachment_controller_matches(
                     controller.as_ref(),
@@ -6804,7 +6994,7 @@ mod tests {
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             },
         ]));
         assert!(
@@ -7847,7 +8037,7 @@ mod tests {
             &FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             },
             &state,
             &enchanted_record,
@@ -7857,7 +8047,7 @@ mod tests {
             &FilterProp::HasAttachment {
                 kind: AttachmentKind::Equipment,
                 controller: None,
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             },
             &state,
             &enchanted_record,

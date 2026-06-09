@@ -206,6 +206,7 @@ pub fn resolve(
                 values: Box::new(values),
                 display_source: source.display_source,
                 printed_ref: source.printed_ref.clone(),
+                token_image_ref: source.token_image_ref.clone(),
                 extra_keywords: extra_keywords.clone(),
                 additional_modifications: additional_modifications.clone(),
                 tapped,
@@ -317,6 +318,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         values,
         display_source,
         printed_ref,
+        token_image_ref,
         extra_keywords,
         additional_modifications,
         tapped,
@@ -327,6 +329,22 @@ pub(crate) fn apply_copy_token_after_replacement(
     } = copy;
     let name = values.name.clone();
     let mut created_ids = Vec::with_capacity(final_count as usize);
+
+    // CR 306.5b + CR 707.2: A token that's a copy of a planeswalker enters with
+    // loyalty counters equal to the copied permanent's loyalty — CR 306.5c makes
+    // the counter map the single source of truth for loyalty. The copy path
+    // builds the object directly (not through the ZoneChange ETB-counter seeding
+    // used by cast/play/effect entries), so seed the intrinsic loyalty counters
+    // here, ahead of any explicit `enter_with_counters`, routing them through
+    // `add_counter_with_replacement` below so Doubling Season etc. apply
+    // (CR 614.1a). Without this a copied planeswalker enters with 0 loyalty
+    // counters and dies immediately to CR 704.5i. Copies don't track battle
+    // defense (`CopiableValues` has no defense field), so only loyalty is seeded.
+    let etb_counters: Vec<(crate::types::counter::CounterType, u32)> =
+        crate::game::printed_cards::intrinsic_face_counters(values.loyalty, None)
+            .into_iter()
+            .chain(enter_with_counters.iter().cloned())
+            .collect();
 
     for index in 0..final_count {
         let token_id = zones::create_object(
@@ -342,6 +360,9 @@ pub(crate) fn apply_copy_token_after_replacement(
         token.display_source = display_source;
         token.printed_ref = printed_ref.clone();
         token.base_printed_ref = printed_ref.clone();
+        // CR 111.1 + CR 707.2: when copying a true token, carry its exact token
+        // art pointer so the copy resolves the same art (not a name fallback).
+        token.token_image_ref = token_image_ref.clone();
         token.name = values.name.clone();
         token.base_name = values.name.clone();
         token.mana_cost = values.mana_cost.clone();
@@ -410,6 +431,7 @@ pub(crate) fn apply_copy_token_after_replacement(
                             values: values.clone(),
                             display_source,
                             printed_ref: printed_ref.clone(),
+                            token_image_ref: token_image_ref.clone(),
                             extra_keywords: extra_keywords.clone(),
                             additional_modifications: additional_modifications.clone(),
                             tapped,
@@ -434,8 +456,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         // CR 614.1c + CR 122.6a: ETB-counter replacement mutations are carried
         // on the accepted CreateToken spec, even for copy tokens whose full
         // CR 707 payload lives in `CopyTokenSpec`.
-        for (counter_index, (counter_type, counter_count)) in enter_with_counters.iter().enumerate()
-        {
+        for (counter_index, (counter_type, counter_count)) in etb_counters.iter().enumerate() {
             if *counter_count > 0
                 && !super::counters::add_counter_with_replacement(
                     state,
@@ -447,7 +468,7 @@ pub(crate) fn apply_copy_token_after_replacement(
                 )
             {
                 state.last_created_token_ids = created_ids.clone();
-                let remaining_counters = enter_with_counters[counter_index + 1..]
+                let remaining_counters = etb_counters[counter_index + 1..]
                     .iter()
                     .filter(|(_, count)| *count > 0)
                     .map(|(counter_type, count)| {
@@ -480,6 +501,7 @@ pub(crate) fn apply_copy_token_after_replacement(
                                     values: values.clone(),
                                     display_source,
                                     printed_ref: printed_ref.clone(),
+                                    token_image_ref: token_image_ref.clone(),
                                     extra_keywords: extra_keywords.clone(),
                                     additional_modifications: additional_modifications.clone(),
                                     tapped,
@@ -2762,6 +2784,77 @@ mod tests {
             p1p1, 0,
             "if_type=Creature must skip on a Planeswalker copy; counters={:?}",
             token.counters
+        );
+    }
+
+    /// CR 306.5b + CR 306.5c + CR 707.2: A token that's a copy of a planeswalker
+    /// must enter with loyalty counters equal to the copied loyalty — the copy
+    /// path builds the object directly, bypassing the ZoneChange ETB-counter
+    /// seeding, so it must seed loyalty counters itself. Pre-fix the copy carried
+    /// only the `loyalty` field with no counter, so once the layer system treats
+    /// the counter map as the source of truth (CR 306.5c) the copy would read 0
+    /// loyalty and die immediately to CR 704.5i.
+    #[test]
+    fn copy_token_of_planeswalker_seeds_loyalty_counters() {
+        use crate::game::layers::evaluate_layers;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source_id).unwrap();
+            s.base_loyalty = Some(5);
+            s.loyalty = Some(5);
+            s.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Planeswalker],
+                subtypes: vec!["Jace".to_string()],
+            };
+            s.card_types = s.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        assert_eq!(
+            state.objects[&token_id]
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied(),
+            Some(5),
+            "planeswalker copy must seed loyalty counters equal to copied loyalty",
+        );
+
+        // The copy must survive a layer re-evaluation at its real loyalty, not
+        // snap to 0 (it's still on the battlefield, not in the graveyard).
+        evaluate_layers(&mut state);
+        let token = &state.objects[&token_id];
+        assert_eq!(token.zone, Zone::Battlefield);
+        assert_eq!(
+            token.loyalty,
+            Some(5),
+            "copied planeswalker loyalty must derive from its seeded counters",
         );
     }
 

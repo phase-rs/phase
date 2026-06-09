@@ -264,6 +264,7 @@
     "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft"
   },
   "zone": {
+    "commandZone": "Kommandozone",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Kommandeur",
@@ -283,6 +284,8 @@
     "graveyardShort": "FH",
     "graveyardTitle": "Friedhof ({{count}})",
     "libraryAlt": "Bibliothek",
+    "library": "Bibliothek",
+    "libraryLower": "Bibliothek",
     "libraryCount_one": "Bibliothek ({{count}} Karte)",
     "libraryCount_other": "Bibliothek ({{count}} Karten)",
     "playFromTop": "{{name}} von oben aus der Bibliothek spielen",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Wähle die zu zahlende Menge",
     "payAmount": "{{value}} {{resource}} bezahlen",
     "resourceEnergy": "Energie",
-    "resourceMana": "Mana"
+    "resourceMana": "Mana",
+    "resourceCounters": "Marken"
   },
   "hand": {
     "viewFullHand_one": "Volle Hand ansehen ({{count}} Karte)",
@@ -1254,6 +1258,16 @@
     "decline": "Ablehnen",
     "discoverDeclineSuffix": "(den Rest unter die Bibliothek legen)",
     "cascadeDeclineSuffix": "(alle ins Exil geschickten Karten unter die Bibliothek mischen)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Kostenlos wirken",
+    "title": "Wirke einen Zauberspruch kostenlos",
+    "subtitle": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
+    "subtitleNoBudget": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
+    "castNamed": "{{name}} wirken",
+    "castSuffix": "(ohne seine Manakosten zu bezahlen)",
+    "done": "Fertig",
+    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)"
   },
   "castingVariant": {
     "eyebrow": "Wirken",

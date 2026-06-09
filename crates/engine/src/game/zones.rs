@@ -281,12 +281,17 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         // creature leaving the battlefield (its death) is exactly when the
         // card's haunt-payoff trigger reads the link to fire from exile. The
         // link is pruned later, when the haunting card itself leaves exile.
+        // CR 702.167a/c: `CraftMaterial` links are preserved too — the craft
+        // source self-exiles mid-activation and returns with the same ObjectId,
+        // so the material links must survive its battlefield exit for the
+        // returned permanent to still read what it was crafted with.
         state.exile_links.retain(|link| {
             link.source_id != object_id
                 || matches!(
                     link.kind,
                     crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
                         | crate::types::game_state::ExileLinkKind::Haunt
+                        | crate::types::game_state::ExileLinkKind::CraftMaterial
                 )
         });
     }

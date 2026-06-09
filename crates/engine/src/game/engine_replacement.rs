@@ -23,7 +23,7 @@ use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
-use super::sacrifice::apply_sacrifice_after_replacement;
+use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
 use super::zones;
 
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
@@ -297,7 +297,7 @@ pub(super) fn handle_replacement_choice(
                             let unit = crate::types::mana::ManaUnit {
                                 color: mana_type,
                                 source_id,
-                                snow: false,
+                                supertype: None,
                                 source_could_produce_two_or_more_colors: false,
                                 restrictions: Vec::new(),
                                 grants: Vec::new(),
@@ -341,11 +341,17 @@ pub(super) fn handle_replacement_choice(
                         return Ok(state.waiting_for.clone());
                     }
                 }
-                // CR 701.21a + CR 614: Sacrifice accepted after replacement choice —
-                // delegate to the shared helper. Regeneration cannot apply (CR
-                // 701.21a) but Moved replacements on the graveyard transfer still do.
+                // CR 701.21a + CR 614.1: Sacrifice accepted after replacement
+                // choice — delegate to the shared helper. Regeneration cannot
+                // apply (CR 701.21a) but Moved replacements on the inner graveyard
+                // transfer do; if that inner transfer itself needs a choice, the
+                // helper sets `state.waiting_for` and we propagate it back.
                 sacrifice @ ProposedEvent::Sacrifice { .. } => {
-                    apply_sacrifice_after_replacement(state, sacrifice, events);
+                    if let SacrificeApply::NeedsChoice(_) =
+                        apply_sacrifice_after_replacement(state, sacrifice, events)
+                    {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 111.1 + CR 614.1a: CreateToken accepted after replacement choice
                 // — the `spec` field carries the full self-describing token
@@ -476,10 +482,23 @@ pub(super) fn handle_replacement_choice(
                 && state.pending_phase_transition_progress.is_some()
             {
                 super::turns::drain_pending_phase_transition_progress(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-                    && state.pending_phase_transition_progress.is_some()
+                if state.pending_phase_transition_progress.is_some() {
+                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        waiting_for = state.waiting_for.clone();
+                    }
+                } else if state.deferred_step_trigger_resume.is_some()
+                    && matches!(state.waiting_for, WaitingFor::Priority { .. })
                 {
-                    waiting_for = state.waiting_for.clone();
+                    // CR 513.1 + CR 603.3b: A CR 616.1 mana-pool choice can
+                    // defer completion of `enter_phase`. In that case
+                    // `auto_advance` returned before its per-step trigger arm
+                    // ran (it bails while `pending_phase_transition_progress`
+                    // is set). Resume only when that bail happened — not when
+                    // `advance_phase` alone paused the drain (unit tests).
+                    state.deferred_step_trigger_resume = None;
+                    waiting_for = super::turns::auto_advance(state, events);
+                } else {
+                    state.deferred_step_trigger_resume = None;
                 }
             }
 
@@ -1322,7 +1341,7 @@ mod tests {
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: false,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],

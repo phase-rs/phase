@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from "react";
+import { Fragment, useRef, useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -19,12 +19,17 @@ interface BattlefieldRowProps {
   groups: GroupedPermanent[];
   rowType: BattlefieldRowType;
   className?: string;
+  /** Render a thin vertical divider immediately before the group at this index,
+   *  keeping two sub-clusters (e.g. enchantments|planeswalkers) on one wrapping
+   *  line while visually separating them. Omit for no divider. */
+  dividerBeforeIndex?: number;
 }
 
 const ROW_JUSTIFY: Record<string, string> = {
   creatures: "justify-center",
   lands: "justify-start",
   support: "justify-end",
+  planeswalkers: "justify-end",
   other: "justify-end",
 };
 
@@ -56,7 +61,7 @@ function getCreatureScale(groupCount: number, display: "art_crop" | "full_card")
   return Math.max(min, 1 / Math.sqrt(1 + excess * 0.15));
 }
 
-export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowProps) {
+export function BattlefieldRow({ groups, rowType, className, dividerBeforeIndex }: BattlefieldRowProps) {
   const { t } = useTranslation("game");
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const isCompactHeight = useIsCompactHeight();
@@ -207,10 +212,18 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
     ? "flex-wrap items-end content-end"
     : "flex-nowrap items-end";
 
+  // Planeswalkers stay on a single horizontal line — wrapping them stacks
+  // vertically and warps the surrounding board rows. Every other non-creature
+  // row (lands, support enchantments/artifacts, other) wraps to multiple rows
+  // when crowded, shrinking via the column's count-based zoneScale.
+  const nonCreatureClass = rowType === "planeswalkers"
+    ? "flex-nowrap items-center gap-2"
+    : "flex-wrap items-center gap-2";
+
   return (
     <div
       ref={containerRef}
-      className={`relative flex ${minH} ${rowType === "creatures" ? `${creatureClass} ${creatureWrap ? "gap-x-2 gap-y-3" : "gap-2"}` : "flex-wrap items-center gap-2"} ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
+      className={`relative flex ${minH} ${rowType === "creatures" ? `${creatureClass} ${creatureWrap ? "gap-x-2 gap-y-3" : "gap-2"}` : nonCreatureClass} ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
       style={rowStyle}
     >
       {rowType === "creatures" && expandedGroupIds.size > 0 && (
@@ -228,24 +241,28 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
           </span>
         </button>
       )}
-      {renderedGroups.map(({ group, manualExpanded }) => (
-        <GroupedPermanentDisplay
-          key={group.ids[0]}
-          group={group}
-          rowType={rowType}
-          manualExpanded={manualExpanded}
-          onExpand={() => {
-            setExpandedGroupIds((previous) => {
-              const next = new Set(previous);
-              if (next.has(group.ids[0])) {
-                next.delete(group.ids[0]);
-              } else {
-                next.add(group.ids[0]);
-              }
-              return next;
-            });
-          }}
-        />
+      {renderedGroups.map(({ group, manualExpanded }, index) => (
+        <Fragment key={group.ids[0]}>
+          {index === dividerBeforeIndex && (
+            <div aria-hidden className="mx-1 w-px self-stretch rounded bg-white/15" />
+          )}
+          <GroupedPermanentDisplay
+            group={group}
+            rowType={rowType}
+            manualExpanded={manualExpanded}
+            onExpand={() => {
+              setExpandedGroupIds((previous) => {
+                const next = new Set(previous);
+                if (next.has(group.ids[0])) {
+                  next.delete(group.ids[0]);
+                } else {
+                  next.add(group.ids[0]);
+                }
+                return next;
+              });
+            }}
+          />
+        </Fragment>
       ))}
     </div>
   );

@@ -7,16 +7,16 @@ use crate::game::effects::prepare;
 use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
 use crate::game::mana_sources;
-use crate::types::ability::ChoiceType;
-use crate::types::ability::TargetRef;
+use crate::types::ability::{ChoiceType, CounterCostSelection, TargetRef};
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
 };
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
+use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, ConvokeMode, CounterMoveChoice, GameState, PayCostKind, TargetSelectionSlot,
-    WaitingFor,
+    CastOfferKind, ConvokeMode, CounterCostChoice, CounterMoveChoice, GameState, PayCostKind,
+    TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -527,6 +527,33 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 vec![decline, cast]
             }
         }
+        // CR 608.2g + CR 601.2: Invoke Calamity's free-cast window — offer
+        // casting each eligible candidate plus a decline to finish the window.
+        // The engine handler re-validates the MV budget and candidate set, so
+        // every candidate plus the decline is a legal action here.
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+        } => {
+            let mut actions: Vec<_> = candidates
+                .iter()
+                .map(|&id| {
+                    candidate(
+                        GameAction::FreeCastWindowChoice {
+                            selection: Some(id),
+                        },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect();
+            actions.push(candidate(
+                GameAction::FreeCastWindowChoice { selection: None },
+                TacticalClass::Selection,
+                Some(*player),
+            ));
+            actions
+        }
         WaitingFor::LearnChoice { player, hand_cards } => {
             let mut actions: Vec<_> = hand_cards
                 .iter()
@@ -678,7 +705,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             valid_attacker_ids,
             valid_attack_targets,
-        } => attacker_actions(*player, valid_attacker_ids, valid_attack_targets),
+        } => attacker_actions(state, *player, valid_attacker_ids, valid_attack_targets),
         WaitingFor::DeclareBlockers {
             player,
             valid_blocker_ids,
@@ -1117,6 +1144,19 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             choice_type,
             source_id,
         } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        // Alchemy spellbook draft: one candidate per card in the spellbook list.
+        WaitingFor::SpellbookDraft {
+            player, options, ..
+        } => options
+            .iter()
+            .map(|card| {
+                candidate(
+                    GameAction::SubmitSpellbookDraft { card: card.clone() },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::DamageSourceChoice {
             player, options, ..
         } => options
@@ -1431,12 +1471,16 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ),
         ],
         // CR 118.3 + CR 601.2b + CR 605.3b: AI selects objects to pay a cost.
-        // RemoveCounter chooses exactly one source (one permanent per
-        // candidate); Sacrifice honors the [min, max] range; every other kind
-        // selects exactly `count` objects.
+        // Single-object RemoveCounter chooses one source per candidate;
+        // from-among RemoveCounter and Sacrifice honor the [min, max] range;
+        // every other kind selects exactly `count` objects.
         WaitingFor::PayCost {
             player,
-            kind: PayCostKind::RemoveCounter { .. },
+            kind:
+                PayCostKind::RemoveCounter {
+                    selection: CounterCostSelection::SingleObject,
+                    ..
+                },
             choices,
             ..
         } => choices
@@ -1449,6 +1493,24 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::PayCost {
+            player,
+            kind:
+                PayCostKind::RemoveCounter {
+                    selection: CounterCostSelection::AmongObjects,
+                    counter_type,
+                    count: counter_count,
+                    ..
+                },
+            choices,
+            ..
+        } => remove_counter_cost_distribution_candidate(
+            state,
+            *player,
+            choices,
+            counter_type,
+            *counter_count,
+        ),
         WaitingFor::PayCost {
             player,
             kind: PayCostKind::Sacrifice,
@@ -2340,6 +2402,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             kind: CastOfferKind::Ripple { .. },
             ..
         }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { .. },
+            ..
+        }
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::RepeatDecision { .. }
         | WaitingFor::LearnChoice { .. }
@@ -2643,9 +2709,9 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         for &obj_id in &state.battlefield {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.controller == player {
-                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
                             && casting::can_activate_ability_now(state, player, obj_id, i)
                         {
                             actions.push(candidate(
@@ -2717,10 +2783,10 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         for &obj_id in &state.players[player.0 as usize].hand {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.controller == player {
-                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
                             && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
-                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
                             && casting::can_activate_ability_now(state, player, obj_id, i)
                         {
                             actions.push(candidate(
@@ -2749,11 +2815,11 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 // doesn't have a controller) can activate its activated
                 // ability." Restrict candidates to the acting player.
                 if obj.controller == player {
-                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
                             && ability_def.activation_zone
                                 == Some(crate::types::zones::Zone::Graveyard)
-                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
                             && casting::can_activate_ability_now(state, player, obj_id, i)
                         {
                             actions.push(candidate(
@@ -2884,6 +2950,9 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                                         c.controller == player
                                             && !c.tapped
                                             && c.card_types.core_types.contains(&CoreType::Creature)
+                                            && !crate::game::static_abilities::object_has_cant_crew(
+                                                state, cid,
+                                            )
                                     })
                             });
                             if has_eligible {
@@ -3191,11 +3260,15 @@ fn target_step_actions(
 }
 
 fn attacker_actions(
+    state: &GameState,
     player: PlayerId,
     valid_attacker_ids: &[crate::types::identifiers::ObjectId],
     valid_attack_targets: &[AttackTarget],
 ) -> Vec<CandidateAction> {
-    let default_target = valid_attack_targets.first().cloned();
+    // CR 508.1a: declaring no attackers is a structurally legal submission. The
+    // engine's combat-requirement check rejects it at apply time only when a
+    // creature *must* attack (goad, CR 701.15b), and the simulation filter then
+    // drops it — so it is always safe to offer here.
     let mut actions = vec![candidate(
         GameAction::DeclareAttackers {
             attacks: Vec::new(),
@@ -3206,29 +3279,114 @@ fn attacker_actions(
         Some(player),
     )];
 
-    let Some(target) = default_target else {
+    if valid_attack_targets.is_empty() {
         return actions;
-    };
-
-    for &id in valid_attacker_ids {
-        actions.push(candidate(
-            GameAction::DeclareAttackers {
-                attacks: vec![(id, target)],
-                bands: vec![],
-            },
-            TacticalClass::Attack,
-            Some(player),
-        ));
     }
 
+    // CR 508.1: each attacker independently chooses any one defending player,
+    // planeswalker, or battle. Enumerate every (attacker, target) pairing rather
+    // than only the first target — a goaded creature (CR 701.15b) must attack a
+    // player *other than* the goader if able, so pairing solely against the
+    // first target makes the only non-empty candidate illegal whenever that
+    // target is the goader, collapsing the legal-action set to empty and
+    // hanging the game.
+    for &id in valid_attacker_ids {
+        for &target in valid_attack_targets {
+            actions.push(candidate(
+                GameAction::DeclareAttackers {
+                    attacks: vec![(id, target)],
+                    bands: vec![],
+                },
+                TacticalClass::Attack,
+                Some(player),
+            ));
+        }
+    }
+
+    // Alpha-strike: all eligible attackers swing at a single shared target.
+    // Offer one per target so goad on a lone attacker doesn't make the only
+    // all-in candidate illegal.
     if valid_attacker_ids.len() > 1 {
+        for &target in valid_attack_targets {
+            actions.push(candidate(
+                GameAction::DeclareAttackers {
+                    attacks: valid_attacker_ids
+                        .iter()
+                        .copied()
+                        .map(|id| (id, target))
+                        .collect(),
+                    bands: vec![],
+                },
+                TacticalClass::Attack,
+                Some(player),
+            ));
+        }
+    }
+
+    // CR 508.1d: a declaration must include *every* creature that must attack
+    // (goad CR 701.15b, MustAttack/MustAttackPlayer statics CR 508.1b). When
+    // those per-creature requirements force different targets — two creatures
+    // goaded by *different* players, or a MustAttackPlayer creature alongside a
+    // goaded one — the only legal declaration assigns them to *different* targets,
+    // a mixed-target combination none of the candidates above ever emit (singles
+    // omit the other must-attacker; alpha-strike forces one shared target that is
+    // illegal for whichever creature is goaded by / not directed at it). Add one
+    // greedy forced-legal assignment so a legal candidate survives filtering.
+    // Each must-attack requirement is per-creature and independent (creatures may
+    // share a defender), so choosing each creature's target independently yields a
+    // jointly legal declaration. Target priority mirrors the validator's
+    // enforcement order: CR 508.1b MustAttackPlayer (strict — attack the directed
+    // player when attackable) first, then CR 701.15b goad redirect (avoid this
+    // creature's goader if able), then any valid target ("if able"). Reuses the
+    // engine's single authorities (`creature_must_attack`,
+    // `must_attack_players_for_creature`, `goading_players_for_creature`). Only
+    // needed for 2+ must-attack creatures — the single case is covered above.
+    // Scope: this steers by must-attack *requirements* (CR 508.1d) only. It does
+    // not consult scoped CR 508.1c can't-attack *restrictions*
+    // (CantAttack/CantAttackOrBlock with an attack_target scope, e.g. Eriette),
+    // so a must-attacker that also can't attack the chosen target could still
+    // yield an illegal forced candidate. That over-constraint axis is a
+    // pre-existing gap (independent of goad) and is not addressed here.
+    // Likewise, a *requirements conflict* — a creature with MustAttackPlayer{P}
+    // that is also goaded by P — has no legal declaration at all: the CR 508.1b
+    // gate demands attacking P while the CR 701.15b redirect forbids it (a
+    // non-goading target exists). The engine validator enforces both
+    // requirements independently rather than obeying the CR 508.1d maximum, so
+    // no target this builder picks can survive filtering. Fixing that is a
+    // validator concern (CR 508.1d max-satisfaction), not a generator one.
+    let forced: Vec<(ObjectId, AttackTarget)> = valid_attacker_ids
+        .iter()
+        .copied()
+        .filter(|&id| crate::game::combat::creature_must_attack(state, id))
+        .filter_map(|id| {
+            let obj = state.objects.get(&id)?;
+            let must_attack_players =
+                crate::game::combat::must_attack_players_for_creature(state, obj);
+            let goaders = crate::game::combat::goading_players_for_creature(state, id);
+            valid_attack_targets
+                .iter()
+                .copied()
+                // CR 508.1b: honor a directed MustAttackPlayer requirement first.
+                .find(|target| {
+                    matches!(target, AttackTarget::Player(pid) if must_attack_players.contains(pid))
+                })
+                // CR 701.15b "if able": otherwise steer away from this creature's
+                // goader.
+                .or_else(|| {
+                    valid_attack_targets.iter().copied().find(|target| match target {
+                        AttackTarget::Player(pid) => !goaders.contains(pid),
+                        _ => true,
+                    })
+                })
+                // Fall back to any valid target when no constraint can be honored.
+                .or_else(|| valid_attack_targets.first().copied())
+                .map(|target| (id, target))
+        })
+        .collect();
+    if forced.len() > 1 {
         actions.push(candidate(
             GameAction::DeclareAttackers {
-                attacks: valid_attacker_ids
-                    .iter()
-                    .copied()
-                    .map(|id| (id, target))
-                    .collect(),
+                attacks: forced,
                 bands: vec![],
             },
             TacticalClass::Attack,
@@ -3321,6 +3479,62 @@ fn bounded_select_card_candidates(
             )
         })
         .collect()
+}
+
+fn remove_counter_cost_distribution_candidate(
+    state: &GameState,
+    player: PlayerId,
+    cards: &[ObjectId],
+    counter_type: &CounterMatch,
+    count: u32,
+) -> Vec<CandidateAction> {
+    let mut remaining = count;
+    let mut distribution = Vec::new();
+    for &object_id in cards {
+        if remaining == 0 {
+            break;
+        }
+        let Some(obj) = state.objects.get(&object_id) else {
+            continue;
+        };
+        let available: Vec<_> = match counter_type {
+            CounterMatch::OfType(counter_type) => obj
+                .counters
+                .get(counter_type)
+                .copied()
+                .into_iter()
+                .map(|count| (counter_type.clone(), count))
+                .collect(),
+            CounterMatch::Any => obj
+                .counters
+                .iter()
+                .map(|(counter_type, count)| (counter_type.clone(), *count))
+                .collect(),
+        };
+        for (counter_type, available) in available {
+            if remaining == 0 {
+                break;
+            }
+            let assigned = available.min(remaining);
+            if assigned > 0 {
+                distribution.push(CounterCostChoice {
+                    object_id,
+                    counter_type,
+                    count: assigned,
+                });
+                remaining -= assigned;
+            }
+        }
+    }
+    if remaining == 0 {
+        vec![candidate(
+            GameAction::ChooseRemoveCounterCostDistribution { distribution },
+            TacticalClass::Selection,
+            Some(player),
+        )]
+    } else {
+        Vec::new()
+    }
 }
 
 fn mode_actions(
@@ -3996,9 +4210,11 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
         ChoiceType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, Effect, EffectKind,
-        ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter, TargetRef,
+        FilterProp, ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
@@ -4250,6 +4466,78 @@ mod tests {
     }
 
     #[test]
+    fn priority_actions_offer_runtime_granted_typecycling_from_homing_sliver() {
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = p0;
+        state.priority_player = p0;
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+
+        let homing_sliver = create_object(
+            &mut state,
+            CardId(100),
+            p0,
+            "Homing Sliver".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&homing_sliver)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .subtype("Sliver".to_string())
+                            .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Typecycling {
+                            cost: ManaCost::NoCost,
+                            subtype: "Sliver".to_string(),
+                        },
+                    }]),
+            );
+
+        let hand_sliver = create_object(
+            &mut state,
+            CardId(101),
+            p0,
+            "Striking Sliver".to_string(),
+            Zone::Hand,
+        );
+        let printed_len = {
+            let obj = state.objects.get_mut(&hand_sliver).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Sliver".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.abilities.len()
+        };
+
+        assert!(
+            crate::game::off_zone_characteristics::off_zone_has_keyword_kind(
+                &state,
+                hand_sliver,
+                KeywordKind::Typecycling,
+            ),
+            "Homing Sliver static should grant Typecycling to the Sliver card in hand"
+        );
+
+        let actions = priority_actions(&state, p0);
+        assert!(actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                } if source_id == hand_sliver && ability_index == printed_len
+            )
+        }));
+    }
+
+    #[test]
     fn target_selection_uses_current_slot_legality() {
         let mut state = GameState::new_two_player(42);
         let p0 = PlayerId(0);
@@ -4305,6 +4593,188 @@ mod tests {
         assert!(actions.iter().any(|a| matches!(a.action, GameAction::DeclareAttackers { ref attacks, .. } if attacks.len() == 2)));
     }
 
+    /// Regression (hung game — turn 20, 4-player Commander): a goaded creature
+    /// (CR 701.15b) must attack a player *other than* the goader if able. The
+    /// attacker generator previously paired every attacker with only
+    /// `valid_attack_targets.first()`. When that first target is the goading
+    /// player, the sole non-empty candidate (attack the goader) is illegal and
+    /// the empty "no attackers" candidate is illegal (a goaded creature must
+    /// attack) — so the simulation filter dropped every candidate, `legal_actions`
+    /// returned empty, and the AI's combat step hung. The generator must offer
+    /// each attacker against *every* valid target so a legal redirect onto a
+    /// non-goading opponent always survives filtering.
+    #[test]
+    fn declare_attackers_offers_every_target_for_each_attacker() {
+        let attacker = crate::types::identifiers::ObjectId(1);
+        let goader = AttackTarget::Player(PlayerId(1));
+        let other_a = AttackTarget::Player(PlayerId(2));
+        let other_b = AttackTarget::Player(PlayerId(3));
+        let state = GameState {
+            waiting_for: WaitingFor::DeclareAttackers {
+                player: PlayerId(0),
+                valid_attacker_ids: vec![attacker],
+                // The goading player is deliberately first: the pre-fix generator
+                // would only ever offer this single (illegal-under-goad) pairing.
+                valid_attack_targets: vec![goader, other_a, other_b],
+            },
+            ..GameState::new_two_player(42)
+        };
+
+        let actions = candidate_actions(&state);
+        let attacks_against = |t: AttackTarget| {
+            actions.iter().any(|a| {
+                matches!(
+                    &a.action,
+                    GameAction::DeclareAttackers { attacks, .. }
+                        if attacks.len() == 1 && attacks[0] == (attacker, t)
+                )
+            })
+        };
+        // Every target must be offered for the attacker — including the
+        // non-goading opponents a goaded creature is actually allowed to attack.
+        assert!(
+            attacks_against(goader),
+            "goader target must still be offered"
+        );
+        assert!(
+            attacks_against(other_a) && attacks_against(other_b),
+            "non-goading opponents must be offered so goad has a legal redirect"
+        );
+    }
+
+    /// Regression (multi-goad residual): two creatures goaded by *different*
+    /// players force a mixed-target declaration (CR 508.1d requires every
+    /// must-attack creature be declared; CR 701.15b forbids each from attacking
+    /// its own goader). Neither the per-target singles (each omits the other
+    /// must-attacker) nor the shared-target alpha-strikes ever emit that mixed
+    /// assignment, so without the greedy forced-legal candidate the generator
+    /// again produces zero legal declarations and the game hangs. Verify the
+    /// generator now offers the legal mixed assignment.
+    #[test]
+    fn declare_attackers_offers_legal_mixed_assignment_for_multi_goad() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.active_player = PlayerId(0);
+        state.phase = Phase::DeclareAttackers;
+
+        // Two creatures controlled by the active player, each goaded by a
+        // different opponent.
+        let make_goaded = |state: &mut GameState, card: u64, goader: PlayerId| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Goaded {card}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.summoning_sick = false;
+            obj.goaded_by.insert(goader);
+            id
+        };
+        let a = make_goaded(&mut state, 1, PlayerId(1));
+        let b = make_goaded(&mut state, 2, PlayerId(2));
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![a, b],
+            valid_attack_targets: vec![
+                AttackTarget::Player(PlayerId(1)),
+                AttackTarget::Player(PlayerId(2)),
+            ],
+        };
+
+        let actions = candidate_actions(&state);
+        // The only legal declaration: A avoids its goader P1 (attacks P2), B
+        // avoids its goader P2 (attacks P1). It must be offered.
+        let has_legal_mixed = actions.iter().any(|act| {
+            matches!(&act.action, GameAction::DeclareAttackers { attacks, .. }
+                if attacks.len() == 2
+                    && attacks.contains(&(a, AttackTarget::Player(PlayerId(2))))
+                    && attacks.contains(&(b, AttackTarget::Player(PlayerId(1)))))
+        });
+        assert!(
+            has_legal_mixed,
+            "generator must offer the legal mixed-target assignment for multi-goad"
+        );
+    }
+
+    /// Regression (multi-requirement residual): a creature directed by
+    /// `MustAttackPlayer` (CR 508.1b) alongside a goaded creature (CR 701.15b)
+    /// also forces a mixed-target declaration. The greedy forced-legal candidate
+    /// must steer the directed creature onto its *required* player regardless of
+    /// `valid_attack_targets` ordering. A goad-only target pick would land the
+    /// directed creature on the first non-goading target instead, making the
+    /// forced candidate illegal (filtered) and re-stranding the game. Targets are
+    /// ordered with the required player LAST to catch exactly that ordering bug.
+    #[test]
+    fn declare_attackers_forced_assignment_respects_must_attack_player() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.active_player = PlayerId(0);
+        state.phase = Phase::DeclareAttackers;
+
+        let make_creature = |state: &mut GameState, card: u64| -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Creature {card}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.summoning_sick = false;
+            id
+        };
+
+        // A is directed to attack P1; B is goaded by P1 (must avoid P1).
+        let directed = make_creature(&mut state, 1);
+        state
+            .objects
+            .get_mut(&directed)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                crate::types::statics::StaticMode::MustAttackPlayer {
+                    player: PlayerId(1),
+                },
+            ));
+        let goaded = make_creature(&mut state, 2);
+        state
+            .objects
+            .get_mut(&goaded)
+            .unwrap()
+            .goaded_by
+            .insert(PlayerId(1));
+
+        // Required/goading player P1 deliberately ordered LAST.
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![directed, goaded],
+            valid_attack_targets: vec![
+                AttackTarget::Player(PlayerId(2)),
+                AttackTarget::Player(PlayerId(1)),
+            ],
+        };
+
+        let actions = candidate_actions(&state);
+        // Legal declaration: directed -> P1 (required), goaded -> P2 (avoids goader).
+        let has_legal = actions.iter().any(|act| {
+            matches!(&act.action, GameAction::DeclareAttackers { attacks, .. }
+                if attacks.len() == 2
+                    && attacks.contains(&(directed, AttackTarget::Player(PlayerId(1))))
+                    && attacks.contains(&(goaded, AttackTarget::Player(PlayerId(2)))))
+        });
+        assert!(
+            has_legal,
+            "forced assignment must direct the MustAttackPlayer creature to its required player"
+        );
+    }
+
     #[test]
     fn named_card_choice_uses_bounded_in_game_names() {
         let mut state = GameState::new_two_player(42);
@@ -4358,7 +4828,7 @@ mod tests {
             effect_kind: EffectKind::Sacrifice,
             zone: Zone::Battlefield,
             destination: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: None,
             enters_attacking: false,
@@ -5261,7 +5731,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -5379,7 +5849,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -5401,7 +5871,7 @@ mod tests {
         state.players[player].mana_pool.add(ManaUnit {
             color,
             source_id: ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],

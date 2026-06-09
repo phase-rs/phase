@@ -264,6 +264,7 @@
     "grantsProperty": "Concede uma propriedade à mágica"
   },
   "zone": {
+    "commandZone": "Zona de comando",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -283,6 +284,8 @@
     "graveyardShort": "CEM",
     "graveyardTitle": "Cemitério ({{count}})",
     "libraryAlt": "Grimório",
+    "library": "Grimório",
+    "libraryLower": "grimório",
     "libraryCount_one": "Grimório ({{count}} carta)",
     "libraryCount_other": "Grimório ({{count}} cartas)",
     "playFromTop": "Jogue {{name}} do topo do grimório",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Escolher a quantia a pagar",
     "payAmount": "Pagar {{value}} {{resource}}",
     "resourceEnergy": "energia",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "marcadores"
   },
   "hand": {
     "viewFullHand_one": "Ver mão completa ({{count}} carta)",
@@ -1254,6 +1258,16 @@
     "decline": "Recusar",
     "discoverDeclineSuffix": "(colocar o restante no fundo)",
     "cascadeDeclineSuffix": "(embaralhar todas as cartas exiladas no fundo)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Conjuração grátis",
+    "title": "Conjure uma mágica de graça",
+    "subtitle": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)). Valor de mana total restante: {{budget}}.",
+    "subtitleNoBudget": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)).",
+    "castNamed": "Conjurar {{name}}",
+    "castSuffix": "(sem pagar seu custo de mana)",
+    "done": "Concluído",
+    "doneSuffix": "(pare de conjurar mágicas desta forma)"
   },
   "castingVariant": {
     "eyebrow": "Conjurar",

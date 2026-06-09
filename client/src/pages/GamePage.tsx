@@ -53,6 +53,7 @@ import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.t
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
+import { FreeCastWindowModal } from "../components/modal/FreeCastWindowModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { AlternativeCostModal } from "../components/modal/AlternativeCostModal.tsx";
 import { CastingVariantModal } from "../components/modal/CastingVariantModal.tsx";
@@ -745,7 +746,7 @@ function GamePageContent({
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
-    zone: "graveyard" | "exile";
+    zone: "graveyard" | "exile" | "library";
     playerId: number;
   } | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState<
@@ -1098,7 +1099,11 @@ function GamePageContent({
               size={pileSize}
               onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
             />
-            <LibraryPile playerId={activeOpponentId} size={pileSize} />
+            <LibraryPile
+              playerId={activeOpponentId}
+              size={pileSize}
+              onView={() => setViewingZone({ zone: "library", playerId: activeOpponentId })}
+            />
             <GraveyardPile
               playerId={activeOpponentId}
               size={pileSize}
@@ -1136,7 +1141,11 @@ function GamePageContent({
                 size={pileSize}
                 onClick={() => setViewingZone({ zone: "graveyard", playerId: perspectivePlayerId })}
               />
-              <LibraryPile playerId={perspectivePlayerId} size={pileSize} />
+              <LibraryPile
+                playerId={perspectivePlayerId}
+                size={pileSize}
+                onView={() => setViewingZone({ zone: "library", playerId: perspectivePlayerId })}
+              />
             </div>
           </div>
           <div
@@ -1394,6 +1403,8 @@ function GamePageContent({
         <ChooseOneOfBranchModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
+        <SpellbookDraftModal />
+        <FreeCastWindowModal />
         <ModalFaceModal />
         <MiracleRevealModal />
         {waitingFor?.type === "SpliceOffer" &&
@@ -2475,6 +2486,38 @@ function AbilityChoiceModal() {
         setPending(null);
       }}
       onClose={() => setPending(null)}
+    />
+  );
+}
+
+function SpellbookDraftModal() {
+  const { t } = useTranslation("game");
+  const canActForWaitingState = useCanActForWaitingState();
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const source = useGameStore((s) =>
+    waitingFor?.type === "SpellbookDraft"
+      ? s.gameState?.objects[waitingFor.data.source_id]
+      : undefined,
+  );
+
+  if (waitingFor?.type !== "SpellbookDraft") return null;
+  if (!canActForWaitingState) return null;
+
+  return (
+    <ChoiceModal
+      title={t("cardChoice.dig.title")}
+      subtitle={source?.name}
+      previewCardName={source?.name}
+      previewCardTypes={source?.card_types}
+      previewObjectId={waitingFor.data.source_id}
+      options={waitingFor.data.options.map((name) => ({
+        id: name,
+        label: name,
+      }))}
+      onChoose={(card) =>
+        dispatch({ type: "SubmitSpellbookDraft", data: { card } })
+      }
     />
   );
 }

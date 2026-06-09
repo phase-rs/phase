@@ -489,7 +489,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 filter: None,
-                random: true,
+                selection: crate::types::ability::CardSelectionMode::Random,
                 unless_filter: None,
             },
             vec![],

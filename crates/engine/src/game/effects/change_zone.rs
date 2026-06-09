@@ -13,11 +13,11 @@ use crate::types::game_state::{
     ExileLink, ExileLinkKind, GameState, PendingCounterPostAction, WaitingFor,
     ZoneDeliveryExileTracking,
 };
-use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 614.1c + CR 122.1: Collect the additional ETB counters that active
 /// "[scope] creatures you control enter with an additional [counter] counter on
@@ -84,18 +84,14 @@ pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec
 /// in the library/hand — so an interactive `ChangeZone` selecting "from among"
 /// such a set must scan the members' actual zone, not the battlefield default.
 ///
-/// The `TrackedSetId(0)` sentinel resolves to the most recent non-empty set,
-/// mirroring the binding pass in `resolve` (CR 603.7). Returns `None` when the
+/// The `TrackedSetId(0)` sentinel resolves through the same chain-first binding
+/// authority as `matches_target_filter` (CR 603.7). Returns `None` when the
 /// filter is not tracked-set-backed or the set is empty/unbound.
 fn tracked_set_member_zone(state: &GameState, filter: &TargetFilter) -> Option<Zone> {
-    let id = match filter {
+    let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter.clone());
+    let id = match &filter {
         TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
         _ => return None,
-    };
-    let id = if id == TrackedSetId(0) {
-        crate::game::targeting::latest_tracked_set_id(state)?
-    } else {
-        id
     };
     state
         .tracked_object_sets
@@ -653,7 +649,23 @@ pub(crate) fn execute_zone_move(
     // reanimate, blink, etc.). Spell-cast entry is handled in stack.rs.
     if dest_zone == Zone::Battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
-            let intrinsic = crate::game::printed_cards::intrinsic_etb_counters(obj);
+            // CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
+            // double-faced card exiled and returned with its back face up, like
+            // a creature-front // planeswalker-back DFC) will have its back
+            // face's characteristics on the battlefield. The physical face swap
+            // happens later in `deliver_replaced_zone_change`, so `obj` still
+            // shows its front face here — read the back face's printed
+            // loyalty/defense directly so CR 306.5b/310.4b seeds the counter map
+            // (the source of truth per CR 306.5c). Without this a transforming
+            // planeswalker enters with 0 loyalty counters and dies immediately
+            // to CR 704.5i. Ravenous (front-face cast-time) does not apply to an
+            // effect-driven transformed entry, so only face counters are seeded.
+            let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
+                (true, Some(back)) => {
+                    crate::game::printed_cards::intrinsic_face_counters(back.loyalty, back.defense)
+                }
+                _ => crate::game::printed_cards::intrinsic_etb_counters(obj),
+            };
             if !intrinsic.is_empty() {
                 if let ProposedEvent::ZoneChange {
                     enter_with_counters,
@@ -1036,7 +1048,7 @@ pub fn resolve(
                 ability.source_id,
                 ability.duration.as_ref(),
                 effect_enter_transformed,
-                effect_enter_tapped,
+                effect_enter_tapped.is_tapped(),
                 enters_under_player,
                 &effect_enter_with_counters,
                 face_down_profile.as_ref(),
@@ -1100,7 +1112,7 @@ pub fn resolve(
                 ability.source_id,
                 ability.duration.as_ref(),
                 effect_enter_transformed,
-                effect_enter_tapped,
+                effect_enter_tapped.is_tapped(),
                 enters_under_player,
                 &effect_enter_with_counters,
                 face_down_profile.as_ref(),
@@ -1297,7 +1309,7 @@ pub(crate) struct ChangeZoneIterationCtx {
     pub origin: Option<Zone>,
     pub destination: Zone,
     pub enter_transformed: bool,
-    pub enter_tapped: bool,
+    pub enter_tapped: EtbTapState,
     /// CR 110.2a: Resolved-once controller override. `Some(pid)` routes the
     /// moved object to `pid` on battlefield entry; `None` keeps the object
     /// under its owner's control. Pre-resolved from
@@ -1360,7 +1372,7 @@ pub(crate) fn process_one_zone_move(
         ctx.source_id,
         ctx.duration.as_ref(),
         ctx.enter_transformed,
-        ctx.enter_tapped,
+        ctx.enter_tapped.is_tapped(),
         ctx.enters_under_player,
         &ctx.enter_with_counters,
         None,
@@ -1404,8 +1416,12 @@ pub fn resolve_all(
             let extracted = target.extract_zones();
             let scan_zones = if extracted.len() > 1 {
                 extracted
+            } else if let Some(origin) = origin {
+                vec![*origin]
+            } else if let Some(zone) = tracked_set_member_zone(state, target) {
+                vec![zone]
             } else {
-                vec![origin.unwrap_or(Zone::Battlefield)]
+                vec![Zone::Battlefield]
             };
             (scan_zones, *destination, target.clone(), *enter_tapped)
         }
@@ -1598,7 +1614,7 @@ pub fn resolve_all(
             ability.source_id,
             ability.duration.as_ref(),
             false,
-            enter_tapped,
+            enter_tapped.is_tapped(),
             enters_under_player,
             &[],
             face_down_profile.as_ref(),
@@ -1761,7 +1777,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::{StackEntry, StackEntryKind, ZoneChangeRecord};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::statics::{ProhibitionScope, StaticMode};
@@ -1776,7 +1792,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to,
                 enter_with_counters: vec![],
@@ -1806,7 +1822,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -1883,7 +1899,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -1955,7 +1971,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2023,7 +2039,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2091,7 +2107,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2162,7 +2178,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2283,7 +2299,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2368,7 +2384,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2462,7 +2478,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
@@ -2528,7 +2544,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2573,7 +2589,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![(
@@ -2620,7 +2636,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2656,7 +2672,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2701,7 +2717,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2737,7 +2753,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2815,7 +2831,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2860,7 +2876,7 @@ mod tests {
                 owner_library: true,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -2905,7 +2921,7 @@ mod tests {
                 owner_library: true,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -3043,7 +3059,7 @@ mod tests {
                 destination: Zone::Hand,
                 target: TargetFilter::None,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -3092,7 +3108,7 @@ mod tests {
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -3180,7 +3196,7 @@ mod tests {
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -3251,7 +3267,7 @@ mod tests {
                     ..Default::default()
                 }),
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -3313,7 +3329,7 @@ mod tests {
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -3385,7 +3401,7 @@ mod tests {
                         }]),
                 ),
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 face_down_profile: None,
             },
             vec![],
@@ -3416,7 +3432,7 @@ mod tests {
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -3488,7 +3504,7 @@ mod tests {
                     properties: vec![],
                 }),
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -3590,7 +3606,7 @@ mod tests {
                 destination: Zone::Graveyard,
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -3640,7 +3656,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -3695,7 +3711,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: true,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -3746,7 +3762,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -3803,7 +3819,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: true,
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
@@ -3839,7 +3855,7 @@ mod tests {
                 assert_eq!(*destination, Some(Zone::Battlefield));
                 assert!(cards.contains(&a));
                 assert!(cards.contains(&b));
-                assert!(*enter_tapped);
+                assert!(enter_tapped.is_tapped());
                 assert!(*enter_transformed);
                 // CR 110.2a: WaitingFor carries the resolved player id, not a
                 // boolean. Ability controller in this test is PlayerId(0).
@@ -3929,7 +3945,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -3951,7 +3967,7 @@ mod tests {
                         ..Default::default()
                     }),
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     face_down_profile: None,
                 },
                 vec![],
@@ -4035,7 +4051,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -4088,7 +4104,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4161,7 +4177,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4224,7 +4240,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4279,7 +4295,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4332,7 +4348,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4555,7 +4571,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4601,7 +4617,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4650,7 +4666,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4740,7 +4756,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
-                enter_tapped,
+                enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -4988,7 +5004,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -5063,7 +5079,7 @@ mod tests {
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -5137,7 +5153,7 @@ mod tests {
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -5187,7 +5203,7 @@ mod tests {
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::Opponent),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -5284,7 +5300,7 @@ mod tests {
                     ]),
                 ),
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             // Parent target supplies the "that name" referent.
@@ -5429,7 +5445,7 @@ mod tests {
                         FilterProp::SameNameAsParentTarget,
                     ])),
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     face_down_profile: None,
                 },
                 vec![TargetRef::Object(seed)],
@@ -5446,7 +5462,7 @@ mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -5557,7 +5573,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: true,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -5630,7 +5646,7 @@ mod tests {
                     id: TrackedSetId(0),
                 },
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             vec![],
@@ -5703,7 +5719,7 @@ mod tests {
                     filter: Box::new(creature_filter),
                 },
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: Some(FaceDownProfile {
                     power: Some(2),
                     toughness: Some(2),
@@ -5736,6 +5752,133 @@ mod tests {
         assert_eq!(state.objects[&land].owner, PlayerId(1));
     }
 
+    /// CR 701.20b: Tracked-set mass moves without an explicit origin
+    /// must scan the tracked objects' actual zone, not the battlefield default.
+    /// Zimone-style "revealed this way" cards leave the revealed cards in the
+    /// library until the follow-up `ChangeZoneAll` routes them by type.
+    #[test]
+    fn change_zone_all_tracked_set_without_origin_uses_member_zone() {
+        let mut state = GameState::new_two_player(42);
+        let land = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Tracked Land".to_string(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+        let creature = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Tracked Creature".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(set_id, vec![land, creature]);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::land())),
+                },
+                enters_under: None,
+                enter_tapped: EtbTapState::Tapped,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        assert!(state.objects[&land].tapped);
+        assert_eq!(state.objects[&creature].zone, Zone::Library);
+    }
+
+    /// CR 603.7: `TrackedSetId(0)` must bind through `chain_tracked_set_id`
+    /// before falling back to the globally latest tracked set, matching the
+    /// target-filter resolver used by `matches_target_filter`.
+    #[test]
+    fn change_zone_all_tracked_set_zone_uses_chain_binding() {
+        let mut state = GameState::new_two_player(42);
+        let chain_land = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Chain Land".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&chain_land)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        let latest_land = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Latest Land".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&latest_land)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+
+        let chain_set = TrackedSetId(5);
+        let latest_set = TrackedSetId(9);
+        state
+            .tracked_object_sets
+            .insert(chain_set, vec![chain_land]);
+        state
+            .tracked_object_sets
+            .insert(latest_set, vec![latest_land]);
+        state.chain_tracked_set_id = Some(chain_set);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::land())),
+                },
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&chain_land].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&latest_land].zone, Zone::Graveyard);
+    }
+
     /// CR 708.2a: An empty milled set (no eligible cards) is a clean no-op.
     #[test]
     fn change_zone_all_face_down_empty_set_noop() {
@@ -5757,7 +5900,7 @@ mod tests {
                     })),
                 },
                 enters_under: Some(ControllerRef::You),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
             },
             vec![],
@@ -5793,7 +5936,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -5884,7 +6027,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
@@ -6016,7 +6159,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
@@ -6075,7 +6218,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
@@ -6208,7 +6351,7 @@ mod tests {
             effect_kind: EffectKind::ChangeZone,
             zone: Zone::Hand,
             destination: Some(Zone::Battlefield),
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: None,
             enters_attacking: false,
@@ -6285,7 +6428,7 @@ mod tests {
                 // CR 110.2a: deliberately use an unsupported variant to drive
                 // the strict-fail branch.
                 enters_under: Some(ControllerRef::Opponent),
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -6387,7 +6530,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],

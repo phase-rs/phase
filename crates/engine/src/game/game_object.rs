@@ -10,7 +10,7 @@ use crate::types::ability::{
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
-use crate::types::counter::CounterType;
+use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
 use crate::types::game_state::{AttackDeclarationRecord, GameState, LKISnapshot};
 use crate::types::identifiers::{CardId, ObjectId};
@@ -288,6 +288,22 @@ pub struct RoomUnlockOutcome {
     pub fully_unlocked: bool,
 }
 
+/// CR 114: Display-only provenance for an emblem — the name and printed-card
+/// reference of the source that created it (e.g. the planeswalker whose
+/// ultimate ability made the emblem). This is deliberately NOT the emblem's
+/// own `printed_ref`: an emblem is neither a card nor a permanent (CR 114.5),
+/// and setting `printed_ref` would make the layer system treat the emblem as
+/// represented by that card and leak its types/P-T/abilities. This field is
+/// purely presentational — the client uses it to render the emblem as a small
+/// chip bearing the source's art crop and a "from <name>" label, mirroring
+/// MTG Arena's emblem display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmblemSource {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -334,7 +350,16 @@ pub struct GameObject {
     pub pair_controller: Option<PlayerId>,
 
     // Counters
+    #[serde(with = "counter_map_serde")]
     pub counters: HashMap<CounterType, u32>,
+
+    /// Alchemy Intensity — a per-card escalating value (digital-only, no CR
+    /// entry). Initialized from the card's "Starting intensity N" at first
+    /// characteristic application and incremented by `Effect::Intensify`. Like
+    /// `counters`, it persists across zone changes (the object keeps its id), so
+    /// a card's intensity follows it through hand/library/stack/battlefield.
+    #[serde(default)]
+    pub intensity: u32,
 
     // Characteristics
     pub name: String,
@@ -386,6 +411,12 @@ pub struct GameObject {
     /// metadata copied from `CardFace`; game rules never read it directly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_related_token_ids: Vec<String>,
+
+    /// Alchemy spellbook — the fixed list of card names this object can draft
+    /// from, copied from `CardFace::metadata.spellbook`. Read by the
+    /// `DraftFromSpellbook` resolver to present the choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spellbook: Vec<String>,
 
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
@@ -640,6 +671,12 @@ pub struct GameObject {
     #[serde(default)]
     pub is_emblem: bool,
 
+    /// CR 114: Display-only provenance of the source that created this emblem
+    /// (planeswalker, spell, etc.). Populated at creation in `create_emblem`;
+    /// `None` for every non-emblem object. See [`EmblemSource`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emblem_source: Option<EmblemSource>,
+
     /// CR 111.1: Whether this object is a token (not a card).
     #[serde(default)]
     pub is_token: bool,
@@ -770,6 +807,17 @@ pub struct GameObject {
     /// to evaluate conditions like "if you cast it from your hand".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
+
+    /// CR 614.1a + CR 608.2n: When true, this spell is exiled instead of being
+    /// put into its owner's graveyard any time it would leave the stack
+    /// ("if those spells would be put into your graveyard, exile them instead").
+    /// Set on a spell cast via `Effect::FreeCastFromZones` with the exile rider
+    /// (Invoke Calamity); read by the stack-resolution router. Unlike the
+    /// keyword-driven `CastingVariant` exile riders, this is a per-object marker
+    /// so it survives the during-resolution cast finalize regardless of the
+    /// spell's origin zone or casting variant.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exile_from_stack_instead_of_graveyard: bool,
 
     /// CR 305.1 + CR 603.4: Transient field tracking the zone a land was played
     /// from. Consumed by ETB trigger processing for conditions like "without
@@ -964,6 +1012,7 @@ impl GameObject {
             paired_with: None,
             pair_controller: None,
             counters: HashMap::new(),
+            intensity: 0,
             name: name.clone(),
             power: None,
             toughness: None,
@@ -984,6 +1033,7 @@ impl GameObject {
             base_printed_ref: None,
             token_image_ref: None,
             source_related_token_ids: Vec::new(),
+            spellbook: Vec::new(),
             back_face: None,
             specialize_faces: None,
             specialized_color: None,
@@ -1032,6 +1082,7 @@ impl GameObject {
             commander_tax: None,
             is_renowned: false,
             is_emblem: false,
+            emblem_source: None,
             is_token: false,
             is_copy: false,
             display_source: DisplaySource::Card,
@@ -1056,6 +1107,7 @@ impl GameObject {
             room_unlocks: None,
             class_level: None,
             cast_from_zone: None,
+            exile_from_stack_instead_of_graveyard: false,
             played_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),

@@ -1,15 +1,16 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AdditionalCost, BeholdCostAction, CastTimingPermission,
-    CostPaidObjectSnapshot, Effect, KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility,
-    SpellCastingOptionKind, StaticCondition, TargetFilter, TypedFilter,
+    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AdditionalCost,
+    BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot, CounterCostSelection, Effect,
+    KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility, SpellCastingOptionKind,
+    StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit,
-    GameState, PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    AssistState, CastPaymentMode, CastingVariant, ConvokeMode, CostResume, CounterCostChoice,
+    DistributionUnit, GameState, PayCostKind, PendingCast, PendingDiscardForCostResume,
+    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -119,7 +120,8 @@ pub(crate) fn handle_decide_additional_cost(
         }
         (
             Some(AdditionalCost::Optional {
-                repeatable: true, ..
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+                ..
             }),
             _,
         ) => {
@@ -133,7 +135,8 @@ pub(crate) fn handle_decide_additional_cost(
         (
             None,
             AdditionalCost::Optional {
-                repeatable: true, ..
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+                ..
             },
         ) => {
             let mut pending = pending;
@@ -156,7 +159,7 @@ pub(crate) fn handle_decide_additional_cost(
         // CR 702.33a: Kicker is an optional additional cost.
         AdditionalCost::Optional {
             cost,
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         } => {
             if pay {
                 ability.context.additional_cost_paid = true;
@@ -168,7 +171,8 @@ pub(crate) fn handle_decide_additional_cost(
             }
         }
         AdditionalCost::Optional {
-            repeatable: true, ..
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+            ..
         } => {
             unreachable!("repeatable optional costs are handled before generic optional costs")
         }
@@ -218,7 +222,7 @@ pub(crate) fn handle_decide_additional_cost(
         && matches!(
             updated_pending.additional_cost_flow,
             Some(AdditionalCost::Optional {
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 ..
             })
         )
@@ -402,13 +406,13 @@ fn handle_decide_kicker_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let Some((variant, cost, repeatable)) = next_kicker_option(state, player, &pending) else {
+    let Some((variant, cost, repeatability)) = next_kicker_option(state, player, &pending) else {
         pending.additional_cost_flow = None;
         return finish_pending_cost_or_cast(state, player, pending, events);
     };
 
     if !pay {
-        if repeatable {
+        if repeatability.is_repeatable() {
             pending.additional_cost_flow = None;
         } else if !pending.declined_kickers.contains(&variant) {
             pending.declined_kickers.push(variant);
@@ -429,16 +433,28 @@ fn next_kicker_option(
     state: &GameState,
     player: PlayerId,
     pending: &PendingCast,
-) -> Option<(KickerVariant, AbilityCost, bool)> {
-    let Some(AdditionalCost::Kicker { costs, repeatable }) = &pending.additional_cost_flow else {
+) -> Option<(
+    KickerVariant,
+    AbilityCost,
+    crate::types::ability::AdditionalCostRepeatability,
+)> {
+    let Some(AdditionalCost::Kicker {
+        costs,
+        repeatability,
+    }) = &pending.additional_cost_flow
+    else {
         return None;
     };
 
-    if *repeatable {
+    if repeatability.is_repeatable() {
         let cost = costs.first()?.clone();
         return cost
             .is_payable(state, player, pending.object_id)
-            .then_some((KickerVariant::First, cost, true));
+            .then_some((
+                KickerVariant::First,
+                cost,
+                crate::types::ability::AdditionalCostRepeatability::Repeatable,
+            ));
     }
 
     for (index, cost) in costs.iter().enumerate() {
@@ -453,7 +469,11 @@ fn next_kicker_option(
             continue;
         }
         if cost.is_payable(state, player, pending.object_id) {
-            return Some((variant, cost.clone(), false));
+            return Some((
+                variant,
+                cost.clone(),
+                crate::types::ability::AdditionalCostRepeatability::Once,
+            ));
         }
     }
 
@@ -493,7 +513,7 @@ fn next_repeatable_additional_cost(
 ) -> Option<AbilityCost> {
     let Some(AdditionalCost::Optional {
         cost,
-        repeatable: true,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
     }) = &pending.additional_cost_flow
     else {
         return None;
@@ -509,23 +529,6 @@ fn finish_pending_cost_or_cast(
     mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if let Some(ability_index) = pending.activation_ability_index {
-        let waiting_for = push_activated_ability_to_stack(
-            state,
-            player,
-            pending.object_id,
-            ability_index,
-            pending.ability,
-            pending.activation_cost.as_ref(),
-            events,
-        )?;
-        return Ok(drain_deferred_triggers_after_stack_object_announcement(
-            state,
-            events,
-            waiting_for,
-        ));
-    }
-
     if matches!(
         pending.additional_cost_flow,
         Some(AdditionalCost::Required(_))
@@ -547,7 +550,7 @@ fn finish_pending_cost_or_cast(
     if matches!(
         pending.additional_cost_flow,
         Some(AdditionalCost::Optional {
-            repeatable: true,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
             ..
         })
     ) {
@@ -557,7 +560,7 @@ fn finish_pending_cost_or_cast(
                 player,
                 cost: AdditionalCost::Optional {
                     cost: current_cost,
-                    repeatable: true,
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
                 },
                 times_kicked,
                 pending_cast: Box::new(pending),
@@ -571,7 +574,8 @@ fn finish_pending_cost_or_cast(
         Some(AdditionalCost::Kicker { .. })
     ) {
         if pending.deferred_target_selection {
-            if let Some((_, current_cost, repeatable)) = next_kicker_option(state, player, &pending)
+            if let Some((_, current_cost, repeatability)) =
+                next_kicker_option(state, player, &pending)
             {
                 // CR 702.33c/d: present the live Kicker cost (not a laundered
                 // Optional) so the frontend can render a kicker-aware modal and
@@ -581,7 +585,7 @@ fn finish_pending_cost_or_cast(
                     player,
                     cost: AdditionalCost::Kicker {
                         costs: vec![current_cost],
-                        repeatable,
+                        repeatability,
                     },
                     times_kicked,
                     pending_cast: Box::new(pending),
@@ -594,7 +598,8 @@ fn finish_pending_cost_or_cast(
                 return pay_additional_cost(state, player, cost, pending, events);
             }
         }
-        if let Some((_, current_cost, repeatable)) = next_kicker_option(state, player, &pending) {
+        if let Some((_, current_cost, repeatability)) = next_kicker_option(state, player, &pending)
+        {
             // CR 702.33c/d: present the live Kicker cost (not a laundered Optional)
             // so the frontend renders the kicker re-prompt with the running kick count.
             let times_kicked = pending.ability.context.kickers_paid.len() as u32;
@@ -602,7 +607,7 @@ fn finish_pending_cost_or_cast(
                 player,
                 cost: AdditionalCost::Kicker {
                     costs: vec![current_cost],
-                    repeatable,
+                    repeatability,
                 },
                 times_kicked,
                 pending_cast: Box::new(pending),
@@ -619,13 +624,13 @@ fn finish_pending_cost_or_cast(
     // handle_decide_additional_cost so the general deferred path below fires.
     if let Some(AdditionalCost::Optional {
         cost: ref optional_cost,
-        repeatable: false,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     }) = pending.additional_cost_flow
     {
         if pending.deferred_target_selection {
             let optional_cost = AdditionalCost::Optional {
                 cost: optional_cost.clone(),
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             };
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
@@ -645,7 +650,8 @@ fn finish_pending_cost_or_cast(
             Some(
                 AdditionalCost::Kicker { .. }
                     | AdditionalCost::Optional {
-                        repeatable: true,
+                        repeatability:
+                            crate::types::ability::AdditionalCostRepeatability::Repeatable,
                         ..
                     }
             )
@@ -689,6 +695,30 @@ fn finish_pending_cost_or_cast(
             pending,
             events,
         );
+    }
+
+    if pending.activation_ability_index.is_some()
+        && !matches!(pending.cost, ManaCost::NoCost | ManaCost::SelfManaCost)
+    {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, None, events);
+    }
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        let waiting_for = push_activated_ability_to_stack(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
+            events,
+        )?;
+        return Ok(drain_deferred_triggers_after_stack_object_announcement(
+            state,
+            events,
+            waiting_for,
+        ));
     }
 
     let base_cost = pending.base_cost.clone();
@@ -850,11 +880,15 @@ pub(crate) fn begin_deferred_target_selection(
 
 fn next_declared_kicker_cost(pending: &mut PendingCast) -> Option<AbilityCost> {
     let additional = pending.additional_cost_flow.as_ref()?;
-    let AdditionalCost::Kicker { costs, repeatable } = additional else {
+    let AdditionalCost::Kicker {
+        costs,
+        repeatability,
+    } = additional
+    else {
         return None;
     };
     let variant = pending.declared_kickers_to_pay.pop()?;
-    if *repeatable {
+    if repeatability.is_repeatable() {
         return costs.first().cloned();
     }
     let index = match variant {
@@ -1270,20 +1304,42 @@ pub(crate) fn handle_remove_counter_for_cost(
     mut pending: PendingCast,
     count: u32,
     counter_type: crate::types::counter::CounterMatch,
+    selection: CounterCostSelection,
     legal_permanents: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != 1 {
-        return Err(EngineError::InvalidAction(format!(
-            "Must choose exactly one permanent, got {}",
-            chosen.len()
-        )));
+    if selection == CounterCostSelection::AmongObjects {
+        return Err(EngineError::InvalidAction(
+            "Counter distribution is required for from-among counter costs".to_string(),
+        ));
     }
-    let chosen = chosen[0];
-    if !legal_permanents.contains(&chosen) {
+    let paid_object = match selection {
+        CounterCostSelection::SingleObject => {
+            if chosen.len() != 1 {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must choose exactly one permanent, got {}",
+                    chosen.len()
+                )));
+            }
+            Some(chosen[0])
+        }
+        CounterCostSelection::AmongObjects => chosen.first().copied(),
+    };
+    if chosen.is_empty() || chosen.iter().any(|id| !legal_permanents.contains(id)) {
         return Err(EngineError::InvalidAction(
             "Selected permanent not eligible for counter removal".to_string(),
+        ));
+    }
+
+    let selected_removable = chosen
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|obj| super::casting::removable_counter_count(obj, &counter_type))
+        .fold(0, u32::saturating_add);
+    if selected_removable < count {
+        return Err(EngineError::InvalidAction(
+            "Selected permanents do not have enough removable counters".to_string(),
         ));
     }
 
@@ -1297,24 +1353,158 @@ pub(crate) fn handle_remove_counter_for_cost(
         }
     }
 
-    let concrete_counter =
-        super::effects::counters::resolve_counter_match_for_removal(state, chosen, &counter_type)
-            .ok_or_else(|| EngineError::ActionNotAllowed("No removable counter".to_string()))?;
-    super::effects::counters::remove_counter_with_replacement(
-        state,
-        chosen,
-        concrete_counter,
-        count,
-        events,
-    );
+    let mut remaining = count;
+    for &object_id in chosen {
+        if remaining == 0 {
+            break;
+        }
+        let Some(concrete_counter) = super::effects::counters::resolve_counter_match_for_removal(
+            state,
+            object_id,
+            &counter_type,
+        ) else {
+            continue;
+        };
+        let removable = state
+            .objects
+            .get(&object_id)
+            .and_then(|obj| obj.counters.get(&concrete_counter))
+            .copied()
+            .unwrap_or(0);
+        let to_remove = removable.min(remaining);
+        if to_remove > 0 {
+            super::effects::counters::remove_counter_with_replacement(
+                state,
+                object_id,
+                concrete_counter,
+                to_remove,
+                events,
+            );
+            remaining -= to_remove;
+        }
+    }
+    if remaining > 0 {
+        return Err(EngineError::ActionNotAllowed(
+            "No removable counter".to_string(),
+        ));
+    }
 
-    if let Some(obj) = state.objects.get(&chosen) {
+    if let Some(obj) = paid_object.and_then(|id| state.objects.get(&id).map(|obj| (id, obj))) {
         pending
             .ability
             .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
-                object_id: chosen,
-                lki: obj.snapshot_for_mana_spent(),
+                object_id: obj.0,
+                lki: obj.1.snapshot_for_mana_spent(),
             });
+    }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 118.3 + CR 122.1 + CR 601.2b: Complete "remove N counters from among"
+/// cost payment after the player assigns exact counter counts per object.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_remove_counter_distribution_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    count: u32,
+    counter_type: crate::types::counter::CounterMatch,
+    selection: CounterCostSelection,
+    legal_permanents: &[ObjectId],
+    distribution: &[CounterCostChoice],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if selection != CounterCostSelection::AmongObjects {
+        return Err(EngineError::InvalidAction(
+            "Counter distribution is only valid for from-among counter costs".to_string(),
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut total = 0u32;
+    for choice in distribution {
+        if choice.count == 0 {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution amounts must be positive".to_string(),
+            ));
+        }
+        if !seen.insert((choice.object_id, choice.counter_type.clone())) {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution contains duplicate counter choices".to_string(),
+            ));
+        }
+        if !legal_permanents.contains(&choice.object_id) {
+            return Err(EngineError::InvalidAction(
+                "Selected permanent not eligible for counter removal".to_string(),
+            ));
+        }
+        if matches!(
+            &counter_type,
+            crate::types::counter::CounterMatch::OfType(required) if required != &choice.counter_type
+        ) {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution uses the wrong counter type".to_string(),
+            ));
+        }
+        let removable = state
+            .objects
+            .get(&choice.object_id)
+            .and_then(|obj| obj.counters.get(&choice.counter_type))
+            .copied()
+            .unwrap_or(0);
+        if removable < choice.count {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution exceeds removable counters".to_string(),
+            ));
+        }
+        total = total.saturating_add(choice.count);
+    }
+    if total != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Counter distribution must total {count}, got {total}",
+        )));
+    }
+
+    if pending.activation_ability_index.is_some() {
+        if let Some(cost) = pending.activation_cost.take() {
+            // CR 601.2h + CR 602.2b: Pay automatic activation-cost components
+            // such as {T} before removing the assigned counters and putting
+            // the ability on the stack.
+            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
+        }
+    }
+
+    for choice in distribution {
+        let removable = state
+            .objects
+            .get(&choice.object_id)
+            .and_then(|obj| obj.counters.get(&choice.counter_type))
+            .copied()
+            .unwrap_or(0);
+        if removable < choice.count {
+            return Err(EngineError::InvalidAction(
+                "Counter distribution exceeds removable counters".to_string(),
+            ));
+        }
+        super::effects::counters::remove_counter_with_replacement(
+            state,
+            choice.object_id,
+            choice.counter_type.clone(),
+            choice.count,
+            events,
+        );
+    }
+
+    if let Some(choice) = distribution.first() {
+        if let Some(obj) = state.objects.get(&choice.object_id) {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: choice.object_id,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
+        }
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -1635,9 +1825,13 @@ pub(crate) fn handle_exile_materials_for_cost(
         pending.object_id,
         &materials,
     );
+    // Capture the crafting source id before `pending` is moved into the helper.
+    // The craft source self-exiles and returns with the same ObjectId (CR
+    // 702.167a), so this id is also the returned permanent's id.
+    let source_id = pending.object_id;
     // CR 702.167a/b + CR 601.2h: chosen materials are revalidated against the
     // live battlefield/graveyard union immediately before payment.
-    finish_exile_selection_for_cost(
+    let result = finish_exile_selection_for_cost(
         state,
         player,
         pending,
@@ -1655,7 +1849,21 @@ pub(crate) fn handle_exile_materials_for_cost(
             }
             Ok(())
         },
-    )
+    )?;
+    // CR 702.167c: link each exiled material to the crafting source so a
+    // "cares what was used to craft it" ability can read them after the
+    // permanent returns transformed (same ObjectId across the exile round-trip;
+    // the link survives the source's battlefield exit via the zones.rs preserve
+    // arm). `push_with_kind` is idempotent on (exiled_id, source_id).
+    for &material_id in chosen {
+        crate::game::exile_links::push_with_kind(
+            state,
+            material_id,
+            source_id,
+            crate::types::game_state::ExileLinkKind::CraftMaterial,
+        );
+    }
+    Ok(result)
 }
 
 /// Push an activated ability to the stack after costs are paid.
@@ -1674,6 +1882,16 @@ pub(super) fn push_activated_ability_to_stack(
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        let concretized_cost;
+        let cost = if let Some(chosen_x) = resolved.chosen_x {
+            // CR 602.2b + CR 601.2f + CR 122.1: Once X is announced for an
+            // activation cost, the symbolic counter-removal cost becomes a
+            // concrete count before payment removes counters.
+            concretized_cost = concretize_x_counter_removal_cost(cost, chosen_x);
+            &concretized_cost
+        } else {
+            cost
+        };
         if super::casting::variable_speed_payment_range(
             cost,
             super::speed::effective_speed(state, player),
@@ -1773,6 +1991,29 @@ pub(super) fn push_activated_ability_to_stack(
     emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
     push_ability_entry(state, player, source_id, ability_index, resolved, events)
+}
+
+fn concretize_x_counter_removal_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
+    match cost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target,
+            selection,
+        } if is_chosen_remove_counter_cost_count(*count) => AbilityCost::RemoveCounter {
+            count: chosen_x,
+            counter_type: counter_type.clone(),
+            target: target.clone(),
+            selection: *selection,
+        },
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|cost| concretize_x_counter_removal_cost(cost, chosen_x))
+                .collect(),
+        },
+        _ => cost.clone(),
+    }
 }
 
 /// Final step: create stack entry and record activation.
@@ -1928,7 +2169,11 @@ pub(super) fn begin_modal_additional_cost_declaration(
         .objects
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone());
-    let Some(AdditionalCost::Kicker { costs, repeatable }) = additional else {
+    let Some(AdditionalCost::Kicker {
+        costs,
+        repeatability,
+    }) = additional
+    else {
         let mut capped =
             modal_choice_for_player(state, player, object_id, &modal, &ability.context);
         capped.max_choices = capped.max_choices.min(capped.mode_count);
@@ -1955,7 +2200,10 @@ pub(super) fn begin_modal_additional_cost_declaration(
     pending.origin_zone = origin_zone;
     pending.payment_mode = payment_mode;
     pending.deferred_modal_choice = Some(modal);
-    pending.additional_cost_flow = Some(AdditionalCost::Kicker { costs, repeatable });
+    pending.additional_cost_flow = Some(AdditionalCost::Kicker {
+        costs,
+        repeatability,
+    });
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -1979,7 +2227,11 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
         .objects
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone());
-    let Some(AdditionalCost::Kicker { costs, repeatable }) = additional else {
+    let Some(AdditionalCost::Kicker {
+        costs,
+        repeatability,
+    }) = additional
+    else {
         return pay_and_push(
             state,
             player,
@@ -2005,7 +2257,10 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
     pending.origin_zone = origin_zone;
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
-    pending.additional_cost_flow = Some(AdditionalCost::Kicker { costs, repeatable });
+    pending.additional_cost_flow = Some(AdditionalCost::Kicker {
+        costs,
+        repeatability,
+    });
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -2294,7 +2549,10 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                     events,
                 );
             }
-            AdditionalCost::Kicker { costs, repeatable } => {
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.base_cost = base_cost.clone();
                 pending.casting_variant = casting_variant;
@@ -2307,7 +2565,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 }
                 pending.additional_cost_flow = Some(AdditionalCost::Kicker {
                     costs: costs.clone(),
-                    repeatable: *repeatable,
+                    repeatability: *repeatability,
                 });
                 if !pending.ability.context.kickers_paid.is_empty() {
                     pending.declared_kickers_to_pay = pending
@@ -2323,7 +2581,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             }
             AdditionalCost::Optional {
                 cost: repeatable_cost,
-                repeatable: true,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
             } => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.base_cost = base_cost.clone();
@@ -2334,13 +2592,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.payment_mode = payment_mode;
                 pending.additional_cost_flow = Some(AdditionalCost::Optional {
                     cost: repeatable_cost.clone(),
-                    repeatable: true,
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
                 });
                 return finish_pending_cost_or_cast(state, player, pending, events);
             }
             AdditionalCost::Optional {
                 cost: opt_cost,
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.base_cost = base_cost.clone();
@@ -3044,28 +3302,63 @@ fn pay_additional_cost_with_source(
             count,
             ref counter_type,
             target: Some(ref target),
+            selection,
         } => {
+            if count == 0 {
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
+            let required_count = match selection {
+                CounterCostSelection::SingleObject => count,
+                CounterCostSelection::AmongObjects => 1,
+            };
             let eligible = super::casting::find_eligible_remove_counter_for_cost_targets(
                 state,
                 player,
                 pending.object_id,
                 target,
                 counter_type,
-                count,
+                required_count,
             );
             if eligible.is_empty() {
                 return Err(EngineError::ActionNotAllowed(
                     "No eligible permanents with counters".into(),
                 ));
             }
+            if selection == CounterCostSelection::AmongObjects {
+                let removable_count = eligible
+                    .iter()
+                    .filter_map(|object_id| state.objects.get(object_id))
+                    .map(|obj| {
+                        super::casting::removable_counter_count_for_cost_selection(
+                            obj,
+                            counter_type,
+                            selection,
+                        )
+                    })
+                    .fold(0, u32::saturating_add);
+                if removable_count < count {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Not enough eligible counters to remove".into(),
+                    ));
+                }
+            }
+            let max_count = match selection {
+                CounterCostSelection::SingleObject => 1,
+                CounterCostSelection::AmongObjects => eligible.len(),
+            };
             return Ok(WaitingFor::PayCost {
                 player,
                 kind: PayCostKind::RemoveCounter {
                     counter_type: counter_type.clone(),
+                    count,
+                    selection,
                 },
                 choices: eligible,
-                count: count as usize,
-                min_count: 0,
+                count: max_count,
+                min_count: match selection {
+                    CounterCostSelection::SingleObject => 0,
+                    CounterCostSelection::AmongObjects => 1,
+                },
                 resume: CostResume::Spell {
                     spell: Box::new(pending),
                 },
@@ -3308,12 +3601,96 @@ fn additional_cost_x_max(
                     .unwrap_or(u32::MAX),
             )
         }
+        AbilityCost::RemoveCounter {
+            target,
+            count,
+            counter_type,
+            selection,
+        } if is_chosen_remove_counter_cost_count(*count) => {
+            // CR 601.2b: X in a variable counter removal cost is announced before later target choices.
+            let target_filter = target.as_ref().unwrap_or(&TargetFilter::SelfRef);
+            let eligible = super::casting::find_eligible_remove_counter_for_cost_targets(
+                state,
+                player,
+                source_id,
+                target_filter,
+                counter_type,
+                *count,
+            );
+            let removable_counts = eligible
+                .into_iter()
+                .filter_map(|object_id| state.objects.get(&object_id))
+                .map(|obj| {
+                    super::casting::removable_counter_count_for_cost_selection(
+                        obj,
+                        counter_type,
+                        *selection,
+                    )
+                });
+            Some(
+                if target.is_some() && *selection == CounterCostSelection::SingleObject {
+                    removable_counts.max().unwrap_or(0)
+                } else {
+                    removable_counts.fold(0, u32::saturating_add)
+                },
+            )
+        }
         AbilityCost::Composite { costs } => costs
             .iter()
             .filter_map(|cost| additional_cost_x_max(state, player, source_id, cost))
             .min(),
         AbilityCost::PerCounter { base, .. } => {
             additional_cost_x_max(state, player, source_id, base)
+        }
+        _ => None,
+    }
+}
+
+fn activation_counter_cost_x_max(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    cost: &AbilityCost,
+) -> Option<u32> {
+    if !activation_cost_needs_x_choice(ability, cost) {
+        return None;
+    }
+    additional_cost_x_max(state, player, source_id, cost)
+}
+
+pub(super) fn activation_cost_needs_x_choice(
+    ability: &ResolvedAbility,
+    cost: &AbilityCost,
+) -> bool {
+    ability.chosen_x.is_none() && cost_has_symbolic_counter_removal(cost)
+}
+
+fn cost_has_symbolic_counter_removal(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::RemoveCounter { count, .. } => is_chosen_remove_counter_cost_count(*count),
+        AbilityCost::Composite { costs } => costs.iter().any(cost_has_symbolic_counter_removal),
+        _ => false,
+    }
+}
+
+fn cost_has_targeted_symbolic_counter_removal(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::RemoveCounter { count, target, .. } => {
+            is_chosen_remove_counter_cost_count(*count) && target.is_some()
+        }
+        AbilityCost::Composite { costs } => {
+            costs.iter().any(cost_has_targeted_symbolic_counter_removal)
+        }
+        _ => false,
+    }
+}
+
+fn targeted_remove_counter_choice_cost(cost: &AbilityCost) -> Option<AbilityCost> {
+    match cost {
+        AbilityCost::RemoveCounter { target, .. } if target.is_some() => Some(cost.clone()),
+        AbilityCost::Composite { costs } => {
+            costs.iter().find_map(targeted_remove_counter_choice_cost)
         }
         _ => None,
     }
@@ -3356,7 +3733,7 @@ pub(super) fn effective_casualty_additional_cost(
             ])),
             count: 1,
         },
-        repeatable: false,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     })
 }
 
@@ -3377,7 +3754,7 @@ pub(super) fn effective_conspire_additional_cost(
                 count: 2,
                 filter: crate::database::synthesis::conspire_tap_filter(),
             },
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         })
 }
 
@@ -3396,7 +3773,7 @@ pub(super) fn effective_replicate_additional_cost(
         })?;
     Some(AdditionalCost::Optional {
         cost: AbilityCost::Mana { cost },
-        repeatable: true,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
     })
 }
 
@@ -3460,7 +3837,7 @@ pub(super) fn effective_offering_additional_cost(
     let quality = effective_offering_quality(state, player, object_id)?;
     Some(AdditionalCost::Optional {
         cost: offering_sacrifice_cost(&quality),
-        repeatable: false,
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     })
 }
 
@@ -3649,8 +4026,8 @@ pub(super) fn retrace_discard_land_cost() -> AbilityCost {
     AbilityCost::Discard {
         count: QuantityExpr::Fixed { value: 1 },
         filter: Some(TargetFilter::Typed(TypedFilter::land())),
-        random: false,
-        self_ref: false,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
     }
 }
 
@@ -3670,8 +4047,8 @@ pub(super) fn jumpstart_discard_card_cost() -> AbilityCost {
     AbilityCost::Discard {
         count: QuantityExpr::Fixed { value: 1 },
         filter: None,
-        random: false,
-        self_ref: false,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
     }
 }
 
@@ -4510,6 +4887,8 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         let waiting_for = handle_resolution_cast_success(
             state,
             player,
+            object_id,
+            resulting_mv,
             cleanup.exiled_misses,
             cleanup.success_action,
             events,
@@ -4529,6 +4908,8 @@ fn evaluate_cascade_constraint_with_resulting_mv(
 fn handle_resolution_cast_success(
     state: &mut GameState,
     player: PlayerId,
+    cast_object: ObjectId,
+    resulting_mv: u32,
     exiled_misses: Vec<ObjectId>,
     success_action: crate::types::ability::ResolutionCastSuccessAction,
     events: &mut Vec<GameEvent>,
@@ -4560,6 +4941,65 @@ fn handle_resolution_cast_success(
                 }))
             }
         }
+        // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity — the spell cast this
+        // way has finished announcement and is on the stack. Apply the exile-
+        // instead rider (CR 614.1a) to the cast spell, then reduce the running
+        // MV budget by this spell's resulting mana value, decrement the cast
+        // count, and re-open the window if any casts remain and candidates fit.
+        ResolutionCastSuccessAction::FreeCastOfferRemaining {
+            controller,
+            remaining_casts,
+            remaining_mv_budget,
+            filter,
+            zones,
+            exile_instead_of_graveyard,
+        } => {
+            if exile_instead_of_graveyard {
+                apply_exile_instead_of_graveyard_rider(state, cast_object);
+            }
+            let casts_left = remaining_casts.saturating_sub(1);
+            // CR 202.3: shrink the shared budget by what was actually spent on
+            // mana value (resulting MV after X, copies, etc.).
+            let budget_left = remaining_mv_budget.map(|b| b.saturating_sub(resulting_mv));
+            if casts_left == 0 {
+                return None;
+            }
+            let candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
+                state,
+                controller,
+                &filter,
+                &zones,
+                budget_left,
+            );
+            if candidates.is_empty() {
+                return None;
+            }
+            Some(Box::new(WaitingFor::CastOffer {
+                player: controller,
+                kind: crate::types::game_state::CastOfferKind::FreeCastWindow {
+                    candidates,
+                    remaining_casts: casts_left,
+                    remaining_mv_budget: budget_left,
+                    filter,
+                    zones,
+                    exile_instead_of_graveyard,
+                },
+            }))
+        }
+    }
+}
+
+/// CR 614.1a + CR 608.2n: Stamp the "if this spell would be put into your
+/// graveyard, exile it instead" rider on a spell cast during resolution via
+/// `Effect::FreeCastFromZones` (Invoke Calamity). Sets a per-object marker on
+/// the spell rather than mutating its casting variant — the during-resolution
+/// cast has not yet pushed its resolvable `StackEntry::Spell` (that happens at
+/// finalize, after this cascade-check point), and the rider must apply
+/// regardless of the spell's origin zone or casting variant. The stack-
+/// resolution router reads the marker when the spell leaves the stack.
+fn apply_exile_instead_of_graveyard_rider(state: &mut GameState, cast_object: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&cast_object) {
+        obj.exile_from_stack_instead_of_graveyard = true;
     }
 }
 
@@ -5017,23 +5457,62 @@ fn auto_tap_mana_sources_inner(
         assigned[idx] = true;
     }
 
-    // Phase 2: satisfy generic cost + deferred shards with any remaining sources.
-    // Skip combination sources — their value is in covering colored shards;
-    // spending a full 2-mana combination on a single generic is wasteful.
+    // Phase 2: satisfy generic cost + deferred shards. CR 107.4b: generic mana
+    // in costs can be paid with any type of mana — including colorless — so a
+    // multi-mana source such as Sol Ring (`{T}: Add {C}{C}`) is valid generic
+    // filler. Sources are spent in a fixed priority so the plan both stays
+    // payable and matches player expectation:
+    //   class 0 — color-locked sources (every unit colorless): usable ONLY for
+    //             generic, so spend them first and keep flexible colored
+    //             sources open. This is why a colorless rock (Sol Ring, Mind
+    //             Stone) fills generic before a colored land is tapped.
+    //   class 1 — flexible single-mana sources (one colored mana each).
+    //   class 2 — flexible (colored) combination sources: last resort. Burning
+    //             a 2-mana colored combo on generic wastes half its output when
+    //             a cheaper line exists, so a filter land's `{T}: Add {C}`
+    //             (class 0) is preferred over its colored combo for pure
+    //             generic (see `auto_tap_does_not_use_combo_for_pure_generic`).
+    // A combination source credits its full atomic width toward generic — one
+    // activation yields every unit at once. Previously ALL combination sources
+    // were skipped here, which stranded Sol Ring (a combo with no non-combo
+    // sibling ability) and made spells payable only by colorless rocks read as
+    // uncastable in the shared affordability preview.
     let mut remaining_generic = generic as usize + deferred_generic;
-    for option in &available {
+    let generic_priority = |option: &ManaSourceOption| -> u8 {
+        let color_locked = match &option.atomic_combination {
+            Some(combo) => combo.iter().all(|m| *m == ManaType::Colorless),
+            None => option.mana_type == ManaType::Colorless,
+        };
+        if color_locked {
+            0
+        } else if option.atomic_combination.is_none() {
+            1
+        } else {
+            2
+        }
+    };
+    for class in 0u8..=2 {
         if remaining_generic == 0 {
             break;
         }
-        if option.atomic_combination.is_some() {
-            continue;
-        }
-        if !option_allowed_for_context(option, effective_ctx) {
-            continue;
-        }
-        if used_sources.insert(option.object_id) {
-            to_tap.push(option.clone());
-            remaining_generic = remaining_generic.saturating_sub(1);
+        for option in &available {
+            if remaining_generic == 0 {
+                break;
+            }
+            if generic_priority(option) != class {
+                continue;
+            }
+            if !option_allowed_for_context(option, effective_ctx) {
+                continue;
+            }
+            if used_sources.insert(option.object_id) {
+                let width = option
+                    .atomic_combination
+                    .as_ref()
+                    .map_or(1, |combo| combo.len());
+                to_tap.push(option.clone());
+                remaining_generic = remaining_generic.saturating_sub(width);
+            }
         }
     }
 
@@ -5453,20 +5932,61 @@ pub(super) fn max_x_value_excluding(
     // `concretize_x` adds `x * x_count` generic; non-floor and target-dependent
     // reductions subtract an X-independent amount capped via `saturating_sub`
     // (never below {0}, CR 601.2f); floors are `max(., N)`. The composition of
-    // these monotonic non-decreasing maps is monotonic non-decreasing, so we may
-    // ascend from X=0 to the first X whose total overshoots `available` and
-    // return the prior X. Termination: `mana_value(x) >= x * x_count - C` for the
-    // fixed total reduction cap C, which grows without bound, so the overshoot is
-    // always reached.
-    let mut x = 0u32;
-    loop {
-        let probe =
-            super::casting::concrete_cost_for_x(state, player, spell_id, &ability, &base, x);
-        if probe.mana_value() > available {
-            return x.saturating_sub(1);
-        }
-        x += 1;
+    // these monotonic non-decreasing maps is monotonic non-decreasing, so the
+    // predicate `P(x) := concrete_cost_for_x(x).mana_value() <= available` is a
+    // monotone gate: once false it stays false. The answer is the largest X with
+    // `P(x)` true. A linear ascent finds it in O(maxX) cost recomputations; an
+    // exponential probe + bisection over the same monotone predicate finds the
+    // identical value in O(log maxX). `concrete_cost_for_x` is pure read-only
+    // (clones `base`, mutates only the local), so probing X out of ascending
+    // order is safe. The explicit `!probe(0)` early return below reproduces the
+    // old linear loop's `saturating_sub(1)` floor exactly: when even X=0
+    // overshoots, the cap is 0 (not an underflow).
+    largest_x_satisfying(formula_max, |x| {
+        super::casting::concrete_cost_for_x(state, player, spell_id, &ability, &base, x)
+            .mana_value()
+            <= available
+    })
+}
+
+/// Largest `x` for which `predicate(x)` holds, given `predicate` is a monotone
+/// gate — true for an initial prefix `[0, cap]` and false above it. This is the
+/// search underlying the X-cost cap (CR 601.2f): the per-X concrete cost is
+/// monotonic non-decreasing, so "the largest affordable X" is the top of the
+/// true-prefix.
+///
+/// `formula_max` is only a starting estimate for the exponential probe;
+/// correctness does NOT depend on it (the true cap can be lower — Trinisphere
+/// floor — or higher — reductions exceeding the fixed generic). Returns `0` when
+/// even `predicate(0)` is false, reproducing the linear ascent's
+/// `saturating_sub(1)` floor at the `X=0` boundary. O(log cap) evaluations of
+/// `predicate` versus the linear scan's O(cap); identical result by monotonicity.
+fn largest_x_satisfying(formula_max: u32, predicate: impl Fn(u32) -> bool) -> u32 {
+    if !predicate(0) {
+        return 0;
     }
+
+    // Exponential probe: grow `hi` off `formula_max` until `predicate(hi)` is
+    // false, yielding a proven upper bound above the true cap regardless of
+    // whether `formula_max` under- or over-states it. `saturating_mul` guards
+    // overflow; `max(saturating_add(1))` guards `hi == 0`.
+    let mut hi = formula_max.max(1);
+    while predicate(hi) {
+        hi = hi.saturating_mul(2).max(hi.saturating_add(1));
+    }
+
+    // Bisect `[lo, hi]` with invariant `predicate(lo)` true, `predicate(hi)`
+    // false. `lo` starts at 0 (proven true above). Returns the top of the prefix.
+    let mut lo = 0u32;
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if predicate(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 /// Single authority for transitioning into the payment step of a cast.
@@ -5522,7 +6042,12 @@ pub fn enter_payment_step(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(pending) = state.pending_cast.as_ref() {
-        if pending.ability.chosen_x.is_none() && cost_has_x(&pending.cost) {
+        let activation_counter_x_max = pending.activation_cost.as_ref().and_then(|cost| {
+            activation_counter_cost_x_max(state, player, pending.object_id, &pending.ability, cost)
+        });
+        if pending.ability.chosen_x.is_none()
+            && (cost_has_x(&pending.cost) || activation_counter_x_max.is_some())
+        {
             // CR 601.2f: Every spell-cast path that reaches X announcement must
             // carry the captured tax-inclusive base so the X cap and the locked-in
             // cost can be recomputed from scratch (`concrete_cost_for_x`). Activated
@@ -5540,13 +6065,23 @@ pub fn enter_payment_step(
                     super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
                 })
                 .unwrap_or_default();
-            let max = max_x_value_excluding(
-                state,
-                player,
-                &pending.cost,
-                Some(pending.object_id),
-                &excluded_sources,
-            );
+            let mana_max = if cost_has_x(&pending.cost) {
+                max_x_value_excluding(
+                    state,
+                    player,
+                    &pending.cost,
+                    Some(pending.object_id),
+                    &excluded_sources,
+                )
+            } else {
+                u32::MAX
+            };
+            let max = pending
+                .activation_cost
+                .as_ref()
+                .and_then(|cost| additional_cost_x_max(state, player, pending.object_id, cost))
+                .or(activation_counter_x_max)
+                .map_or(mana_max, |cost_max| mana_max.min(cost_max));
             if min > max {
                 let pending_for_cancel = pending.clone();
                 state.pending_cast = None;
@@ -5563,6 +6098,30 @@ pub fn enter_payment_step(
                 pending_cast,
                 convoke_mode,
             });
+        }
+
+        let targeted_counter_resume = pending.ability.chosen_x.and_then(|chosen_x| {
+            pending
+                .activation_cost
+                .as_ref()
+                .filter(|cost| cost_has_targeted_symbolic_counter_removal(cost))
+                .cloned()
+                .map(|cost| (pending.as_ref().clone(), cost, chosen_x))
+        });
+        if let Some((mut pending, cost, chosen_x)) = targeted_counter_resume {
+            let concretized_cost = concretize_x_counter_removal_cost(&cost, chosen_x);
+            let prompt_cost = targeted_remove_counter_choice_cost(&concretized_cost)
+                .unwrap_or_else(|| concretized_cost.clone());
+            pending.activation_cost = Some(concretized_cost);
+            state.pending_cast = None;
+            return pay_additional_cost_with_source(
+                state,
+                player,
+                prompt_cost,
+                SpellCostSource::Other,
+                pending,
+                events,
+            );
         }
     }
 
@@ -6225,6 +6784,54 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
 
+    /// Reference implementation of the X-cap search: the pre-refactor linear
+    /// ascent. Returns the largest `x` with `predicate(x)` true, clamped at 0.
+    fn linear_x_reference(predicate: impl Fn(u32) -> bool) -> u32 {
+        let mut x = 0u32;
+        loop {
+            if !predicate(x) {
+                return x.saturating_sub(1);
+            }
+            x += 1;
+        }
+    }
+
+    /// `largest_x_satisfying` (exponential probe + bisection) must return the
+    /// byte-identical X cap of the old linear ascent for every monotone cost
+    /// shape. Each shape models `concrete_cost_for_x(x).mana_value()` as a
+    /// monotone-non-decreasing function of X, then asserts the two searches agree.
+    #[test]
+    fn largest_x_satisfying_matches_linear_reference() {
+        // cost(x) = max(fixed + x * x_count - reduction, floor); predicate is
+        // cost(x) <= available. `reduction` and `floor` exercise the understate
+        // (reduction > fixed) and overstate (Trinisphere floor) cases the cap
+        // computation warns about.
+        let cost = |fixed: u32, x_count: u32, reduction: u32, floor: u32, x: u32| -> u32 {
+            (fixed + x * x_count).saturating_sub(reduction).max(floor)
+        };
+
+        for available in [0u32, 1, 2, 3, 5, 8, 13, 50, 100] {
+            for fixed in [0u32, 1, 3, 6] {
+                for x_count in [1u32, 2] {
+                    for reduction in [0u32, 2, 9] {
+                        for floor in [0u32, 3, 9] {
+                            let predicate =
+                                |x: u32| cost(fixed, x_count, reduction, floor, x) <= available;
+                            // The arithmetic estimate the real function passes in.
+                            let formula_max = available.saturating_sub(fixed) / x_count;
+                            assert_eq!(
+                                largest_x_satisfying(formula_max, predicate),
+                                linear_x_reference(predicate),
+                                "mismatch at available={available} fixed={fixed} \
+                                 x_count={x_count} reduction={reduction} floor={floor}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn make_pending(source_id: ObjectId) -> PendingCast {
         PendingCast {
             object_id: source_id,
@@ -6281,6 +6888,40 @@ mod tests {
                     .description("Apply discard replacement".to_string()),
             );
         replacement_source
+    }
+
+    #[test]
+    fn remove_counter_additional_cost_x_max_counts_counters_not_targets() {
+        use crate::types::ability::REMOVE_COUNTER_COST_X;
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_003),
+            PlayerId(0),
+            "Marath Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 3);
+
+        let cost = AbilityCost::RemoveCounter {
+            target: None,
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
+            selection: CounterCostSelection::SingleObject,
+        };
+
+        assert_eq!(
+            additional_cost_x_max(&state, PlayerId(0), source, &cost),
+            Some(3),
+            "X must be capped by removable +1/+1 counters, not by eligible target count"
+        );
     }
 
     /// CR 603.10a + CR 701.21a + CR 601.2h: when a spell's additional cost
@@ -6919,23 +7560,23 @@ mod tests {
                     },
                 },
             ],
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
 
-        let (variant, _, repeatable) =
+        let (variant, _, repeatability) =
             next_kicker_option(&state, PlayerId(0), &pending).expect("first kicker option");
         assert_eq!(variant, KickerVariant::First);
-        assert!(!repeatable);
+        assert!(repeatability.is_once());
 
         pending
             .ability
             .context
             .kickers_paid
             .push(KickerVariant::First);
-        let (variant, _, repeatable) =
+        let (variant, _, repeatability) =
             next_kicker_option(&state, PlayerId(0), &pending).expect("second kicker option");
         assert_eq!(variant, KickerVariant::Second);
-        assert!(!repeatable);
+        assert!(repeatability.is_once());
     }
 
     #[test]
@@ -6951,7 +7592,7 @@ mod tests {
                     generic: 1,
                 },
             }],
-            repeatable: true,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
         });
 
         pending
@@ -6965,10 +7606,10 @@ mod tests {
             .kickers_paid
             .push(KickerVariant::First);
 
-        let (variant, _, repeatable) =
+        let (variant, _, repeatability) =
             next_kicker_option(&state, PlayerId(0), &pending).expect("repeatable kicker option");
         assert_eq!(variant, KickerVariant::First);
-        assert!(repeatable);
+        assert!(repeatability.is_repeatable());
     }
 
     #[test]
@@ -7054,7 +7695,7 @@ mod tests {
             WaitingFor::OptionalCostChoice { cost, .. } => match cost {
                 AdditionalCost::Optional {
                     cost: AbilityCost::Sacrifice { target, count },
-                    repeatable: false,
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 } => {
                     assert_eq!(count, 1);
                     match target {
@@ -7169,7 +7810,7 @@ mod tests {
             WaitingFor::OptionalCostChoice { cost, .. } => match cost {
                 AdditionalCost::Optional {
                     cost: AbilityCost::TapCreatures { count, filter },
-                    repeatable: false,
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 } => {
                     assert_eq!(count, 2, "conspire taps exactly two creatures");
                     match filter {
@@ -7606,6 +8247,118 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 0);
     }
 
+    /// CR 605.1b: A non-land permanent's `{T}: Add {C}{C}` mana ability
+    /// (Sol Ring's shape). One activation produces two colorless mana, so the
+    /// source surfaces as a single atomic combination row.
+    fn create_colorless_rock(state: &mut GameState, name: &str, count: i32) -> ObjectId {
+        let rock = create_object(
+            state,
+            CardId(950),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&rock).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: count },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        rock
+    }
+
+    #[test]
+    fn auto_tap_uses_colorless_combo_for_pure_generic() {
+        // CR 107.4b: generic mana can be paid with any type of mana, including
+        // colorless. Sol Ring's `{T}: Add {C}{C}` is a combination with no
+        // non-combo sibling ability, so it must still be tapped for a pure
+        // generic `{2}` — the regression was that Phase 2 skipped every
+        // combination source, leaving the cost unpayable (and the spell
+        // reported uncastable by the shared affordability preview).
+        let mut state = GameState::new_two_player(42);
+        let sol_ring = create_colorless_rock(&mut state, "Sol Ring", 2);
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            &mut events,
+            None,
+        );
+
+        assert!(
+            state.objects.get(&sol_ring).unwrap().tapped,
+            "Sol Ring must be tapped to pay the generic cost"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            2,
+            "`{{T}}: Add {{C}}{{C}}` must contribute both colorless mana to generic"
+        );
+    }
+
+    #[test]
+    fn auto_tap_prefers_colorless_rock_over_colored_lands_for_generic() {
+        // "Use Sol Ring first": for a generic cost, color-locked colorless
+        // mana is spent before flexible colored lands, so the colored sources
+        // stay open. A single Sol Ring tap covers `{2}` and both Forests are
+        // left untapped.
+        let mut state = GameState::new_two_player(42);
+        let sol_ring = create_colorless_rock(&mut state, "Sol Ring", 2);
+        let mut forests = Vec::new();
+        for i in 0..2 {
+            let forest = create_object(
+                &mut state,
+                CardId(960 + i),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            forests.push(forest);
+        }
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            &mut events,
+            None,
+        );
+
+        assert!(
+            state.objects.get(&sol_ring).unwrap().tapped,
+            "the colorless rock should fill generic before any colored land"
+        );
+        for forest in &forests {
+            assert!(
+                !state.objects.get(forest).unwrap().tapped,
+                "colored lands must stay open when colorless mana covers the generic"
+            );
+        }
+    }
+
     #[test]
     fn auto_tap_filter_land_does_not_prompt_user() {
         // Regression: the filter-land activation must short-circuit the
@@ -7804,7 +8557,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color,
                 source_id: floated_source,
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -7871,7 +8624,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(99),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -9716,7 +10469,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(99),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -11228,7 +11981,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
             p0.mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -11249,7 +12002,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
             p0.mana_pool.add(ManaUnit {
                 color: ManaType::White,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -11298,7 +12051,8 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                     matches!(
                         cost,
                         AdditionalCost::Kicker {
-                            repeatable: true,
+                            repeatability:
+                                crate::types::ability::AdditionalCostRepeatability::Repeatable,
                             ..
                         }
                     ),
@@ -11322,7 +12076,8 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                     matches!(
                         cost,
                         AdditionalCost::Kicker {
-                            repeatable: true,
+                            repeatability:
+                                crate::types::ability::AdditionalCostRepeatability::Repeatable,
                             ..
                         }
                     ),
@@ -11455,7 +12210,8 @@ many tokens that are copies of it.)";
                     cost,
                     AdditionalCost::Optional {
                         cost: AbilityCost::Mana { .. },
-                        repeatable: true,
+                        repeatability:
+                            crate::types::ability::AdditionalCostRepeatability::Repeatable,
                     }
                 ));
                 assert_eq!(times_kicked, 0);
@@ -11616,7 +12372,8 @@ its replicate cost was paid.)\nDraw a card.";
                         cost,
                         AdditionalCost::Optional {
                             cost: AbilityCost::Mana { .. },
-                            repeatable: true,
+                            repeatability:
+                                crate::types::ability::AdditionalCostRepeatability::Repeatable,
                         }
                     ),
                     "replicate must surface a repeatable Optional mana cost: {cost:?}"
@@ -11677,7 +12434,8 @@ its replicate cost was paid.)\nDraw a card.";
                         cost,
                         AdditionalCost::Optional {
                             cost: AbilityCost::Mana { .. },
-                            repeatable: true,
+                            repeatability:
+                                crate::types::ability::AdditionalCostRepeatability::Repeatable,
                         }
                     ),
                     "granted Replicate must surface a repeatable Optional mana cost: {cost:?}"
@@ -12200,7 +12958,7 @@ its replicate cost was paid.)\nDraw a card.";
                         cost,
                         AdditionalCost::Optional {
                             cost: AbilityCost::Sacrifice { count: 1, .. },
-                            repeatable: false,
+                            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                         }
                     ),
                     "expected optional Spirit sacrifice, got {cost:?}"

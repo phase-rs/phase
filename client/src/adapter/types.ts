@@ -289,6 +289,7 @@ export type LibraryPosition =
 // only `Hand` (pitch spells) and `Graveyard` (escape) are valid (mirrors the
 // engine's `ExileCostSourceZone`).
 export type ExileCostSourceZone = "Hand" | "Graveyard";
+export type CounterCostSelection = "SingleObject" | "AmongObjects";
 
 // CR 118.3 + CR 601.2b + CR 605.3b: which action a `PayCost` selection applies
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
@@ -302,7 +303,7 @@ export type PayCostKind =
   // the modal only renders `choices`, so it is opaque pass-through here.
   | { type: "ExileMaterials"; materials: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
-  | { type: "RemoveCounter"; counter_type: CounterMatch }
+  | { type: "RemoveCounter"; counter_type: CounterMatch; count: number; selection: CounterCostSelection }
   | { type: "TapCreatures" }
   | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
 
@@ -524,6 +525,12 @@ export type CounterMoveChoice = {
   count: number;
 };
 
+export type CounterCostChoice = {
+  object_id: ObjectId;
+  counter_type: CounterType;
+  count: number;
+};
+
 export type PlayerCounterKind =
   | "Poison"
   | "Experience"
@@ -717,6 +724,14 @@ export interface GameObject {
   available_mana_pips?: ManaPip[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  /**
+   * CR 114: Display-only provenance of the source that created this emblem
+   * (e.g. the planeswalker whose ultimate made it). The frontend renders the
+   * emblem as a small chip bearing the source's art crop and a "from <name>"
+   * label. Distinct from `printed_ref` — an emblem is not represented by that
+   * card (CR 114.5); this is purely presentational. Present only on emblems.
+   */
+  emblem_source?: { name: string; printed_ref?: PrintedRef | null } | null;
   /**
    * CR 111.1: Whether this object is a token (not a card). Independent of
    * `display_source`: a token-copy of a real card (Twinflame, Helm of the
@@ -1046,7 +1061,16 @@ export type CastOfferKind =
   | { type: "Paradigm"; offers: ObjectId[] }
   | { type: "Cascade"; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number }
   | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number }
-  | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] };
+  | { type: "Ripple"; hit_card: ObjectId; remaining_hits: ObjectId[]; revealed_misses: ObjectId[] }
+  | {
+      type: "FreeCastWindow";
+      candidates: ObjectId[];
+      remaining_casts: number;
+      remaining_mv_budget?: number;
+      filter: TargetFilter;
+      zones: Zone[];
+      exile_instead_of_graveyard?: boolean;
+    };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
@@ -1074,7 +1098,7 @@ export type WaitingFor =
       type: "ChooseXValue";
       data: { player: PlayerId; min?: number; max: number; pending_cast: PendingCast };
     }
-  | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
+  | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId; pending_mana_ability?: unknown } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number> } }
@@ -1101,6 +1125,7 @@ export type WaitingFor =
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
+  | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
@@ -1482,6 +1507,7 @@ export type GameAction =
   | { type: "SubmitSideboard"; data: { main: DeckCardCount[]; sideboard: DeckCardCount[] } }
   | { type: "ChoosePlayDraw"; data: { play_first: boolean } }
   | { type: "ChooseOption"; data: { choice: string } }
+  | { type: "SubmitSpellbookDraft"; data: { card: string } }
   | { type: "SubmitPilePartition"; data: { pile_a: ObjectId[] } }
   | { type: "ChoosePile"; data: { pile: PileSide } }
   | { type: "ChooseBranch"; data: { index: number } }
@@ -1529,6 +1555,7 @@ export type GameAction =
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "RippleChoice"; data: { choice: CastChoice } }
+  | { type: "FreeCastWindowChoice"; data: { selection?: ObjectId } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   // CR 702.140c + CR 730.2a: answer to MutateMergeChoice — top or bottom.
   | { type: "ChooseMutateMergeSide"; data: { side: "Top" | "Bottom" } }
@@ -1544,6 +1571,7 @@ export type GameAction =
   // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
   | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
+  | { type: "ChooseRemoveCounterCostDistribution"; data: { distribution: CounterCostChoice[] } }
   | { type: "ChooseCounterMoveDistribution"; data: { selections: CounterMoveChoice[] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }
   | { type: "LearnDecision"; data: { choice: LearnOption } }
@@ -1584,7 +1612,8 @@ export type ShardChoice =
 
 export type PayableResource =
   | { type: "Energy" }
-  | { type: "ManaGeneric"; data: { per_x: number } };
+  | { type: "ManaGeneric"; data: { per_x: number } }
+  | { type: "Counters" };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }
@@ -1626,6 +1655,7 @@ export type GameEvent =
   | { type: "DamageDealt"; data: { source_id: ObjectId; target: TargetRef; amount: number; is_combat: boolean; excess?: number } }
   | { type: "SpellCountered"; data: { object_id: ObjectId; countered_by: ObjectId } }
   | { type: "CounterAdded"; data: { object_id: ObjectId; counter_type: string; count: number } }
+  | { type: "ObjectIntensified"; data: { object_id: ObjectId; amount: number } }
   | { type: "CounterRemoved"; data: { object_id: ObjectId; counter_type: string; count: number } }
   | { type: "TokenCreated"; data: { object_id: ObjectId; name: string } }
   | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
@@ -1817,6 +1847,11 @@ export interface GameState {
   outside_game_cards_brought_in?: OutsideGameCardUse[];
   sideboard_submitted?: PlayerId[];
   revealed_cards?: ObjectId[];
+  /** CR 701.20e: ids the looker is privately peeking during a look-at-top
+   * window (Mishra's Bauble, scry looks). Visible only to `private_look_player`. */
+  private_look_ids?: ObjectId[];
+  /** CR 701.20e: the player to whom `private_look_ids` is visible (the looker). */
+  private_look_player?: PlayerId;
   restrictions?: GameRestriction[];
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;

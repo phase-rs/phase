@@ -645,15 +645,20 @@ pub fn expiration_to_duration(exp: &Expiration) -> ConvResult<Duration> {
         // effect's controller. Player-scoped variants only convert for
         // `SelfPlayer` because the engine resolves `PlayerScope::Controller`
         // against the grantee/controller.
-        Expiration::UntilPlayersNextTurn(p)
-        | Expiration::UntilTheEndOfPlayersNextTurn(p)
-        | Expiration::UntilEndOfNextTurn(p)
+        // CR 514.2: "until the end of [your/their] next turn" — persists through
+        // that entire turn and expires at cleanup (Light Up the Stage, Reckless
+        // Impulse). Distinct from `UntilNextTurnOf`, which expires at the
+        // beginning of the next turn.
+        Expiration::UntilTheEndOfPlayersNextTurn(p) | Expiration::UntilEndOfNextTurn(p)
             if is_self_player(p) =>
         {
-            Duration::UntilNextTurnOf {
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             }
         }
+        Expiration::UntilPlayersNextTurn(p) if is_self_player(p) => Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        },
         // CR 502.1: "during your next untap step" — Π-2 parameterized
         // `UntilNextStepOf { step: Untap, player: Controller }` ends at the affected
         // permanent's controller's next untap step, matching the SelfPlayer scope.
@@ -692,7 +697,7 @@ pub fn expiration_to_duration(exp: &Expiration) -> ConvResult<Duration> {
 
 /// True when the `Player` reference resolves to the effect's own controller —
 /// the only `PlayerScope` (`Controller`) the `Duration::UntilNextTurnOf` /
-/// `UntilNextStepOf` parameterizations bind today.
+/// `UntilEndOfNextTurnOf` / `UntilNextStepOf` parameterizations bind today.
 fn is_self_player(p: &Player) -> bool {
     matches!(p, Player::You | Player::SelfPlayer | Player::ItsController)
 }
@@ -1072,6 +1077,29 @@ mod tests {
             expiration_to_duration(&Expiration::UntilPlayersNextTurn(Box::new(Player::You)))
                 .unwrap(),
             Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }
+        );
+    }
+
+    #[test]
+    fn until_the_end_of_your_next_turn_lowers_to_end_of_next_turn_duration() {
+        assert_eq!(
+            expiration_to_duration(&Expiration::UntilTheEndOfPlayersNextTurn(Box::new(
+                Player::You
+            )))
+            .unwrap(),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            }
+        );
+    }
+
+    #[test]
+    fn until_end_of_next_turn_lowers_to_end_of_next_turn_duration() {
+        assert_eq!(
+            expiration_to_duration(&Expiration::UntilEndOfNextTurn(Box::new(Player::You))).unwrap(),
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             }
         );

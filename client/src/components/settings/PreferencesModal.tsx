@@ -30,6 +30,7 @@ import type {
   ArtChainEntry,
   CardPreviewMode,
   CardSizePreference,
+  CommandZoneDisplay,
   LogDefaultState,
 } from "../../stores/preferencesStore.ts";
 import type { SupportedLng } from "../../i18n/resources.ts";
@@ -62,6 +63,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
+const COMMAND_ZONE_DISPLAYS: CommandZoneDisplay[] = ["auto", "inline", "compact"];
 const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
@@ -143,6 +145,7 @@ export function PreferencesModal({
   const language = usePreferencesStore((s) => s.language);
   const setLanguage = usePreferencesStore((s) => s.setLanguage);
   const cardSize = usePreferencesStore((s) => s.cardSize);
+  const commandZoneDisplay = usePreferencesStore((s) => s.commandZoneDisplay);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
@@ -150,6 +153,7 @@ export function PreferencesModal({
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
   const pacingMultipliers = usePreferencesStore((s) => s.pacingMultipliers);
   const setCardSize = usePreferencesStore((s) => s.setCardSize);
+  const setCommandZoneDisplay = usePreferencesStore((s) => s.setCommandZoneDisplay);
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
@@ -298,6 +302,15 @@ export function PreferencesModal({
                       value={cardSize}
                       onChange={setCardSize}
                       renderLabel={(opt) => t(`gameplay.cardSizeOptions.${opt}`)}
+                    />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.commandZone")}>
+                    <SegmentedControl
+                      options={COMMAND_ZONE_DISPLAYS}
+                      value={commandZoneDisplay}
+                      onChange={setCommandZoneDisplay}
+                      renderLabel={(opt) => t(`gameplay.commandZoneOptions.${opt}`)}
                     />
                   </SettingGroup>
 

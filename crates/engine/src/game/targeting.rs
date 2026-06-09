@@ -875,6 +875,11 @@ pub(crate) fn extract_player_from_event(
             TargetRef::Player(pid) => Some(*pid),
             TargetRef::Object(oid) => state.objects.get(oid).map(|obj| obj.controller),
         },
+        // CR 120.1 + CR 510.2: Combat damage to a player binds `TriggeringPlayer`
+        // / "that player" to the damaged player. Rev, Tithe Extractor's exile-top
+        // effect must read the damaged opponent's library, not the ability
+        // controller's.
+        GameEvent::CombatDamageDealtToPlayer { player_id, .. } => Some(*player_id),
         // CR 500.2 + CR 603.7c: Phase-change triggers like "at the beginning of
         // each player's upkeep" bind "that player" / `TriggeringPlayer` to the
         // active player — the player whose phase is currently beginning.
@@ -1583,6 +1588,17 @@ mod tests {
             total_damage: 7,
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
+    }
+
+    #[test]
+    fn extract_player_from_combat_damage_dealt_to_player_returns_damaged_player() {
+        let (state, _c0, _c1) = setup_with_creatures();
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(ObjectId(1), 3)],
+            total_damage: 3,
+        };
+        assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
 
     fn setup_with_creatures() -> (GameState, ObjectId, ObjectId) {

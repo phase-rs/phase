@@ -22,6 +22,11 @@ use crate::types::triggers::{AttackTargetFilter, TriggerMode};
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
+use super::conditions::{
+    counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
+    eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn, eval_source_in_zone,
+    eval_source_is_attacking, eval_source_is_tapped,
+};
 use super::filter::{matches_target_filter, spell_record_matches_filter, FilterContext};
 use super::game_object::GameObject;
 use super::speed::{
@@ -137,8 +142,8 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
         WardCost::DiscardCard => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         },
         WardCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
             target: filter.clone(),
@@ -2273,7 +2278,7 @@ fn ring_level_two_ability(source_id: ObjectId, controller: PlayerId) -> Resolved
         Effect::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
-            random: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
             unless_filter: None,
             filter: None,
         },
@@ -3692,7 +3697,7 @@ pub fn check_state_triggers(state: &mut GameState) {
 /// One-shot triggers are removed after firing; multi-fire (WheneverEvent) triggers
 /// persist until end-of-turn cleanup (CR 603.7c).
 pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Vec<GameEvent> {
-    if state.delayed_triggers.is_empty() {
+    if state.delayed_triggers.is_empty() && state.epic_effects.is_empty() {
         return vec![];
     }
 
@@ -3714,6 +3719,23 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             } else {
                 to_fire.push((delayed.clone(), Some(trigger_event)));
             }
+        }
+    }
+
+    // CR 702.50a: Epic effects are a persistent rest-of-game generator (never
+    // stored as a `DelayedTrigger`, so cleanup never purges them). At the
+    // beginning of each controller's upkeep, synthesize a fresh `EpicCopy`
+    // trigger from each stored effect and fire it through the same path.
+    for effect in &state.epic_effects {
+        let synth = super::effects::epic::epic_upkeep_trigger(effect);
+        if let Some(trigger_event) = delayed_trigger_event(
+            &synth.condition,
+            events,
+            state,
+            synth.source_id,
+            synth.controller,
+        ) {
+            to_fire.push((synth, Some(trigger_event)));
         }
     }
 
@@ -4029,9 +4051,9 @@ pub(crate) fn check_trigger_condition(
             player_field(state, controller, |p| p.life_lost_this_turn > 0)
         }
         TriggerCondition::Descended => player_field(state, controller, |p| p.descended_this_turn),
-        TriggerCondition::SourceEnteredThisTurn => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number)),
+        TriggerCondition::SourceEnteredThisTurn => {
+            source_id.is_some_and(|id| eval_source_entered_this_turn(state, id))
+        }
         TriggerCondition::EchoDue => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
@@ -4097,10 +4119,9 @@ pub(crate) fn check_trigger_condition(
             .and_then(|obj| obj.case_state.as_ref())
             .is_some_and(|cs| !cs.is_solved && evaluate_solve_condition(state, cs, controller)),
         // CR 716.2a: True when the source Class is at or above the specified level.
-        TriggerCondition::ClassLevelGE { level } => source_id
-            .and_then(|id| state.objects.get(&id))
-            .and_then(|obj| obj.class_level)
-            .is_some_and(|current| current >= *level),
+        TriggerCondition::ClassLevelGE { level } => {
+            source_id.is_some_and(|id| eval_class_level_ge(state, id, *level))
+        }
         TriggerCondition::AttractionVisitRoll { min, max } => trigger_event
             .and_then(|e| match e {
                 GameEvent::AttractionVisited { roll, .. } => Some(*roll),
@@ -4207,11 +4228,7 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 508.1: "if it's attacking" — true when the trigger source is in combat.attackers.
         TriggerCondition::SourceIsAttacking => {
-            let sid = source_id.unwrap_or(ObjectId(0));
-            state
-                .combat
-                .as_ref()
-                .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == sid))
+            source_id.is_some_and(|id| eval_source_is_attacking(state, id))
         }
         // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid
         // this turn". Negation ("unless it escaped") wraps via `Not`.
@@ -4290,10 +4307,9 @@ pub(crate) fn check_trigger_condition(
         // permanent entered the battlefield) matches the linked anchor word.
         // Case-insensitive to match the persistence canonicalisation used by
         // `StaticCondition::ChosenLabelIs`.
-        TriggerCondition::ChosenLabelIs { label } => source_id
-            .and_then(|id| state.objects.get(&id))
-            .and_then(|obj| obj.chosen_label())
-            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
+        TriggerCondition::ChosenLabelIs { label } => {
+            source_id.is_some_and(|id| eval_chosen_label_is(state, id, label))
+        }
         // "if you control a [type]" — check for presence of matching permanent.
         TriggerCondition::ControlsType { filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
@@ -4480,16 +4496,17 @@ pub(crate) fn check_trigger_condition(
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
         // CR 725.1: True when the controller is the monarch.
-        TriggerCondition::IsMonarch => state.monarch == Some(controller),
+        TriggerCondition::IsMonarch => eval_is_monarch(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
-        TriggerCondition::NoMonarch => state.monarch.is_none(),
+        TriggerCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
-        TriggerCondition::HasCityBlessing => state.city_blessing.contains(&controller),
+        TriggerCondition::HasCityBlessing => eval_has_city_blessing(state, controller),
         // CR 110.5b: True when the trigger source is tapped. Negation ("untapped")
-        // wraps via `Not { Box::new(SourceIsTapped) }`.
-        TriggerCondition::SourceIsTapped => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.tapped),
+        // wraps via `Not { Box::new(SourceIsTapped) }`. No battlefield zone guard
+        // (trigger conditions; zone already constrained by functioning-abilities path).
+        TriggerCondition::SourceIsTapped => {
+            source_id.is_some_and(|id| eval_source_is_tapped(state, id))
+        }
         // CR 603.4 + CR 603.6a + CR 110.5b: "enters tapped" rider — the subject
         // is the permanent named by the triggering zone-change event (the
         // entering permanent), not the ability's own source. Resolve the
@@ -4523,9 +4540,9 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.face_down),
         // CR 113.6b: True when the trigger source is in the specified zone.
-        TriggerCondition::SourceInZone { zone } => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.zone == *zone),
+        TriggerCondition::SourceInZone { zone } => {
+            source_id.is_some_and(|id| eval_source_in_zone(state, id, *zone))
+        }
         // CR 702.104b: True when the Tribute ETB replacement resolved without the
         // chosen opponent placing the +1/+1 counters. Read from the creature's
         // persisted `ChosenAttribute::TributeOutcome` — explicit `Declined` or no
@@ -4571,8 +4588,23 @@ pub(crate) fn check_trigger_condition(
                 false
             }
         }
-        // CR 400.7: "if it had counters on it" — check LKI for counters.
-        TriggerCondition::HadCounters { counter_type } => source_id
+        // CR 603.10 + CR 608.2h: "if it had counters on it" — "it" is the
+        // triggering object (the creature that left/died), not the trigger
+        // source. Counters cease to exist when a permanent changes zones
+        // (CR 122.2), so this look-back reads the counters the object had as it
+        // left from its last-known information. For a watcher that observes
+        // OTHER permanents leaving (The Ozolith: "Whenever a creature you
+        // control leaves the battlefield, if IT had counters on it"), the
+        // triggering object is the leaving creature, extracted from the event;
+        // its LKI is keyed by its own ObjectId, not the source's. For a
+        // self-referential trigger (Undying's "When this creature dies, if it
+        // had no +1/+1 counters on it"), the triggering object IS the source,
+        // so the event source equals `source_id` and the `or(source_id)`
+        // fallback (also covering event-less Phase/reflexive triggers) yields
+        // identical behavior. Mirrors the `ManaSpentCondition` resolution above.
+        TriggerCondition::HadCounters { counter_type } => trigger_event
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .or(source_id)
             .and_then(|id| state.lki_cache.get(&id))
             .is_some_and(|lki| match counter_type {
                 Some(ct) => lki.counters.get(ct).is_some_and(|&v| v > 0),
@@ -4645,15 +4677,7 @@ pub(crate) fn check_trigger_condition(
             maximum,
         } => source_id
             .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| {
-                let count: u32 = match counters {
-                    crate::types::counter::CounterMatch::Any => obj.counters.values().sum(),
-                    crate::types::counter::CounterMatch::OfType(ct) => {
-                        obj.counters.get(ct).copied().unwrap_or(0)
-                    }
-                };
-                count >= *minimum && maximum.is_none_or(|max| count <= max)
-            }),
+            .is_some_and(|obj| counter_condition_matches(obj, counters, *minimum, *maximum)),
     }
 }
 
@@ -5062,13 +5086,13 @@ pub mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-        AggregateFunction, AttackersDeclaredCountSubject, ChosenAttribute, ChosenSubtypeKind,
-        CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, Duration, Effect, FilterProp, KickerVariant, MultiTargetSpec,
-        PaymentCost, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        ResolvedAbility, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
-        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-        TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
+        ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
+        DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp, KickerVariant,
+        MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtStat, PtValueScope,
+        QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -7845,7 +7869,7 @@ pub mod tests {
                                 owner_library: false,
                                 enter_transformed: false,
                                 enters_under: None,
-                                enter_tapped: false,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                                 enters_attacking: false,
                                 up_to: false,
                                 enter_with_counters: vec![],
@@ -8135,7 +8159,7 @@ pub mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -8241,7 +8265,7 @@ pub mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -8439,7 +8463,7 @@ pub mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -8553,7 +8577,7 @@ pub mod tests {
                                 owner_library: false,
                                 enter_transformed: false,
                                 enters_under: None,
-                                enter_tapped: false,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                                 enters_attacking: false,
                                 up_to: false,
                                 enter_with_counters: vec![],
@@ -8628,7 +8652,7 @@ pub mod tests {
                             owner_library: false,
                             enter_transformed: false,
                             enters_under: None,
-                            enter_tapped: false,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
@@ -8689,7 +8713,7 @@ pub mod tests {
                             owner_library: false,
                             enter_transformed: false,
                             enters_under: None,
-                            enter_tapped: false,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
@@ -8840,7 +8864,7 @@ pub mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -8998,7 +9022,7 @@ pub mod tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: true,
+                    enter_tapped: crate::types::zones::EtbTapState::Tapped,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -9257,7 +9281,7 @@ pub mod tests {
                                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
                                 ),
                                 count: None,
-                                random: false,
+                                selection: crate::types::ability::CardSelectionMode::Chosen,
                                 choice_optional: false,
                             },
                         )
@@ -9271,7 +9295,7 @@ pub mod tests {
                                     owner_library: false,
                                     enter_transformed: false,
                                     enters_under: None,
-                                    enter_tapped: false,
+                                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                                     enters_attacking: false,
                                     up_to: false,
                                     enter_with_counters: vec![],
@@ -9740,8 +9764,8 @@ pub mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
             }
         ));
 
@@ -10195,7 +10219,7 @@ pub mod tests {
                 FilterProp::HasAttachment {
                     kind: crate::types::ability::AttachmentKind::Aura,
                     controller: None,
-                    exclude_source: false,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
                 },
             ])),
         };
@@ -10499,7 +10523,7 @@ pub mod tests {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: true,
+            enter_tapped: crate::types::zones::EtbTapState::Tapped,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -10522,7 +10546,7 @@ pub mod tests {
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -13803,7 +13827,7 @@ pub mod tests {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     count: 1,
                 },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             obj.keywords.push(Keyword::Casualty(2));
         }
@@ -15879,7 +15903,7 @@ pub mod tests {
                 p0.mana_pool.add(ManaUnit {
                     color: ManaType::Colorless,
                     source_id: ObjectId(0),
-                    snow: false,
+                    supertype: None,
                     source_could_produce_two_or_more_colors: false,
                     restrictions: Vec::new(),
                     grants: vec![],
@@ -15888,7 +15912,7 @@ pub mod tests {
                 p0.mana_pool.add(ManaUnit {
                     color: ManaType::Black,
                     source_id: ObjectId(0),
-                    snow: false,
+                    supertype: None,
                     source_could_produce_two_or_more_colors: false,
                     restrictions: Vec::new(),
                     grants: vec![],
@@ -16036,7 +16060,7 @@ pub mod tests {
             p0.mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -16212,7 +16236,7 @@ pub mod tests {
             p0.mana_pool.add(ManaUnit {
                 color: ManaType::Red,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -16603,7 +16627,7 @@ pub mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -17299,7 +17323,7 @@ pub mod tests {
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             Vec::new(),
@@ -17492,7 +17516,7 @@ pub mod tests {
             effect_kind: crate::types::ability::EffectKind::Sacrifice,
             zone: Zone::Battlefield,
             destination: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enter_transformed: false,
             enters_under_player: None,
             enters_attacking: false,
@@ -17680,7 +17704,7 @@ pub mod tests {
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 face_down_profile: None,
             },
             Vec::new(),
@@ -17917,7 +17941,7 @@ pub mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -18044,7 +18068,7 @@ pub mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -18673,7 +18697,7 @@ mod dedup_regression_tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -21145,7 +21169,7 @@ mod push_first_contract_tests {
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],

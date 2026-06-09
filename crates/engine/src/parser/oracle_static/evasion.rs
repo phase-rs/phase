@@ -705,6 +705,71 @@ pub(crate) fn try_split_and_doesnt_untap(text: &str) -> Option<Vec<StaticDefinit
 /// conjunct's static(s) plus a `CantAttack` static sharing the same `affected`
 /// (and any `condition`).
 ///
+/// CR 508.1c / CR 509.1b: Decompose `"<continuous grant or restriction> and
+/// can't attack or block"` into the first conjunct's static(s) plus a
+/// `CantAttackOrBlock` static sharing the same `affected` set (and any
+/// shared condition).
+///
+/// Without this split the trailing combat lockout was dropped: Immovable Rod
+/// ("another target permanent loses all abilities and can't attack or block")
+/// and Fog on the Barrow-Downs parsed to only the leading clause, so the
+/// affected creature could still attack and block — the defining lockout
+/// effect was silently inert. Mirrors `try_split_and_cant_block`.
+///
+/// Registered before `try_split_and_cant_attack` so the combined "attack or
+/// block" phrase is consumed first; the bare-attack splitter's terminal guard
+/// would decline the "or block" tail anyway, but ordering is belt-and-suspenders.
+pub(crate) fn try_split_and_cant_attack_or_block(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        // Match both the ASCII and typographic U+2019 apostrophe.
+        let (i, _) = alt((
+            tag::<_, _, VE>("and can't attack or block"),
+            tag::<_, _, VE>("and can\u{2019}t attack or block"),
+        ))
+        .parse(i)?;
+        // Optional trailing duration phrase.
+        let (i, _) = opt(alt((
+            tag::<_, _, VE>(" each combat"),
+            tag::<_, _, VE>(" this combat"),
+            tag::<_, _, VE>(" this turn"),
+        )))
+        .parse(i)?;
+        Ok((i, ()))
+    })?;
+
+    // Only the bare, terminal "can't attack or block" maps to CantAttackOrBlock.
+    // A remaining tail is a different restriction — decline so we don't mis-split.
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let condition = defs[0].condition.clone();
+    let mut companion = StaticDefinition::new(StaticMode::CantAttackOrBlock)
+        .affected(affected)
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        companion = companion.condition(condition);
+    }
+    defs.push(companion);
+    Some(defs)
+}
+
 /// Without this split the trailing attacking restriction was dropped: Cagemail
 /// ("Enchanted creature gets +2/+2 and can't attack.") parsed to only the +2/+2
 /// grant, so the enchanted creature could still attack — the Aura's drawback

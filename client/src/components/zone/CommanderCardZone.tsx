@@ -12,6 +12,7 @@ import { useDragToCast } from "../../hooks/useDragToCast.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
+import { commandersInZone } from "../../viewmodel/commanderColumn.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
@@ -26,19 +27,10 @@ interface CommanderCardZoneProps {
 export function CommanderCardZone({ playerId }: CommanderCardZoneProps) {
   const gameState = useGameStore((s) => s.gameState);
 
-  const commanders = useMemo(() => {
-    if (!gameState) return [];
-    const czIds = gameState.command_zone ?? [];
-    return czIds
-      .map((id) => gameState.objects[id])
-      .filter(
-        (obj): obj is GameObject =>
-          obj != null &&
-          obj.is_commander === true &&
-          obj.owner === playerId &&
-          obj.zone === "Command",
-      );
-  }, [gameState, playerId]);
+  const commanders = useMemo(
+    () => (gameState ? commandersInZone(gameState, playerId) : []),
+    [gameState, playerId],
+  );
 
   if (commanders.length === 0) return null;
 

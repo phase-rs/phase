@@ -614,6 +614,18 @@ impl GameScenario {
         self.add_spell_to_zone(player, name, is_instant, Zone::Library)
     }
 
+    /// Add an instant or sorcery to a player's graveyard without Oracle text.
+    ///
+    /// Use `is_instant: true` for instants, `false` for sorceries.
+    pub fn add_spell_to_graveyard(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        is_instant: bool,
+    ) -> CardBuilder<'_> {
+        self.add_spell_to_zone(player, name, is_instant, Zone::Graveyard)
+    }
+
     fn add_spell_to_zone(
         &mut self,
         player: PlayerId,
@@ -1464,6 +1476,7 @@ impl GameRunner {
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
             WaitingFor::DamageSourceChoice { .. } => "DamageSourceChoice",
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
@@ -1552,6 +1565,10 @@ impl GameRunner {
                 kind: CastOfferKind::Ripple { .. },
                 ..
             } => "RippleChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
+            } => "FreeCastWindow",
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",

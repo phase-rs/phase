@@ -18,7 +18,7 @@ use super::effects;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
-use super::{casting, casting_costs};
+use super::{casting, casting_costs, mana_abilities};
 
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
@@ -93,6 +93,10 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
                 kind: CastOfferKind::Ripple { .. },
                 ..
             }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
+            }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
@@ -115,6 +119,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EffectZoneChoice { .. }
             | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
+            | WaitingFor::SpellbookDraft { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseDungeon { .. }
@@ -466,7 +471,7 @@ pub(super) fn handle_resolution_choice(
             if accept {
                 zones::move_to_zone(state, hit_card, accept_zone, events);
                 // CR 110.5b: the kept card enters tapped when requested.
-                if enter_tapped {
+                if enter_tapped.resolve(false) {
                     if let Some(obj) = state.objects.get_mut(&hit_card) {
                         obj.tapped = true;
                     }
@@ -611,6 +616,80 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
+        // CR 608.2g + CR 601.2 + CR 202.3: Invoke Calamity's free-cast window —
+        // the controller either picks one candidate to cast for free or declines
+        // (`selection: None`) to finish the window. A chosen candidate is cast
+        // during resolution via `initiate_cast_during_resolution`; after it
+        // resolves, `ResolutionCastSuccessAction::FreeCastOfferRemaining` reduces
+        // the budget and re-opens the window. Declining drains the continuation
+        // (the "Exile ~" sub-ability).
+        (
+            WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        remaining_mv_budget,
+                        filter,
+                        zones,
+                        exile_instead_of_graveyard,
+                    },
+            },
+            GameAction::FreeCastWindowChoice { selection },
+        ) => {
+            let Some(chosen) = selection else {
+                // CR 601.2: "Up to N" — the controller may stop early. Finish the
+                // window and run the continuation (Exile ~).
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    finish_with_continuation(state, player, events),
+                ));
+            };
+            // CR 608.2c: Validate the choice against the offered candidate set.
+            if !candidates.contains(&chosen) {
+                return Err(EngineError::InvalidAction(
+                    "Selected card is not an eligible free-cast candidate".to_string(),
+                ));
+            }
+            // CR 202.3: Re-check the MV budget at submission so a stale or
+            // hand-crafted action cannot exceed the running total.
+            if let Some(budget) = remaining_mv_budget {
+                let mv = state
+                    .objects
+                    .get(&chosen)
+                    .map(|obj| obj.mana_cost.mana_value())
+                    .unwrap_or(0);
+                if mv > budget {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card exceeds the remaining total mana value".to_string(),
+                    ));
+                }
+            }
+            // CR 608.2g: Cast the chosen spell during this resolution. The
+            // success action re-opens the window with the count decremented and
+            // the budget reduced by the spell's resulting mana value; there are
+            // no dig misses and a declined finalize-time MV check leaves the card
+            // where it is (RemainExiled — never reached here because the
+            // per-card MV is pre-checked and these casts carry no resulting-MV
+            // permission constraint).
+            let cleanup = crate::types::ability::ResolutionCastCleanup {
+                exiled_misses: Vec::new(),
+                reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                success_action:
+                    crate::types::ability::ResolutionCastSuccessAction::FreeCastOfferRemaining {
+                        controller: player,
+                        remaining_casts,
+                        remaining_mv_budget,
+                        filter,
+                        zones,
+                        exile_instead_of_graveyard,
+                    },
+            };
+            let result = casting::initiate_cast_during_resolution(
+                state, player, chosen, None, false, cleanup, events,
+            )?;
+            ResolutionChoiceOutcome::WaitingFor(result)
+        }
         (WaitingFor::LearnChoice { player, hand_cards }, GameAction::LearnDecision { choice }) => {
             match choice {
                 LearnOption::Rummage { card_id } => {
@@ -685,6 +764,7 @@ pub(super) fn handle_resolution_choice(
                 max,
                 accumulated,
                 source_id,
+                pending_mana_ability,
             },
             GameAction::SubmitPayAmount { amount },
         ) => {
@@ -693,6 +773,13 @@ pub(super) fn handle_resolution_choice(
                     "Submitted pay amount {} outside legal range [{}, {}]",
                     amount, min, max
                 )));
+            }
+            if let Some(pending_mana_ability) = pending_mana_ability {
+                let mut pending = pending_mana_ability.as_ref().clone();
+                pending.chosen_counter_count = Some(amount);
+                let waiting_for =
+                    mana_abilities::advance_mana_ability_activation(state, pending, events)?;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             match resource {
                 PayableResource::Energy => {
@@ -726,6 +813,11 @@ pub(super) fn handle_resolution_choice(
                         )));
                     }
                     let _ = casting::pay_unless_cost(state, player, &cost, events);
+                }
+                PayableResource::Counters => {
+                    return Err(EngineError::InvalidAction(
+                        "Counter amount choices require a pending mana ability".to_string(),
+                    ));
                 }
             }
             // CR 603.7c: Bind the paid amount for downstream chain steps that
@@ -1086,8 +1178,7 @@ pub(super) fn handle_resolution_choice(
                 .filter(|id| !kept.contains(id))
                 .copied()
                 .collect();
-            let kept_zone = kept_destination.unwrap_or(Zone::Hand);
-            if kept_zone == Zone::Library {
+            if kept_destination == Some(Zone::Library) {
                 let move_unkept_to = {
                     let player_state = state
                         .players
@@ -1118,29 +1209,27 @@ pub(super) fn handle_resolution_choice(
                     finish_with_continuation(state, player, events),
                 ));
             }
-            for &obj_id in &kept {
-                zones::move_to_zone(state, obj_id, kept_zone, events);
-                if enter_tapped && kept_zone == Zone::Battlefield {
-                    if let Some(obj) = state.objects.get_mut(&obj_id) {
-                        obj.tapped = true;
+            if let Some(kept_zone) = kept_destination {
+                for &obj_id in &kept {
+                    zones::move_to_zone(state, obj_id, kept_zone, events);
+                    if enter_tapped && kept_zone == Zone::Battlefield {
+                        if let Some(obj) = state.objects.get_mut(&obj_id) {
+                            obj.tapped = true;
+                        }
                     }
                 }
             }
-            // CR 701.33 + CR 701.18: Publish the kept (revealed) cards as a
+            // CR 701.20b + CR 608.2c: Publish the kept (revealed) cards as a
             // tracked set so downstream sub_abilities can route them by type
             // via `TargetFilter::TrackedSetFiltered`. Used by Zimone's
             // Experiment — "Put all land cards revealed this way onto the
             // battlefield tapped and put all creature cards revealed this way
-            // into your hand" consume this set. Safe to populate
-            // unconditionally; unused tracked sets are harmless and resolved
-            // by the latest-set-wins sentinel binding pass.
-            if !kept.is_empty() {
-                let tracked_id = crate::types::identifiers::TrackedSetId(state.next_tracked_set_id);
-                state.next_tracked_set_id += 1;
-                state.tracked_object_sets.insert(tracked_id, kept.clone());
-            }
-            // CR 701.20e: None => Graveyard; map to a concrete zone so the rest
-            // mover (shared with the search-split partition) has a single Zone.
+            // into your hand" consume this set. Use a fresh tracked set so a
+            // parent effect's empty pre-choice publish cannot keep the chain
+            // sentinel bound to the wrong set.
+            effects::publish_fresh_tracked_set(state, kept.clone());
+            // None => Graveyard; map to a concrete zone so the rest mover
+            // (shared with the search-split partition) has a single Zone.
             route_rest_partition(
                 state,
                 &unkept,
@@ -2033,6 +2122,24 @@ pub(super) fn handle_resolution_choice(
                 let _ = state.devour_eligible_snapshot.take();
             }
 
+            if chosen.is_empty() && matches!(effect_kind, EffectKind::CastFromZone) {
+                // CR 609.1 / CR 601.2a: Declining an optional
+                // Electrodominance-style hand cast consumes the stashed
+                // CastFromZone continuation without granting a permission. Do
+                // not call the generic resume path here; the pending ability
+                // would re-open the same optional prompt.
+                state.pending_continuation.take();
+                state.last_effect_count = Some(0);
+                events.push(GameEvent::EffectResolved {
+                    kind: effect_kind,
+                    source_id,
+                });
+                set_priority(state, player);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
             if chosen.is_empty() {
                 // Issue #423 audit: no cards chosen — this branch moves no
                 // objects and emits no battlefield-exit events, so no
@@ -2209,6 +2316,23 @@ pub(super) fn handle_resolution_choice(
                         super::zones::move_to_library_at_index(state, card_id, Some(0), events);
                     }
                 }
+                // CR 601.2c + CR 115.1: Resolution-time hand pick for
+                // `CastFromZone` (Electrodominance, Baral's Expertise).
+                EffectKind::CastFromZone => {
+                    let Some(cont) = state.pending_continuation.take() else {
+                        return Err(EngineError::InvalidAction(
+                            "CastFromZone EffectZoneChoice missing stashed ability".to_string(),
+                        ));
+                    };
+                    let ability = *cont.chain;
+                    effects::cast_from_zone::grant_lingering_permissions(
+                        &mut *state,
+                        &ability,
+                        &chosen,
+                        events,
+                    )
+                    .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
+                }
                 // CR 701.68a: Place `count_param` -1/-1 counters on the creature
                 // the controller chose. The choice is non-targeted; the pool was
                 // restricted to the controller's creatures in `blight::resolve`,
@@ -2273,6 +2397,7 @@ pub(super) fn handle_resolution_choice(
                     | EffectKind::Tap
                     | EffectKind::Untap
                     | EffectKind::PutAtLibraryPosition
+                    | EffectKind::CastFromZone
             ) && state.pending_continuation.is_some()
             {
                 let tracked = if matches!(effect_kind, EffectKind::Sacrifice) {
@@ -2483,6 +2608,31 @@ pub(super) fn handle_resolution_choice(
             }
             state.last_named_choice = None;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        // Alchemy spellbook draft: the player chose a card from the source's
+        // spellbook — conjure it, then resume the rest of the ability chain.
+        (
+            WaitingFor::SpellbookDraft {
+                player,
+                source_id,
+                options,
+                destination,
+                tapped,
+            },
+            GameAction::SubmitSpellbookDraft { card },
+        ) => {
+            crate::game::effects::spellbook::complete_draft(
+                state,
+                player,
+                source_id,
+                &options,
+                &card,
+                destination,
+                tapped,
+                events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("spellbook draft: {e:?}")))?;
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
             WaitingFor::DamageSourceChoice {

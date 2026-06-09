@@ -3,8 +3,14 @@ use std::sync::Arc;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
+use crate::game::conditions::{
+    counter_condition_matches, eval_chosen_label_is, eval_class_level_ge, eval_has_city_blessing,
+    eval_is_monarch, eval_no_monarch, eval_source_entered_this_turn, eval_source_in_zone,
+    eval_source_is_attacking, eval_source_is_tapped_on_battlefield,
+};
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{apply_copiable_values, intrinsic_copiable_values};
 use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient, QuantityContext};
 use crate::game::speed::{effective_speed, has_max_speed};
@@ -18,7 +24,7 @@ use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
-use crate::types::counter::{has_positive_counters, CounterMatch, CounterType};
+use crate::types::counter::{has_positive_counters, CounterType};
 use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -791,11 +797,7 @@ fn evaluate_condition_with_context(
         // matches the anchor word. The comparison is case-insensitive so a
         // capitalised anchor word ("Jeskai") matches a label persisted in
         // any canonicalisation. Mirrors `ChosenColorIs`'s lookup pattern.
-        StaticCondition::ChosenLabelIs { label } => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.chosen_label())
-            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
+        StaticCondition::ChosenLabelIs { label } => eval_chosen_label_is(state, source_id, label),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -875,12 +877,10 @@ fn evaluate_condition_with_context(
                 )
             })
             .unwrap_or(false),
-        // CR 716.3: Level abilities are active at or above the specified level.
-        StaticCondition::ClassLevelGE { level } => state
-            .objects
-            .get(&source_id)
-            .and_then(|obj| obj.class_level)
-            .is_some_and(|current| current >= *level),
+        // CR 716.2a + CR 716.3: Level abilities are active at or above the specified
+        // level. No battlefield zone guard here — the functioning-abilities machinery
+        // already constrains source availability before this static is evaluated.
+        StaticCondition::ClassLevelGE { level } => eval_class_level_ge(state, source_id, *level),
         StaticCondition::Unrecognized { .. } => true,
         StaticCondition::DuringYourTurn => state.active_player == controller,
         // CR 103.1: True when the scoped player took the first turn of the
@@ -892,10 +892,7 @@ fn evaluate_condition_with_context(
             crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
         // CR 400.7: True when the source permanent entered the battlefield this turn.
-        StaticCondition::SourceEnteredThisTurn => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number)),
+        StaticCondition::SourceEnteredThisTurn => eval_source_entered_this_turn(state, source_id),
         // CR 701.54a: True when this creature is the ring-bearer for its controller.
         StaticCondition::IsRingBearer => {
             super::effects::ring::is_current_ring_bearer(state, controller, source_id)
@@ -904,17 +901,11 @@ fn evaluate_condition_with_context(
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
         }
-        // CR 611.2b + CR 110.5d: True only when the source is a tapped permanent.
-        // CR 110.5d: cards not on the battlefield are neither tapped nor untapped,
-        // regardless of their physical state — so a source that has left the
-        // battlefield (e.g. Callous Oppressor dying while tapped) fails this
-        // predicate and any `ForAsLongAs { SourceIsTapped }` continuous effect
-        // (gain-control, etc.) ends. Mirrors the battlefield-presence guard the
-        // `UntilHostLeavesPlay` arm of `gather_transient_continuous_effects` uses.
-        StaticCondition::SourceIsTapped => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield && obj.tapped),
+        // CR 611.2b + CR 110.5d: require battlefield — cards not on the battlefield are
+        // neither tapped nor untapped. A source that has left the battlefield (e.g.
+        // Callous Oppressor dying while tapped) fails this predicate and any
+        // `ForAsLongAs { SourceIsTapped }` continuous effect (gain-control, etc.) ends.
+        StaticCondition::SourceIsTapped => eval_source_is_tapped_on_battlefield(state, source_id),
         // CR 702.62a + CR 611.2b: True when the source object's current controller
         // equals the stored player. Drives the Suspend haste duration: when a
         // suspended creature spell resolves, a transient continuous effect with
@@ -954,10 +945,7 @@ fn evaluate_condition_with_context(
                     .contains(&crate::types::card_type::CoreType::Creature)
             }),
         // CR 113.6b: True when the source card is in the specified zone.
-        StaticCondition::SourceInZone { zone } => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| obj.zone == *zone),
+        StaticCondition::SourceInZone { zone } => eval_source_in_zone(state, source_id, *zone),
         // CR 708.2 + CR 707.2: True when the creature this Aura/Equipment is attached to
         // is face-down. Traverses `attached_to` to the target object and reads its
         // `face_down` status (false if source is not attached, or attached to a
@@ -1009,10 +997,7 @@ fn evaluate_condition_with_context(
                     .is_some_and(|a| a.object_id == source_id)
         }),
         // CR 508.1k: Source creature is currently an attacker.
-        StaticCondition::SourceIsAttacking => state
-            .combat
-            .as_ref()
-            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == source_id)),
+        StaticCondition::SourceIsAttacking => eval_source_is_attacking(state, source_id),
         // CR 509.1g: Source creature is currently a blocker.
         StaticCondition::SourceIsBlocking => state
             .combat
@@ -1027,11 +1012,11 @@ fn evaluate_condition_with_context(
                 .is_some_and(|a| a.blocked)
         }),
         // CR 725.1: True when the controller is the monarch.
-        StaticCondition::IsMonarch => state.monarch == Some(controller),
+        StaticCondition::IsMonarch => eval_is_monarch(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
-        StaticCondition::NoMonarch => state.monarch.is_none(),
+        StaticCondition::NoMonarch => eval_no_monarch(state),
         // CR 702.131a: True when the controller has the city's blessing.
-        StaticCondition::HasCityBlessing => state.city_blessing.contains(&controller),
+        StaticCondition::HasCityBlessing => eval_has_city_blessing(state, controller),
         StaticCondition::OpponentPoisonAtLeast { count } => state
             .players
             .iter()
@@ -1070,19 +1055,6 @@ fn evaluate_condition_with_context(
             }
         },
     }
-}
-
-fn counter_condition_matches(
-    obj: &crate::game::game_object::GameObject,
-    counters: &CounterMatch,
-    minimum: u32,
-    maximum: Option<u32>,
-) -> bool {
-    let count: u32 = match counters {
-        CounterMatch::Any => obj.counters.values().sum(),
-        CounterMatch::OfType(ct) => obj.counters.get(ct).copied().unwrap_or(0),
-    };
-    count >= minimum && maximum.is_none_or(|max| count <= max)
 }
 
 /// Test-only wrapper to expose `evaluate_condition` for unit tests in other modules.
@@ -1201,6 +1173,28 @@ pub fn evaluate_layers(state: &mut GameState) {
             // re-applies the copied source's `printed_ref` below for objects
             // under a copy effect, so a temporary copy's art reverts on expiry.
             obj.printed_ref = obj.base_printed_ref.clone();
+            // Reset display routing to the object's own derived baseline so a
+            // copy effect's override (set by `CopyValues` below) reverts on
+            // expiry. Display routing is derived state, not a copiable value
+            // (CR 707.2): a true token — created by a token-making effect
+            // (CR 111.1), so carrying no printed identity — routes to the token
+            // art database; everything else (a real card, or a token-copy *of a
+            // real card*, which carries `base_printed_ref`) routes to the card
+            // database. Deriving here (rather than storing a `base_display_source`)
+            // keeps tokens in pre-existing saved states correct on load.
+            obj.display_source = if obj.is_token && obj.base_printed_ref.is_none() {
+                DisplaySource::Token
+            } else {
+                DisplaySource::Card
+            };
+            // A nontoken never has its own token-art pointer, so clear it to its
+            // baseline (`None`); a copy-of-token effect re-applies the source
+            // token's `token_image_ref` below while active. A true token keeps
+            // its own pointer (its baseline), which the copy layer overrides only
+            // while it is copying another object.
+            if !obj.is_token {
+                obj.token_image_ref = None;
+            }
             // CR 613.1b: Reset controller to the object's base controller;
             // Layer 2 re-applies continuous control-changing effects.
             obj.controller = obj.base_controller.unwrap_or(obj.owner);
@@ -1360,10 +1354,74 @@ pub fn evaluate_layers(state: &mut GameState) {
     // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
     // (P/T counters are applied in-loop at Layer::CounterPT above, in layer 7c
     // before the 7d switch.)
+    //
+    // Loyalty is HYBRID: a counter-tracked planeswalker's loyalty IS its counter
+    // count (present entry wins, including 0); an un-counter-tracked planeswalker
+    // (a clone whose loyalty comes from the Copy layer, an in-place transform, an
+    // off-battlefield/pre-seed object) keeps the base/copy-layer value. So the
+    // `if let Some` is load-bearing: an ABSENT entry means "not counter-tracked,
+    // keep the field", while a PRESENT 0 means "drained to 0, must die" (CR
+    // 704.5i). `apply_counter_removal` is what keeps the 0 entry alive for a
+    // genuinely-tracked walker so this re-derive can see it.
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
+            }
+        }
+    }
+
+    // CR 614.12 + CR 604.1 + CR 702.136a: replacement-on-grant (seam 3).
+    // A Continuous static that grants an as-enters replacement keyword (Riot)
+    // contributes its as-enters `Moved` replacement from the GRANTING permanent,
+    // scoped to the static's `affected` filter — not as a SelfRef replacement on
+    // the recipient (CR 614.12: a grant to "a general subset of permanents that
+    // includes it" comes from the granting source). Build-time `synthesize_riot`
+    // installs this once on `face.replacements`; the per-pass reset above
+    // (CR 613.1) discards persistent installs, so the replacement must be
+    // re-derived each pass onto the source's live `replacement_definitions`. This
+    // runs AFTER Layer 6 (Ability) so a Riot-granting static that was itself
+    // granted to the source is visible in `static_definitions`. The runtime
+    // gather (`find_applicable_replacements`) then applies the affected-filter
+    // replacement to matching entering creatures with no further change.
+    for &id in &bf_ids {
+        let derived: Vec<crate::types::ability::ReplacementDefinition> = {
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            obj.static_definitions
+                .iter_all()
+                .filter_map(|def| {
+                    // Cheap discriminator FIRST: `entry_replacement_for_grant_static`
+                    // is a couple of field checks returning `None` for ~every
+                    // static, whereas `source_condition_gate_passes` can scan all
+                    // objects (e.g. `IsPresent`). Run the condition gate only once
+                    // an as-enters keyword grant is confirmed, so the layer hot
+                    // path pays no board-wide condition tax for non-Riot statics.
+                    let replacement =
+                        crate::database::synthesis::entry_replacement_for_grant_static(def)?;
+                    let active = def.condition.as_ref().is_none_or(|condition| {
+                        source_condition_gate_passes(state, condition, obj.controller, id)
+                    });
+                    active.then_some(replacement)
+                })
+                .collect()
+        };
+        if derived.is_empty() {
+            continue;
+        }
+        if let Some(obj) = state.objects.get_mut(&id) {
+            for replacement in derived {
+                // Idempotent: the per-pass reset already cleared derived
+                // replacements, but a static that also appears in the base set
+                // (printed Riot grant) could double-install otherwise.
+                if !obj
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|r| r == &replacement)
+                {
+                    obj.replacement_definitions.push(replacement);
+                }
             }
         }
     }
@@ -2798,6 +2856,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::AddStaticMode { .. }
             | ContinuousModification::GrantStaticAbility { .. }
             | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+            | ContinuousModification::RetainPrintedAbilityFromSource { .. }
     );
 
     if b_changes_abilities && filter_references_ability(&a.affected_filter) {
@@ -3094,6 +3153,7 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::RemoveManaCost => None,
@@ -3305,6 +3365,20 @@ fn apply_continuous_effect_filtered(
     } else {
         None
     };
+    // CR 707.9a: Pre-read the printed activated ability to retain from the
+    // source object's `base_abilities`. Cloned before the per-object mutable
+    // borrow inside the loop (mirrors the trigger retain pre-read above).
+    let retained_printed_ability = if let ContinuousModification::RetainPrintedAbilityFromSource {
+        source_ability_index,
+    } = &effect.modification
+    {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.base_abilities.get(*source_ability_index).cloned())
+    } else {
+        None
+    };
     let all_creature_types = state.all_creature_types.clone();
 
     for id in affected_ids {
@@ -3333,13 +3407,22 @@ fn apply_continuous_effect_filtered(
         match &effect.modification {
             ContinuousModification::CopyValues {
                 values,
+                display_source,
                 printed_ref,
+                token_image_ref,
             } => {
                 apply_copiable_values(obj, values);
-                // Display identity follows the copy: override the baseline
+                // Display routing follows the copy: override the baseline
                 // restored by the layer reset so the copy renders the source's
                 // art. Reverts automatically when the copy effect expires.
+                // CR 111.1 + CR 707.2: for a copy of a true token, the source's
+                // `display_source = Token` + `token_image_ref` carry the art (the
+                // copied name has no real-card printing); for a printed source,
+                // `display_source = Card` + `printed_ref`. None are copiable
+                // values — purely display routing.
+                obj.display_source = *display_source;
                 obj.printed_ref = printed_ref.clone();
+                obj.token_image_ref = token_image_ref.clone();
             }
             // CR 707.9b + CR 707.2: Name override is a copiable-value override
             // applied at Layer 1 after the base CopyValues (ordered by timestamp
@@ -3767,6 +3850,18 @@ fn apply_continuous_effect_filtered(
                     }
                 }
             }
+            // CR 707.9a: Retain the source's printed activated ability on the
+            // copy. After `CopyValues` overwrote `obj.abilities` with the
+            // copied values, push the source's printed ability back so the
+            // copy retains "this ability". Idempotent — duplicate retain calls
+            // (same ability structurally) collapse into one.
+            ContinuousModification::RetainPrintedAbilityFromSource { .. } => {
+                if let Some(ability) = retained_printed_ability.clone() {
+                    if !obj.abilities.iter().any(|a| a == &ability) {
+                        Arc::make_mut(&mut obj.abilities).push(ability);
+                    }
+                }
+            }
         }
     }
 }
@@ -3936,6 +4031,24 @@ pub(crate) fn compute_current_copiable_values(
                     let triggers = Arc::make_mut(&mut values.trigger_definitions);
                     if !triggers.iter().any(|t| t == &trigger) {
                         triggers.push(trigger);
+                    }
+                }
+            }
+            // CR 707.9a: A copy effect that retains an activated ability makes
+            // that ability part of the copiable values of the copy. Read the
+            // printed ability from the effect's source object by index,
+            // mirroring the trigger retain path above.
+            ContinuousModification::RetainPrintedAbilityFromSource {
+                source_ability_index,
+            } => {
+                if let Some(ability) = state
+                    .objects
+                    .get(&effect.source_id)
+                    .and_then(|src| src.base_abilities.get(*source_ability_index).cloned())
+                {
+                    let abilities = Arc::make_mut(&mut values.abilities);
+                    if !abilities.iter().any(|a| a == &ability) {
+                        abilities.push(ability);
                     }
                 }
             }
@@ -5047,6 +5160,125 @@ mod tests {
                 .unwrap()
                 .has_keyword(&Keyword::Flying),
             "CantHaveKeyword denial must strip Flying granted by the concurrent anthem"
+        );
+    }
+
+    /// CR 604.1 + CR 702.123a/b: a runtime grant of `Fabricate N` via a
+    /// continuous `AddKeyword` static must install the Fabricate ETB trigger
+    /// onto the recipient's `trigger_definitions` (the trigger-on-grant seam at
+    /// `KeywordTriggerInstaller::triggers_for`). Before the `Fabricate` arm
+    /// existed, the recipient gained the bare keyword but no trigger, so this
+    /// assertion would have found zero installed Fabricate triggers.
+    #[test]
+    fn granted_fabricate_installs_etb_trigger_on_recipient() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        // Anthem-style static: grants Fabricate 2 to all creatures.
+        let anthem_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Fabricate(2),
+            }]);
+        let anthem = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fabricate Anthem".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(anthem_static);
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let recipient = state.objects.get(&bear).unwrap();
+        assert!(
+            recipient.has_keyword(&Keyword::Fabricate(2)),
+            "granted Fabricate keyword must land on the recipient"
+        );
+        let fabricate_triggers = recipient
+            .trigger_definitions
+            .iter_all()
+            .filter(|t| {
+                KeywordTriggerInstaller::trigger_matches_keyword_kind(t, &Keyword::Fabricate(2))
+            })
+            .count();
+        assert_eq!(
+            fabricate_triggers, 1,
+            "granted Fabricate must install exactly one ETB ChooseOneOf trigger"
+        );
+    }
+
+    /// CR 614.12 + CR 604.1 + CR 702.136a (seam 3, replacement-on-grant): a
+    /// battlefield permanent whose Continuous static grants `AddKeyword{Riot}` to
+    /// a subset of permanents must, after a layer pass, carry the affected-filter
+    /// as-enters Riot replacement on its OWN `replacement_definitions` (scoped to
+    /// the static's `affected` filter, NOT SelfRef per CR 614.12). Before the
+    /// runtime-derivation pass existed, `AddKeyword` installed only the keyword +
+    /// triggers, never a replacement, so this assertion found none.
+    #[test]
+    fn granted_riot_static_derives_affected_filter_replacement_on_source() {
+        let mut state = setup();
+
+        let affected = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+        let riot_static = StaticDefinition::new(StaticMode::Continuous)
+            .affected(affected.clone())
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Riot,
+            }]);
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Riot Grantor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&grantor).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(riot_static);
+            obj.base_static_definitions = obj.static_definitions.as_slice().to_vec().into();
+        }
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let expected =
+            crate::database::synthesis::keyword_entry_replacement(&Keyword::Riot, affected.clone())
+                .expect("Riot must map to an entry replacement");
+        let source = state.objects.get(&grantor).unwrap();
+        let installed = source
+            .replacement_definitions
+            .iter_all()
+            .filter(|r| **r == expected)
+            .count();
+        assert_eq!(
+            installed, 1,
+            "granting permanent must carry exactly one affected-filter Riot replacement"
+        );
+
+        // Idempotency across re-evaluation (the per-pass reset + re-derive must
+        // not accumulate duplicates).
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let source = state.objects.get(&grantor).unwrap();
+        assert_eq!(
+            source
+                .replacement_definitions
+                .iter_all()
+                .filter(|r| **r == expected)
+                .count(),
+            1,
+            "re-evaluation must not duplicate the derived replacement"
         );
     }
 
@@ -10526,7 +10758,9 @@ mod tests {
             TargetFilter::SpecificObject { id: target },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(copy_values),
+                display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
+                token_image_ref: None,
             }],
             None,
         );

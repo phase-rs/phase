@@ -264,6 +264,7 @@
     "grantsProperty": "Grants a property to the spell"
   },
   "zone": {
+    "commandZone": "Command Zone",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Commander",
@@ -283,6 +284,8 @@
     "graveyardShort": "GY",
     "graveyardTitle": "Graveyard ({{count}})",
     "libraryAlt": "Library",
+    "library": "Library",
+    "libraryLower": "library",
     "libraryCount_one": "Library ({{count}} card)",
     "libraryCount_other": "Library ({{count}} cards)",
     "playFromTop": "Play {{name}} from top of library",
@@ -319,7 +322,8 @@
     "chooseAmountAria": "Choose amount to pay",
     "payAmount": "Pay {{value}} {{resource}}",
     "resourceEnergy": "energy",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "counters"
   },
   "hand": {
     "viewFullHand_one": "View full hand ({{count}} card)",
@@ -1259,6 +1263,16 @@
     "decline": "Decline",
     "discoverDeclineSuffix": "(put the rest on the bottom)",
     "cascadeDeclineSuffix": "(shuffle all exiled cards to the bottom)"
+  },
+  "freeCastWindow": {
+    "eyebrow": "Free Cast",
+    "title": "Cast a spell for free",
+    "subtitle": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining). Total mana value left: {{budget}}.",
+    "subtitleNoBudget": "Choose a spell to cast without paying its mana cost ({{remaining}} remaining).",
+    "castNamed": "Cast {{name}}",
+    "castSuffix": "(without paying its mana cost)",
+    "done": "Done",
+    "doneSuffix": "(stop casting spells this way)"
   },
   "castingVariant": {
     "eyebrow": "Cast",

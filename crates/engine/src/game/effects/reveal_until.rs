@@ -139,7 +139,7 @@ pub fn resolve(
             }
             Zone::Battlefield => {
                 zones::move_to_zone(state, hit, Zone::Battlefield, events);
-                if enter_tapped {
+                if enter_tapped.resolve(false) {
                     if let Some(obj) = state.objects.get_mut(&hit) {
                         obj.tapped = true;
                     }
@@ -271,7 +271,7 @@ mod tests {
                 filter,
                 kept_destination,
                 rest_destination,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
             },
@@ -295,7 +295,7 @@ mod tests {
                 filter,
                 kept_destination,
                 rest_destination,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 kept_optional_to: None,
             },
@@ -573,7 +573,7 @@ mod tests {
                     filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
-                    enter_tapped: false,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     enters_attacking: false,
                     kept_optional_to: Some(Zone::Battlefield),
                 },

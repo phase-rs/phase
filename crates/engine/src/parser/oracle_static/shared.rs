@@ -632,6 +632,15 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1c / CR 509.1b: "<grant or restriction> and can't attack or block"
+    // pairs a first clause with a full combat lockout under one subject (Immovable
+    // Rod, Fog on the Barrow-Downs). Split so the CantAttackOrBlock clause is not
+    // dropped. Registered before the bare-attack splitter so the combined phrase is
+    // consumed first.
+    if let Some(defs) = try_split_and_cant_attack_or_block(&stripped) {
+        return defs;
+    }
+
     // CR 508.1c: "<grant> and can't attack" pairs a P/T (or keyword) grant with an
     // attacking restriction under one subject (Cagemail). Split so the CantAttack
     // clause is not dropped. The terminal-phrase guard keeps the scoped
@@ -1695,7 +1704,7 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
             .properties(vec![FilterProp::HasAttachment {
                 kind,
                 controller: None,
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             }]),
     )
 }
@@ -2078,7 +2087,7 @@ pub(crate) fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<F
     let prop = FilterProp::HasAttachment {
         kind,
         controller: Some(ControllerRef::You),
-        exclude_source: false,
+        exclude_source: crate::types::ability::SourceExclusion::Include,
     };
     (&subject[..before.len()], Some(prop))
 }

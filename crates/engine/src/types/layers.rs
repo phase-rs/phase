@@ -147,7 +147,8 @@ impl ContinuousModification {
             // ability part of the copiable values. Applied at Layer 1 alongside
             // CopyValues / SetName so downstream copy effects observe the
             // retained ability when reading copiable values.
-            ContinuousModification::RetainPrintedTriggerFromSource { .. } => Layer::Copy,
+            ContinuousModification::RetainPrintedTriggerFromSource { .. }
+            | ContinuousModification::RetainPrintedAbilityFromSource { .. } => Layer::Copy,
         }
     }
 }
@@ -237,7 +238,9 @@ mod tests {
                     replacement_definitions: Default::default(),
                     static_definitions: Default::default(),
                 }),
+                display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,
+                token_image_ref: None,
             }
             .layer(),
             Layer::Copy

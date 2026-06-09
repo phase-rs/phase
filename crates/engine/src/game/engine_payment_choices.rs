@@ -1,4 +1,5 @@
 use crate::game::filter;
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -9,6 +10,8 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
+use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 use super::casting;
@@ -340,6 +343,61 @@ pub(super) fn handle_unless_payment_choose_cost(
     }
 }
 
+fn pay_top_library_exile_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    count: u32,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EngineError> {
+    let library_len = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| p.library.len())
+        .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
+    if library_len < count as usize {
+        return Ok(false);
+    }
+
+    let top_cards = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| {
+            p.library
+                .iter()
+                .copied()
+                .take(count as usize)
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
+    let mut zone_changes = Vec::with_capacity(top_cards.len());
+
+    for card_id in top_cards {
+        let proposed =
+            ProposedEvent::zone_change(card_id, Zone::Library, Zone::Exile, Some(source_id));
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(ProposedEvent::ZoneChange { object_id, to, .. }) => {
+                zone_changes.push((object_id, to));
+            }
+            ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+                return Ok(false);
+            }
+            ReplacementResult::NeedsChoice(_) => {
+                state.pending_replacement = None;
+                return Ok(false);
+            }
+        }
+    }
+
+    for (object_id, to) in zone_changes {
+        zones::move_to_zone(state, object_id, to, events);
+    }
+
+    Ok(true)
+}
+
 pub(super) fn handle_unless_payment(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -441,8 +499,8 @@ pub(super) fn handle_unless_payment(
             AbilityCost::Discard {
                 count,
                 filter,
-                random: _,
-                self_ref: _,
+                selection: _,
+                self_scope: _,
             } => {
                 let resolved = crate::game::quantity::resolve_quantity_with_targets(
                     state,
@@ -511,6 +569,26 @@ pub(super) fn handle_unless_payment(
                         remaining: count,
                     };
                     return Ok(action_result(events, state.waiting_for.clone()));
+                }
+            }
+            // CR 702.24a + CR 701.13: Thought Lash-style cumulative upkeep
+            // pays by exiling the top N cards of the payer's library. This is
+            // deterministic, so it does not need an object-selection prompt.
+            // Partial payments are not allowed; if the library has too few
+            // cards, the unless cost is unpayable and the sacrifice happens.
+            AbilityCost::Exile {
+                count,
+                zone: Some(Zone::Library),
+                filter: None,
+            } => {
+                if !pay_top_library_exile_cost(
+                    state,
+                    player,
+                    count,
+                    pending_effect.source_id,
+                    events,
+                )? {
+                    payment_failed = true;
                 }
             }
             // CR 118.12: Return-to-hand unless cost. `from_zone` defaults to
@@ -1534,8 +1612,8 @@ mod tests {
                 AbilityCost::Discard {
                     count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                     filter: None,
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
             ],
             pending_effect: Box::new(pending),

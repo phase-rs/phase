@@ -11,16 +11,17 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, DelayedTriggerCondition, Effect, ManaProduction,
-    ModalChoice, ParsedCondition, QuantityExpr, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypedFilter,
+    ChosenSubtypeKind, ContinuousModification, DelayedTriggerCondition, Effect, FilterProp,
+    ManaProduction, ModalChoice, ParsedCondition, QuantityExpr, QuantityRef, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{ActivationCadence, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -37,11 +38,13 @@ use super::oracle_casting::{
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
     has_roll_die_pattern, has_trigger_prefix, is_ability_activate_cost_static,
-    is_cant_win_lose_compound, is_cast_spells_alternative_cost_pattern, is_compound_turn_limit,
-    is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound, is_enters_with_counter_trigger,
-    is_flashback_equal_mana_cost, is_granted_static_line, is_instead_replacement_line,
-    is_opening_hand_begin_game, is_replacement_pattern, is_spells_alternative_cost_pattern,
-    is_static_pattern, is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
+    is_alternative_keyword_cost_pattern, is_cant_win_lose_compound,
+    is_cast_spells_alternative_cost_pattern, is_collect_evidence_alt_cost_pattern,
+    is_compound_turn_limit, is_defiler_cost_pattern, is_enters_tapped_cant_untap_compound,
+    is_enters_with_counter_trigger, is_flashback_equal_mana_cost, is_granted_static_line,
+    is_instead_replacement_line, is_opening_hand_begin_game, is_pay_life_as_colored_mana_pattern,
+    is_replacement_pattern, is_spells_alternative_cost_pattern, is_static_pattern,
+    is_vehicle_tier_line, lower_starts_with, should_defer_spell_to_effect,
 };
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
@@ -74,10 +77,10 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    lower_static_ir, parse_cast_spells_alternative_cost_multi,
-    parse_chosen_creature_type_static_prefix, parse_every_creature_type_static_prefix,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    lower_static_ir, parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
+    parse_chosen_creature_type_static_prefix, parse_collect_evidence_alt_cost,
+    parse_every_creature_type_static_prefix, parse_spells_alternative_cost, parse_static_line,
+    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -124,18 +127,18 @@ fn merge_kicker_additional_cost(slot: &mut Option<AdditionalCost>, incoming: Add
     match incoming {
         AdditionalCost::Kicker {
             costs: incoming_costs,
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         } => {
             if let Some(AdditionalCost::Kicker {
                 costs,
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             }) = slot.as_mut()
             {
                 costs.extend(incoming_costs);
             } else {
                 *slot = Some(AdditionalCost::Kicker {
                     costs: incoming_costs,
-                    repeatable: false,
+                    repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 });
             }
         }
@@ -495,7 +498,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
             owner_library: false,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             // CR 122.1: entry counters parsed from "with [N] [type] counter(s) on it".
@@ -724,6 +727,141 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
 
 /// CR 607.2d: Reconcile self-chosen type statics with the source's linked
 /// persisted choice.
+/// CR 614.1c + CR 608.2d: Cards like Banner of Kinship parse "as ~ enters,
+/// choose a creature type" and "~ enters with a fellowship counter … for each
+/// creature you control of the chosen type" as two Moved replacements. The
+/// counter count depends on the persisted choice, so it must chain after the
+/// `Choose` post-entry effect — not fold into `enter_with_counters` during the
+/// replacement pipeline.
+fn reconcile_choose_then_chosen_dependent_etb_counters(result: &mut ParsedAbilities) {
+    let choose_idx = result.replacements.iter().position(|replacement| {
+        replacement.event == ReplacementEvent::Moved
+            && replacement
+                .execute
+                .as_ref()
+                .is_some_and(|def| is_persisted_as_enters_choice(def))
+    });
+    let counter_idx = result.replacements.iter().position(|replacement| {
+        replacement.event == ReplacementEvent::Moved
+            && replacement
+                .execute
+                .as_ref()
+                .is_some_and(|def| is_chosen_dependent_self_etb_counter(def))
+    });
+    let (Some(choose_idx), Some(counter_idx)) = (choose_idx, counter_idx) else {
+        return;
+    };
+    if choose_idx == counter_idx {
+        return;
+    }
+
+    let counter_repl = result.replacements.remove(counter_idx);
+    let choose_idx = if counter_idx < choose_idx {
+        choose_idx - 1
+    } else {
+        choose_idx
+    };
+    let Some(counter_exec) = counter_repl.execute else {
+        return;
+    };
+    let choose_repl = &mut result.replacements[choose_idx];
+    if let Some(ref mut choose_exec) = choose_repl.execute {
+        append_sub_ability(choose_exec, *counter_exec);
+    }
+}
+
+fn is_persisted_as_enters_choice(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::Choose { persist: true, .. })
+}
+
+fn is_chosen_dependent_self_etb_counter(def: &AbilityDefinition) -> bool {
+    match &*def.effect {
+        Effect::PutCounter {
+            target: TargetFilter::SelfRef,
+            count,
+            ..
+        }
+        | Effect::AddCounter {
+            target: TargetFilter::SelfRef,
+            count,
+            ..
+        } => quantity_expr_uses_chosen_filter(count),
+        _ => false,
+    }
+}
+
+fn quantity_expr_uses_chosen_filter(expr: &QuantityExpr) -> bool {
+    quantity_expr_uses_filter_prop(expr, &|prop| {
+        matches!(
+            prop,
+            FilterProp::IsChosenCreatureType | FilterProp::IsChosenColor
+        )
+    })
+}
+
+fn quantity_expr_uses_filter_prop(
+    expr: &QuantityExpr,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_uses_filter_prop(qty, pred),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_filter_prop(inner, pred),
+        QuantityExpr::Sum { exprs } => exprs
+            .iter()
+            .any(|inner| quantity_expr_uses_filter_prop(inner, pred)),
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::UpTo { max } => quantity_expr_uses_filter_prop(max, pred),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_uses_filter_prop(exponent, pred),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_uses_filter_prop(left, pred)
+                || quantity_expr_uses_filter_prop(right, pred)
+        }
+    }
+}
+
+fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) -> bool) -> bool {
+    match qty {
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::Aggregate { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::DistinctColorsAmongPermanents { filter }
+        | QuantityRef::DistinctCounterKindsAmong { filter }
+        | QuantityRef::EnteredThisTurn { filter } => target_filter_uses_filter_prop(filter, pred),
+        QuantityRef::DistinctCardTypes {
+            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        } => target_filter_uses_filter_prop(filter, pred),
+        _ => false,
+    }
+}
+
+fn target_filter_uses_filter_prop(
+    filter: &TargetFilter,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(pred),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|inner| target_filter_uses_filter_prop(inner, pred)),
+        TargetFilter::Not { filter } => target_filter_uses_filter_prop(filter, pred),
+        _ => false,
+    }
+}
+
+fn append_sub_ability(chain: &mut AbilityDefinition, tail: AbilityDefinition) {
+    let mut cursor = chain;
+    while let Some(ref mut next) = cursor.sub_ability {
+        cursor = next;
+    }
+    cursor.sub_ability = Some(Box::new(tail));
+}
+
 fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[String]) {
     let Some(chosen_kind) = chosen_subtype_kind_from_persisted_choice(result)
         .or_else(|| chosen_kind_from_card_types(types))
@@ -2309,6 +2447,7 @@ pub(crate) fn parse_oracle_ir(
                 effect_text,
                 &line,
                 card_name,
+                Some(result.abilities.len()),
                 &mut ctx,
             );
             if ability_cant_be_copied {
@@ -2409,6 +2548,7 @@ pub(crate) fn parse_oracle_ir(
                         activated_effect_text,
                         &line,
                         card_name,
+                        Some(result.abilities.len()),
                         &mut ctx,
                     );
                     result.abilities.push(def);
@@ -2566,6 +2706,42 @@ pub(crate) fn parse_oracle_ir(
             let defs = parse_cast_spells_alternative_cost_multi(&line);
             if !defs.is_empty() {
                 result.statics.extend(defs);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-c: CR 118.9 + CR 701.59a — "You may collect evidence N
+        // rather than pay the mana cost for [filter] spells you cast."
+        // Conspiracy Unraveler class. Must run before Priority 7 because
+        // `is_spells_alternative_cost_pattern` requires "you may pay " prefix
+        // and would miss this verb form.
+        if is_collect_evidence_alt_cost_pattern(&lower) {
+            if let Some(static_def) = parse_collect_evidence_alt_cost(&line) {
+                result.statics.push(static_def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-d: CR 107.4f — "For each {C} in a cost, you may pay
+        // 2 life rather than pay that mana." K'rrik class. Must run before Priority 7
+        // because is_static_pattern does not classify this shape.
+        if is_pay_life_as_colored_mana_pattern(&lower) {
+            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            if !defs.is_empty() {
+                result.statics.extend(defs);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 6c-altcost-e: CR 118.9 + CR 702.29a + CR 702.122a —
+        // "You may [cost] rather than pay [keyword] cost[s]."
+        // New Perspectives (cycling) / Heart of Kiran (crew) / Gavi class.
+        if is_alternative_keyword_cost_pattern(&lower) {
+            if let Some(static_def) = parse_alternative_keyword_cost(&line) {
+                result.statics.push(static_def);
                 i += 1;
                 continue;
             }
@@ -3355,6 +3531,7 @@ pub(crate) fn parse_oracle_ir(
         i += 1;
     }
 
+    reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
     reconcile_self_chosen_type_statics(&mut result, types);
 
     // Architectural rule: the parser must never silently discard Oracle
@@ -3373,7 +3550,10 @@ pub(crate) fn parse_oracle_ir(
 
 fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
     match cost {
-        AbilityCost::Discard { self_ref: true, .. } => Some(Zone::Hand),
+        AbilityCost::Discard {
+            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+            ..
+        } => Some(Zone::Hand),
         AbilityCost::Exile {
             filter: Some(TargetFilter::SelfRef),
             zone: Some(zone),
@@ -3435,6 +3615,7 @@ fn parse_activated_ability_definition(
     effect_text: &str,
     description: &str,
     card_name: &str,
+    current_ability_index: Option<usize>,
     ctx: &mut ParseContext,
 ) -> (AbilityDefinition, String) {
     let (effect_text, constraints) = strip_activated_constraints(effect_text);
@@ -3446,12 +3627,17 @@ fn parse_activated_ability_definition(
     // reference. Restored after the effect parse — no leak to sibling abilities.
     let prev_exile_zone = ctx.current_ability_exile_cost_zone.take();
     ctx.current_ability_exile_cost_zone = non_self_exile_cost_zone(&cost);
+    // CR 707.9a: thread the activated-ability index so "except it has this
+    // ability" inside the effect body resolves to RetainPrintedAbilityFromSource.
+    let prev_ability_index = ctx.current_ability_index;
+    ctx.current_ability_index = current_ability_index;
 
     // Retry with `~` normalization if the first pass left an Unimplemented node
     // or emitted a target-fallback warning.
     let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, ctx);
 
     ctx.current_ability_exile_cost_zone = prev_exile_zone;
+    ctx.current_ability_index = prev_ability_index;
     normalize_activated_mana_instead_delta(&mut def);
     if def.activation_zone.is_none() {
         def.activation_zone = activation_zone_from_self_cost(&cost);
@@ -4622,6 +4808,133 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
+    /// Issue #2385 — the free-cast window class must parse its resolution text to a real
+    /// interactive `Effect::FreeCastFromZones` (the free-cast window), NOT get
+    /// swallowed into a `GraveyardCastPermission` static with an empty `abilities`
+    /// list (which resolved to no effect). Verifies the per-clause parser produces
+    /// the count, MV budget, instant/sorcery filter, graveyard+hand zones, and the
+    /// CR 614.1a exile rider — plus the trailing "Exile ~" self-exile as a chained
+    /// sub-ability.
+    #[test]
+    fn free_cast_window_clause_chains_rider_and_self_exile() {
+        let text = "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.";
+        let result = parse(text, "Invoke Calamity", &[], &["Instant"], &[]);
+
+        assert!(
+            result.statics.is_empty(),
+            "must NOT classify as a GraveyardCastPermission static, got {:?}",
+            result.statics
+        );
+        assert_eq!(
+            result.abilities.len(),
+            1,
+            "the spell must have a single resolution ability, got {:?}",
+            result.abilities
+        );
+        let ability = &result.abilities[0];
+        match &*ability.effect {
+            Effect::FreeCastFromZones {
+                count,
+                max_total_mv,
+                filter,
+                zones,
+                exile_instead_of_graveyard,
+            } => {
+                assert_eq!(*count, 2);
+                assert_eq!(*max_total_mv, Some(6));
+                assert!(*exile_instead_of_graveyard);
+                assert_eq!(zones, &vec![Zone::Graveyard, Zone::Hand]);
+                assert_eq!(
+                    *filter,
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    }
+                );
+            }
+            other => panic!("expected FreeCastFromZones, got {other:?}"),
+        }
+        // CR 608.2c: "Exile ~" chains as the sub-ability and runs after the
+        // window closes.
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("Exile ~ self-exile must chain as sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "trailing self-exile must lower to a ChangeZone→Exile, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// CR 608.2g + CR 601.2 + CR 118.9: The free-cast window parser is a class
+    /// parser, not an Invoke Calamity special case. Single-type, single-zone,
+    /// no-budget text lowers through the same per-clause seam.
+    #[test]
+    fn free_cast_window_parses_single_zone_non_invoke_variant() {
+        let text =
+            "You may cast up to one instant spell from your graveyard without paying its mana cost.";
+        let result = parse(text, "Sample Free Cast", &[], &["Sorcery"], &[]);
+
+        assert!(
+            result.statics.is_empty(),
+            "free-cast window must stay out of the static classifier, got {:?}",
+            result.statics
+        );
+        assert_eq!(result.abilities.len(), 1);
+
+        let Effect::FreeCastFromZones {
+            count,
+            max_total_mv,
+            filter,
+            zones,
+            exile_instead_of_graveyard,
+        } = &*result.abilities[0].effect
+        else {
+            panic!(
+                "expected FreeCastFromZones, got {:?}",
+                result.abilities[0].effect
+            );
+        };
+
+        assert_eq!(*count, 1);
+        assert_eq!(*max_total_mv, None);
+        assert_eq!(
+            *filter,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant))
+        );
+        assert_eq!(zones, &vec![Zone::Graveyard]);
+        assert!(!*exile_instead_of_graveyard);
+    }
+
+    /// Issue #2385 MED — `Effect::FreeCastFromZones` is a *free* cast. A
+    /// hypothetical "cast up to N ... from your graveyard and/or hand" that omits
+    /// the "without paying their mana cost(s)" clause (the controller still pays)
+    /// must NOT be lowered to the free-cast window (CR 118.9). The recognizer
+    /// requires the without-paying clause before emitting the effect.
+    #[test]
+    fn pay_required_cast_up_to_n_is_not_free_cast() {
+        let text = "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand. Exile this spell.";
+        let result = parse(text, "Pay Required Calamity", &[], &["Instant"], &[]);
+
+        assert!(
+            !result
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::FreeCastFromZones { .. })),
+            "a pay-required cast clause must not lower to a free-cast window, got {:?}",
+            result.abilities
+        );
+    }
+
     /// CR 508.1a + CR 508.6: "During any turn you attacked with <filter>, you
     /// may play that card" must gate the play permission on a (filtered)
     /// AttackedThisTurn condition instead of dropping the clause to
@@ -5136,8 +5449,11 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(!repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 2);
                 assert!(matches!(
                     &costs[0],
@@ -5169,8 +5485,11 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(!repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 2);
                 assert!(matches!(
                     &costs[0],
@@ -5200,8 +5519,11 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_repeatable());
                 assert_eq!(costs.len(), 1);
                 assert!(matches!(
                     &costs[0],
@@ -5225,8 +5547,11 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Kicker { costs, repeatable } => {
-                assert!(!repeatable);
+            AdditionalCost::Kicker {
+                costs,
+                repeatability,
+            } => {
+                assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 1);
                 assert!(matches!(&costs[0], AbilityCost::Sacrifice { count: 1, .. }));
             }
@@ -5248,7 +5573,7 @@ mod tests {
                     AbilityCost::Sacrifice {
                         count: u32::MAX, ..
                     },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             }) => {}
             other => panic!("expected optional any-number sacrifice, got {other:?}"),
         }
@@ -7487,6 +7812,213 @@ mod tests {
             *r.abilities[0].effect,
             Effect::Unimplemented { ref name, .. } if name == "cast"
         ));
+    }
+
+    // CR 118.9 + CR 701.59a: Conspiracy Unraveler — "You may collect evidence N
+    // rather than pay the mana cost for spells you cast." routes to a
+    // CastWithAlternativeCost static carrying a CollectEvidence cost, and the
+    // Optional_YouMay swallow detector no longer flags it.
+    #[test]
+    fn conspiracy_unraveler_collect_evidence_alternative_cost_static() {
+        let r = parse(
+            "Flying\nYou may collect evidence 10 rather than pay the mana cost for spells you cast. (To collect evidence 10, exile cards with total mana value 10 or greater from your graveyard.)",
+            "Conspiracy Unraveler",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert_eq!(r.statics.len(), 1, "warnings: {:?}", r.parse_warnings);
+        assert!(matches!(
+            r.statics[0].mode,
+            StaticMode::CastWithAlternativeCost {
+                cost: AbilityCost::CollectEvidence { amount: 10 },
+                ..
+            }
+        ));
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 107.4f: K'rrik, Son of Yawgmoth — "For each {B} in a cost, you may pay
+    // 2 life rather than pay that mana." routes to a PayLifeAsColoredMana static
+    // and suppresses both the Optional_YouMay and DynamicQty swallow detectors.
+    #[test]
+    fn krrik_pay_life_as_colored_mana_static() {
+        let r = parse(
+            "({B/P} can be paid with either {B} or 2 life.)\nLifelink\nFor each {B} in a cost, you may pay 2 life rather than pay that mana.\nWhenever you cast a black spell, put a +1/+1 counter on K'rrik.",
+            "K'rrik, Son of Yawgmoth",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(
+            r.statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::PayLifeAsColoredMana { .. })),
+            "statics: {:?} warnings: {:?}",
+            r.statics,
+            r.parse_warnings
+        );
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 118.9 + CR 702.122a: Heart of Kiran — "You may remove a loyalty counter
+    // from a planeswalker you control rather than pay Heart of Kiran's crew cost."
+    // routes to an AlternativeKeywordCost(Crew) static.
+    #[test]
+    fn heart_of_kiran_alternative_crew_cost_static() {
+        let r = parse(
+            "Flying, vigilance\nCrew 3 (Tap any number of creatures you control with total power 3 or more: This Vehicle becomes an artifact creature until end of turn.)\nYou may remove a loyalty counter from a planeswalker you control rather than pay Heart of Kiran's crew cost.",
+            "Heart of Kiran",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(
+            r.statics.iter().any(|s| matches!(
+                s.mode,
+                StaticMode::AlternativeKeywordCost {
+                    keyword: crate::types::keywords::KeywordKind::Crew,
+                    ..
+                }
+            )),
+            "statics: {:?} warnings: {:?}",
+            r.statics,
+            r.parse_warnings
+        );
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 118.9 + CR 702.29a + CR 611.3a: New Perspectives — "As long as you have
+    // seven or more cards in hand, you may pay {0} rather than pay cycling costs."
+    // routes to a conditional AlternativeKeywordCost(Cycling) static.
+    #[test]
+    fn new_perspectives_conditional_alternative_cycling_cost_static() {
+        let r = parse(
+            "When this enchantment enters, draw three cards.\nAs long as you have seven or more cards in hand, you may pay {0} rather than pay cycling costs.",
+            "New Perspectives",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let alt = r.statics.iter().find(|s| {
+            matches!(
+                s.mode,
+                StaticMode::AlternativeKeywordCost {
+                    keyword: crate::types::keywords::KeywordKind::Cycling,
+                    ..
+                }
+            )
+        });
+        assert!(
+            alt.is_some(),
+            "statics: {:?} warnings: {:?}",
+            r.statics,
+            r.parse_warnings
+        );
+        assert!(
+            alt.unwrap().condition.is_some(),
+            "as-long-as gate must attach as a StaticCondition"
+        );
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 118.9 + CR 702.29a: Gavi's "first card you cycle each turn" clause
+    // routes to the once-per-turn frequency on the cycling alternative cost.
+    #[test]
+    fn gavi_alternative_cycling_cost_tracks_once_per_turn_frequency() {
+        let r = parse(
+            "You may pay {0} rather than pay the cycling cost of the first card you cycle each turn.",
+            "Gavi, Nest Warden",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let alt = r.statics.iter().find_map(|s| match &s.mode {
+            StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Cycling,
+                cost,
+                frequency,
+            } => Some((cost, frequency)),
+            _ => None,
+        });
+        let (cost, frequency) = alt.unwrap_or_else(|| {
+            panic!(
+                "expected cycling AlternativeKeywordCost, statics: {:?}, warnings: {:?}",
+                r.statics, r.parse_warnings
+            )
+        });
+        assert!(
+            matches!(cost, AbilityCost::Mana { cost } if cost == &ManaCost::generic(0)),
+            "expected zero mana alternative cost, got {cost:?}"
+        );
+        assert_eq!(
+            frequency,
+            &Some(crate::types::statics::CastFrequency::OncePerTurn)
+        );
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    // CR 118.9 + CR 701.20a + CR 601.3: Land Grant — "If you have no land cards in
+    // hand, you may reveal your hand rather than pay this spell's mana cost."
+    // routes to a conditional alternative-cost casting option whose cost is an
+    // EffectCost wrapping RevealHand.
+    #[test]
+    fn land_grant_reveal_hand_alternative_cost_option() {
+        let r = parse(
+            "If you have no land cards in hand, you may reveal your hand rather than pay this spell's mana cost.\nSearch your library for a Forest card, reveal that card, put it into your hand, then shuffle.",
+            "Land Grant",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(
+            r.casting_options.len(),
+            1,
+            "warnings: {:?}",
+            r.parse_warnings
+        );
+        assert!(matches!(
+            r.casting_options[0].cost,
+            Some(AbilityCost::EffectCost { ref effect })
+                if matches!(**effect, Effect::RevealHand { .. })
+        ));
+        assert!(matches!(
+            r.casting_options[0].condition.as_ref(),
+            Some(ParsedCondition::Not { condition })
+                if matches!(
+                    condition.as_ref(),
+                    ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+                        zone: Zone::Hand,
+                        core_type: crate::types::card_type::CoreType::Land,
+                        count: 1,
+                    }
+                )
+        ));
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.parse_warnings
+        );
     }
 
     #[test]
@@ -10629,9 +11161,13 @@ mod tests {
                     costs
                 );
                 assert!(
-                    costs
-                        .iter()
-                        .any(|c| matches!(c, AbilityCost::Discard { self_ref: true, .. })),
+                    costs.iter().any(|c| matches!(
+                        c,
+                        AbilityCost::Discard {
+                            self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+                            ..
+                        }
+                    )),
                     "Channel cost should include self-ref discard, got {:?}",
                     costs
                 );
@@ -11595,7 +12131,10 @@ mod tests {
             } => {
                 assert_eq!(*origin, Some(crate::types::zones::Zone::Library));
                 assert_eq!(*destination, crate::types::zones::Zone::Battlefield);
-                assert!(enter_tapped, "searched land should enter tapped");
+                assert!(
+                    enter_tapped.is_tapped(),
+                    "searched land should enter tapped"
+                );
             }
             other => panic!("Expected ChangeZone, got {other:?}"),
         }
@@ -11639,7 +12178,7 @@ mod tests {
             } => {
                 assert_eq!(*destination, crate::types::zones::Zone::Battlefield);
                 assert!(
-                    enter_tapped,
+                    enter_tapped.is_tapped(),
                     "searched land after 'Then' should enter tapped"
                 );
             }
@@ -11668,7 +12207,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*destination, crate::types::zones::Zone::Hand);
-                assert!(!enter_tapped, "search-to-hand should not be tapped");
+                assert!(
+                    !enter_tapped.is_tapped(),
+                    "search-to-hand should not be tapped"
+                );
             }
             other => panic!("Expected ChangeZone to Hand, got {other:?}"),
         }
@@ -14131,7 +14673,7 @@ mod tests {
             result.additional_cost,
             Some(AdditionalCost::Optional {
                 cost: AbilityCost::CollectEvidence { amount: 8 },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             })
         );
         assert_eq!(result.abilities.len(), 1);
@@ -15828,6 +16370,40 @@ mod tests {
         }
     }
 
+    /// CR 707.9a + CR 602.1: Thespian's Stage "{2}, {T}: becomes a copy of
+    /// target land, except it has this ability" must emit
+    /// `RetainPrintedAbilityFromSource` keyed to the activated ability's index
+    /// in the printed ability list (index 1 — the mana ability is index 0).
+    #[test]
+    fn thespians_stage_emits_retain_printed_ability_from_source() {
+        let r = parse(
+            "{T}: Add {C}.\n{2}, {T}: This land becomes a copy of target land, except it has this ability.",
+            "Thespian's Stage",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 2, "mana ability + copy ability");
+        let copy_ability = &r.abilities[1];
+        match &*copy_ability.effect {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::RetainPrintedAbilityFromSource {
+                            source_ability_index: 1
+                        }
+                    )),
+                    "expected RetainPrintedAbilityFromSource(1); got {additional_modifications:?}"
+                );
+            }
+            other => panic!("expected BecomeCopy on second activated ability, got {other:?}"),
+        }
+    }
+
     /// Regression: pin Puresteel Paladin's Metalcraft static-grant-of-equip line
     /// so a future refactor of `try_parse_equip` / Priority 3 dispatch cannot
     /// resurface the `cost: Unimplemented("ment you control...")` misparse.
@@ -16412,6 +16988,44 @@ mod tests {
             ),
             "ETB execute must be ChangeZone→Exile"
         );
+    }
+
+    #[test]
+    fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
+        let oracle = "As this artifact enters, choose a creature type. This artifact enters with a \
+                      fellowship counter on it for each creature you control of the chosen type.\n\
+                      Creatures you control of the chosen type get +1/+1 for each fellowship counter \
+                      on this artifact.";
+        let result = parse(oracle, "Banner of Kinship", &[], &["Artifact"], &[]);
+
+        assert_eq!(
+            result.replacements.len(),
+            1,
+            "choose + chosen-dependent ETB counters must compose into one replacement"
+        );
+        let execute = result.replacements[0]
+            .execute
+            .as_ref()
+            .expect("composed replacement must have execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType,
+                persist: true,
+            }
+        ));
+        let counter = execute
+            .sub_ability
+            .as_ref()
+            .expect("PutCounter must chain after Choose");
+        assert!(matches!(
+            &*counter.effect,
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Generic(ref name),
+                target: TargetFilter::SelfRef,
+                ..
+            } if name == "fellowship"
+        ));
     }
 }
 

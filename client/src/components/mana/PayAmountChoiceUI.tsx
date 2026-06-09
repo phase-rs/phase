@@ -35,6 +35,8 @@ export function PayAmountChoiceUI() {
         return t("mana.resourceEnergy");
       case "ManaGeneric":
         return t("mana.resourceMana");
+      case "Counters":
+        return t("mana.resourceCounters");
     }
   }, [data, t]);
 
