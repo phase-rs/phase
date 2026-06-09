@@ -150,6 +150,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::DamageCleared { .. }
         | GameEvent::CounterAdded { .. }
+        | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
         | GameEvent::CounterRemoved { .. }
         | GameEvent::Transformed { .. }
@@ -632,6 +633,12 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             LogSegment::Keyword(format!("{counter_type:?}")),
             text(" counter(s) on "),
             card_seg(state, *object_id),
+        ],
+
+        GameEvent::ObjectIntensified { object_id, amount } => vec![
+            card_seg(state, *object_id),
+            text(" intensified by "),
+            num(*amount as i32),
         ],
 
         GameEvent::Evolved { object_id } => {

@@ -241,7 +241,7 @@ fn prompt_resolution_tap_untap_choice(
         effect_kind,
         zone: Zone::Battlefield,
         destination: None,
-        enter_tapped: false,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enter_transformed: false,
         enters_under_player: None,
         enters_attacking: false,

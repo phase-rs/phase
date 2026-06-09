@@ -70,7 +70,7 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
             stub,
             AdditionalCost::Optional {
                 cost: cost_conv::convert(cost)?,
-                repeatable: false,
+                repeatability: engine::types::ability::AdditionalCostRepeatability::Once,
             },
             "OptionalAdditionalCastingCost",
         ),

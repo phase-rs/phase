@@ -91,10 +91,22 @@ pub fn effective_disturb_cost(state: &GameState, object_id: ObjectId) -> Option<
 pub fn effective_escape_data(state: &GameState, object_id: ObjectId) -> Option<(ManaCost, u32)> {
     let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Escape)?;
     match keyword {
-        Keyword::Escape { cost, exile_count } => Some((
-            resolve_keyword_mana_cost(state, object_id, &cost),
-            exile_count,
-        )),
+        Keyword::Escape { cost, exile_count } => {
+            // CR 702.138a: "Escape [cost]" always specifies "Exile N other cards"
+            // with N >= 1 — the exile is part of the escape cost. A leaked
+            // exile_count == 0 is a parse failure (the "Exile N" clause was not
+            // extracted), not a legal "exile 0 cards" escape. Refuse the escape so
+            // the mis-parse surfaces instead of allowing an illegal 0-card escape
+            // cast (the exile-selection path would build bounds (0, 0) and accept
+            // an empty selection).
+            if exile_count == 0 {
+                return None;
+            }
+            Some((
+                resolve_keyword_mana_cost(state, object_id, &cost),
+                exile_count,
+            ))
+        }
         _ => None,
     }
 }
@@ -663,6 +675,49 @@ mod tests {
         assert!(!has_keyword(&obj, &Keyword::Haste));
     }
 
+    /// CR 702.138a: a placeholder `exile_count == 0` is a parse failure, not a
+    /// legal "exile 0 cards" escape. `effective_escape_data` must refuse it
+    /// (return `None`) so the mis-parse can't produce an illegal 0-card escape
+    /// cast, while well-parsed counts (N >= 1) pass through unchanged.
+    #[test]
+    fn effective_escape_data_refuses_zero_exile_count() {
+        let escape_cost = ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Black],
+        };
+        let make_escape_obj = |state: &mut GameState, exile_count: u32| {
+            let id = create_object(
+                state,
+                CardId(1),
+                PlayerId(0),
+                "Escape Test".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.keywords.push(Keyword::Escape {
+                cost: escape_cost.clone(),
+                exile_count,
+            });
+            id
+        };
+
+        // Placeholder 0 -> refused.
+        let mut state = GameState::new_two_player(1);
+        let zero_id = make_escape_obj(&mut state, 0);
+        assert_eq!(effective_escape_data(&state, zero_id), None);
+
+        // Well-parsed counts pass through with the resolved cost.
+        for n in [1u32, 2, 5] {
+            let mut state = GameState::new_two_player(1);
+            let id = make_escape_obj(&mut state, n);
+            assert_eq!(
+                effective_escape_data(&state, id),
+                Some((escape_cost.clone(), n)),
+                "exile_count {n} must be accepted unchanged",
+            );
+        }
+    }
+
     /// CR 702.16 + CR 205.2: `source_matches_protection_target`'s
     /// `ChosenCardType` arm resolves against the *protected* object's own
     /// chosen card type. A creature-typed source matches when the protected
@@ -1150,7 +1205,7 @@ mod tests {
             state.players[0].mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],

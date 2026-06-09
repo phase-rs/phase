@@ -509,7 +509,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     crate::types::ability::AttachmentKind::Aura => "aura",
                     crate::types::ability::AttachmentKind::Equipment => "equipment",
                 };
-                let qualifier = if *exclude_source { " another" } else { "" };
+                let qualifier = if exclude_source.is_exclude() {
+                    " another"
+                } else {
+                    ""
+                };
                 match controller {
                     None => parts.push(format!("attached by{qualifier} {kind_s}")),
                     Some(c) => parts.push(format!(
@@ -968,6 +972,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             None => format!("counters on {}", fmt_target(filter)),
         },
         QuantityRef::Variable { name } => name.clone(),
+        QuantityRef::Intensity { .. } => "intensity".into(),
         QuantityRef::Power { scope } => match scope {
             ObjectScope::Source | ObjectScope::Anaphoric | ObjectScope::Demonstrative => {
                 "self power".into()
@@ -1700,6 +1705,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
         Effect::EpicCopy { .. } => {}
+        Effect::Intensify { .. } => {}
         Effect::DestroyAll { target, .. }
         | Effect::TapAll { target }
         | Effect::UntapAll { target }
@@ -2012,7 +2018,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             card_filter,
             count,
-            random,
+            selection,
             ..
         } => {
             d.push(("player".into(), fmt_target(target)));
@@ -2022,7 +2028,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(c) = count {
                 d.push(("count".into(), fmt_quantity(c)));
             }
-            if *random {
+            if selection.is_random() {
                 d.push(("selection".into(), "random".into()));
             }
         }
@@ -2532,6 +2538,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }
+        | Effect::DraftFromSpellbook { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseOneOf { .. }
@@ -2705,6 +2712,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
         } => format!("retain printed trigger {source_trigger_index}"),
+        ContinuousModification::RetainPrintedAbilityFromSource {
+            source_ability_index,
+        } => format!("retain printed ability {source_ability_index}"),
         ContinuousModification::AddSupertype { supertype } => {
             format!("add supertype {supertype}")
         }
@@ -3076,13 +3086,15 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 
     let label = match additional_cost {
         AdditionalCost::Optional {
-            repeatable: true, ..
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
+            ..
         } => "AdditionalCost:Repeatable",
         AdditionalCost::Optional {
-            repeatable: false, ..
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            ..
         } => "AdditionalCost:Optional",
-        AdditionalCost::Kicker { repeatable, .. } => {
-            if *repeatable {
+        AdditionalCost::Kicker { repeatability, .. } => {
+            if repeatability.is_repeatable() {
                 "AdditionalCost:Multikicker"
             } else {
                 "AdditionalCost:Kicker"
@@ -5360,6 +5372,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ObjectCountBySharedQuality { .. } => ("ObjectCountBySharedQuality", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
+        QuantityRef::Intensity { .. } => ("Intensity", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
         QuantityRef::Variable { .. } => ("Variable", Handled),
         QuantityRef::Power { scope } => match scope {
@@ -8773,7 +8786,7 @@ mod tests {
             cost: AbilityCost::Unimplemented {
                 description: "mystery cost".to_string(),
             },
-            repeatable: false,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
 
         assert!(card_face_has_unimplemented_parts(&face));
@@ -10008,14 +10021,14 @@ mod tests {
 
     #[test]
     fn unsupported_cumulative_upkeep_cost_counts_as_keyword_gap() {
-        // CR 702.24a: Exile-base cumulative upkeep is still unsupported by the
-        // unless-payment pipeline (Discard became supported once the per-counter
-        // discard payment chain landed), so it remains a coverage gap.
+        // CR 702.24a: arbitrary exile-base cumulative upkeep still needs
+        // interactive object selection before it can enter the unless-payment
+        // pipeline. Thought Lash-style top-library exile is covered separately.
         let mut face = make_face();
         face.keywords
             .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
                 count: 1,
-                zone: None,
+                zone: Some(Zone::Graveyard),
                 filter: None,
             }));
 
@@ -10030,6 +10043,26 @@ mod tests {
             .find(|item| item.category == ParseCategory::Keyword)
             .expect("keyword parse item");
         assert!(!keyword.supported);
+    }
+
+    #[test]
+    fn top_library_exile_cumulative_upkeep_has_no_keyword_gap() {
+        let mut face = make_face();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Library),
+                filter: None,
+            }));
+
+        assert!(card_face_gaps(&face).is_empty());
+
+        let parse_details = build_parse_details_for_face(&face);
+        let keyword = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Keyword)
+            .expect("keyword parse item");
+        assert!(keyword.supported);
     }
 
     #[test]

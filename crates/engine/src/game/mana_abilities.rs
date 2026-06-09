@@ -1,13 +1,13 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect,
-    ManaProduction, ResolvedAbility, TargetFilter,
+    ManaProduction, ResolvedAbility, TargetFilter, REMOVE_COUNTER_COST_ALL,
+    REMOVE_COUNTER_COST_ANY_NUMBER,
 };
-#[cfg(test)]
-use crate::types::counter::CounterMatch;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
-    PayCostKind, PendingManaAbility, ProductionOverride, WaitingFor,
+    PayCostKind, PayableResource, PendingManaAbility, ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
@@ -447,6 +447,7 @@ pub fn activate_mana_ability(
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -1029,7 +1030,7 @@ pub fn can_activate_mana_ability_now(
     .is_ok()
 }
 
-fn advance_mana_ability_activation(
+pub(super) fn advance_mana_ability_activation(
     state: &mut GameState,
     mut pending: PendingManaAbility,
     events: &mut Vec<GameEvent>,
@@ -1146,6 +1147,24 @@ fn advance_mana_ability_activation(
         }
     }
 
+    // CR 107.1c + CR 605.3a: "Remove any number of <type> counters" in a
+    // mana-ability cost requires choosing the count before costs are paid and
+    // mana is produced.
+    if pending.chosen_counter_count.is_none() {
+        if let Some(counter_type) = any_number_self_remove_counter_cost(&ability_def.cost) {
+            let max = removable_counter_count_for_mana_cost(state, pending.source_id, counter_type);
+            return Ok(WaitingFor::PayAmountChoice {
+                player: pending.player,
+                resource: PayableResource::Counters,
+                min: 0,
+                max,
+                accumulated: 0,
+                source_id: pending.source_id,
+                pending_mana_ability: Some(Box::new(pending)),
+            });
+        }
+    }
+
     // CR 605.3a + CR 602.2b + CR 601.2g-h + CR 107.4e: Resolve the mana
     // sub-cost payment before producing any mana or prompting for output
     // choices. If the current pool already offers multiple hybrid assignments,
@@ -1216,6 +1235,7 @@ fn advance_mana_ability_activation(
                 &mut pending.chosen_exiled.iter().copied(),
                 &mut pending.chosen_sacrificed_battlefield.iter().copied(),
                 pending.chosen_mana_payment.as_deref(),
+                pending.chosen_counter_count,
             )?;
             // CR 603.2a + CR 603.2g + CR 605.3b: Cost-payment events (Tap,
             // Sacrifice, etc.) generated during a mana ability's cost step
@@ -1266,6 +1286,7 @@ fn advance_mana_ability_activation(
         &pending.chosen_exiled,
         &pending.chosen_sacrificed_battlefield,
         pending.chosen_mana_payment.as_deref(),
+        pending.chosen_counter_count,
         pending.cost_paid_object,
     )?;
     complete_mana_ability_activation(
@@ -1299,6 +1320,7 @@ fn pay_mana_ability_cost(
         &mut std::iter::empty(),
         &mut std::iter::empty(),
         None,
+        None,
     )
 }
 
@@ -1315,6 +1337,7 @@ fn resolve_mana_ability_with_selected_choices(
     exiled_battlefield: &[ObjectId],
     sacrificed_battlefield: &[ObjectId],
     chosen_hybrid_payment: Option<&[ManaType]>,
+    chosen_counter_count: Option<u32>,
     cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
@@ -1332,6 +1355,7 @@ fn resolve_mana_ability_with_selected_choices(
         &mut exiled,
         &mut sacrificed,
         chosen_hybrid_payment,
+        chosen_counter_count,
     )?;
     if chosen.next().is_some() {
         return Err(EngineError::InvalidAction(
@@ -1541,6 +1565,7 @@ fn pay_mana_ability_cost_with_choices<I, J, K, L>(
     chosen_exiled: &mut K,
     chosen_sacrificed_battlefield: &mut L,
     chosen_hybrid_payment: Option<&[ManaType]>,
+    chosen_counter_count: Option<u32>,
 ) -> Result<(), EngineError>
 where
     I: Iterator<Item = ObjectId>,
@@ -1590,15 +1615,15 @@ where
         Some(AbilityCost::Discard {
             count,
             filter,
-            random,
-            self_ref,
+            selection,
+            self_scope,
         }) => {
-            if *random {
+            if selection.is_random() {
                 return Err(EngineError::InvalidAction(
                     "Unsupported random discard cost for mana ability".to_string(),
                 ));
             }
-            if *self_ref {
+            if self_scope.is_source_card() {
                 match crate::game::effects::discard::discard_as_cost(
                     state, source_id, player, events,
                 ) {
@@ -1724,15 +1749,15 @@ where
                     AbilityCost::Discard {
                         count,
                         filter,
-                        random,
-                        self_ref,
+                        selection,
+                        self_scope,
                     } => {
-                        if *random {
+                        if selection.is_random() {
                             return Err(EngineError::InvalidAction(
                                 "Unsupported random discard cost for mana ability".to_string(),
                             ));
                         }
-                        if *self_ref {
+                        if self_scope.is_source_card() {
                             match crate::game::effects::discard::discard_as_cost(
                                 state, source_id, player, events,
                             ) {
@@ -1823,18 +1848,30 @@ where
                         count,
                         counter_type,
                         target: None,
+                        ..
                     } => {
-                        if let Some(resolved) =
-                            super::effects::counters::resolve_counter_match_for_removal(
+                        let count = match *count {
+                            REMOVE_COUNTER_COST_ANY_NUMBER => {
+                                chosen_counter_count.ok_or_else(|| {
+                                    EngineError::InvalidAction(
+                                        "Missing counter count for mana ability".to_string(),
+                                    )
+                                })?
+                            }
+                            REMOVE_COUNTER_COST_ALL => removable_counter_count_for_mana_cost(
                                 state,
                                 source_id,
                                 counter_type,
-                            )
-                        {
-                            super::effects::counters::remove_counter_with_replacement(
-                                state, source_id, resolved, *count, events,
-                            );
-                        }
+                            ),
+                            count => count,
+                        };
+                        remove_counters_for_mana_cost(
+                            state,
+                            source_id,
+                            counter_type,
+                            count,
+                            events,
+                        );
                     }
                     // CR 605.3a + CR 601.2h + CR 107.4e: Mana sub-cost inside a
                     // Composite mana-ability cost (filter lands' `{W/U}, {T}`).
@@ -2220,6 +2257,89 @@ pub fn handle_pay_mana_ability_mana(
     advance_mana_ability_activation(state, updated, events)
 }
 
+fn any_number_self_remove_counter_cost(cost: &Option<AbilityCost>) -> Option<&CounterMatch> {
+    match cost.as_ref()? {
+        AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+            counter_type,
+            target: None,
+            ..
+        } => Some(counter_type),
+        AbilityCost::Composite { costs } => costs.iter().find_map(|cost| match cost {
+            AbilityCost::RemoveCounter {
+                count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                counter_type,
+                target: None,
+                ..
+            } => Some(counter_type),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+fn removable_counter_count_for_mana_cost(
+    state: &GameState,
+    source_id: ObjectId,
+    counter_type: &CounterMatch,
+) -> u32 {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return 0;
+    };
+    match counter_type {
+        CounterMatch::Any => obj.counters.values().copied().sum(),
+        CounterMatch::OfType(counter_type) => obj.counters.get(counter_type).copied().unwrap_or(0),
+    }
+}
+
+fn remove_counters_for_mana_cost(
+    state: &mut GameState,
+    source_id: ObjectId,
+    counter_type: &CounterMatch,
+    mut count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    match counter_type {
+        CounterMatch::OfType(counter_type) => {
+            super::effects::counters::remove_counter_with_replacement(
+                state,
+                source_id,
+                counter_type.clone(),
+                count,
+                events,
+            );
+        }
+        CounterMatch::Any => {
+            let counters: Vec<(CounterType, u32)> = state
+                .objects
+                .get(&source_id)
+                .map(|obj| {
+                    obj.counters
+                        .iter()
+                        .map(|(counter_type, count)| (counter_type.clone(), *count))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (counter_type, available) in counters {
+                if count == 0 {
+                    break;
+                }
+                let to_remove = available.min(count);
+                if to_remove > 0 {
+                    super::effects::counters::remove_counter_with_replacement(
+                        state,
+                        source_id,
+                        counter_type,
+                        to_remove,
+                        events,
+                    );
+                    count -= to_remove;
+                }
+            }
+        }
+    }
+}
+
 /// Tap a permanent as part of paying a mana ability cost.
 fn tap_source(
     state: &mut GameState,
@@ -2398,8 +2518,8 @@ fn find_non_self_discard_cost(
         AbilityCost::Discard {
             count,
             filter,
-            self_ref: false,
-            random: false,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
         } => Some((count, filter.as_ref())),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard_cost),
         _ => None,
@@ -2566,7 +2686,7 @@ mod tests {
         ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, FilterProp,
         LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope,
         PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -2634,7 +2754,7 @@ mod tests {
             state.players[player.0 as usize].mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -4049,8 +4169,8 @@ mod tests {
                         },
                     },
                     filter: None,
-                    random: false,
-                    self_ref: false,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
                 AbilityCost::Sacrifice {
                     target: TargetFilter::SelfRef,
@@ -4500,7 +4620,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -5013,6 +5133,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -5074,6 +5195,7 @@ mod tests {
                 chosen_tappers: Vec::new(),
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
+                chosen_counter_count: None,
                 chosen_exiled: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
@@ -5301,6 +5423,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -5401,6 +5524,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -6299,6 +6423,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -6379,6 +6504,7 @@ mod tests {
                     count: 1,
                     counter_type: CounterMatch::OfType(CounterType::Generic("mining".to_string())),
                     target: None,
+                    selection: crate::types::ability::CounterCostSelection::SingleObject,
                 },
             ],
         });
@@ -6446,6 +6572,88 @@ mod tests {
             remaining, 2,
             "Gemstone Mine must lose one mining counter per activation"
         );
+    }
+
+    #[test]
+    fn any_number_counter_mana_ability_prompts_and_removes_chosen_count() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let land = create_object(
+            &mut state,
+            CardId(8002),
+            player,
+            "Storage Land".to_string(),
+            Zone::Battlefield,
+        );
+        let storage = CounterType::Generic("storage".to_string());
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.counters.insert(storage.clone(), 3);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: Vec::new(),
+                        grants: Vec::new(),
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::RemoveCounter {
+                            count: REMOVE_COUNTER_COST_ANY_NUMBER,
+                            counter_type: CounterMatch::OfType(storage.clone()),
+                            target: None,
+                            selection: crate::types::ability::CounterCostSelection::SingleObject,
+                        },
+                    ],
+                }),
+            );
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: land,
+                ability_index: 0,
+            },
+        )
+        .expect("storage mana ability should prompt for a counter count");
+
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                resource, min, max, ..
+            } => {
+                assert_eq!(*resource, PayableResource::Counters);
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 3);
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SubmitPayAmount { amount: 1 },
+        )
+        .expect("chosen counter count should resume mana production");
+
+        assert_eq!(
+            state.objects[&land]
+                .counters
+                .get(&storage)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "any-number counter mana costs must remove only the chosen count"
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
     }
 
     #[test]
@@ -6582,6 +6790,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7139,6 +7348,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7206,6 +7416,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7328,6 +7539,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7388,6 +7600,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -7539,6 +7752,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,

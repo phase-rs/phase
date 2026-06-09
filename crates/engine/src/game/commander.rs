@@ -957,7 +957,7 @@ mod tests {
             player_data.mana_pool.add(ManaUnit {
                 color: ManaType::Red,
                 source_id: crate::types::identifiers::ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -1033,7 +1033,7 @@ mod tests {
             player_data.mana_pool.add(ManaUnit {
                 color: ManaType::Red,
                 source_id: crate::types::identifiers::ObjectId(0),
-                snow: false,
+                supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
                 grants: vec![],
@@ -1123,7 +1123,7 @@ mod tests {
         player_data.mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: crate::types::identifiers::ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],
@@ -1223,7 +1223,7 @@ mod tests {
         player_data.mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: crate::types::identifiers::ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],

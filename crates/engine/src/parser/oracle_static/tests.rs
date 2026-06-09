@@ -6,8 +6,8 @@ use super::support::*;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
-    Duration, Effect, ObjectProperty, PlayerScope, PtStat, PtValueScope, SharedQuality,
-    SharedQualityRelation, TypeFilter, ZoneRef,
+    Duration, Effect, ObjectProperty, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+    SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -2136,6 +2136,89 @@ fn static_this_spell_cost_less_if_it_targets_creature_filter() {
     assert_eq!(
         def.active_zones,
         vec![Zone::Hand, Zone::Stack, Zone::Command]
+    );
+}
+
+#[test]
+fn static_this_spell_cost_less_if_it_targets_spell_or_ability_targeting_large_creature() {
+    let def = parse_static_line(
+        "This spell costs {7} less to cast if it targets a spell or ability that targets a creature you control with power 7 or greater.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::Cost { generic: 7, .. },
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost");
+    };
+    let filter = spell_filter
+        .as_ref()
+        .expect("expected stack-target-gated spell filter");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed spell filter, got {filter:?}");
+    };
+    let self_targets_filter = tf
+        .properties
+        .iter()
+        .find_map(|prop| match prop {
+            FilterProp::Targets { filter } => Some(filter.as_ref()),
+            _ => None,
+        })
+        .expect("expected outer Targets property");
+    let TargetFilter::And { filters } = self_targets_filter else {
+        panic!("expected stack target conjunction, got {self_targets_filter:?}");
+    };
+    assert!(filters.iter().any(|filter| matches!(
+        filter,
+        TargetFilter::Or { filters }
+            if filters.iter().any(|f| matches!(f, TargetFilter::StackSpell))
+                && filters
+                    .iter()
+                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None }))
+    )));
+    let stack_targets_filter = filters
+        .iter()
+        .find_map(|filter| match filter {
+            TargetFilter::Typed(tf) => tf.properties.iter().find_map(|prop| match prop {
+                FilterProp::Targets { filter } => Some(filter.as_ref()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("expected nested Targets property");
+    let TargetFilter::Typed(creature_tf) = stack_targets_filter else {
+        panic!("expected typed creature target filter, got {stack_targets_filter:?}");
+    };
+    assert!(creature_tf.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(creature_tf.controller, Some(ControllerRef::You));
+    assert!(creature_tf.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: 7 },
+        }
+    )));
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        vec![Zone::Hand, Zone::Stack, Zone::Command]
+    );
+}
+
+#[test]
+fn static_this_spell_cost_less_if_it_targets_stack_object_fails_closed_on_trailing_text() {
+    assert!(
+        parse_static_line(
+            "This spell costs {7} less to cast if it targets a spell or ability that targets a creature you control with power 7 or greater and toughness 7 or greater.",
+        )
+        .is_none(),
+        "unconsumed nested target text must not become an unconditional cost reduction"
     );
 }
 
@@ -4665,7 +4748,7 @@ fn static_during_your_turn_equipped_creatures_you_control_have_double_strike() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Equipment,
                     controller: None,
-                    exclude_source: false,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
                 }]),
         ))
     );
@@ -9440,7 +9523,7 @@ fn creatures_you_control_that_are_enchanted() {
                 [FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
-                    exclude_source: false
+                    exclude_source: crate::types::ability::SourceExclusion::Include
                 }]
             ));
         }
@@ -11145,6 +11228,37 @@ fn parser_shape_arcane_adaptation_chosen_type_applies_to_creatures_you_control()
     }
 }
 
+// CR 607.2d + CR 301.7: Lifecraft Engine grants the chosen creature subtype to
+// Vehicle permanents you control — not the Creature card type. The additive-type
+// fallback must not mis-tokenize "the chosen creature type" as AddType(Creature).
+#[test]
+fn parser_shape_lifecraft_engine_vehicle_chosen_creature_type_static() {
+    let def = parse_static_line(
+        "Vehicle creatures you control are the chosen creature type in addition to their other types.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def.modifications.iter().all(|modification| matches!(
+        modification,
+        ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType
+        }
+    )));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert_eq!(tf.get_subtype(), Some("Vehicle"));
+            assert!(
+                !tf.type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Creature)),
+                "Vehicle scope must not require the Creature card type"
+            );
+        }
+        other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
+}
+
 // CR 613.1d + CR 205.3m: Maskwood Nexus's battlefield static — "Creatures
 // you control are every creature type." — must lower to a Layer 4
 // type-changing effect that adds every creature type (CR 205.3m) to each
@@ -12326,7 +12440,7 @@ fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
-                    exclude_source: false,
+                    exclude_source: crate::types::ability::SourceExclusion::Include,
                 }])
         ))
     );
@@ -14471,11 +14585,9 @@ fn static_selfref_cant_be_blocked_except_by_disjunction_top_level() {
 /// CR 702.29e + CR 113.6b: Homing Sliver's top-level static grants Typecycling
 /// to all Sliver cards in their owner's hand. This asserts the PARSE is correct
 /// (affected = Typed(Subtype:Sliver) in the Hand zone; modification =
-/// AddKeyword(Typecycling { cost {3}, subtype "Sliver" })). NOTE: a deferred
-/// RUNTIME gap remains — `synthesize_cycling` reads intrinsic printed keywords
-/// only, so a Typecycling keyword GRANTED at runtime is on the recipient's
-/// keyword set but is not synthesized into an activatable ability. See the
-/// doc comment at `database/synthesis.rs::synthesize_cycling`.
+/// AddKeyword(Typecycling { cost {3}, subtype "Sliver" })). Runtime-granted
+/// cycling abilities are surfaced by `game::casting` from the effective
+/// off-zone keyword set.
 #[test]
 fn static_homing_sliver_grants_typecycling_to_slivers_in_hand() {
     // Real Oracle text. The "Each <type> in each player's hand has <keyword>"
@@ -14529,7 +14641,7 @@ fn eriette_charmed_apple_static_and_trigger_parse() {
             vec![FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
-                exclude_source: false,
+                exclude_source: crate::types::ability::SourceExclusion::Include,
             }]
         ))),
         "affected must be creatures enchanted by an Aura you control, got {:?}",

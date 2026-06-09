@@ -1482,6 +1482,60 @@ mod tests {
         );
     }
 
+    // CR 707.9a: Activated-ability "except it has this ability" (Thespian's
+    // Stage class) retains the source's printed activated ability on the copy.
+    #[test]
+    fn become_copy_retains_printed_ability_from_source() {
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Urza's Saga", 2, 2);
+        state.objects.get_mut(&target).unwrap().base_keywords = vec![Keyword::Trample];
+
+        let source = create_creature(&mut state, 2, PlayerId(0), "Thespian's Stage", 0, 0);
+        let copy_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![],
+            },
+        )
+        .cost(AbilityCost::Tap);
+        state.objects.get_mut(&source).unwrap().base_abilities =
+            Arc::new(vec![copy_ability.clone()]);
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::RetainPrintedAbilityFromSource {
+                        source_ability_index: 0,
+                    },
+                ],
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let copied = state.objects.get(&source).unwrap();
+        assert!(
+            copied.abilities.iter().any(|a| a == &copy_ability),
+            "retained activated copy ability must survive Layer 1; got {:?}",
+            copied.abilities
+        );
+    }
+
     // ── Reset regression: abilities revert when copy ends ─────────────────
     #[test]
     fn abilities_revert_to_empty_when_copy_expires() {

@@ -54,7 +54,7 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
             return Some(AdditionalCost::Optional {
                 cost,
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
         }
     }
@@ -646,8 +646,9 @@ fn scan_timing_restrictions(text: &str) -> Vec<CastingRestriction> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        BeholdCostAction, Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        AdditionalCostRepeatability, BeholdCostAction, CardSelectionMode, Comparator,
+        ControllerRef, FilterProp, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter,
     };
     use crate::types::mana::ManaCost;
     use crate::types::zones::Zone;
@@ -856,7 +857,7 @@ mod tests {
             result,
             Some(AdditionalCost::Optional {
                 cost: AbilityCost::Blight { count: 1 },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             })
         );
     }
@@ -870,7 +871,7 @@ mod tests {
             result,
             Some(AdditionalCost::Optional {
                 cost: AbilityCost::Blight { count: 2 },
-                repeatable: false,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             })
         );
     }
@@ -890,7 +891,7 @@ mod tests {
                         filter: TargetFilter::Typed(filter),
                         action: BeholdCostAction::ChooseOrReveal,
                     },
-                repeatable: false,
+                repeatability: AdditionalCostRepeatability::Once,
             }) => {
                 assert!(filter
                     .type_filters
@@ -1027,7 +1028,7 @@ mod tests {
             Some(AdditionalCost::Choice(
                 AbilityCost::Discard {
                     count: QuantityExpr::Fixed { value: 1 },
-                    random: false,
+                    selection: CardSelectionMode::Chosen,
                     ..
                 },
                 AbilityCost::PayLife {
@@ -1134,7 +1135,7 @@ mod tests {
         match result {
             Some(AdditionalCost::Optional {
                 cost: AbilityCost::Sacrifice { count: 1, .. },
-                repeatable: false,
+                repeatability: AdditionalCostRepeatability::Once,
             }) => {}
             other => panic!("Expected Optional(Sacrifice), got {:?}", other),
         }
@@ -1153,7 +1154,7 @@ mod tests {
                     AbilityCost::Sacrifice {
                         count: u32::MAX, ..
                     },
-                repeatable: false,
+                repeatability: AdditionalCostRepeatability::Once,
             }) => {}
             other => panic!("Expected Optional(Sacrifice any number), got {:?}", other),
         }

@@ -694,7 +694,7 @@ pub fn convert_replace_would_put_into_graveyard(
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
@@ -939,7 +939,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
@@ -1629,9 +1629,8 @@ fn build_replacement_exec(
                 needed_variant: format!("ETB counter-action shape ({})", variant_tag(act)),
             });
         }
-        // CR 614.12: Untapped-instead replacement — needs an engine
-        // "force-untapped" override since `enter_tapped: false` is the
-        // default (no replacement fires for the default).
+        // CR 614.12: Untapped-instead replacement needs an explicit
+        // force-untapped override, distinct from the default/no-modifier state.
         A::EntersUntapped => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "ReplacementDefinition",

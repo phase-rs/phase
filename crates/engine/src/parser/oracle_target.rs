@@ -20,7 +20,9 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
-use super::oracle_effect::{is_bare_object_pronoun, resolve_it_pronoun};
+use super::oracle_effect::{
+    is_bare_object_pronoun, parse_multi_target_count_expr, resolve_it_pronoun,
+};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::OracleError;
@@ -1039,6 +1041,25 @@ pub fn parse_target_with_syntax<'a>(
                 syntax,
             );
         }
+    }
+
+    // CR 601.2c: "each of <count> target <type>" is an exact-count multi-target
+    // distribution (handled upstream by the counter.rs strip), NOT an all-matching
+    // "each" filter. For any non-counter effect that reaches here, route the type
+    // through "target" parsing rather than the bare "each " path below — which
+    // would call `parse_type_phrase_with_ctx("of <count> target <type>")` and
+    // degenerate to an all-matching TypedFilter.
+    if let Ok((rest_lower, ())) = (|i| {
+        let (i, ()) = value((), tag::<_, _, OracleError<'_>>("each of ")).parse(i)?;
+        let (i, _count) = parse_multi_target_count_expr(i)?;
+        let (i, ()) = value((), space1).parse(i)?;
+        let (i, _) = peek(tag::<_, _, OracleError<'_>>("target")).parse(i)?;
+        Ok::<_, nom::Err<OracleError<'_>>>((i, ()))
+    })(lower.as_str())
+    {
+        let tail = &text[lower.len() - rest_lower.len()..];
+        let (filter, rest) = parse_target_with_ctx(tail, ctx);
+        return (filter, rest, syntax);
     }
 
     // "each " + type phrase
@@ -4193,7 +4214,7 @@ pub(crate) fn attachment_kinds_filter_prop(
         [kind] => FilterProp::HasAttachment {
             kind: kind.clone(),
             controller,
-            exclude_source: false,
+            exclude_source: crate::types::ability::SourceExclusion::Include,
         },
         _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
     }
@@ -7491,6 +7512,17 @@ mod tests {
                 id: TrackedSetId(0)
             }
         ));
+        assert_eq!(rest, "");
+    }
+
+    /// CR 601.2c: "each of <count> target <type>" must route through "target"
+    /// parsing (a concrete creature filter), NOT degenerate to the bare "each "
+    /// all-matching path. This guard is the safety net for any non-counter
+    /// effect that reaches `parse_target` with the exact-count form.
+    #[test]
+    fn each_of_count_target_creatures_routes_to_target_filter() {
+        let (filter, rest) = parse_target("each of two target creatures");
+        assert_eq!(filter, TargetFilter::Typed(TypedFilter::creature()));
         assert_eq!(rest, "");
     }
 

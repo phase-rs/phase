@@ -1706,6 +1706,7 @@ mod tests {
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            chosen_counter_count: None,
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
@@ -1983,6 +1984,8 @@ mod tests {
                     player: PlayerId(0),
                     kind: PayCostKind::RemoveCounter {
                         counter_type: CounterMatch::Any,
+                        count: 1,
+                        selection: engine::types::ability::CounterCostSelection::SingleObject,
                     },
                     choices: vec![ObjectId(29)],
                     count: 1,

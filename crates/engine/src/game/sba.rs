@@ -1615,7 +1615,7 @@ mod tests {
                 TypedFilter::creature().properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
-                    exclude_source: true,
+                    exclude_source: crate::types::ability::SourceExclusion::Exclude,
                 }]),
             )));
             aura.attached_to = Some(host.into());
@@ -1775,7 +1775,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Black,
             source_id: crate::types::identifiers::ObjectId(0),
-            snow: false,
+            supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
             grants: vec![],

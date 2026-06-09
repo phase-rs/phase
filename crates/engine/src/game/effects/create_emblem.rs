@@ -1,3 +1,4 @@
+use crate::game::game_object::EmblemSource;
 use crate::game::zones::create_object;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
@@ -20,6 +21,19 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("CreateEmblem".into())),
     };
 
+    // CR 114: Capture display-only provenance from the ability's source (the
+    // planeswalker/spell that created the emblem) BEFORE borrowing the emblem
+    // mutably. The client renders the emblem as a chip bearing the source's art
+    // crop + name; an emblem has no art of its own (CR 114.5). Read here while
+    // the source still exists on the stack/battlefield — it may leave later.
+    let emblem_source = state
+        .objects
+        .get(&ability.source_id)
+        .map(|src| EmblemSource {
+            name: src.name.clone(),
+            printed_ref: src.printed_ref.clone(),
+        });
+
     // CR 114.1: Create emblem in command zone owned by the ability's controller
     let emblem_id = create_object(
         state,
@@ -35,6 +49,7 @@ pub fn resolve(
     // to admit command-zone objects, so the first trigger/static scan after
     // creation sees the emblem's abilities.
     obj.is_emblem = true;
+    obj.emblem_source = emblem_source;
     obj.static_definitions = statics.clone().into();
     obj.base_static_definitions = Arc::new(statics.clone());
     // CR 113.1c + CR 114.4: Install triggered abilities on the emblem so
@@ -116,6 +131,52 @@ mod tests {
     }
 
     #[test]
+    fn create_emblem_captures_source_provenance() {
+        // CR 114: the emblem records its source's display name + printed_ref so
+        // the client can render the source's art crop as a chip. The emblem has
+        // no art of its own (CR 114.5), so this provenance is the only handle
+        // the display layer has on "where it came from".
+        use crate::types::card::PrintedCardRef;
+        let mut state = GameState::new_two_player(42);
+
+        // A planeswalker-style source on the battlefield with a printed ref.
+        let source_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Jace, the Mind Sculptor".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_id).unwrap().printed_ref = Some(PrintedCardRef {
+            oracle_id: "jace-oracle".to_string(),
+            face_name: "Jace, the Mind Sculptor".to_string(),
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateEmblem {
+                statics: vec![ninja_pump_static()],
+                triggers: Vec::new(),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let emblem = state.objects.get(&state.command_zone[0]).unwrap();
+        let provenance = emblem
+            .emblem_source
+            .as_ref()
+            .expect("emblem records source provenance");
+        assert_eq!(provenance.name, "Jace, the Mind Sculptor");
+        assert_eq!(
+            provenance.printed_ref.as_ref().unwrap().oracle_id,
+            "jace-oracle"
+        );
+    }
+
+    #[test]
     fn create_emblem_marks_layers_dirty() {
         let mut state = GameState::new_two_player(42);
         state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
@@ -186,7 +247,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],

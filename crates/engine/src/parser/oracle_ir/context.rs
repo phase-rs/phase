@@ -20,6 +20,10 @@ pub(crate) struct ParseContext {
     /// CR 707.9a + CR 603.1: Index of the printed trigger whose body is being
     /// parsed. Consumed by BecomeCopy "has this ability" arm.
     pub current_trigger_index: Option<usize>,
+    /// CR 707.9a + CR 602.1: Index of the printed activated ability whose
+    /// effect is being parsed. Consumed by BecomeCopy "has this ability" arm
+    /// inside activated abilities (Thespian's Stage, Cytoshape, …).
+    pub current_ability_index: Option<usize>,
     /// CR 701.21a + CR 608.2k: The actor performing the effect ("you", "an opponent").
     pub actor: Option<ControllerRef>,
     /// Resolved quantity reference ("that many", "that much").

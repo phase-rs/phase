@@ -38,7 +38,8 @@ expression: "&lowered"
           "type": "OfType",
           "data": "P1P1"
         },
-        "target": null
+        "target": null,
+        "selection": "SingleObject"
       },
       "sub_ability": null,
       "duration": null,

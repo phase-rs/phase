@@ -214,7 +214,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                         ..
                                     } => {
                                         *enters_attacking = true;
-                                        *enter_tapped = true;
+                                        *enter_tapped = crate::types::zones::EtbTapState::Tapped;
                                     }
                                     _ => {}
                                 }
@@ -243,7 +243,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                             ..
                                         } => {
                                             *enters_attacking = false;
-                                            *enter_tapped = false;
+                                            *enter_tapped =
+                                                crate::types::zones::EtbTapState::Unspecified;
                                         }
                                         _ => {}
                                     }

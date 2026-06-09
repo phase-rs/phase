@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
-    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterMoveChoice,
-    ShardChoice,
+    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterCostChoice,
+    CounterMoveChoice, ShardChoice,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -206,6 +206,11 @@ pub enum GameAction {
     SelectCards {
         cards: Vec<ObjectId>,
     },
+    /// CR 118.3 + CR 122.1: Choose exactly how many counters each selected
+    /// object contributes to a remove-counter cost that says "from among".
+    ChooseRemoveCounterCostDistribution {
+        distribution: Vec<CounterCostChoice>,
+    },
     /// CR 705.1: Krark's Thumb keep-choice — indices into `results` the player
     /// keeps (ignoring the rest, CR 614.1a). Length must equal `keep_count`.
     SelectCoinFlips {
@@ -281,6 +286,12 @@ pub enum GameAction {
     },
     ChooseOption {
         choice: String,
+    },
+    /// Alchemy spellbook draft: the player's chosen card name in response to
+    /// `WaitingFor::SpellbookDraft`. The named card is conjured into the
+    /// pending destination.
+    SubmitSpellbookDraft {
+        card: String,
     },
     /// CR 700.3 + CR 700.3a: Submit one pile (pile A) of a
     /// `SeparateIntoPiles` partition. Pile B is derived by the engine as
@@ -1267,6 +1278,7 @@ impl GameAction {
             | GameAction::MulliganDecision { .. }
             | GameAction::ReorderHand { .. }
             | GameAction::SelectCards { .. }
+            | GameAction::ChooseRemoveCounterCostDistribution { .. }
             | GameAction::SelectCoinFlips { .. }
             | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
@@ -1277,6 +1289,7 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::SubmitSpellbookDraft { .. }
             | GameAction::SubmitPilePartition { .. }
             | GameAction::ChoosePile { .. }
             | GameAction::ChooseBranch { .. }

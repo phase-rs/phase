@@ -1892,7 +1892,7 @@ pub(super) fn apply_clause_continuation(
                     owner_library: false,
                     enter_transformed: false,
                     enters_under: None,
-                    enter_tapped,
+                    enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
@@ -2174,7 +2174,7 @@ pub(super) fn apply_clause_continuation(
                                     filter: Box::new(card_filter),
                                 },
                                 enters_under,
-                                enter_tapped: false,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                                 face_down_profile,
                             },
                         ));
@@ -2202,7 +2202,7 @@ pub(super) fn apply_clause_continuation(
                                 owner_library: false,
                                 enter_transformed: false,
                                 enters_under,
-                                enter_tapped: false,
+                                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                                 enters_attacking: false,
                                 up_to: is_up_to,
                                 enter_with_counters: vec![],
@@ -2320,7 +2320,7 @@ pub(super) fn apply_clause_continuation(
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: false,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
@@ -2336,7 +2336,7 @@ pub(super) fn apply_clause_continuation(
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: false,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
@@ -2425,7 +2425,7 @@ pub(super) fn apply_clause_continuation(
                     ..
                 } => {
                     *enters_attacking = true;
-                    *enter_tapped = true;
+                    *enter_tapped = crate::types::zones::EtbTapState::Tapped;
                 }
                 _ => {}
             }
@@ -2473,7 +2473,7 @@ pub(super) fn apply_clause_continuation(
                     Some(decline) => {
                         *kept_optional_to = Some(destination);
                         *kept_destination = decline;
-                        *enter_tapped = tapped;
+                        *enter_tapped = crate::types::zones::EtbTapState::from_legacy_bool(tapped);
                         // CR 508.4: accept zone is the battlefield here.
                         *enters_attacking = attacking;
                     }
@@ -2484,7 +2484,8 @@ pub(super) fn apply_clause_continuation(
                     None => {
                         *kept_destination = destination;
                         if destination == Zone::Battlefield {
-                            *enter_tapped = tapped;
+                            *enter_tapped =
+                                crate::types::zones::EtbTapState::from_legacy_bool(tapped);
                             // CR 508.4: "put that card onto the battlefield
                             // tapped and attacking" (Raph & Mikey, Fireflux Squad).
                             *enters_attacking = attacking;
@@ -2584,7 +2585,8 @@ fn apply_search_destination_to_ability_chain(
         } = &mut *sub_ability.effect
         {
             *existing_destination = destination;
-            *existing_enter_tapped = enter_tapped;
+            *existing_enter_tapped =
+                crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
         }
         cursor = sub_ability.sub_ability.as_deref_mut();
     }
@@ -3461,6 +3463,8 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
         // CR 614.12 + CR 303.4: Return-as-Aura is its own emitted sub-effect
         // following a `ChangeZone`; it is not a lookback-transparent clause
@@ -5045,7 +5049,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Player,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },

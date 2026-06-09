@@ -264,6 +264,7 @@
     "grantsProperty": "Accorde une propriété au sort"
   },
   "zone": {
+    "commandZone": "Zone de commandement",
     "emblem": "Emblème",
     "emblemFallback": "Emblème",
     "commander": "Commandant",
@@ -321,7 +322,8 @@
     "chooseAmountAria": "Choisir la quantité à payer",
     "payAmount": "Payer {{value}} {{resource}}",
     "resourceEnergy": "énergie",
-    "resourceMana": "mana"
+    "resourceMana": "mana",
+    "resourceCounters": "marqueurs"
   },
   "hand": {
     "viewFullHand_one": "Voir la main complète ({{count}} carte)",

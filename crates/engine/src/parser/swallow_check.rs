@@ -292,6 +292,51 @@ fn detect_optional_you_may(
     if parsed_has_conditional_modal_max(parsed) {
         return;
     }
+    // CR 702.160a: Prototype keyword explanation "(You may cast this spell with
+    // different mana cost, color, and size. It keeps its abilities and types.)"
+    // is keyword reminder text, not an optional effect.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may cast this spell with different mana cost") {
+        // allow-noncombinator: swallow detector marker scan on classified text
+        return;
+    }
+    // CR 305.2: "you may play additional lands" is encoded as
+    // `StaticMode::MayPlayAdditionalLand`, which is an optional permission
+    // static, not a def-level optional effect.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may play") // allow-noncombinator: swallow detector marker scan on classified text
+        && cleaned.contains("additional land")
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
+        return;
+    }
+    // CR 614.1c: "you may reveal" in ETB replacement effects (e.g., Arsenal
+    // Thresher) is part of the replacement condition, not a separate optional
+    // effect. The reveal choice is captured in the replacement logic.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("you may reveal") // allow-noncombinator: swallow detector marker scan on classified text
+        && (cleaned.contains("as this creature enters") // allow-noncombinator: swallow detector marker scan on classified text
+            || cleaned.contains("as this permanent enters"))
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
+        return;
+    }
+    // Die roll result branches (e.g., "1—9 | You may put that card on top of
+    // your library") are conditional effects gated by the die result, not
+    // standalone optional effects. The optionality is conditional on the roll.
+    // Gate on die-roll pattern (N—N |) to avoid over-broad exemption for other pipe uses.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("— | you may")
+    // allow-noncombinator: swallow detector marker scan on classified text
+    {
+        return;
+    }
+    // CR 611.3: Static abilities that grant triggers with optional effects
+    // (e.g., Arm with Aether granting "you may return target creature")
+    // carry the optionality in the granted trigger, not at the grant site.
+    if any_static_has_granted_trigger_with_optional(parsed) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "Optional_YouMay".into(),
         description: truncate(original, 140).into(),
@@ -431,22 +476,27 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // Veil's "you may activate one of its loyalty abilities once this turn"
         // is the permission itself; the player still decides each activation.
         | Effect::GrantExtraLoyaltyActivations { .. } => true,
-        // CR 117.3a + CR 601.3b + CR 702.8a: a `GenericEffect` that grants a
-        // casting permission carries the "you may cast … as though …" opt-in
-        // inside the granted static, exactly like `GrantCastingPermission` /
-        // `CastFromZone` above. Teferi, Time Raveler's [+1] ("you may cast
-        // sorcery spells as though they had flash") lowers to a `GenericEffect`
-        // whose static grants `StaticMode::CastWithKeyword { Flash }` (directly,
-        // or via `GrantStaticAbility`), so the "may" is the permission itself —
-        // no def-level `optional` flag is needed.
+        // CR 601.3b + CR 702.8a + CR 609.4: a `GenericEffect` whose statics
+        // encode a "you may" opt-in accounts for the marker in two ways:
         //
-        // NARROW BY DESIGN: only casting-permission modes count here. A
-        // `GenericEffect` granting an unrelated static (CantGainLife, +1/+1,
-        // etc.) does NOT carry a "you may" and must remain subject to the
-        // Optional_YouMay detector.
+        //   1. Casting-permission modes (`StaticMode::CastWithKeyword`, etc.):
+        //      detected by `static_mode_is_optional_permission` (via
+        //      `static_definition_has_optional`).
+        //
+        //   2. Optional modification grants (`ContinuousModification::
+        //      AssignDamageAsThoughUnblocked`, `GrantStaticAbility` recursion, etc.):
+        //      detected by `static_carries_optional_modification` (via
+        //      `static_definition_has_optional`). Garruk, Savage Herald's [-7]
+        //      ("Until end of turn, creatures you control gain 'You may have this
+        //      creature assign its combat damage as though it weren't blocked.'")
+        //      is the motivating case — CR 510.1c + CR 609.4.
+        //
+        // STILL NARROW: `static_definition_has_optional` only exempts permission
+        // modes and optional modifications — statics that are neither (CantGainLife,
+        // +1/+1, MustAttack, etc.) remain subject to Optional_YouMay detection.
         Effect::GenericEffect {
             static_abilities, ..
-        } => static_abilities.iter().any(static_grants_cast_permission),
+        } => static_abilities.iter().any(static_definition_has_optional),
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
         Effect::CreateEmblem { statics, triggers } => {
@@ -455,28 +505,6 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         }
         _ => false,
     }
-}
-
-/// CR 117.3a + CR 601.3b + CR 702.8a: True when a `StaticDefinition` IS (or,
-/// via `GrantStaticAbility`, grants) a casting-permission static of the
-/// "cast as though it had <keyword>" family (`StaticMode::CastWithKeyword`).
-/// Such permissions inherently encode the "you may cast" opt-in, so a
-/// `GenericEffect` carrying one accounts for the "you may " marker without a
-/// def-level `optional` flag (Teferi, Time Raveler's flash grant).
-///
-/// Deliberately narrow: only `CastWithKeyword` permission modes match. This
-/// must NOT exempt grants of unrelated modes (CantGainLife, AddPower, etc.),
-/// or it would suppress legitimate Optional_YouMay detection elsewhere.
-fn static_grants_cast_permission(s: &StaticDefinition) -> bool {
-    if matches!(s.mode, StaticMode::CastWithKeyword { .. }) {
-        return true;
-    }
-    s.modifications.iter().any(|m| match m {
-        ContinuousModification::GrantStaticAbility { definition } => {
-            matches!(definition.mode, StaticMode::CastWithKeyword { .. })
-        }
-        _ => false,
-    })
 }
 
 /// Recursive walk: does any def in the tree carry an `AddTargetReplacement`
@@ -517,6 +545,12 @@ fn static_carries_optional_modification(s: &StaticDefinition) -> bool {
         ContinuousModification::AssignDamageAsThoughUnblocked => true,
         ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_optional(trigger),
         ContinuousModification::GrantAbility { definition } => def_tree_has_optional(definition),
+        // CR 113.3d + CR 613.1f: GrantStaticAbility conveys a static as if printed on the
+        // recipient (CR 113.3d: static abilities are simply true; CR 613.1f: layer 6).
+        // Recurse into the granted static definition to detect optional markers it may carry.
+        ContinuousModification::GrantStaticAbility { definition } => {
+            static_definition_has_optional(definition)
+        }
         _ => false,
     })
 }
@@ -561,11 +595,30 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // CR 601.2f: Defiler-style cost reductions encode the optional
             // life payment inside the static cost-modification primitive.
             | StaticMode::DefilerCostReduction { .. }
+            // CR 609.4b: "You may spend mana as though it were mana of any color" —
+            // opt-in mana-color substitution, inherently optional by the "you may" surface.
+            | StaticMode::SpendManaAsAnyColor
+            // CR 602.5a + CR 702.10c: "You may activate abilities of X as though those
+            // creatures had haste" — lifts the summoning-sickness gate on {T}/{Q}
+            // activated abilities; the permission is opt-in by the "you may" surface.
+            | StaticMode::CanActivateAbilitiesAsThoughHaste
     )
 }
 
 fn static_definition_has_optional(s: &StaticDefinition) -> bool {
     static_carries_optional_modification(s) || static_mode_is_optional_permission(&s.mode)
+}
+
+/// Check if any static ability in the parsed abilities grants a trigger
+/// that has internal optionality (e.g., Arm with Aether granting a trigger
+/// with "you may return target creature").
+fn any_static_has_granted_trigger_with_optional(parsed: &ParsedAbilities) -> bool {
+    parsed.statics.iter().any(|s| {
+        s.modifications.iter().any(|m| match m {
+            ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_optional(trigger),
+            _ => false,
+        })
+    })
 }
 
 /// Recursive walk: does any def in the tree carry an `Effect::Unimplemented`?
@@ -601,6 +654,12 @@ fn static_definition_has_unimplemented(s: &StaticDefinition) -> bool {
         ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_unimplemented(trigger),
         ContinuousModification::GrantAbility { definition } => {
             def_tree_has_unimplemented(definition)
+        }
+        // CR 113.3d + CR 613.1f: Parallel to static_carries_optional_modification —
+        // recurse into GrantStaticAbility so an Unimplemented-carrying granted static
+        // suppresses swallow detectors rather than double-reporting the parse gap.
+        ContinuousModification::GrantStaticAbility { definition } => {
+            static_definition_has_unimplemented(definition)
         }
         _ => false,
     })
@@ -2565,6 +2624,164 @@ mod tests {
                 .any(def_tree_grants_cast_with_keyword),
             "expected Teferi [+1] to lower to a GenericEffect granting \
              CastWithKeyword, parsed abilities: {:#?}",
+            parsed.abilities
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_spend_mana_as_any_color_static() {
+        // CR 609.4b: "You may spend mana as though it were mana of any color."
+        // Must not produce an Optional_YouMay warning.
+        let parsed = parse(
+            "You may spend mana as though it were mana of any color.",
+            &["Artifact"],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::SpendManaAsAnyColor)),
+            "expected SpendManaAsAnyColor static to parse, got statics: {:#?}",
+            parsed.statics
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_activate_abilities_as_though_haste_static() {
+        // CR 602.5a + CR 702.10c: "You may activate abilities of creatures you
+        // control as though those creatures had haste."
+        let parsed = parse(
+            "You may activate abilities of creatures you control as though those creatures had haste.",
+            &["Creature"],
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::CanActivateAbilitiesAsThoughHaste)),
+            "expected CanActivateAbilitiesAsThoughHaste static to parse, got statics: {:#?}",
+            parsed.statics
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn static_carries_optional_modification_recurses_into_grant_static_ability() {
+        // CR 113.3d + CR 613.1f: GrantStaticAbility wrapping an optional modification
+        // must be detected by static_carries_optional_modification via recursion.
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+
+        let inner_def = Box::new(
+            StaticDefinition::continuous()
+                .modifications(vec![ContinuousModification::AssignDamageAsThoughUnblocked]),
+        );
+        let outer_static = StaticDefinition::continuous().modifications(vec![
+            ContinuousModification::GrantStaticAbility {
+                definition: inner_def,
+            },
+        ]);
+        assert!(
+            super::static_carries_optional_modification(&outer_static),
+            "static_carries_optional_modification must recurse into GrantStaticAbility"
+        );
+    }
+
+    #[test]
+    fn optional_you_may_accepts_chromatic_orrery_real_oracle_text() {
+        // Regression test against actual Chromatic Orrery oracle text.
+        // SpendManaAsAnyColor static must suppress Optional_YouMay.
+        let parsed = parse(
+            "You may spend mana as though it were mana of any color.\n\
+             {T}: Add {C}{C}{C}{C}{C}.\n\
+             {5}, {T}: Draw a card for each color among permanents you control.",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_thousand_year_elixir_real_oracle_text() {
+        // Regression test against actual Thousand-Year Elixir oracle text.
+        // CanActivateAbilitiesAsThoughHaste static must suppress Optional_YouMay.
+        let parsed = parse(
+            "You may activate abilities of creatures you control as though those creatures had haste.\n\
+             {1}, {T}: Untap target creature.",
+            &["Artifact"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_proud_wildbonder_real_oracle_text() {
+        // Regression test against actual Proud Wildbonder oracle text.
+        // "Creatures you control with trample have '...' " is a top-level static
+        // (exercises the parsed.statics path at swallow_check.rs line ~980), not the
+        // Effect::GenericEffect arm. AssignDamageAsThoughUnblocked must suppress
+        // Optional_YouMay via static_carries_optional_modification.
+        let parsed = parse(
+            "Trample\n\
+             Creatures you control with trample have \
+             \"You may have this creature assign its combat damage as though it weren't blocked.\"",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_garruk_savage_herald_minus_seven() {
+        // CR 510.1c + CR 609.4: Garruk, Savage Herald's [-7] ("Until end of
+        // turn, creatures you control gain \"You may have this creature assign
+        // its combat damage as though it weren't blocked.\"") lowers to a
+        // loyalty AbilityDefinition with Effect::GenericEffect whose static
+        // carries AssignDamageAsThoughUnblocked (directly or via GrantStaticAbility).
+        // static_definition_has_optional must recognise this via
+        // static_carries_optional_modification so Optional_YouMay does not fire.
+        let parsed = parse_named(
+            "[+1]: Reveal the top card of your library. If it's a creature card, put it into your hand. Otherwise, put it on the bottom of your library.\n\
+             [\u{2212}2]: Target creature you control deals damage equal to its power to another target creature.\n\
+             [\u{2212}7]: Until end of turn, creatures you control gain \
+             \"You may have this creature assign its combat damage as though it weren't blocked.\"",
+            "Garruk, Savage Herald",
+            &["Planeswalker"],
+        );
+        // Structural guard: the [-7] must lower to a GenericEffect carrying
+        // AssignDamageAsThoughUnblocked (directly or via GrantStaticAbility).
+        // Without this, the negative assertion below could pass vacuously if
+        // the [-7] regresses to Unimplemented (any_ability_has_unimplemented
+        // early-returns from check_swallowed_clauses, masking the gap).
+        use crate::types::ability::ContinuousModification;
+        fn ability_grants_assign_damage_unblocked(def: &AbilityDefinition) -> bool {
+            if let Effect::GenericEffect {
+                ref static_abilities,
+                ..
+            } = *def.effect
+            {
+                if static_abilities.iter().any(|s| {
+                    s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AssignDamageAsThoughUnblocked
+                                | ContinuousModification::GrantStaticAbility { .. }
+                        )
+                    })
+                }) {
+                    return true;
+                }
+            }
+            def.sub_ability
+                .as_deref()
+                .is_some_and(ability_grants_assign_damage_unblocked)
+        }
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(ability_grants_assign_damage_unblocked),
+            "expected Garruk [-7] to lower to GenericEffect with \
+             AssignDamageAsThoughUnblocked/GrantStaticAbility static, \
+             abilities: {:#?}",
             parsed.abilities
         );
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));

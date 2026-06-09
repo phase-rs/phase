@@ -154,6 +154,7 @@ pub enum KeywordKind {
     Protection,
     Kicker,
     Cycling,
+    Typecycling,
     Flashback,
     Retrace,
     Ward,
@@ -459,6 +460,9 @@ pub enum Keyword {
     Infect,
     /// CR 702.130a: "Afflict N" — when blocked, defending player loses N life.
     Afflict(u32),
+    /// Digital-only Alchemy (no CR entry): "Starting intensity N" — the card's
+    /// initial intensity value, stamped onto the object at creation.
+    StartingIntensity(u32),
 
     // Triggered abilities
     Prowess,
@@ -857,7 +861,7 @@ pub enum Keyword {
     Station,
 
     /// RUNTIME: `database::synthesis::synthesize_replicate` — repeatable
-    /// optional additional cost (`AdditionalCost::Optional { repeatable: true }`)
+    /// optional additional cost (`AdditionalCost::Optional { repeatability: Repeatable }`)
     /// plus a `SpellCast` trigger whose execute is
     /// `replicate_copy_ability_definition()` (a `CopySpell` with
     /// `repeat_for = AdditionalCostPaymentCount`).
@@ -990,6 +994,7 @@ impl Keyword {
             Keyword::Wither => KeywordKind::Wither,
             Keyword::Infect => KeywordKind::Infect,
             Keyword::Afflict(_) => KeywordKind::Afflict,
+            Keyword::StartingIntensity(_) => KeywordKind::Unknown,
             Keyword::Prowess => KeywordKind::Prowess,
             Keyword::Undying => KeywordKind::Undying,
             Keyword::Persist => KeywordKind::Persist,
@@ -1039,6 +1044,7 @@ impl Keyword {
             Keyword::Protection(_) => KeywordKind::Protection,
             Keyword::Kicker(_) => KeywordKind::Kicker,
             Keyword::Cycling(_) => KeywordKind::Cycling,
+            Keyword::Typecycling { .. } => KeywordKind::Typecycling,
             Keyword::Flashback(_) => KeywordKind::Flashback,
             Keyword::Retrace => KeywordKind::Retrace,
             Keyword::Ward(_) => KeywordKind::Ward,
@@ -1170,7 +1176,6 @@ impl Keyword {
             | Keyword::Surge(_)
             | Keyword::Totem
             | Keyword::Toxic(_)
-            | Keyword::Typecycling { .. }
             | Keyword::WebSlinging(_) => KeywordKind::Unknown,
         }
     }
@@ -2322,6 +2327,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Wither" => Ok(Keyword::Wither),
         "Infect" => Ok(Keyword::Infect),
         "Afflict" => Ok(Keyword::Afflict(uint(data).max(1))),
+        "StartingIntensity" => Ok(Keyword::StartingIntensity(uint(data))),
         "Prowess" => Ok(Keyword::Prowess),
         "Undying" => Ok(Keyword::Undying),
         "Persist" => Ok(Keyword::Persist),
@@ -3265,7 +3271,7 @@ mod tests {
     /// CR 303.4 + CR 702.5a: Daybreak Coronet — "Enchant creature with another
     /// Aura attached to it" narrows the legal host set to creatures that already
     /// carry another Aura. The qualifier folds onto the typed filter as
-    /// `FilterProp::HasAttachment { Aura, exclude_source: true }` so SBA
+    /// `FilterProp::HasAttachment { Aura, exclude_source: Exclude }` so SBA
     /// legality cannot let Daybreak Coronet count itself after it resolves.
     #[test]
     fn parse_enchant_creature_with_another_aura_attached() {
@@ -3280,7 +3286,7 @@ mod tests {
             tf.properties.contains(&FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: None,
-                exclude_source: true,
+                exclude_source: crate::types::ability::SourceExclusion::Exclude,
             }),
             "expected FilterProp::HasAttachment {{ Aura, exclude_source }}; got {:?}",
             tf.properties

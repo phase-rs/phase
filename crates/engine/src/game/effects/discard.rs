@@ -61,7 +61,7 @@ pub fn resolve(
             count,
             unless_filter,
             target,
-            random,
+            selection,
             ..
         } => {
             let (inner, up_to) = count.peel_up_to();
@@ -71,7 +71,7 @@ pub fn resolve(
                 up_to,
                 unless_filter.clone(),
                 target.clone(),
-                *random,
+                selection.is_random(),
             )
         }
         _ => (1, false, None, TargetFilter::Any, false),
@@ -334,7 +334,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![(
@@ -429,7 +429,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -611,7 +611,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -653,7 +653,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Any,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -686,7 +686,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -924,7 +924,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -1002,7 +1002,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -1044,7 +1044,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -1094,7 +1094,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -1132,7 +1132,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
                 target: TargetFilter::Any,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },
@@ -1192,7 +1192,7 @@ mod tests {
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                random: false,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
                 unless_filter: None,
                 filter: None,
             },

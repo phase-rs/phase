@@ -22,6 +22,7 @@ pub mod combat;
 pub mod combat_damage;
 pub mod commander;
 pub mod companion;
+pub(crate) mod conditions;
 pub mod cost_payability;
 pub mod coverage;
 pub mod dash;

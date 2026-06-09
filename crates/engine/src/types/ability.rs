@@ -22,7 +22,7 @@ use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
 use super::statics::{ActivationExemption, CastFrequency, StaticMode};
 use super::triggers::TriggerMode;
-use super::zones::Zone;
+use super::zones::{EtbTapState, Zone};
 use crate::game::game_object::DisplaySource;
 use crate::types::events::PlayerActionKind;
 
@@ -142,9 +142,14 @@ pub struct SearchDestinationSplit {
     /// How many of the found cards go to `primary_destination` (literal N from
     /// "put N ..."). Mirrors `Effect::Dig.keep_count`.
     pub primary_count: u32,
-    /// CR 614.1 / CR 110.5b: When true, primary cards enter the battlefield
-    /// tapped. Mirrors `Effect::ChangeZone.enter_tapped`.
-    pub primary_enter_tapped: bool,
+    /// CR 614.1 / CR 110.5b: Primary cards enter the battlefield tapped.
+    /// Mirrors `Effect::ChangeZone.enter_tapped`.
+    #[serde(
+        default,
+        with = "super::zones::etb_tap_bool_compat",
+        skip_serializing_if = "EtbTapState::is_unspecified"
+    )]
+    pub primary_enter_tapped: EtbTapState,
     /// Where the remaining found cards go ("the rest"/"the other" — Hand for
     /// cultivate-class).
     pub rest_destination: Zone,
@@ -2214,8 +2219,12 @@ pub enum FilterProp {
         kind: AttachmentKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
-        #[serde(default, skip_serializing_if = "is_false")]
-        exclude_source: bool,
+        #[serde(
+            default,
+            with = "source_exclusion_bool_compat",
+            skip_serializing_if = "SourceExclusion::is_include"
+        )]
+        exclude_source: SourceExclusion,
     },
     /// CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches objects that
     /// have at least one attachment whose subtype is in `kinds` and whose controller
@@ -2627,6 +2636,185 @@ impl TargetSelectionMode {
     /// preserved exactly.
     pub fn is_chosen(&self) -> bool {
         matches!(self, TargetSelectionMode::Chosen)
+    }
+}
+
+/// CR 701.9a: How cards are selected from a zone during an effect or cost.
+///
+/// Analogous to `TargetSelectionMode` but for cards from a player's hand (or
+/// other non-target zones) rather than spell/ability targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CardSelectionMode {
+    /// CR 608.2d: The affected player or controller chooses the card(s).
+    #[default]
+    Chosen,
+    /// CR 701.9a: The game selects card(s) uniformly at random.
+    Random,
+}
+
+impl CardSelectionMode {
+    pub fn is_chosen(&self) -> bool {
+        matches!(self, Self::Chosen)
+    }
+
+    pub fn is_random(self) -> bool {
+        matches!(self, Self::Random)
+    }
+}
+
+/// Serde adapter for legacy `random: bool` fields in card-data.json.
+pub mod card_selection_bool_compat {
+    use super::CardSelectionMode;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        mode: &CardSelectionMode,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(mode.is_random())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<CardSelectionMode, D::Error> {
+        let random = bool::deserialize(deserializer)?;
+        Ok(if random {
+            CardSelectionMode::Random
+        } else {
+            CardSelectionMode::Chosen
+        })
+    }
+}
+
+/// Whether a discard cost discards the ability source itself or cards from hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DiscardSelfScope {
+    /// Discard from hand per `filter` / `count` (the default).
+    #[default]
+    FromHand,
+    /// Discard the source card itself (Channel's "Discard this card").
+    SourceCard,
+}
+
+impl DiscardSelfScope {
+    pub fn is_from_hand(self) -> bool {
+        matches!(self, Self::FromHand)
+    }
+
+    pub fn is_source_card(self) -> bool {
+        matches!(self, Self::SourceCard)
+    }
+}
+
+/// Serde adapter for legacy `self_ref: bool` on `AbilityCost::Discard`.
+pub mod discard_self_scope_bool_compat {
+    use super::DiscardSelfScope;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        scope: &DiscardSelfScope,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(scope.is_source_card())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<DiscardSelfScope, D::Error> {
+        let self_ref = bool::deserialize(deserializer)?;
+        Ok(if self_ref {
+            DiscardSelfScope::SourceCard
+        } else {
+            DiscardSelfScope::FromHand
+        })
+    }
+}
+
+/// Whether an optional or kicker additional cost may be paid multiple times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AdditionalCostRepeatability {
+    /// Pay at most once (ordinary kicker / optional cost).
+    #[default]
+    Once,
+    /// Pay any number of times (multikicker, replicate).
+    Repeatable,
+}
+
+impl AdditionalCostRepeatability {
+    pub fn is_once(&self) -> bool {
+        matches!(self, Self::Once)
+    }
+
+    pub fn is_repeatable(self) -> bool {
+        matches!(self, Self::Repeatable)
+    }
+}
+
+/// Serde adapter for legacy `repeatable: bool` on `AdditionalCost`.
+pub mod additional_cost_repeatability_bool_compat {
+    use super::AdditionalCostRepeatability;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        repeatability: &AdditionalCostRepeatability,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(repeatability.is_repeatable())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<AdditionalCostRepeatability, D::Error> {
+        let repeatable = bool::deserialize(deserializer)?;
+        Ok(if repeatable {
+            AdditionalCostRepeatability::Repeatable
+        } else {
+            AdditionalCostRepeatability::Once
+        })
+    }
+}
+
+/// Whether a filter predicate includes or excludes the ability source object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SourceExclusion {
+    /// The source object may satisfy the predicate.
+    #[default]
+    Include,
+    /// The source object is excluded ("another Aura/Equipment" semantics).
+    Exclude,
+}
+
+impl SourceExclusion {
+    pub fn is_include(&self) -> bool {
+        matches!(self, Self::Include)
+    }
+
+    pub fn is_exclude(self) -> bool {
+        matches!(self, Self::Exclude)
+    }
+}
+
+/// Serde adapter for legacy `exclude_source: bool` on `FilterProp::HasAttachment`.
+pub mod source_exclusion_bool_compat {
+    use super::SourceExclusion;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        exclusion: &SourceExclusion,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(exclusion.is_exclude())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SourceExclusion, D::Error> {
+        let exclude_source = bool::deserialize(deserializer)?;
+        Ok(if exclude_source {
+            SourceExclusion::Exclude
+        } else {
+            SourceExclusion::Include
+        })
     }
 }
 
@@ -3123,6 +3311,10 @@ pub enum QuantityRef {
     /// `EventContextSourcePower` (CR 608.2k: cost OR trigger-condition
     /// referent).
     Power { scope: ObjectScope },
+    /// Digital-only Alchemy (no CR entry): the current `intensity` of an object,
+    /// scoped via `ObjectScope`. Reads "X is [card]'s intensity" /
+    /// "this spell's intensity" / "equal to its intensity".
+    Intensity { scope: ObjectScope },
     /// CR 208.1 + CR 113.6: Current toughness of an object, scoped via
     /// ObjectScope (Round Π-6). Mirrors `Power`. Replaces the `SelfToughness`
     /// variant. `CostPaidObject` subsumes the former
@@ -4808,6 +5000,41 @@ impl CostObjectCount {
     }
 }
 
+/// Sentinel for literal `X` in remove-counter costs. `AbilityCost::RemoveCounter`
+/// keeps a compact numeric payload for generated data compatibility, so use
+/// these named constants instead of raw `u32::MAX` checks.
+pub const REMOVE_COUNTER_COST_X: u32 = u32::MAX;
+/// Sentinel for "all" remove-counter costs.
+pub const REMOVE_COUNTER_COST_ALL: u32 = u32::MAX - 1;
+/// Sentinel for "any number of" remove-counter costs. This still requires a
+/// count choice, but is distinct from literal `X` for parser/data clarity.
+pub const REMOVE_COUNTER_COST_ANY_NUMBER: u32 = u32::MAX - 2;
+
+pub fn is_x_remove_counter_cost_count(count: u32) -> bool {
+    count == REMOVE_COUNTER_COST_X
+}
+
+pub fn is_chosen_remove_counter_cost_count(count: u32) -> bool {
+    matches!(
+        count,
+        REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER
+    )
+}
+
+pub fn is_variable_remove_counter_cost_count(count: u32) -> bool {
+    matches!(
+        count,
+        REMOVE_COUNTER_COST_X | REMOVE_COUNTER_COST_ANY_NUMBER | REMOVE_COUNTER_COST_ALL
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CounterCostSelection {
+    #[default]
+    SingleObject,
+    AmongObjects,
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -4849,11 +5076,11 @@ pub enum AbilityCost {
         count: QuantityExpr,
         #[serde(default)]
         filter: Option<TargetFilter>,
-        #[serde(default)]
-        random: bool,
-        /// When true, the source card itself is discarded (Channel's "Discard this card").
-        #[serde(default)]
-        self_ref: bool,
+        #[serde(default, with = "card_selection_bool_compat", rename = "random")]
+        selection: CardSelectionMode,
+        /// When `SourceCard`, the source card itself is discarded (Channel's "Discard this card").
+        #[serde(default, with = "discard_self_scope_bool_compat", rename = "self_ref")]
+        self_scope: DiscardSelfScope,
     },
     Exile {
         count: u32,
@@ -4886,15 +5113,16 @@ pub enum AbilityCost {
     /// CR 122.1 + CR 601.2h: Remove `count` counters matching `counter_type`
     /// as an additional cost. `CounterMatch::Any` is the untyped "remove a
     /// counter" form (Loch Mare's `{1}{U}, Remove a counter from ~`); the
-    /// payment path sums across every counter type on the chosen permanent
-    /// and resolves to a concrete kind at payment time. `CounterMatch::OfType`
-    /// is the typed form ("remove a +1/+1 counter", "remove a charge counter"),
-    /// scoped to a single counter kind.
+    /// payment path resolves to one concrete kind at payment time.
+    /// `CounterMatch::OfType` is the typed form ("remove a +1/+1 counter",
+    /// "remove a charge counter"), scoped to a single counter kind.
     RemoveCounter {
         count: u32,
         counter_type: CounterMatch,
         #[serde(default)]
         target: Option<TargetFilter>,
+        #[serde(default)]
+        selection: CounterCostSelection,
     },
     PayEnergy {
         amount: QuantityExpr,
@@ -5048,6 +5276,15 @@ impl AbilityCost {
             // folded by `expand_per_counter` and paid by the `remaining`
             // re-prompt loop in `handle_unless_payment` end-to-end.
             | AbilityCost::Discard { .. } => true,
+            // CR 702.24a: Thought Lash-style "exile the top card of your
+            // library" is payable as a deterministic top-library cost. Other
+            // exile costs still need interactive object selection and stay
+            // outside the cumulative-upkeep support boundary.
+            AbilityCost::Exile {
+                zone: Some(Zone::Library),
+                filter: None,
+                ..
+            } => true,
             // CR 118.12a: OneOf at the base must be a disjunction of mana
             // costs; mixed-shape disjunctions are not yet expanded into a
             // payable per-counter form.
@@ -5150,7 +5387,7 @@ impl AbilityCost {
     ///
     /// `Composite` / `OneOf` recurse and OR over sub-costs, mirroring
     /// `categories()`. Costs that consume *other* permanents/cards
-    /// (`Discard { self_ref: false }`, `Sacrifice`, `Exile`, `Mill`, etc.)
+    /// (`Discard { self_scope: FromHand }`, `Sacrifice`, `Exile`, `Mill`, etc.)
     /// return `false` — they do not destroy the source. (A self-only
     /// `Sacrifice` would also qualify, but no `TargetFilter` self-only
     /// predicate exists today; cycling — issue #506 — is `Discard`-based and
@@ -5158,7 +5395,7 @@ impl AbilityCost {
     pub fn consumes_source(&self) -> bool {
         match self {
             // Cycling, Channel: "Discard this card" as a cost.
-            AbilityCost::Discard { self_ref, .. } => *self_ref,
+            AbilityCost::Discard { self_scope, .. } => self_scope.is_source_card(),
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
                 costs.iter().any(AbilityCost::consumes_source)
             }
@@ -5216,18 +5453,28 @@ pub enum AdditionalCost {
     /// `SpellContext::additional_cost_payment_count`.
     Optional {
         cost: AbilityCost,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        repeatable: bool,
+        #[serde(
+            default,
+            with = "additional_cost_repeatability_bool_compat",
+            skip_serializing_if = "AdditionalCostRepeatability::is_once",
+            rename = "repeatable"
+        )]
+        repeatability: AdditionalCostRepeatability,
     },
     /// CR 702.33a-c + CR 601.2b/f: Kicker costs announced during spell
     /// casting. `costs.len() == 1` is ordinary kicker, `costs.len() == 2`
     /// represents "Kicker [cost 1] and/or [cost 2]" (CR 702.33b), and
-    /// `repeatable == true` represents multikicker (CR 702.33c), where the
+    /// `Repeatable` represents multikicker (CR 702.33c), where the
     /// single listed cost may be paid any number of times.
     Kicker {
         costs: Vec<AbilityCost>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        repeatable: bool,
+        #[serde(
+            default,
+            with = "additional_cost_repeatability_bool_compat",
+            skip_serializing_if = "AdditionalCostRepeatability::is_once",
+            rename = "repeatable"
+        )]
+        repeatability: AdditionalCostRepeatability,
     },
     /// "[cost A] or [cost B]" — player must pay exactly one.
     /// Choosing the first cost sets `additional_cost_paid = true`.
@@ -5358,7 +5605,7 @@ where
 /// - `DynamicGeneric { quantity }` → `ManaDynamic { quantity }`
 /// - `PayLife { amount: i32 }` → `PayLife { amount: QuantityExpr::Fixed { value: amount } }`
 /// - `PayEnergy { amount }` → `PayEnergy { amount }` (identity)
-/// - `DiscardCard { filter }` → `Discard { count: 1, filter, random: false, self_ref: false }`
+/// - `DiscardCard { filter }` → `Discard { count: 1, filter, selection: Chosen, self_scope: FromHand }`
 /// - `Sacrifice { count, filter }` → `Sacrifice { target: filter, count }`
 /// - `ReturnToHand { count, filter, from_zone }` → `ReturnToHand { count, filter: Some(filter), from_zone }`
 pub fn deserialize_ability_cost_compat<'de, D>(d: D) -> Result<AbilityCost, D::Error>
@@ -5427,8 +5674,8 @@ impl LegacyUnlessCost {
             LegacyUnlessCost::DiscardCard { filter } => AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter,
-                random: false,
-                self_ref: false,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
             },
             LegacyUnlessCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
                 target: filter,
@@ -5485,6 +5732,22 @@ pub struct ConjureCard {
     pub name: String,
     #[serde(default = "default_quantity_one")]
     pub count: QuantityExpr,
+}
+
+/// Digital-only Alchemy: which cards an `Effect::Intensify` applies to. Every
+/// scope resolves across ALL zones (a card's intensity follows it everywhere).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum IntensityScope {
+    /// "this creature/artifact/… intensifies" — the source object only.
+    #[default]
+    Source,
+    /// "cards you own named [this card] intensify" — every card the source's
+    /// controller owns with the source's name.
+    OwnedSameName,
+    /// "All [subtype] cards you own intensify" — every card the source's
+    /// controller owns of the given subtype (e.g. "Chorus").
+    OwnedSubtype { subtype: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -5922,10 +6185,10 @@ pub enum Effect {
             deserialize_with = "deserialize_enters_under_compat"
         )]
         enters_under: Option<ControllerRef>,
-        /// CR 614.1: When true, the object enters the battlefield tapped.
+        /// CR 614.1: The object enters the battlefield tapped.
         /// Building block for "put onto the battlefield tapped" effects.
-        #[serde(default)]
-        enter_tapped: bool,
+        #[serde(default, with = "super::zones::etb_tap_bool_compat")]
+        enter_tapped: EtbTapState,
         /// CR 508.4: When true, the object enters the battlefield tapped and attacking.
         /// Not "declared as an attacker" — attack triggers do not fire.
         #[serde(default)]
@@ -5959,10 +6222,13 @@ pub enum Effect {
         /// `None` leaves each object under its default controller.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_under: Option<ControllerRef>,
-        /// CR 110.5b: When true, objects enter the battlefield tapped during
-        /// a mass zone move.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        enter_tapped: bool,
+        /// CR 110.5b: Objects enter the battlefield tapped during a mass zone move.
+        #[serde(
+            default,
+            with = "super::zones::etb_tap_bool_compat",
+            skip_serializing_if = "EtbTapState::is_unspecified"
+        )]
+        enter_tapped: EtbTapState,
         /// CR 708.2a + CR 708.3: when `Some`, each object that enters the
         /// battlefield via this move is turned face down (before entry, CR
         /// 708.3) with these characteristics. `None` = normal face-up entry.
@@ -6525,9 +6791,14 @@ pub enum Effect {
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 701.9a: When true, the discard is random (e.g., "discard a card at random").
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        random: bool,
+        /// CR 701.9a: Random discard (e.g., "discard a card at random").
+        #[serde(
+            default,
+            with = "card_selection_bool_compat",
+            rename = "random",
+            skip_serializing_if = "CardSelectionMode::is_chosen"
+        )]
+        selection: CardSelectionMode,
         /// CR 701.9b + CR 608.2d: "Discard up to N cards" is encoded as
         /// `count: QuantityExpr::UpTo { max: <former count> }`.
         /// CR 608.2c: "discard N cards unless you discard a [type] card" — when set,
@@ -6628,9 +6899,14 @@ pub enum Effect {
         /// None = reveal entire hand. Some = reveal this many cards. CR 701.20a.
         #[serde(default)]
         count: Option<QuantityExpr>,
-        /// CR 701.20a: When true, reveal `count` cards chosen at random from that hand.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        random: bool,
+        /// CR 701.20a: Reveal `count` cards chosen at random from that hand.
+        #[serde(
+            default,
+            with = "card_selection_bool_compat",
+            rename = "random",
+            skip_serializing_if = "CardSelectionMode::is_chosen"
+        )]
+        selection: CardSelectionMode,
         /// CR 608.2d: "You may choose a [card] from it" makes the post-reveal
         /// card selection optional while the hand reveal itself remains mandatory.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -7251,9 +7527,13 @@ pub enum Effect {
         kept_destination: Zone,
         /// Where non-matching revealed cards go (Library bottom or Graveyard).
         rest_destination: Zone,
-        /// CR 110.5b: When true, the matching card enters the battlefield tapped.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        enter_tapped: bool,
+        /// CR 110.5b: The matching card enters the battlefield tapped.
+        #[serde(
+            default,
+            with = "super::zones::etb_tap_bool_compat",
+            skip_serializing_if = "EtbTapState::is_unspecified"
+        )]
+        enter_tapped: EtbTapState,
         /// CR 508.4: When true, a matching card sent to the battlefield enters
         /// attacking (e.g. Raph & Mikey, Fireflux Squad — "put that card onto
         /// the battlefield tapped and attacking"). Its controller's existing
@@ -7555,8 +7835,8 @@ pub enum Effect {
         /// Where the sought card goes. Usually Hand, but some cards put onto Battlefield.
         #[serde(default = "default_zone_hand")]
         destination: Zone,
-        #[serde(default)]
-        enter_tapped: bool,
+        #[serde(default, with = "super::zones::etb_tap_bool_compat")]
+        enter_tapped: EtbTapState,
     },
     /// CR 119.5: Set a player's life total to a specific number.
     /// The player gains or loses the necessary amount of life to reach the target.
@@ -7606,6 +7886,30 @@ pub enum Effect {
     Conjure {
         /// One or more (card_name, count) pairs for multi-card conjure patterns.
         cards: Vec<ConjureCard>,
+        destination: Zone,
+        #[serde(default)]
+        tapped: bool,
+    },
+    /// Digital-only Alchemy keyword action (no CR entry): increase the intensity
+    /// of one or more cards by `amount`. `scope` selects which cards — the source
+    /// itself, every card the controller owns with the source's name, or every
+    /// card the controller owns of a given subtype — across ALL zones, since a
+    /// card's intensity follows it everywhere.
+    Intensify {
+        #[serde(default)]
+        scope: IntensityScope,
+        #[serde(default = "default_quantity_one")]
+        amount: QuantityExpr,
+    },
+    /// Digital-only Alchemy keyword action (no CR entry): "draft a card from
+    /// [this card]'s spellbook" — reveal the source card's fixed spellbook list,
+    /// the controller chooses one card name from it, and that card is conjured
+    /// into `destination` (mirrors `Conjure`, but the controller picks one entry
+    /// from a per-card list). The list is not in the Oracle text; it is carried
+    /// on the source object (`GameObject::spellbook`, from
+    /// `CardFace::metadata.spellbook`), so the resolver reads it from the source.
+    /// An empty list resolves as a no-op.
+    DraftFromSpellbook {
         destination: Zone,
         #[serde(default)]
         tapped: bool,
@@ -8514,6 +8818,8 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::Intensify { .. }
+            | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
             | Effect::Unimplemented { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
@@ -8726,6 +9032,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::Conjure { .. } => "Conjure",
+        Effect::Intensify { .. } => "Intensify",
+        Effect::DraftFromSpellbook { .. } => "DraftFromSpellbook",
         Effect::ChooseOneOf { .. } => "ChooseOneOf",
         Effect::Unimplemented { name, .. } => name,
     }
@@ -8917,6 +9225,8 @@ pub enum EffectKind {
     GiveControl,
     RemoveFromCombat,
     Conjure,
+    Intensify,
+    DraftFromSpellbook,
     ChooseOneOf,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
@@ -9117,6 +9427,8 @@ impl From<&Effect> for EffectKind {
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::Conjure { .. } => EffectKind::Conjure,
+            Effect::Intensify { .. } => EffectKind::Intensify,
+            Effect::DraftFromSpellbook { .. } => EffectKind::DraftFromSpellbook,
             Effect::ChooseOneOf { .. } => EffectKind::ChooseOneOf,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
@@ -12302,6 +12614,19 @@ pub enum ContinuousModification {
     RetainPrintedTriggerFromSource {
         source_trigger_index: usize,
     },
+    /// CR 707.9a: Retain a printed activated ability from the source object's
+    /// printed ability list at the given index. Used by "becomes a copy of
+    /// <X>, except it has this ability" patterns inside activated abilities
+    /// (Thespian's Stage, Cytoshape), where "this ability" refers to the
+    /// activated ability containing the BecomeCopy effect.
+    ///
+    /// Applied at Layer 1 because CR 707.9a states the granted ability
+    /// "becomes part of the copiable values for the copy". The runtime reads
+    /// the source object's `base_abilities[source_ability_index]` and pushes
+    /// a clone onto the affected object's `abilities`.
+    RetainPrintedAbilityFromSource {
+        source_ability_index: usize,
+    },
     /// CR 205.4 + CR 707.9d: Add a supertype to the affected object's
     /// supertypes (e.g., Sarkhan, Soul Aflame: "it's legendary in addition
     /// to its other types"). Idempotent: pushing an already-present supertype
@@ -13007,14 +13332,14 @@ mod tests {
         let self_discard = AbilityCost::Discard {
             count: default_quantity_one(),
             filter: None,
-            random: false,
-            self_ref: true,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::SourceCard,
         };
         let other_discard = AbilityCost::Discard {
             count: default_quantity_one(),
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
         };
         let mana = AbilityCost::Mana {
             cost: crate::types::mana::ManaCost::generic(2),
@@ -13177,8 +13502,20 @@ mod tests {
         assert!(AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
-            random: false,
-            self_ref: false,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Library),
+            filter: None,
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(!AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: None,
         }
         .supports_cumulative_upkeep_payment());
     }
@@ -13233,7 +13570,7 @@ mod tests {
                     FilterProp::HasAttachment {
                         kind: AttachmentKind::Aura,
                         controller: None,
-                        exclude_source: false,
+                        exclude_source: SourceExclusion::Include,
                     },
                 ])),
                 TargetFilter::Typed(TypedFilter::creature()),
@@ -13249,7 +13586,7 @@ mod tests {
                 properties: vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
-                    exclude_source: false,
+                    exclude_source: SourceExclusion::Include,
                 }],
             })
         );
@@ -13718,8 +14055,8 @@ mod tests {
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
             },
             AbilityCost::Exile {
                 count: 1,
@@ -14110,7 +14447,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: EtbTapState::Unspecified,
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
@@ -14144,7 +14481,7 @@ mod tests {
             owner_library: true,
             enter_transformed: false,
             enters_under: None,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -14166,7 +14503,7 @@ mod tests {
                 owner_library: false,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: false,
+                enter_tapped: EtbTapState::Unspecified,
                 enters_attacking: false,
                 ..
             }
@@ -14189,7 +14526,7 @@ mod tests {
             owner_library: false,
             enter_transformed: false,
             enters_under,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
@@ -14355,8 +14692,8 @@ mod tests {
             let cost = AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
-                random: false,
-                self_ref: false,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
             };
             assert_eq!(cost.categories(), vec![CostCategory::Discards]);
         }
@@ -14394,6 +14731,7 @@ mod tests {
                 count: 1,
                 counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
                 target: None,
+                selection: CounterCostSelection::SingleObject,
             };
             assert_eq!(cost.categories(), vec![CostCategory::RemovesCounters]);
         }

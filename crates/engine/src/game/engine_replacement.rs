@@ -297,7 +297,7 @@ pub(super) fn handle_replacement_choice(
                             let unit = crate::types::mana::ManaUnit {
                                 color: mana_type,
                                 source_id,
-                                snow: false,
+                                supertype: None,
                                 source_could_produce_two_or_more_colors: false,
                                 restrictions: Vec::new(),
                                 grants: Vec::new(),
@@ -476,10 +476,23 @@ pub(super) fn handle_replacement_choice(
                 && state.pending_phase_transition_progress.is_some()
             {
                 super::turns::drain_pending_phase_transition_progress(state, events);
-                if !matches!(state.waiting_for, WaitingFor::Priority { .. })
-                    && state.pending_phase_transition_progress.is_some()
+                if state.pending_phase_transition_progress.is_some() {
+                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        waiting_for = state.waiting_for.clone();
+                    }
+                } else if state.deferred_step_trigger_resume.is_some()
+                    && matches!(state.waiting_for, WaitingFor::Priority { .. })
                 {
-                    waiting_for = state.waiting_for.clone();
+                    // CR 513.1 + CR 603.3b: A CR 616.1 mana-pool choice can
+                    // defer completion of `enter_phase`. In that case
+                    // `auto_advance` returned before its per-step trigger arm
+                    // ran (it bails while `pending_phase_transition_progress`
+                    // is set). Resume only when that bail happened — not when
+                    // `advance_phase` alone paused the drain (unit tests).
+                    state.deferred_step_trigger_resume = None;
+                    waiting_for = super::turns::auto_advance(state, events);
+                } else {
+                    state.deferred_step_trigger_resume = None;
                 }
             }
 
@@ -1322,7 +1335,7 @@ mod tests {
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: false,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],

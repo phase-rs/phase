@@ -804,6 +804,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DamagePrevented { .. }
         | GameEvent::SpellCountered { .. }
         | GameEvent::CounterAdded { .. }
+        | GameEvent::ObjectIntensified { .. }
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::EffectResolved { .. }
