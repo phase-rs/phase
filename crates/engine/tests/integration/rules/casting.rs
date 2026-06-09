@@ -1641,32 +1641,36 @@ fn add_expensive_dragon_commander(scenario: &mut GameScenario) -> ObjectId {
 /// emblem functions from the command zone and waives mana for hand spells.
 #[test]
 fn tamiyo_emblem_allows_free_cast_from_hand() {
-    use engine::game::zones::create_object;
-    use engine::parser::oracle_static::parse_static_line;
-    use engine::types::zones::Zone;
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let source_id = scenario
+        .add_creature(P0, "Tamiyo, Field Researcher", 0, 0)
+        .id();
     let bolt_id = scenario.add_bolt_to_hand(P0);
 
     let mut runner = scenario.build();
-    let emblem_id = create_object(
-        runner.state_mut(),
-        CardId(1_355),
+    let emblem_static = engine::parser::oracle_static::parse_static_line(
+        "You may cast spells from your hand without paying their mana costs.",
+    )
+    .expect("Tamiyo emblem static should parse");
+    let ability = engine::types::ability::ResolvedAbility::new(
+        Effect::CreateEmblem {
+            statics: vec![emblem_static],
+            triggers: Vec::new(),
+        },
+        vec![],
+        source_id,
         P0,
-        "Emblem".to_string(),
-        Zone::Command,
     );
-    {
-        let emblem = runner.state_mut().objects.get_mut(&emblem_id).unwrap();
-        emblem.is_emblem = true;
-        emblem.static_definitions.push(
-            parse_static_line(
-                "You may cast spells from your hand without paying their mana costs.",
-            )
-            .expect("Tamiyo emblem static should parse"),
-        );
-    }
+    let mut events = Vec::<GameEvent>::new();
+    engine::game::effects::create_emblem::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("Tamiyo emblem should be created");
+    let emblem_id = *runner
+        .state()
+        .command_zone
+        .last()
+        .expect("CreateEmblem should put an emblem in the command zone");
+    assert!(runner.state().objects[&emblem_id].is_emblem);
 
     let card_id = runner.state().objects[&bolt_id].card_id;
     let mana_before = runner.state().players[0].mana_pool.clone();
