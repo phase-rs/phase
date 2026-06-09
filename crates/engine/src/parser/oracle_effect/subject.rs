@@ -2989,9 +2989,21 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
     let (after_prefix, _) = opt(tag::<_, _, OracleError<'_>>("then "))
         .parse(lower.as_str())
         .ok()?;
-    let (after_subject, _) = tag::<_, _, OracleError<'_>>("its controller ")
-        .parse(after_prefix)
-        .ok()?;
+    // "That creature's controller gains life" (Solitude) and "its controller
+    // gains life" are both controller-of-target phrasing — route to
+    // ParentTargetController.
+    fn parse_det_noun_ctrl(i: &str) -> OracleResult<'_, ()> {
+        let (i, _) = alt((tag("that "), tag("the "))).parse(i)?;
+        let (i, _) = take_until("'s controller ").parse(i)?;
+        let (i, _) = tag("'s controller ").parse(i)?;
+        Ok((i, ()))
+    }
+    let (after_subject, _) = alt((
+        map(tag::<_, _, OracleError<'_>>("its controller "), |_| ()),
+        parse_det_noun_ctrl,
+    ))
+    .parse(after_prefix)
+    .ok()?;
     if !nom_primitives::scan_contains(&lower, "gain")
         || !nom_primitives::scan_contains(&lower, "life")
     {
@@ -3975,6 +3987,48 @@ mod tests {
             clause.effect,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::ParentTargetController
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_controller_gains_life_that_noun_phrasing() {
+        // Solitude: "That creature's controller gains life equal to its power."
+        let clause = try_parse_targeted_controller_gain_life(
+            "That creature's controller gains life equal to its power.",
+        )
+        .expect("'that noun's controller' phrasing should route to ParentTargetController");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
+                player: TargetFilter::ParentTargetController
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_controller_gains_life_the_noun_phrasing() {
+        // "The permanent's controller gains life equal to its toughness."
+        let clause = try_parse_targeted_controller_gain_life(
+            "The permanent's controller gains life equal to its toughness.",
+        )
+        .expect("'the noun's controller' phrasing should route to ParentTargetController");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
                 player: TargetFilter::ParentTargetController
             }
         ));

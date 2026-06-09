@@ -87,6 +87,7 @@ mod tests {
             scoped_player: None,
             target_chooser: None,
             source_id: ObjectId(1),
+            source_incarnation: None,
             targets: vec![],
             kind: AbilityKind::Activated,
             sub_ability: None,

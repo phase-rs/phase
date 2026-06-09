@@ -13222,6 +13222,15 @@ pub struct ResolvedAbility {
     pub effect: Effect,
     pub targets: Vec<TargetRef>,
     pub source_id: ObjectId,
+    /// CR 400.7: The source object's `incarnation` captured when this ability was
+    /// created. Set only for triggered abilities (where the source can change
+    /// zones between firing and resolution); `None` for activated abilities,
+    /// casts, and engine-internal abilities, which then bypass the epoch guard.
+    /// At resolution a self-reference (`~`) resolves to the source only while its
+    /// incarnation still matches — once the source has left and re-entered the
+    /// battlefield it is a new object and the self-reference finds nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -13429,6 +13438,7 @@ impl ResolvedAbility {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
+            source_incarnation: None,
         }
     }
 
@@ -13439,6 +13449,35 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_may_trigger_origin_recursive(origin);
+        }
+    }
+
+    /// CR 400.7: Propagate the source's captured incarnation to this ability and
+    /// every sub/else branch (chained "...then exile ~" effects share the source).
+    /// Stamped when a triggered ability fires; read by the self-reference epoch
+    /// guard at resolution.
+    pub fn set_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
+        self.source_incarnation = incarnation;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_source_incarnation_recursive(incarnation);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_source_incarnation_recursive(incarnation);
+        }
+    }
+
+    /// CR 400.7: True if the ability's source is still the same object instance it
+    /// was when the ability was created. A `None` capture (activated abilities,
+    /// casts, engine-internal abilities) is always current. Once the source has
+    /// left and re-entered the battlefield as a new object, its incarnation no
+    /// longer matches the captured value and this returns false.
+    pub fn source_is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        match self.source_incarnation {
+            None => true,
+            Some(captured) => state
+                .objects
+                .get(&self.source_id)
+                .is_some_and(|obj| obj.incarnation == captured),
         }
     }
 
