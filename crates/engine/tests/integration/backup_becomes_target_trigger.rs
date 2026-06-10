@@ -49,9 +49,24 @@ fn backup_ability_target_fires_becomes_target_trigger() {
     scenario.add_creature_from_oracle(P0, "Huge Truck", 4, 4, HUGE_TRUCK_TRIGGER);
 
     // P0's Backup 1 creature in hand — its ETB targets a creature with a tagged
-    // backup ability.
+    // backup ability. Two builder details are load-bearing (both mirror the
+    // passing Renown scenario test):
+    //
+    // 1. The name must NOT contain "Backup". CR 201.4 self-reference
+    //    normalization rewrites the card's own name in its Oracle text to `~`;
+    //    a name like "Backup Bear" would rewrite the keyword line "Backup 1"
+    //    into "~ 1", which parses to no keyword. Real Backup cards never embed
+    //    "Backup" in their name, so production is unaffected.
+    // 2. The `&["Backup"]` keyword hint is required: the bare-Oracle inference
+    //    path cannot recognize the space-separated numeric keyword form
+    //    ("Backup 1") on its own, so without the hint `Keyword::Backup(1)`
+    //    never reaches `face.keywords` and `synthesize_backup` no-ops.
+    //
+    // With both in place the line routes through `parse_keyword_from_oracle` →
+    // `Keyword::Backup(1)` → synthesized ETB trigger.
     let backup = scenario
-        .add_creature_to_hand_from_oracle(P0, "Backup Bear", 2, 2, BACKUP_ONE)
+        .add_creature_to_hand(P0, "Valeron Sentry", 2, 2)
+        .from_oracle_text_with_keywords(&["Backup"], BACKUP_ONE)
         .id();
 
     // A card to draw when the trigger resolves.
@@ -60,12 +75,12 @@ fn backup_ability_target_fires_becomes_target_trigger() {
 
     let mut runner = scenario.build();
 
-    // Cast the backup creature; its ETB targets a creature. The target must be a
-    // creature OTHER than the payoff (Huge Truck), because the trigger fires on
-    // "ANOTHER creature you control" — Huge Truck targeting itself would not count.
-    // The Backup Bear targets itself: it is another creature P0 controls relative
-    // to Huge Truck. When that target locks, `GameEvent::BecomesTarget` fires with
-    // the backup ability as source, matching the payoff's
+    // Cast the backup creature; its ETB targets a creature. The Valeron Sentry
+    // targets itself: relative to the payoff (Huge Truck) it is "another creature
+    // you control", so Huge Truck's trigger fires (a creature targeting itself
+    // would not satisfy "another" for its OWN trigger, but here the trigger lives
+    // on Huge Truck). When that target locks, `GameEvent::BecomesTarget` fires
+    // with the backup ability as source, matching the payoff's
     // `valid_source = StackAbility { tag: Backup }`.
     let outcome = runner.cast(backup).target_object(backup).resolve();
 
