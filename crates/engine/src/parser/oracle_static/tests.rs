@@ -2194,7 +2194,7 @@ fn static_this_spell_cost_less_if_it_targets_spell_or_ability_targeting_large_cr
             if filters.iter().any(|f| matches!(f, TargetFilter::StackSpell))
                 && filters
                     .iter()
-                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None }))
+                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None, tag: None }))
     )));
     let stack_targets_filter = filters
         .iter()
