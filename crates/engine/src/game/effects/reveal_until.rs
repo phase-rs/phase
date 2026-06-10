@@ -726,6 +726,75 @@ mod tests {
         }
     }
 
+    /// C6 discriminating test (CR 614.1c + CR 306.5b): accepting a planeswalker
+    /// through the `RevealUntilKeptChoice` battlefield path must enter it with
+    /// its intrinsic loyalty counters. The old handler used a raw `move_to_zone`
+    /// (loyalty 0 → dead by CR 704.5i); the migrated handler routes through
+    /// `zone_pipeline::move_object` so the CR 614.1c delivery tail seeds them.
+    #[test]
+    fn reveal_until_kept_choice_planeswalker_enters_with_loyalty() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let walker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Planeswalker".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&walker).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.loyalty = Some(5);
+            obj.base_loyalty = Some(5);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                    crate::types::ability::TypeFilter::Planeswalker,
+                )),
+                kept_destination: Zone::Hand,
+                rest_destination: Zone::Library,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: Some(Zone::Battlefield),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let wf = state.waiting_for.clone();
+        assert!(matches!(wf, WaitingFor::RevealUntilKeptChoice { .. }));
+        handle_resolution_choice(
+            &mut state,
+            wf,
+            GameAction::DecideOptionalEffect { accept: true },
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            state.battlefield.contains(&walker),
+            "planeswalker must be on the battlefield, not graveyard"
+        );
+        assert_eq!(
+            state.objects[&walker]
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied(),
+            Some(5),
+            "planeswalker must enter with intrinsic loyalty via the CR 614.1c delivery tail"
+        );
+    }
+
     /// CR 109.5 + CR 701.20a: When `player = ParentTargetController`, the library
     /// of the parent ability's target's controller is revealed — the activator's
     /// own library is left untouched. This is the Polymorph / Proteus Staff /

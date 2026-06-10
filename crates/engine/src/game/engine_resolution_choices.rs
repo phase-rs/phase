@@ -469,23 +469,49 @@ pub(super) fn handle_resolution_choice(
         ) => {
             let mut misses = revealed_misses;
             if accept {
-                zones::move_to_zone(state, hit_card, accept_zone, events);
-                // CR 110.5b: the kept card enters tapped when requested.
-                if enter_tapped.resolve(false) {
-                    if let Some(obj) = state.objects.get_mut(&hit_card) {
-                        obj.tapped = true;
+                if accept_zone == Zone::Battlefield {
+                    // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield
+                    // entry through the zone-change pipeline so the delivery tail
+                    // seeds intrinsic enters-with counters (a kept planeswalker /
+                    // battle must enter with its loyalty / defense or it dies to
+                    // CR 704.5i) and applies the CR 614.1 tap-state. Mirrors the
+                    // synchronous `reveal_until::resolve` battlefield path. The
+                    // previous manual `obj.tapped = true` is dropped (the tail does
+                    // it from the seeded `EntryMods`).
+                    let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                        hit_card,
+                        Zone::Battlefield,
+                        source_id,
+                    );
+                    req.mods.enter_tapped = enter_tapped;
+                    match crate::game::zone_pipeline::move_object(state, req, events) {
+                        crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                        // CR 616.1 / CR 303.4f: battlefield-entry choice parked
+                        // centrally; bail before the rest-pile move so the prompt
+                        // is not clobbered (realistically unreachable for the dig
+                        // classes).
+                        crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                        | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     }
-                }
-                // CR 508.4: "...tapped and attacking" — place the accepted card
-                // in combat. `source_id` (the ability source / trigger attacker)
-                // supplies the defending player, matching the synchronous path.
-                if enters_attacking && accept_zone == Zone::Battlefield {
-                    let controller = state
-                        .objects
-                        .get(&hit_card)
-                        .map(|obj| obj.controller)
-                        .unwrap_or(player);
-                    crate::game::combat::enter_attacking(state, hit_card, source_id, controller);
+                    // CR 508.4: "...tapped and attacking" — place the accepted card
+                    // in combat. `source_id` (the ability source / trigger attacker)
+                    // supplies the defending player, matching the synchronous path.
+                    if enters_attacking {
+                        let controller = state
+                            .objects
+                            .get(&hit_card)
+                            .map(|obj| obj.controller)
+                            .unwrap_or(player);
+                        crate::game::combat::enter_attacking(
+                            state, hit_card, source_id, controller,
+                        );
+                    }
+                } else {
+                    zones::move_to_zone(state, hit_card, accept_zone, events);
                 }
             } else if decline_zone == rest_destination {
                 misses.push(hit_card);
@@ -1146,6 +1172,7 @@ pub(super) fn handle_resolution_choice(
                 kept_destination,
                 rest_destination,
                 enter_tapped,
+                source_id: dig_source_id,
                 ..
             },
             GameAction::SelectCards { cards: kept },
@@ -1211,11 +1238,35 @@ pub(super) fn handle_resolution_choice(
             }
             if let Some(kept_zone) = kept_destination {
                 for &obj_id in &kept {
-                    zones::move_to_zone(state, obj_id, kept_zone, events);
-                    if enter_tapped && kept_zone == Zone::Battlefield {
-                        if let Some(obj) = state.objects.get_mut(&obj_id) {
-                            obj.tapped = true;
+                    if kept_zone == Zone::Battlefield {
+                        // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield
+                        // entries through the zone-change pipeline so the delivery
+                        // tail seeds intrinsic enters-with counters and applies the
+                        // CR 614.1 tap-state. The previous manual `obj.tapped` is
+                        // dropped (the tail does it from the seeded EntryMods).
+                        // CR 400.7: attribute the entry to the dig's source when
+                        // known; otherwise the moved object anchors itself (the
+                        // pre-pipeline raw move recorded no source).
+                        let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                            obj_id,
+                            Zone::Battlefield,
+                            dig_source_id.unwrap_or(obj_id),
+                        );
+                        req.mods.enter_tapped =
+                            crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+                        match crate::game::zone_pipeline::move_object(state, req, events) {
+                            crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                            // CR 616.1 / CR 303.4f: battlefield-entry choice parked
+                            // centrally; bail (realistically unreachable for dig).
+                            crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                            | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                         }
+                    } else {
+                        zones::move_to_zone(state, obj_id, kept_zone, events);
                     }
                 }
             }
