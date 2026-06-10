@@ -163,8 +163,18 @@ fn deliver_mill_cards(
                 // CR 303.4f: only battlefield entries can surface an aura-host
                 // choice, and Battlefield is not a Mill destination (graveyard /
                 // exile / hand top-of-library variants only) — unreachable for
-                // mill. Stash the tail anyway so a future battlefield-mill
-                // variant fails loudly (undrained tail) rather than silently.
+                // mill. Stash the tail and stop anyway so a future
+                // battlefield-mill variant does not silently drop the rest of
+                // the batch.
+                //
+                // NOTE: this is NOT a loud failure. The aura-host choice flows
+                // through `WaitingFor::ReturnAsAuraTarget`, not the
+                // replacement-choice path, so `drain_pending_mill_deliveries`
+                // (which only runs from `handle_replacement_choice`) would not
+                // fire here — the parked tail would instead be drained by the
+                // NEXT unrelated replacement-choice resume. Reaching this arm
+                // for mill is a bug to be surfaced if a battlefield-mill variant
+                // is ever added; today it is dead code for every parsed Mill.
                 let remaining: Vec<ObjectId> = queue.collect();
                 if !remaining.is_empty() {
                     state.pending_mill_deliveries = Some(PendingMillDeliveries {
