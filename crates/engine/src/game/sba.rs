@@ -527,7 +527,7 @@ fn check_lethal_damage(
                     );
                     match replacement::replace_event(state, zone_proposed, events) {
                         ReplacementResult::Execute(zone_event) => {
-                            // CR 701.19b + CR 614: the inner ZoneChange already
+                            // CR 704.5g + CR 614.6: the inner ZoneChange already
                             // cleared the replacement consult — seal it as a proof
                             // token and deliver through the single pipeline tail so
                             // a lethal-damage death redirected to the battlefield
