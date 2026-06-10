@@ -1,4 +1,4 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
@@ -264,6 +264,25 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
     // "in any order", "shuffles ... into their library", and the bare
     // "and the rest" with no zone phrase.
     Some(Zone::Library)
+}
+
+/// Whole-line dig continuation "put the rest on the bottom of your library
+/// [in a random order | in any order]" following a `ChooseFromZone`.
+///
+/// CR 401.4: multi-card library placement defaults to owner-arranged order,
+/// so "in any order" restates the default. The random-order variant is
+/// currently collapsed into the same continuation (randomization is not yet
+/// modeled at this seam) — the suffix axis is one `opt(alt(...))`, extended
+/// there when it is.
+fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            tag("put the rest on the bottom of your library"),
+            opt(alt((tag(" in a random order"), tag(" in any order")))),
+        )),
+    )
+    .parse(input)
 }
 
 pub(super) fn parse_choice_partition_destination(
@@ -3841,11 +3860,7 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::CantRegenerate)
         }
-        Effect::ChooseFromZone { .. }
-            if lower == "put the rest on the bottom of your library in a random order"
-                || lower == "put the rest on the bottom of your library in any order"
-                || lower == "put the rest on the bottom of your library" =>
-        {
+        Effect::ChooseFromZone { .. } if parse_put_rest_on_bottom_line(&lower).is_ok() => {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
         Effect::ChooseFromZone { .. } => parse_choice_partition_destinations(&lower)

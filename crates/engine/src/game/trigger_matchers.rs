@@ -2642,17 +2642,64 @@ pub(super) fn match_foretell(
     }
 }
 
-/// CR 702.110a: "When this creature exploits" = source is the exploiter.
+/// CR 702.110b: "exploits a creature" — fires when a creature matching the
+/// trigger's subject filter exploits. `valid_card`/`valid_source` scope the
+/// EXPLOITER: `SelfRef` ⇒ "this creature exploits", a typed/controller
+/// filter ⇒ "a creature you control exploits". With no filter, defaults to
+/// the source ("this creature exploits").
 pub(super) fn match_exploited(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
-    _state: &GameState,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::CreatureExploited { exploiter, .. } if *exploiter == source_id
-    )
+    let GameEvent::CreatureExploited { exploiter, .. } = event else {
+        return false;
+    };
+    // `valid_source`/`valid_card` scope the EXPLOITER's subject filter. With no
+    // filter, "this creature exploits" — match the source by identity.
+    match trigger
+        .valid_source
+        .as_ref()
+        .or(trigger.valid_card.as_ref())
+    {
+        Some(filter) => exploiter_matches_subject_filter(state, *exploiter, filter, source_id),
+        None => *exploiter == source_id,
+    }
+}
+
+/// CR 603.10a + CR 400.7: Match an exploiter against the trigger's subject
+/// filter. Exploit emits `CreatureExploited` only AFTER the sacrifice resolves
+/// (CR 702.110b), so a creature that exploited ITSELF is already in the
+/// graveyard and its live object has had all battlefield characteristics
+/// (control, types, granted abilities) stripped. A typed filter like "a
+/// creature you control" would then fail to match. When the exploiter has left
+/// the battlefield, evaluate the filter against its last-known battlefield
+/// snapshot (`lki_cache`) instead of the stripped graveyard object. An exploiter
+/// that sacrificed a DIFFERENT creature is still on the battlefield and matches
+/// on the live path.
+fn exploiter_matches_subject_filter(
+    state: &GameState,
+    exploiter: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> bool {
+    if target_filter_matches_object(state, exploiter, filter, source_id) {
+        return true;
+    }
+    if state
+        .objects
+        .get(&exploiter)
+        .is_none_or(|o| o.zone != Zone::Battlefield)
+    {
+        if let Some(lki) = state.lki_cache.get(&exploiter) {
+            let ctx = super::filter::FilterContext::from_source(state, source_id);
+            return super::filter::matches_target_filter_on_lki_snapshot(
+                state, exploiter, lki, filter, &ctx,
+            );
+        }
+    }
+    false
 }
 
 /// CR 702.112b: "When [subject] becomes renowned" — fires when Renown
@@ -8066,6 +8113,7 @@ mod tests {
                 },
                 TargetFilter::StackAbility {
                     controller: Some(controller),
+                    tag: None,
                 },
             ],
         }
@@ -8150,6 +8198,87 @@ mod tests {
         trigger.valid_source = Some(TargetFilter::StackSpell);
 
         // Event: trigger_owner becomes the target of an activated ability
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    /// Build a stack `TriggeredAbility` carrying an optional keyword `ability_tag`,
+    /// mirroring how a synthesized Backup ETB ability reaches the stack.
+    fn setup_with_tagged_triggered_ability(tag: Option<AbilityTag>) -> (GameState, ObjectId) {
+        let mut state = setup();
+        let ability_id = ObjectId(60);
+        let mut ability = ResolvedAbility::new(
+            crate::types::ability::Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(1),
+        );
+        ability.context.ability_tag = tag;
+        state.stack.push_back(StackEntry {
+            id: ability_id,
+            source_id: ObjectId(10),
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(10),
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        (state, ability_id)
+    }
+
+    #[test]
+    fn becomes_target_backup_ability_matches_tagged_source() {
+        // CR 702.165a: a `BecomesTarget` trigger whose `valid_source` filters on
+        // `AbilityTag::Backup` matches when the targeting stack ability carries
+        // that tag (Huge Truck targeted by a backup ability).
+        let (state, ability_id) = setup_with_tagged_triggered_ability(Some(AbilityTag::Backup));
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackAbility {
+            controller: None,
+            tag: Some(AbilityTag::Backup),
+        });
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_backup_ability_rejects_untagged_source() {
+        // CR 702.165a: an untagged stack ability (a plain triggered/activated
+        // ability) is NOT a backup ability and must not fire the trigger.
+        let (state, ability_id) = setup_with_tagged_triggered_ability(None);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackAbility {
+            controller: None,
+            tag: Some(AbilityTag::Backup),
+        });
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
@@ -11225,5 +11354,173 @@ mod tests {
             std::slice::from_ref(&event),
         );
         assert_eq!(count, None);
+    }
+
+    // CR 702.110b: `match_exploited` scopes the exploiter via `valid_card` /
+    // `valid_source` rather than hard-coding `exploiter == source`.
+
+    #[test]
+    fn exploited_self_ref_matches_self_exploit() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_self_ref_rejects_other_exploiter() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: other,
+            sacrificed: other,
+        };
+
+        assert!(!match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_typed_controller_matches_other_controlled_exploiter() {
+        let mut state = setup();
+        // "Whenever a creature you control exploits a creature, …": the trigger
+        // source and the (different) exploiter share a controller.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exploit Payoff".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::Exploited);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: other,
+            sacrificed: other,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn exploited_no_filter_defaults_to_source() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Exploiter".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::Exploited);
+        assert!(trigger.valid_card.is_none());
+        assert!(trigger.valid_source.is_none());
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        assert!(match_exploited(&event, &trigger, source, &state));
+    }
+
+    /// CR 603.10a + CR 400.7: a creature that exploits ITSELF satisfies a typed
+    /// subject filter ("a creature you control") via its last-known battlefield
+    /// snapshot. Drives the REAL zone-change pipeline (`move_to_zone`) so the
+    /// graveyard object is genuinely stripped (control/types cleared) and
+    /// `lki_cache` is populated exactly as it is in a live game. This flips to
+    /// `false` if the LKI fallback in `exploiter_matches_subject_filter` is
+    /// reverted, because `target_filter_matches_object` reads the stripped
+    /// graveyard object.
+    #[test]
+    fn exploited_typed_filter_matches_self_sacrificed_exploiter_via_lki() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sidisi's Faithful".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Real zone-change pipeline: snapshots LKI and strips the graveyard object.
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        assert!(state.lki_cache.contains_key(&source));
+
+        let event = GameEvent::CreatureExploited {
+            exploiter: source,
+            sacrificed: source,
+        };
+
+        let mut you = make_trigger(TriggerMode::Exploited);
+        you.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(
+            match_exploited(&event, &you, source, &state),
+            "CR 603.10a: self-sacrificed exploiter matches 'a creature you control' via LKI"
+        );
+
+        let mut opponent = make_trigger(TriggerMode::Exploited);
+        opponent.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+        assert!(
+            !match_exploited(&event, &opponent, source, &state),
+            "an opponent-controlled subject filter must NOT match the controller's own exploiter"
+        );
     }
 }

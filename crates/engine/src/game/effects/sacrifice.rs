@@ -131,6 +131,19 @@ pub fn resolve(
         }
         _ => (&TargetFilter::Any, &default_count, false, 0),
     };
+    // CR 400.7: A self-referential sacrifice ("sacrifice this creature") does
+    // nothing if the source has left and re-entered the battlefield (blink/
+    // flicker) since this ability fired — the re-entered permanent is a new
+    // object. Sacrifice is non-targeted and resolves `SelfRef` through a
+    // resolution-time pool filter rather than the `resolved_targets` chokepoint,
+    // so the self-reference epoch guard must be applied here explicitly.
+    if matches!(filter, TargetFilter::SelfRef) && !ability.source_is_current(state) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
     let scoped_ability;
     let ability = if matches!(
         sacrifice_controller_scope(filter),

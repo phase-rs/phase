@@ -552,6 +552,7 @@ pub(crate) fn apply_copy_token_after_replacement(
         events.push(GameEvent::TokenCreated {
             object_id: token_id,
             name: name.clone(),
+            source_id,
         });
         created_ids.push(token_id);
     }
@@ -626,6 +627,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     events.push(GameEvent::TokenCreated {
         object_id: token_id,
         name,
+        source_id,
     });
     state.last_created_token_ids.push(token_id);
     if let Some(pending) = state.pending_copy_token_resolution.as_mut() {

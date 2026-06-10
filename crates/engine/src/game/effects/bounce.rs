@@ -641,7 +641,10 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::Bounce {
-                target: TargetFilter::StackAbility { controller: None },
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
                 destination: None,
                 selection: BounceSelection::Targeted,
             },

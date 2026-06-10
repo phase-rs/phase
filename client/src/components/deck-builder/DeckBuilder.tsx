@@ -221,7 +221,7 @@ export function DeckBuilder({
   const infoVisible = activeSurface === "info" ? "flex" : "hidden md:flex";
 
   return (
-    <div className="flex h-screen flex-col bg-transparent">
+    <div className="flex h-full min-h-0 flex-col bg-transparent">
       <DeckBuilderToolbar
         onBack={requestBack}
         deckName={deckName}
@@ -284,7 +284,7 @@ export function DeckBuilder({
               {t("filters.done")}
             </button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto pb-16">
+          <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto pb-16">
             <CardSearch
               onResults={handleSearchResults}
               onSearchTrigger={handleSearchTrigger}
@@ -356,7 +356,7 @@ export function DeckBuilder({
 
           <div className="min-h-0 flex-1 overflow-hidden">
             {searchActive ? (
-              <div className="h-full overflow-y-auto pb-16">
+              <div className="thin-scrollbar h-full overflow-y-auto pb-16">
                 <CardGrid
                   cards={searchResults}
                   onAddCard={handleAddCard}
@@ -373,7 +373,7 @@ export function DeckBuilder({
               // swallow the canvas.
               <div className="flex h-full flex-col">
                 {warnings.length > 0 && (
-                  <div className="max-h-32 shrink-0 space-y-0.5 overflow-y-auto border-b border-white/8 px-3 py-2">
+                  <div className="thin-scrollbar max-h-32 shrink-0 space-y-0.5 overflow-y-auto border-b border-white/8 px-3 py-2">
                     {warnings.map((w) => (
                       <div
                         key={w}
@@ -386,7 +386,7 @@ export function DeckBuilder({
                 )}
                 <div className="min-h-0 flex-1 overflow-hidden">
                   {deckView === "list" ? (
-                    <div className="h-full overflow-y-auto px-3 pt-3 pb-16">
+                    <div className="thin-scrollbar h-full overflow-y-auto px-3 pt-3 pb-16">
                       <DeckList
                         deck={currentDeck}
                         onRemoveCard={handleRemoveCard}
@@ -430,7 +430,7 @@ export function DeckBuilder({
           aria-labelledby={tabId("info")}
           className={`${infoVisible} min-h-0 w-full flex-col overflow-hidden border-white/8 bg-black/12 backdrop-blur-sm md:w-80 md:shrink-0 md:border-l lg:w-96`}
         >
-          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 pt-3 pb-16">
+          <div className="thin-scrollbar flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 pt-3 pb-16">
             {isCommander && (
               <CommanderPanel
                 commanders={commanders}

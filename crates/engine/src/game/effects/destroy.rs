@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -194,6 +195,29 @@ pub fn resolve(
     Ok(())
 }
 
+/// Does this destroy filter carry the "other" qualifier? A spell that creates
+/// tokens and then destroys "all other creatures" must spare its own freshly-
+/// created tokens. This behavior is the official Martial Coup / White Sun's
+/// Twilight Gatherer ruling ("creatures that are not [tokens] created by this
+/// copy"); the Comprehensive Rules have no numbered entry for the "other"
+/// qualifier itself. The parsed marker for "other" is `FilterProp::Another` on a
+/// `Typed` filter. Recurse through the boolean combinators so a compound filter
+/// ("all other creatures and all other artifacts" → `And`/`Or`) still trips the
+/// exclusion when any branch is "other".
+fn filter_excludes_other(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Another)),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_excludes_other)
+        }
+        TargetFilter::Not { filter } => filter_excludes_other(filter),
+        _ => false,
+    }
+}
+
 /// Destroy all permanents matching the filter.
 /// CR 701.8: Routes each destruction through the replacement pipeline
 /// so regeneration shields and other replacements can intercept.
@@ -221,6 +245,42 @@ pub fn resolve_all(
         crate::game::effects::resolved_object_filter(ability, &target_filter)
     };
 
+    // CR 701.7 (create) + CR 701.8 (destroy), per the Martial Coup / White Sun's
+    // Twilight ruling: "destroy all OTHER creatures" on a token-creating spell does
+    // NOT destroy the tokens that same spell just created — they are not "other"
+    // creatures. `FilterProp::Another` is the parsed "other" marker.
+    //
+    // The ruling spares only tokens "created by this copy". Each `TokenCreated`
+    // event carries the `source_id` of the effect that made the token, so the spared
+    // set is exactly the tokens whose creator is THIS resolving ability's source —
+    // the same `source_id` shared by the spell's own create and destroy steps. A
+    // token an opponent's (or anyone's) replacement effect produces earlier in the
+    // same resolution (e.g. Kalitas, Traitor of Ghet turning a creature's death into
+    // a Zombie during an earlier "each player sacrifices" instruction) carries that
+    // replacement source's id, not this spell's, so it remains an "other" creature
+    // and is destroyed. Scanning `events` is resolution-scoped: `resolve_next`
+    // resolves exactly one stack object per `apply` (priority resets afterward), so
+    // no stale cross-resolution token leaks in.
+    //
+    // When the filter has no `Another` marker (plain "destroy all creatures") or this
+    // spell created no tokens this resolution, the exclusion set is empty and behavior
+    // is unchanged.
+    let spare_self_created: HashSet<ObjectId> = if filter_excludes_other(&effective_filter) {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::TokenCreated {
+                    object_id,
+                    source_id,
+                    ..
+                } if *source_id == ability.source_id => Some(*object_id),
+                _ => None,
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     // Collect matching object IDs that are on the battlefield and not indestructible.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
@@ -234,6 +294,7 @@ pub fn resolve_all(
                 .map(|obj| obj.has_keyword(&crate::types::keywords::Keyword::Indestructible))
                 .unwrap_or(false);
             !is_indestructible
+                && !spare_self_created.contains(id)
                 && crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
         })
         .copied()
@@ -320,6 +381,196 @@ mod tests {
 
         assert!(!state.battlefield.contains(&obj_id));
         assert!(state.players[0].graveyard.contains(&obj_id));
+    }
+
+    /// Spawn a battlefield creature for the "destroy all other creatures" tests.
+    fn battlefield_creature(state: &mut GameState, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        id
+    }
+
+    /// A `DestroyAll` over creatures carrying the `FilterProp::Another` ("other")
+    /// marker — the parsed shape of "destroy all other creatures".
+    fn destroy_all_other_creatures() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::Another],
+                }),
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    /// Martial Coup / White Sun's Twilight ruling: "destroy all OTHER creatures"
+    /// spares the tokens this spell created earlier in the same resolution. Those
+    /// tokens are identified by a `TokenCreated` event whose `source_id` matches the
+    /// resolving ability's source (`ObjectId(100)`, per `destroy_all_other_creatures`);
+    /// a creature with no such event is destroyed.
+    #[test]
+    fn destroy_all_other_creatures_spares_same_resolution_tokens() {
+        let mut state = GameState::new_two_player(42);
+        let token = battlefield_creature(&mut state, "Mite");
+        let other = battlefield_creature(&mut state, "Grizzly Bears");
+
+        // The event buffer carries the spell's earlier token creation, exactly as a
+        // token-then-wrath chain produces it during a single resolution.
+        let mut events = vec![GameEvent::TokenCreated {
+            object_id: token,
+            name: "Mite".to_string(),
+            source_id: ObjectId(100),
+        }];
+
+        resolve_all(&mut state, &destroy_all_other_creatures(), &mut events).unwrap();
+
+        assert!(
+            state.battlefield.contains(&token),
+            "a token created this resolution is not 'other' and must survive"
+        );
+        assert!(
+            !state.battlefield.contains(&other),
+            "a creature not created this resolution is destroyed"
+        );
+    }
+
+    /// The "this copy" clause of the Martial Coup ruling: only the tokens THIS
+    /// spell created are spared. A token a replacement effect makes earlier in the
+    /// same resolution (e.g. Kalitas turning a death into a Zombie) carries a
+    /// `TokenCreated` event too, but with that replacement's `source_id` — not this
+    /// spell's — so it is still an "other" creature and is destroyed.
+    ///
+    /// The foreign token is deliberately given the SAME controller as the resolving
+    /// spell (`PlayerId(0)`): identity here is the creating SOURCE, not the
+    /// controller, so a caster-controlled replacement token is correctly destroyed —
+    /// the case a controller-only check would miss.
+    #[test]
+    fn destroy_all_other_creatures_does_not_spare_foreign_replacement_token() {
+        let mut state = GameState::new_two_player(42);
+        let own = battlefield_creature(&mut state, "Mite");
+        let foreign = battlefield_creature(&mut state, "Zombie");
+
+        let mut events = vec![
+            // `own` was created by the resolving spell (source ObjectId(100)).
+            GameEvent::TokenCreated {
+                object_id: own,
+                name: "Mite".to_string(),
+                source_id: ObjectId(100),
+            },
+            // `foreign` was created this resolution by a DIFFERENT source (a
+            // replacement effect, ObjectId(200)) — same controller, different creator.
+            GameEvent::TokenCreated {
+                object_id: foreign,
+                name: "Zombie".to_string(),
+                source_id: ObjectId(200),
+            },
+        ];
+
+        resolve_all(&mut state, &destroy_all_other_creatures(), &mut events).unwrap();
+
+        assert!(
+            state.battlefield.contains(&own),
+            "the spell's own token is not 'other' and survives"
+        );
+        assert!(
+            !state.battlefield.contains(&foreign),
+            "a token created by a different source is not 'this copy' and must be destroyed, \
+             even under the spell's own controller"
+        );
+    }
+
+    /// The "other" marker is recognized through boolean filter combinators, so a
+    /// compound "destroy all other creatures and all other artifacts" (`And`/`Or` of
+    /// `Another`-bearing `Typed` filters) still triggers the self-token exclusion. A
+    /// compound filter with no `Another` does not.
+    #[test]
+    fn filter_excludes_other_recurses_through_compound_filters() {
+        let other = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::Another],
+        });
+        assert!(filter_excludes_other(&other));
+        assert!(filter_excludes_other(&TargetFilter::Or {
+            filters: vec![other.clone()],
+        }));
+        assert!(filter_excludes_other(&TargetFilter::And {
+            filters: vec![other.clone()],
+        }));
+        assert!(filter_excludes_other(&TargetFilter::Not {
+            filter: Box::new(other),
+        }));
+
+        let plain = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Creature],
+            controller: None,
+            properties: vec![],
+        });
+        assert!(!filter_excludes_other(&TargetFilter::And {
+            filters: vec![plain],
+        }));
+    }
+
+    /// Negative control: with no `TokenCreated` event in the buffer (the destroy
+    /// did not create anything this resolution), "destroy all other creatures"
+    /// destroys every matching creature — the exclusion set is empty.
+    #[test]
+    fn destroy_all_other_creatures_without_self_tokens_destroys_all() {
+        let mut state = GameState::new_two_player(42);
+        let a = battlefield_creature(&mut state, "Bear A");
+        let b = battlefield_creature(&mut state, "Bear B");
+
+        resolve_all(&mut state, &destroy_all_other_creatures(), &mut Vec::new()).unwrap();
+
+        assert!(!state.battlefield.contains(&a));
+        assert!(!state.battlefield.contains(&b));
+    }
+
+    /// Negative control: a plain "destroy all creatures" (no `FilterProp::Another`
+    /// marker) destroys even a same-resolution token — the exclusion is gated on
+    /// the "other" qualifier, so it must not fire here.
+    #[test]
+    fn destroy_all_creatures_without_other_marker_destroys_self_token() {
+        let mut state = GameState::new_two_player(42);
+        let token = battlefield_creature(&mut state, "Mite");
+
+        let mut events = vec![GameEvent::TokenCreated {
+            object_id: token,
+            name: "Mite".to_string(),
+            source_id: ObjectId(100),
+        }];
+
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                }),
+                cant_regenerate: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&token),
+            "without the 'other' marker, a same-resolution token is destroyed too"
+        );
     }
 
     /// CR 122.1c: a permanent with shield counters is not destroyed by a

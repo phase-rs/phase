@@ -1,5 +1,7 @@
 //! Atomic parsing combinators for numbers, mana symbols, colors, counters, and P/T modifiers.
 
+use std::borrow::Cow;
+
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
 use nom::character::complete::{char, digit1, space0};
@@ -862,6 +864,54 @@ pub fn scan_contains(text: &str, phrase: &str) -> bool {
     false
 }
 
+/// Mask every double-quoted span (the quotes and their contents) with a single
+/// ASCII space, so line classifiers see the spell's own grammar and not the text
+/// of a granted/printed ability inside quotes (a created token's "with \"…\"" text
+/// or a perpetually-gained spell ability). Borrowed when the text has no '"'.
+/// An unterminated quote passes the remainder through unchanged (no panic).
+pub fn strip_double_quoted_spans(text: &str) -> Cow<'_, str> {
+    // Zero-alloc fast path: no double quote means nothing to mask. This scans for
+    // a char (a single quote mark), not a string literal, so it is not parsing
+    // dispatch and stays off the combinator-mandate ban list.
+    if text.find('"').is_none() {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        match remaining.find('"') {
+            None => {
+                // No further quote: copy the tail verbatim and finish.
+                out.push_str(remaining);
+                break;
+            }
+            Some(open) => {
+                // Copy the verbatim text before the opening quote.
+                out.push_str(&remaining[..open]);
+                let after_open = &remaining[open..];
+                // Recognize the quoted span with combinators: opening quote,
+                // contents up to the closing quote, closing quote.
+                match delimited(char::<_, OracleError<'_>>('"'), take_until("\""), char('"'))
+                    .parse(after_open)
+                {
+                    Ok((rest, _span)) => {
+                        // Whole span (quotes + contents) collapses to one space.
+                        out.push(' ');
+                        remaining = rest;
+                    }
+                    Err(_) => {
+                        // Unterminated quote: pass the remainder through unchanged.
+                        out.push_str(after_open);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Scan `text` at word boundaries using `combinator`. Returns `(prefix, matched_start)` where
 /// `prefix` is the text before the first match and `matched_start` is the slice beginning at
 /// the matched position (combinator input pointer). Returns `None` if no match is found.
@@ -962,6 +1012,40 @@ pub fn split_once_on<'a>(
 mod tests {
     use super::*;
     use nom::bytes::complete::tag;
+
+    #[test]
+    fn strip_double_quoted_spans_no_quote_borrows_unchanged() {
+        let out = strip_double_quoted_spans("creatures you control can't block");
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out, "creatures you control can't block");
+    }
+
+    #[test]
+    fn strip_double_quoted_spans_single_span_collapses_to_one_space() {
+        // The span plus its quotes becomes a single space; surrounding text intact.
+        let out = strip_double_quoted_spans(r#"a "b c" d"#);
+        assert_eq!(out, "a   d");
+        assert!(matches!(out, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn strip_double_quoted_spans_masks_two_spans() {
+        let out = strip_double_quoted_spans(r#"x "one" y "two" z"#);
+        assert_eq!(out, "x   y   z");
+    }
+
+    #[test]
+    fn strip_double_quoted_spans_unterminated_passes_through() {
+        let out = strip_double_quoted_spans(r#"a "b c"#);
+        assert_eq!(out, r#"a "b c"#);
+    }
+
+    #[test]
+    fn strip_double_quoted_spans_empty_ok() {
+        let out = strip_double_quoted_spans("");
+        assert_eq!(out, "");
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
 
     /// Extended number words (30, 40, ..., 100) for cards like Lux Artillery
     /// ("thirty or more counters") and Hundred-Handed One.

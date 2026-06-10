@@ -46,7 +46,23 @@ expression: "&ir"
     },
     {
       "PreLoweredStatic": {
-        "mode": "BlockRestriction",
+        "mode": {
+          "BlockRestriction": {
+            "filter": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "WithKeyword",
+                  "value": "Flying"
+                }
+              ]
+            }
+          }
+        },
         "affected": {
           "type": "SelfRef"
         },

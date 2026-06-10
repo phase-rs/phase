@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::combinator::{all_consuming, map, opt, rest, value, verify};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::animation::{
@@ -22,6 +22,7 @@ use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
+use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -740,14 +741,10 @@ fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {
 }
 
 fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>> {
-    opt(preceded(
-        tag(" this "),
-        alt((
-            value(Duration::UntilEndOfTurn, tag("turn")),
-            value(Duration::UntilEndOfCombat, tag("combat")),
-        )),
-    ))
-    .parse(input)
+    // The phrase→`Duration` mapping is owned by the single duration grammar
+    // (`oracle_nom/duration.rs`); this adapter owns only the slot's leading
+    // space and optionality.
+    opt(preceded(tag(" "), parse_duration)).parse(input)
 }
 
 pub(super) fn parse_subject_application(
@@ -2223,21 +2220,12 @@ fn try_parse_become_and_attack_if_able(
 }
 
 fn parse_attack_if_able_duration(input: &str) -> OracleResult<'_, Duration> {
-    // verb axis × phase axis (PATTERNS.md §8b): factor "attack(s)" out front,
-    // then map the phase clause to its duration ("this turn" → end of turn,
-    // "this/that combat" → end of combat).
+    // verb axis × phase axis (PATTERNS.md §8b): factor "attack(s)" out front;
+    // the phase clause maps through the single duration grammar
+    // (`oracle_nom/duration.rs`: "this turn" → end of turn, "this/that
+    // combat" → end of combat).
     let (rest, _) = alt((tag("attacks"), tag("attack"))).parse(input)?;
-    preceded(
-        tag(" "),
-        alt((
-            value(Duration::UntilEndOfTurn, tag("this turn if able")),
-            value(
-                Duration::UntilEndOfCombat,
-                alt((tag("this combat if able"), tag("that combat if able"))),
-            ),
-        )),
-    )
-    .parse(rest)
+    delimited(tag(" "), parse_duration, tag(" if able")).parse(rest)
 }
 
 /// CR 119.5: Parse "life total becomes N" into SetLifeTotal effect.
@@ -2451,16 +2439,10 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
 /// matches a complete phrase, never an arbitrary substring. Returns `None` when
 /// no recognized interior duration phrase is present.
 fn embedded_restriction_duration(lower: &str) -> Option<Duration> {
-    let (_, duration, _) = nom_primitives::scan_preceded(lower, |i: &str| {
-        alt((
-            value(
-                Duration::UntilEndOfCombat,
-                tag::<_, _, OracleError<'_>>("this combat"),
-            ),
-            value(Duration::UntilEndOfTurn, tag("this turn")),
-        ))
-        .parse(i)
-    })?;
+    // The phrase→`Duration` mapping is owned by the single duration grammar
+    // (`oracle_nom/duration.rs`); this helper owns only the interior
+    // word-boundary scan position.
+    let (_, duration, _) = nom_primitives::scan_preceded(lower, parse_duration)?;
     Some(duration)
 }
 
@@ -2989,9 +2971,21 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
     let (after_prefix, _) = opt(tag::<_, _, OracleError<'_>>("then "))
         .parse(lower.as_str())
         .ok()?;
-    let (after_subject, _) = tag::<_, _, OracleError<'_>>("its controller ")
-        .parse(after_prefix)
-        .ok()?;
+    // "That creature's controller gains life" (Solitude) and "its controller
+    // gains life" are both controller-of-target phrasing — route to
+    // ParentTargetController.
+    fn parse_det_noun_ctrl(i: &str) -> OracleResult<'_, ()> {
+        let (i, _) = alt((tag("that "), tag("the "))).parse(i)?;
+        let (i, _) = take_until("'s controller ").parse(i)?;
+        let (i, _) = tag("'s controller ").parse(i)?;
+        Ok((i, ()))
+    }
+    let (after_subject, _) = alt((
+        map(tag::<_, _, OracleError<'_>>("its controller "), |_| ()),
+        parse_det_noun_ctrl,
+    ))
+    .parse(after_prefix)
+    .ok()?;
     if !nom_primitives::scan_contains(&lower, "gain")
         || !nom_primitives::scan_contains(&lower, "life")
     {
@@ -3975,6 +3969,48 @@ mod tests {
             clause.effect,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::ParentTargetController
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_controller_gains_life_that_noun_phrasing() {
+        // Solitude: "That creature's controller gains life equal to its power."
+        let clause = try_parse_targeted_controller_gain_life(
+            "That creature's controller gains life equal to its power.",
+        )
+        .expect("'that noun's controller' phrasing should route to ParentTargetController");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
+                player: TargetFilter::ParentTargetController
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_controller_gains_life_the_noun_phrasing() {
+        // "The permanent's controller gains life equal to its toughness."
+        let clause = try_parse_targeted_controller_gain_life(
+            "The permanent's controller gains life equal to its toughness.",
+        )
+        .expect("'the noun's controller' phrasing should route to ParentTargetController");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
                 player: TargetFilter::ParentTargetController
             }
         ));

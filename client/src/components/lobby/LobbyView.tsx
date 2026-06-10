@@ -11,6 +11,7 @@ import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
 import { ServerFlag } from "./ServerFlag";
 import { ServerPicker } from "./ServerPicker";
+import { SelectField } from "../ui/SelectField";
 
 interface LobbyViewProps {
   onHostGame: () => void;
@@ -321,7 +322,7 @@ export function LobbyView({
           <span className="text-[0.62rem] font-medium uppercase tracking-[0.18em] text-gray-500">
             {t("lobbyView.format")}
           </span>
-          <select
+          <SelectField
             id="lobby-format-filter"
             value={formatFilter ?? FILTER_ALL_SENTINEL}
             onChange={(e) =>
@@ -343,7 +344,7 @@ export function LobbyView({
                 ))}
               </optgroup>
             ))}
-          </select>
+          </SelectField>
         </label>
       )}
 
@@ -411,41 +412,45 @@ export function LobbyView({
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
           {isP2P ? t("lobbyView.joinByCode") : t("lobbyView.joinATable")}
         </div>
-        <div className="flex w-full items-center gap-2">
-        <input
-          type="text"
-          value={joinCode}
-          onChange={(e) => setJoinCode(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
-          placeholder={isP2P ? t("lobbyView.p2pCodePlaceholder") : t("lobbyView.serverCodePlaceholder")}
-          maxLength={isP2P ? 5 : 50}
-          className="flex-1 rounded-[18px] bg-black/18 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
-        />
-        <button
-          onClick={handleJoinByCode}
-          disabled={!joinCode.trim()}
-          className={menuButtonClass({
-            tone: "cyan",
-            size: "sm",
-            disabled: !joinCode.trim(),
-          })}
-        >
-          {t("lobbyView.join")}
-        </button>
-        {isServer && onSpectate && (
-          <button
-            type="button"
-            onClick={handleSpectateByCode}
-            disabled={!joinCode.trim()}
-            className={menuButtonClass({
-              tone: "neutral",
-              size: "sm",
-              disabled: !joinCode.trim(),
-            })}
-          >
-            {t("lobbyView.watch")}
-          </button>
-        )}
+        <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center">
+          <input
+            type="text"
+            value={joinCode}
+            onChange={(e) => setJoinCode(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleJoinByCode()}
+            placeholder={isP2P ? t("lobbyView.p2pCodePlaceholder") : t("lobbyView.serverCodePlaceholder")}
+            maxLength={isP2P ? 5 : 50}
+            className="min-w-0 flex-1 rounded-[18px] bg-black/18 px-4 py-2 font-mono text-sm tracking-wider text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
+          />
+          <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">
+            <button
+              onClick={handleJoinByCode}
+              disabled={!joinCode.trim()}
+              className={menuButtonClass({
+                tone: "cyan",
+                size: "sm",
+                disabled: !joinCode.trim(),
+                className: "flex-1 sm:flex-none",
+              })}
+            >
+              {t("lobbyView.join")}
+            </button>
+            {isServer && onSpectate && (
+              <button
+                type="button"
+                onClick={handleSpectateByCode}
+                disabled={!joinCode.trim()}
+                className={menuButtonClass({
+                  tone: "neutral",
+                  size: "sm",
+                  disabled: !joinCode.trim(),
+                  className: "flex-1 sm:flex-none",
+                })}
+              >
+                {t("lobbyView.watch")}
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

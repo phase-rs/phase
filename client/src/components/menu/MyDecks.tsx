@@ -43,6 +43,7 @@ import {
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
 import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
+import { SelectField } from "../ui/SelectField";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 const PRECON_PREFIX = "[Pre-built] ";
@@ -1130,18 +1131,21 @@ export function MyDecks({
           <label htmlFor="my-decks-format-filter" className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
             {t("myDecks.formatLabel")}
           </label>
-          <select
+          <SelectField
             id="my-decks-format-filter"
+            wrapperClassName="min-w-0 flex-1 sm:w-44"
+            chevronSize="sm"
+            iconWrapperClassName="text-slate-400"
             value={activeFilter}
             onChange={(e) => setActiveFilter(e.target.value as DeckFilter)}
-            className="min-h-[30px] min-w-0 flex-1 rounded bg-black/30 px-2 py-1 text-xs text-slate-300 outline-none ring-1 ring-white/10 focus:ring-white/20 sm:w-44"
+            className="min-h-[30px] w-full rounded bg-black/30 px-2 py-1 text-xs text-slate-300 outline-none ring-1 ring-white/10 focus:ring-white/20"
           >
             {FORMAT_FILTERS.map(({ key, label }) => (
               <option key={key} value={key}>
                 {key === "all" ? t("myDecks.filterAll") : label}
               </option>
             ))}
-          </select>
+          </SelectField>
           {activeFilterOption?.aetherhubUrl && (
             <a
               href={activeFilterOption.aetherhubUrl}
@@ -1165,7 +1169,9 @@ export function MyDecks({
           </button>
         )}
         <div className="flex items-center justify-end gap-1 sm:ml-auto">
-          <select
+          <SelectField
+            chevronSize="sm"
+            iconWrapperClassName="text-slate-400"
             value={activeSort}
             onChange={(e) => {
               const next = e.target.value as DeckSort;
@@ -1177,7 +1183,7 @@ export function MyDecks({
             <option value="alpha">{t("myDecks.sortName")}</option>
             <option value="recent">{t("myDecks.sortDateAdded")}</option>
             {selectedFormat && <option value="format">{t("myDecks.sortFormat")}</option>}
-          </select>
+          </SelectField>
           <button
             onClick={() => setSortAsc((prev) => !prev)}
             className="rounded p-1 text-slate-400 ring-1 ring-white/10 transition-colors hover:bg-white/5 hover:text-white"

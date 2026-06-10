@@ -6228,7 +6228,7 @@ pub(super) fn apply_committed_assist(
     };
     auto_tap_mana_sources(state, helper, &probe, events, None);
     if let Some(p) = state.players.iter_mut().find(|p| p.id == helper) {
-        mana_payment::pay_cost(&mut p.mana_pool, &probe).map_err(|e| {
+        mana_payment::pay_from_pool(&mut p.mana_pool, &probe).map_err(|e| {
             EngineError::ActionNotAllowed(format!(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))

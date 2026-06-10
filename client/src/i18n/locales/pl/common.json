@@ -71,7 +71,9 @@
     "seatsOccupied": "{{occupied}}/{{total}} miejsc zajętych",
     "startGame": "Rozpocznij grę",
     "startNow": "Rozpocznij teraz",
-    "fillWithAi": "Wypełnij przez AI"
+    "fillWithAi": "Wypełnij przez AI",
+    "joinLinkCopied": "Skopiowano link dołączenia",
+    "copyJoinLink": "Kopiuj link dołączenia: {{joinShare}}"
   },
   "grantDebug": {
     "heading": "Piaskownica: uprawnienia debugowania",

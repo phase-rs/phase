@@ -710,6 +710,25 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
         .parse(rest)
         .map(|(rest, matched)| (rest, matched.is_some()))
         .unwrap_or((rest, false));
+    // CR 608.2c: "if it's a card of the chosen type" (Gathering Stone) — the
+    // chosen creature type can match any card whose type line includes it.
+    if let Ok((after_chosen, _)) =
+        tag::<_, _, OracleError<'_>>("card of the chosen type").parse(rest)
+    {
+        let remainder = remainder_after_optional_comma(after_chosen);
+        let offset = text.len() - remainder.len();
+        return (
+            Some(maybe_negate(
+                AbilityCondition::RevealedHasCardType {
+                    card_types: vec![],
+                    additional_filter: Some(FilterProp::IsChosenCreatureType),
+                    subtype_filter: None,
+                },
+                negated,
+            )),
+            text[offset..].to_string(),
+        );
+    }
     // CR 205.3m: Multi-subtype creature gates ("Kraken, Leviathan, Octopus,
     // or Serpent creature card") must not collapse to bare CoreType::Creature.
     if let Some((subtype_filter, after_type)) = parse_creature_subtype_card_tail(rest) {
@@ -741,10 +760,23 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     // "permanent card" → TargetFilter::Typed(TypeFilter::Permanent) — and gate on it
     // with TargetMatchesFilter (the same condition variant the sibling MV arms use).
     if type_word == "permanent" {
-        let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase("permanent card");
+        let (mut filter, leftover) =
+            crate::parser::oracle_target::parse_type_phrase("permanent card");
         if !matches!(filter, TargetFilter::Any) && leftover.trim().is_empty() {
-            // allow-noncombinator: structural separator after parsed clause
-            let remainder = after_type.strip_prefix(", ").unwrap_or(after_type);
+            let (after_type, chosen_type) = if let Ok((rest_after_chosen, _)) =
+                tag::<_, _, OracleError<'_>>(" of the chosen type").parse(after_type)
+            {
+                (rest_after_chosen, true)
+            } else {
+                (after_type, false)
+            };
+            if chosen_type {
+                let TargetFilter::Typed(typed) = &mut filter else {
+                    return (None, text.to_string());
+                };
+                typed.properties.push(FilterProp::IsChosenCreatureType);
+            }
+            let remainder = remainder_after_optional_comma(after_type);
             let offset = text.len() - remainder.len();
             return (
                 Some(maybe_negate(
@@ -2206,6 +2238,12 @@ pub(super) fn difference_expr(cond: &AbilityCondition) -> Option<QuantityExpr> {
     }
 }
 
+/// Bridge a `StaticCondition` (from the nom condition parser) to an
+/// `AbilityCondition`. Returns `None` for variants that have no
+/// effect-resolution equivalent — the caller falls through to the next strategy.
+///
+/// Exhaustive on purpose — when you add a `StaticCondition` variant, decide
+/// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
 pub(crate) fn static_condition_to_ability_condition(
     sc: &StaticCondition,
     ctx: &mut ParseContext,
@@ -2437,6 +2475,9 @@ pub(crate) fn static_condition_to_ability_condition(
 /// GE, 1 }` shape — the bridge target of `IsPresent` — is restored to
 /// `IsPresent` so the keyword-swap path (`rewrite_condition_keyword`) handles
 /// it uniformly.
+///
+/// Exhaustive on purpose — when you add an `AbilityCondition` variant, decide
+/// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
 pub(crate) fn ability_condition_to_static_condition(
     ac: &AbilityCondition,
 ) -> Option<StaticCondition> {
@@ -2469,7 +2510,61 @@ pub(crate) fn ability_condition_to_static_condition(
         AbilityCondition::Not { condition } => Some(StaticCondition::Not {
             condition: Box::new(ability_condition_to_static_condition(condition)?),
         }),
-        _ => None,
+
+        // Casting-context conditions — read `SpellContext` / cast history at
+        // resolution time; no continuous-evaluation (`StaticCondition`)
+        // equivalent.
+        AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::CastFromZone { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. } => None,
+
+        // Resolution-flow conditions — read in-resolution signals (effect
+        // outcomes, reveals, resolved targets, zone-change events, player-scope
+        // iteration); only meaningful inside `resolve_ability_chain`, never as
+        // a continuous-effect gate.
+        AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::ConditionInstead { .. }
+        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => None,
+
+        // No `StaticCondition` counterpart exists for these game-state
+        // predicates.
+        AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::SourceLacksKeyword { .. } => None,
+
+        // A `StaticCondition` counterpart exists, but `strip_suffix_conditional`
+        // never emits these shapes for per-`StaticDefinition` keyword-grant
+        // gates, so the condition stays on `AbilityDefinition.condition` as
+        // before. Invert here if the lowering path ever needs them.
+        AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::And { .. }
+        | AbilityCondition::Or { .. } => None,
     }
 }
 
@@ -4579,6 +4674,31 @@ mod tests {
     }
 
     #[test]
+    fn strip_card_type_conditional_permanent_of_chosen_type() {
+        let (cond, body) = strip_card_type_conditional(
+            "If it's a permanent card of the chosen type, draw a card.",
+        );
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = cond else {
+            panic!("expected TargetMatchesFilter for permanent chosen type, got {cond:?}");
+        };
+        assert!(!use_lki, "present-tense 'it's a' check must not use LKI");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for permanent chosen type");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Permanent),
+            "expected Permanent type filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::IsChosenCreatureType),
+            "expected chosen-type property, got {:?}",
+            tf.properties
+        );
+        assert_eq!(body, "draw a card.");
+    }
+
+    #[test]
     fn strip_card_type_conditional_nonpermanent_negated() {
         let (cond, body) = strip_card_type_conditional("If it's a nonpermanent card, draw a card.");
         let Some(AbilityCondition::Not { condition }) = cond else {
@@ -4764,6 +4884,22 @@ mod tests {
             panic!("expected subtype Or filter");
         };
         assert_eq!(filters.len(), 4);
+    }
+
+    /// Issue #1525 — Gathering Stone: "if it's a card of the chosen type".
+    #[test]
+    fn if_its_a_card_of_the_chosen_type_revealed_condition() {
+        let (cond, _) = strip_card_type_conditional(
+            "If it's a card of the chosen type, you may reveal it and put it into your hand.",
+        );
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::RevealedHasCardType {
+                card_types: vec![],
+                additional_filter: Some(FilterProp::IsChosenCreatureType),
+                subtype_filter: None,
+            })
+        );
     }
 
     /// CR 608.2c: Regression guard for the subtype fall-through. parse_type_phrase

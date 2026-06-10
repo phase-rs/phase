@@ -1557,6 +1557,9 @@ fn observers_are_batch_safe(state: &GameState, plan: &effects::BatchPlan) -> boo
         let tc = GameEvent::TokenCreated {
             object_id: PROBE_ID,
             name: spec.characteristics.display_name.clone(),
+            // Synthetic batch-safety probe; the creating source is irrelevant to the
+            // observer-shape check, so reuse the probe sentinel id.
+            source_id: PROBE_ID,
         };
         for ev in [&zc, &tc] {
             // unclassified ∪ buckets matching keys_from_event(ev). The

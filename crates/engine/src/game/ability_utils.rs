@@ -934,21 +934,25 @@ pub fn validate_selected_targets(
     targets: &[TargetRef],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<(), EngineError> {
-    let minimum_targets = target_slots.iter().filter(|slot| !slot.optional).count();
-    if targets.len() < minimum_targets || targets.len() > target_slots.len() {
-        return Err(EngineError::InvalidAction(format!(
-            "Expected between {minimum_targets} and {} targets, got {}",
-            target_slots.len(),
-            targets.len()
-        )));
-    }
-
-    validate_target_prefix(target_slots, targets, constraints)
+    validate_selected_targets_inner(None, target_slots, targets, constraints)
 }
 
 pub fn validate_selected_targets_for_ability(
     state: &GameState,
     ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    targets: &[TargetRef],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<(), EngineError> {
+    validate_selected_targets_inner(Some((state, ability)), target_slots, targets, constraints)
+}
+
+/// Shared body for the two `validate_selected_targets*` entry points —
+/// count-window validation lives here exactly once. With an ability context
+/// the prefix check is the spec-aware CR 608.2b re-validation against current
+/// game state; without one it checks against the stored slot snapshots.
+fn validate_selected_targets_inner(
+    ability_ctx: Option<(&GameState, &ResolvedAbility)>,
     target_slots: &[TargetSelectionSlot],
     targets: &[TargetRef],
     constraints: &[TargetSelectionConstraint],
@@ -962,7 +966,12 @@ pub fn validate_selected_targets_for_ability(
         )));
     }
 
-    validate_target_prefix_for_ability(state, ability, target_slots, targets, constraints)
+    match ability_ctx {
+        Some((state, ability)) => {
+            validate_target_prefix_for_ability(state, ability, target_slots, targets, constraints)
+        }
+        None => validate_target_prefix(target_slots, targets, constraints),
+    }
 }
 
 fn validate_target_prefix(

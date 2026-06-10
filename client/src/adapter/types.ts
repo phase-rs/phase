@@ -1657,7 +1657,7 @@ export type GameEvent =
   | { type: "CounterAdded"; data: { object_id: ObjectId; counter_type: string; count: number } }
   | { type: "ObjectIntensified"; data: { object_id: ObjectId; amount: number } }
   | { type: "CounterRemoved"; data: { object_id: ObjectId; counter_type: string; count: number } }
-  | { type: "TokenCreated"; data: { object_id: ObjectId; name: string } }
+  | { type: "TokenCreated"; data: { object_id: ObjectId; name: string; source_id: ObjectId } }
   | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }

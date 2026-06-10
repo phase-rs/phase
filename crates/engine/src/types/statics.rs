@@ -1157,7 +1157,11 @@ pub enum StaticMode {
         count: u8,
     },
     EmblemStatic,
-    BlockRestriction,
+    /// CR 509.1b: Blocker-side restriction — this creature can block only
+    /// attackers matching `filter` (Cloud Sprite, Pinnacle Emissary Drone).
+    BlockRestriction {
+        filter: super::ability::TargetFilter,
+    },
     /// CR 402.2: No maximum hand size.
     NoMaximumHandSize,
     /// CR 402.2 + CR 514.1: Maximum hand size modification.
@@ -1345,6 +1349,7 @@ impl Hash for StaticMode {
                 BlockExceptionKind::MinBlockers { min } => min.hash(state),
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
+            StaticMode::BlockRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::AttachmentRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
@@ -1502,7 +1507,7 @@ impl StaticMode {
             | StaticMode::MayChooseNotToUntap
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::EmblemStatic
-            | StaticMode::BlockRestriction
+            | StaticMode::BlockRestriction { .. }
             | StaticMode::NoMaximumHandSize
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::MayPlayAdditionalLand
@@ -1745,7 +1750,13 @@ impl fmt::Display for StaticMode {
                 write!(f, "AdditionalLandDrop({count})")
             }
             StaticMode::EmblemStatic => write!(f, "EmblemStatic"),
-            StaticMode::BlockRestriction => write!(f, "BlockRestriction"),
+            StaticMode::BlockRestriction { filter } => {
+                if *filter == block_only_creatures_with_flying_filter() {
+                    write!(f, "BlockRestriction")
+                } else {
+                    write!(f, "BlockRestriction:Quality({filter:?})")
+                }
+            }
             StaticMode::NoMaximumHandSize => write!(f, "NoMaximumHandSize"),
             StaticMode::MaximumHandSize { modification } => {
                 write!(f, "MaximumHandSize({modification})")
@@ -2078,7 +2089,9 @@ impl FromStr for StaticMode {
             "MayChooseNotToUntap" => StaticMode::MayChooseNotToUntap,
             // AdditionalLandDrop is parameterized — parsed in the `other` branch below
             "EmblemStatic" => StaticMode::EmblemStatic,
-            "BlockRestriction" => StaticMode::BlockRestriction,
+            "BlockRestriction" => StaticMode::BlockRestriction {
+                filter: block_only_creatures_with_flying_filter(),
+            },
             "NoMaximumHandSize" => StaticMode::NoMaximumHandSize,
             s if s.starts_with("MaximumHandSize(") => {
                 // MaximumHandSize is data-carrying; FromStr round-trip not required.
@@ -2303,6 +2316,16 @@ fn parse_static_mode_u32_arg(s: &str, prefix: &str) -> Option<u32> {
         .ok()
 }
 
+/// CR 509.1b: Canonical attacker filter for "can block only creatures with flying."
+pub fn block_only_creatures_with_flying_filter() -> TargetFilter {
+    use super::ability::{FilterProp, TypedFilter};
+    TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::WithKeyword {
+            value: Keyword::Flying,
+        }]),
+    )
+}
+
 /// Forward-compatible deserializer for `StaticMode` fields in persisted JSON
 /// (card-data.json). Handles the common case where a new unit-variant is added
 /// to the engine but an older WASM binary tries to load card data that contains
@@ -2334,6 +2357,11 @@ where
             // Unit variant path. Handle legacy cost-modify unit variants first.
             if let Some(mode) = deserialize_legacy_cost_modify_string(s) {
                 return Ok(mode);
+            }
+            if s == "BlockRestriction" {
+                return Ok(StaticMode::BlockRestriction {
+                    filter: block_only_creatures_with_flying_filter(),
+                });
             }
             // Try the derived deserializer so all known unit variants
             // (e.g. "SpendManaAsAnyColor", "Flying", …) round-trip correctly.
@@ -2411,6 +2439,22 @@ fn deserialize_legacy_modify_cost_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_block_restriction_string_deserializes_with_flying_filter() {
+        use super::super::ability::StaticDefinition;
+
+        let def: StaticDefinition = serde_json::from_str(
+            r#"{"mode":"BlockRestriction","modifications":[],"affected":{"type":"SelfRef"}}"#,
+        )
+        .expect("legacy card-data unit variant");
+        assert_eq!(
+            def.mode,
+            StaticMode::BlockRestriction {
+                filter: block_only_creatures_with_flying_filter(),
+            }
+        );
+    }
 
     #[test]
     fn parse_known_static_modes() {
@@ -2529,7 +2573,9 @@ mod tests {
             StaticMode::AdditionalLandDrop { count: 1 },
             StaticMode::AdditionalLandDrop { count: 2 },
             StaticMode::EmblemStatic,
-            StaticMode::BlockRestriction,
+            StaticMode::BlockRestriction {
+                filter: block_only_creatures_with_flying_filter(),
+            },
             StaticMode::NoMaximumHandSize,
             StaticMode::MayPlayAdditionalLand,
             // Graveyard cast/play permissions

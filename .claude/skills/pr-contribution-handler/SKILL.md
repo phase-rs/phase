@@ -61,6 +61,15 @@ Before changing code, read these files from the repo root and apply their logic:
 
 Do not paraphrase these from memory. Re-read them each time because they are the source of truth.
 
+## Rate-Limit Discipline (governs every `gh` call)
+
+A non-stop fleet exhausts GitHub's **5,000-req/hr REST `core`** bucket long before the separate GraphQL bucket. Minimize `core` reads:
+
+- **Scan diffs locally, not via API.** After fetching the PR head ref (needed for checkout anyway), use `git diff origin/main...pr/<N>` — never `gh pr diff <N>`, which spends one `core` request per PR and returns a truncatable payload. The local diff is free and carries the full patch (gitlink modes, binary flags, deletion counts).
+- **Comments: comprehensive via GraphQL for the gate; a windowed sweep only for triage.** Most feedback here is **top-level** — review bodies (Gemini's summary, human reviews) and issue comments — which have no resolved-flag, so the "all blocking comments resolved" gate must read every one. Fetch `reviews` + `comments` + inline `reviewThreads` comprehensively in one GraphQL call per PR (idle bucket), paginating every connection whose `hasNextPage` is true — never a time-windowed slice, which can drop an old unaddressed blocker (see `pr-review-comment-resolver.md` §2). A repo-wide `since=` REST sweep is acceptable **only** for lightweight "what's new across the batch" triage: derive `since` from the run window, dedup by comment `id` (`since` is inclusive), never a per-PR un-`since`'d `--paginate` walk (the top `core` drain). Do NOT persist a shared global high-water-mark file: concurrent fleet agents race on it and skip each other's new comments.
+- **Prefer GraphQL builders for state.** `gh pr view --json` / `gh pr list --json` / `gh pr checks` are GraphQL (the idle bucket) — they do not relieve `core`, but they are the right place to read PR state and check rollups.
+- **Back-pressure off response headers.** Watch `x-ratelimit-remaining` on calls you already make; consult `gh api rate_limit` at most once per batch (it counts against the *secondary* limit). When `core` runs low, pause **only at PR boundaries** — never inside the approve → label → enqueue → verify sequence (that critical section must not be interrupted; a half-enqueued PR is worse than waiting).
+
 ## Intake
 
 1. Parse the PR number(s), URL(s), or branch name(s).
@@ -68,14 +77,14 @@ Do not paraphrase these from memory. Re-read them each time because they are the
 3. If multiple PRs are provided, process them sequentially unless the user explicitly asks for parallel work and the PRs have independent worktrees.
 4. Capture the initial state:
    - `git status --short`
-   - `gh pr view <PR> --json number,title,state,author,headRefName,headRepository,baseRefName,isCrossRepository,mergeStateStatus,reviewDecision,url`
+   - `gh pr view <PR> --json number,title,state,author,assignees,headRefName,headRepository,baseRefName,isCrossRepository,mergeStateStatus,reviewDecision,url`
    - `gh pr checks <PR>` if available
 
 ## Security and Sanity Pre-Check (per PR — runs first, before anything else)
 
 **The goal of this skill is to MERGE PRs into `main`.** Most "out of place" changes are unintentional and fixable inline. A small subset is malicious or destructive enough that you should stop and flag the maintainer instead of patching forward.
 
-Run these checks against the diff (`gh pr diff <N>` or `git diff origin/main...HEAD` after checkout — you can do it pre-checkout via `gh pr diff <N>`):
+Run these checks against the **local** diff. Fetch the PR head ref once (`git fetch origin pull/<N>/head:pr/<N>` — required for checkout regardless) and scan `git diff origin/main...pr/<N>`, which costs no API quota and returns the full, untruncated patch (gitlink `160000` modes, binary flags, deletion counts). Avoid `gh pr diff <N>` — it spends a REST `core` request per PR, the bucket a non-stop fleet drains first, and its API payload can be truncated for very large diffs:
 
 ### Hard stops (do not attempt fixes — report and skip)
 
@@ -111,6 +120,56 @@ These are the recurring accidental-damage patterns. Fix inline as part of your n
 
 Run these checks BEFORE prioritization. A PR with hard-stop issues is removed from the queue entirely; a PR with auto-fix issues stays in the queue and gets handled.
 
+**The security scan runs on every PR, including ones another agent has locked** (see "Assignment Lock" below). The scan is on the free local diff, so the assignment-lock skip must never suppress hard-stop reporting: a malicious PR another agent grabbed (or whose lock went stale) must still be caught and reported. The lock is acquired only *after* a clean security pass — never acquire the lock for a PR that fired a hard stop.
+
+## Assignment Lock (cooperative, per PR — acquire after a clean security pass)
+
+A non-stop fleet of agents handles PRs concurrently. PR **assignment is a cooperative lock**: it prevents two agents from redundantly processing the same PR. Acquire it when you pick a PR up for processing; release it the moment you stop working the PR (see "Releasing the Assignment Lock").
+
+**Acting identity.** Resolve the acting account **once per invocation** and cache it: `ACTING_LOGIN=$(gh api user --jq '.login')`. Reads compare assignee logins against `ACTING_LOGIN`; writes use `@me` (GitHub resolves `@me` to the same account under your token). `assignees` is already captured by the intake `gh pr view` call — do not re-fetch it.
+
+**Skip-if-owned gate (do not process PRs assigned to someone else).** If any assignee login ≠ `ACTING_LOGIN`, **skip the PR**: no checkout, no comment resolution, no review, no fixes, no enqueue. Record `skipped: assigned to <login>` in the Final Report and move to the next PR. Notes:
+
+- This gate sits *before* `## Checkout` in the flow, so an owned PR is skipped before any worktree is created or any fix work begins. Apply it as each PR is picked up for processing.
+- "Someone else" includes a **human maintainer** who self-assigned — that is intended (a human has claimed the PR). The report does not distinguish a human from another agent; both are "assigned to <login>".
+- A PR assigned **only** to `ACTING_LOGIN` is **not** "someone else" — it is your own lock from a prior run. Reuse it and proceed.
+- The security hard-stop scan above runs regardless of ownership; a hard stop on an owned PR is still reported.
+
+**Acquire.** After the security pre-check is clean and before checkout, if the PR is unassigned (or already assigned only to you):
+
+```bash
+gh pr edit <PR> --add-assignee @me
+```
+
+This is a single command — do not re-read to confirm. *Known limitation, acceptable for now:* acquire is not atomic, so two agents racing on an unassigned PR could both assign; the loser's release at its next stop point cleans up. There is deliberately no durable/atomic lock and no staleness-based reclaim.
+
+The only new REST `core` read is `gh api user`, once per invocation. The acquire/release `gh pr edit` mutations use the GraphQL/idle bucket (like the other `gh pr` operations in **Rate-Limit Discipline**), not the contended `core` bucket — negligible quota impact.
+
+## Releasing the Assignment Lock
+
+```bash
+gh pr edit <PR> --remove-assignee @me
+```
+
+This command is idempotent — a harmless no-op if you are not currently assigned (e.g. you lost an acquire race, or never acquired because security hard-stopped first).
+
+**Governing principle:** release the lock at **every point where you cease active work on the PR** — any handoff to the maintainer, any BLOCK/skip/stop, any error exit — in **both** default and authorized modes. The list below is illustrative, not exhaustive; the principle governs. The discrete stop sites in this skill each carry a one-line reminder pointing back here — but if you reach any other stop the list omits, release anyway.
+
+Concrete release points:
+
+- **Auto-fix-then-continue** (the security auto-fix classes) is **not** a stop — keep the lock and continue handling.
+- **Security hard-stop** — the lock was never acquired (acquire happens only after a clean security pass), so no release is needed; do not special-case it.
+- **Checkout collision** — the local `pr/<PR>` branch holds unrelated work and you bail rather than reset.
+- **Bring-current obsolete-merge** — merging `origin/main` reveals the PR approach is obsolete and you route it to a full engine cycle instead of finishing.
+- **Duplicate-PR loser** — you keep the more rules-correct base and report the other for close/supersede.
+- **Scope-contamination BLOCK-pending-rebase** — the PR is far behind and its diff would revert other agents' work.
+- **Architecture-review BLOCK / wrong-seam** — the fix belongs at a different seam (the prose-verdict site, not the enqueue checklist).
+- **Full engine cycle required but unavailable**, or a significant deferral is left and you stop.
+- **Enqueue-checklist failure** (any item) — you leave the PR for the maintainer to decide.
+- **`gh pr merge` returns an error** — you surface it verbatim and leave the PR for the maintainer.
+- **Default mode (no enqueue authority)** — the skill never runs `gh pr merge`; it hands every PR back with a recommended command. Release at the **end of every PR**, because there is no enqueue step to release after.
+- **After a successful enqueue (authorized mode)** — release **after** the approve → label → enqueue → verify critical section completes. Place the release mutation *outside* that critical section; never interleave it (per **Rate-Limit Discipline**, that section must not be interrupted).
+
 ## Duplicate-PR and Scope-Contamination Check (per PR — at intake)
 
 Two recurring, expensive intake problems that are neither security hard-stops nor mechanical auto-fixes. Surface them as evidence **before** investing review effort.
@@ -122,7 +181,7 @@ gh pr view <N> --json closingIssuesReferences,title --jq '{title, closes: [.clos
 gh pr list --repo phase-rs/phase --state open --json number,title --jq '.[] | select(.number != <N>)'   # scan for the same issue / card / mechanic
 ```
 
-If a duplicate exists, do not handle both: hand-trace each, keep the more rules-correct base, report the other for close/supersede, and note it in the Final Report. Two PRs for one issue are never both enqueued.
+If a duplicate exists, do not handle both: hand-trace each, keep the more rules-correct base, report the other for close/supersede (if you hold its assignment lock, release it — see *Releasing the Assignment Lock*), and note it in the Final Report. Two PRs for one issue are never both enqueued.
 
 **Scope contamination / stale branch.** Diff the PR against current `origin/main` and confirm the change set matches the PR's stated scope.
 
@@ -131,7 +190,7 @@ gh pr view <N> --json mergeable,mergeStateStatus --jq '{mergeable, mergeStateSta
 git diff --stat origin/main...HEAD
 ```
 
-- `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY` / branch far behind → needs a rebase before review. If the diff would revert other agents' landed work (token data, deploy config, concurrent integration tests), that is **BLOCK-pending-rebase**, not an inline fix (precedent: #2519 was 53 commits behind and its diff would have reverted ~5,800 unrelated lines; #2520 was 40 behind and bundled two features).
+- `mergeable: CONFLICTING` / `mergeStateStatus: DIRTY` / branch far behind → needs a rebase before review. If the diff would revert other agents' landed work (token data, deploy config, concurrent integration tests), that is **BLOCK-pending-rebase**, not an inline fix (precedent: #2519 was 53 commits behind and its diff would have reverted ~5,800 unrelated lines; #2520 was 40 behind and bundled two features). On a BLOCK-pending-rebase, release the assignment lock (see *Releasing the Assignment Lock*) — you are handing the PR back, not processing it.
 - Diff touches generated registries (`known-tokens.toml`), stray gitlinks/submodules (`new file mode 160000`), or subsystems unrelated to the stated scope → handle via the Security/Sanity auto-fix classes (strip/revert); if the contamination is load-bearing to the PR's logic, reduce the PR to its real change before review.
 - A PR body claiming "Scope Expansion: None" whose diff is large and cross-cutting is a contradiction to verify, not to trust.
 
@@ -212,12 +271,16 @@ If `origin/main` is already an ancestor and there are no conflicts, skip the mer
 
 ## Review Comment Resolution
 
-**Operational — posting and fetching.** Post every PR comment, review body, and final report through a temp file (`gh pr comment <N> --body-file /tmp/body.md`, `gh pr review <N> --body-file /tmp/review.md`), **never** an inline `--body "…"` string. Inline bodies are mangled by the shell — zsh strips backticked identifiers and code spans, which has silently corrupted the technical claims of a *blocking* review. Write the body to a file, then pass `--body-file`. When handling many PRs, fetch comments in one batched repo-wide sweep rather than looping per-PR `gh` calls — the per-PR pattern drains the 5,000/hr GitHub core rate limit at fleet scale:
+**Operational — posting and fetching.** Post every PR comment, review body, and final report through a temp file (`gh pr comment <N> --body-file /tmp/body.md`, `gh pr review <N> --body-file /tmp/review.md`), **never** an inline `--body "…"` string. Inline bodies are mangled by the shell — zsh strips backticked identifiers and code spans, which has silently corrupted the technical claims of a *blocking* review. Write the body to a file, then pass `--body-file`.
+
+**Fetching — gate vs triage.** For per-PR comment **resolution** (the gate), fetch `reviews` + `comments` + `reviewThreads` comprehensively via one GraphQL call per PR (the idle bucket — cheap even at fleet scale; query and pagination rules in `pr-review-comment-resolver.md` §2). Most feedback here is top-level review bodies and issue comments, which carry no resolved-flag — read every one's body for findings (Gemini posts its review as `COMMENTED` with `reviewDecision: null`, so do NOT gate on review `state`; treat `CHANGES_REQUESTED` as an additional hard block). The repo-wide `since=` REST sweep below is **only** for lightweight cross-batch triage of what changed recently — never the resolution gate, and never a per-PR un-`since`'d `--paginate` walk (that drains the 5,000/hr `core` bucket at fleet scale):
 
 ```bash
-gh api --paginate 'repos/phase-rs/phase/pulls/comments?since=<ISO8601>&per_page=100'
-gh api --paginate 'repos/phase-rs/phase/issues/comments?since=<ISO8601>&per_page=100'
+gh api --paginate 'repos/phase-rs/phase/pulls/comments?since=<ISO8601>&per_page=100'   # inline review comments
+gh api --paginate 'repos/phase-rs/phase/issues/comments?since=<ISO8601>&per_page=100'  # issue/conversation comments
 ```
+
+Derive `<ISO8601>` from the run's time window (e.g. one hour prior) rather than re-sweeping all history, filter each PR's comments locally by `pull_request_url`/`issue_url`, and **dedup by comment `id`** — `since` is inclusive, so the boundary comment re-returns. Do NOT persist a shared global high-water-mark across runs: concurrent fleet agents race on it and silently skip each other's new comments (per **Rate-Limit Discipline**).
 
 Apply `.claude/agents/pr-review-comment-resolver.md` directly:
 
@@ -243,7 +306,7 @@ git diff origin/main...HEAD
 
 Ask, explicitly, TWO questions in this order:
 
-1. **Is the change in the architecturally correct LOCATION (the right seam)?** Is this fix made at the layer / module / function where the codebase's design says the responsibility belongs — or is it a symptom-patch at the wrong seam that merely makes the test pass? A change on the wrong code path is **technical debt even when CI is green**: it ossifies a dead or duplicate path, scatters logic that should live in one authority, and the *next* card in the class won't be covered because the real seam was never touched. **This is the single most important check in the entire review.** Increasing PR velocity NEVER justifies merging debt — a wrong-location fix that ships is worse than no fix, because it looks done while leaving the actual seam broken and now obscured. If the correct location is a different function/module than the PR touches, the verdict is **BLOCK** (close or request re-implementation at the right seam), or escalate to the full engine cycle — it is *not* an inline patch of the wrong location. Always cite the correct seam in the report. (Precedent: #1251 added a green, inert branch to `classify_quoted_inner` when the real fix belonged in `parse_spells_have_keyword` / `StaticMode::CastWithKeyword` — BLOCKED despite passing CI, because merging it would have ossified a dead path and left the target card class uncovered.)
+1. **Is the change in the architecturally correct LOCATION (the right seam)?** Is this fix made at the layer / module / function where the codebase's design says the responsibility belongs — or is it a symptom-patch at the wrong seam that merely makes the test pass? A change on the wrong code path is **technical debt even when CI is green**: it ossifies a dead or duplicate path, scatters logic that should live in one authority, and the *next* card in the class won't be covered because the real seam was never touched. **This is the single most important check in the entire review.** Increasing PR velocity NEVER justifies merging debt — a wrong-location fix that ships is worse than no fix, because it looks done while leaving the actual seam broken and now obscured. If the correct location is a different function/module than the PR touches, the verdict is **BLOCK** (close or request re-implementation at the right seam), or escalate to the full engine cycle — it is *not* an inline patch of the wrong location. Always cite the correct seam in the report, and release the assignment lock (see *Releasing the Assignment Lock*) when you BLOCK and hand the PR back. (Precedent: #1251 added a green, inert branch to `classify_quoted_inner` when the real fix belonged in `parse_spells_have_keyword` / `StaticMode::CastWithKeyword` — BLOCKED despite passing CI, because merging it would have ossified a dead path and left the target card class uncovered.)
 2. **Is the change AT that seam the MOST IDIOMATIC change possible?** Once the location is right, the implementation at it must be the one a principal engineer steeped in this codebase would write — the established building block reused rather than re-implemented, an existing typed enum parameterized rather than a new `bool` or sibling variant, `nom` combinators composed rather than string dispatch. A correct-but-unidiomatic change at the right seam is still a finding, not a nit: it passes CI and may even cover the class, but it diverges from house style and seeds the next contributor's copy-paste with a non-idiom. Bring it to the idiom before merge (improve the author's branch per Quality Bar rule 1) — never merge "works, but not how we'd write it."
 
 Apply the relevant lenses from `review-impl.md`, especially:
@@ -284,7 +347,7 @@ Use `$engine-implementer` and the full plan -> implement -> review cycle when th
 - the current PR shape solves one card/screen/case but should become a reusable building block
 - fixing the PR safely requires a reviewed implementation plan rather than direct patching
 
-If the full cycle is required but unavailable in the current environment, stop after writing the review findings and tell the user exactly why inline fixing would be risky.
+If the full cycle is required but unavailable in the current environment, stop after writing the review findings, release the assignment lock (see *Releasing the Assignment Lock*), and tell the user exactly why inline fixing would be risky.
 
 ## Explicit Deferrals
 
@@ -387,7 +450,7 @@ gh pr edit <PR> --add-label <type-label>                              # see "## 
 gh pr merge <PR> --auto
 ```
 
-Verify via the GraphQL API (gh CLI output is unreliable under the rtk filter): `reviewDecision == APPROVED`, the type label present, and `mergeQueueEntry.state` is QUEUED or AWAITING_CHECKS. A bare `gh pr merge --auto` that prints "queued" is NOT proof — re-check the entry state, because the queue silently sheds unapproved PRs.
+Verify via the GraphQL API (gh CLI output is unreliable under the rtk filter): `reviewDecision == APPROVED`, the type label present, and `mergeQueueEntry.state` is QUEUED or AWAITING_CHECKS. A bare `gh pr merge --auto` that prints "queued" is NOT proof — re-check the entry state, because the queue silently sheds unapproved PRs. These mergeability/queue-state reads must be **live** — never serve them from a `--cache`d snapshot, because a push during handling changes them.
 
 `--auto` under a merge queue means "add to queue when required checks pass." The queue speculatively rebases the PR against the latest `main`, runs CI once on the synthesized future-main commit (batching up to the configured group size with any other queued PRs), and merges all green PRs in order. Failed PRs are bisected out of the group and kicked back to the author.
 
@@ -428,10 +491,11 @@ Every item must be satisfied before running `gh pr merge`. Failing any item mean
 After running `gh pr merge <PR> --auto`:
 
 1. Capture the auto-merge confirmation (the CLI prints "Pull request #N will be automatically merged via the merge queue when all requirements are met" or similar).
-2. Do NOT wait for the queue to land the PR — the queue is async and may take minutes (CI run + queue position). Move on to the next PR in the batch.
-3. In the Final Report, note `enqueued: yes` plus the timestamp and any queue-position info from the CLI output.
+2. Release the assignment lock (see *Releasing the Assignment Lock*) — processing is complete. Do this *outside* the approve → label → enqueue → verify critical section, after it finishes.
+3. Do NOT wait for the queue to land the PR — the queue is async and may take minutes (CI run + queue position). Move on to the next PR in the batch.
+4. In the Final Report, note `enqueued: yes` plus the timestamp and any queue-position info from the CLI output.
 
-If `gh pr merge` returns an error (PR not mergeable, missing required checks, auth issue, queue disabled), do NOT retry blindly. Surface the error verbatim in the Final Report and leave the PR for the maintainer.
+If `gh pr merge` returns an error (PR not mergeable, missing required checks, auth issue, queue disabled), do NOT retry blindly. Surface the error verbatim in the Final Report, release the assignment lock (see *Releasing the Assignment Lock*), and leave the PR for the maintainer.
 
 ## Final Report
 
@@ -445,8 +509,9 @@ For each PR, report:
 - deferred items completed vs left open
 - verification commands and results
 - commits created and push status
+- **assignment status**: `assigned: self` (lock acquired and held), `skipped: assigned to <login>` (owned by another agent or a human — not processed), or `released: <reason>` (lock acquired then released at a stop point — name the reason, e.g. `released: changes-requested`, `released: enqueued`, `released: default-mode handoff`).
 - **enqueue status**:
-  - In **default mode** (no enqueue authority): the exact `gh pr merge <PR> --auto` command for the maintainer to run, OR an explicit reason not to enqueue (hard-stop security issue, blocking review comment, requires full-cycle work first, etc.).
+  - In **default mode** (no enqueue authority): the exact `gh pr merge <PR> --auto` command for the maintainer to run, OR an explicit reason not to enqueue (hard-stop security issue, blocking review comment, requires full-cycle work first, etc.). Release the assignment lock (see *Releasing the Assignment Lock*) at the end of every PR in this mode — there is no enqueue step to release after.
   - In **authorized mode**: `enqueued: yes` (with timestamp + any queue-position output from the CLI), OR `enqueued: no` with the failed enqueue-checklist item(s) and evidence.
 
 Include evidence for claims, mark assumptions separately, and state confidence. Also include a short self-challenge: what evidence would contradict the conclusion that the PR is ready?

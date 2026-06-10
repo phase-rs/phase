@@ -5,6 +5,7 @@ import type { LobbyGame } from "../../adapter/types";
 import type { CreateDraftSettings } from "../../adapter/server-draft-adapter";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { menuButtonClass } from "../menu/buttonStyles";
+import { SelectField } from "../ui/SelectField";
 
 // ── Draft Room List ─────────────────────────────────────────────────────
 
@@ -193,14 +194,15 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
         {/* Kind */}
         <label className="flex flex-col gap-1">
           <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">{t("lobbyDraftRooms.kind")}</span>
-          <select
+          <SelectField
+            wrapperClassName="w-full"
             value={kind}
             onChange={(e) => setKind(e.target.value as "Premier" | "Traditional")}
-            className="rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400/40"
+            className="w-full rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400/40"
           >
             <option value="Premier">{t("lobbyDraftRooms.premier")}</option>
             <option value="Traditional">{t("lobbyDraftRooms.traditional")}</option>
-          </select>
+          </SelectField>
         </label>
 
         {/* Pod size */}
