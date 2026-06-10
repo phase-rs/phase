@@ -17,7 +17,9 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{CastingPermission, Effect};
 use engine::types::actions::{CastChoice, GameAction};
-use engine::types::game_state::{CastOfferKind, GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    CastOfferKind, CastPaymentMode, GameState, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -85,6 +87,8 @@ fn cascade_accept_casts_hit_during_resolution() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast");
     runner.act(GameAction::PassPriority).expect("p0 pass");
@@ -183,6 +187,8 @@ fn cascade_hit_with_spell_ability_casts_during_resolution() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast");
     runner.act(GameAction::PassPriority).expect("p0 pass");
@@ -266,6 +272,8 @@ fn cascade_hit_cast_triggers_fire_during_resolution() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast outer");
     runner.act(GameAction::PassPriority).expect("p0 pass");
@@ -368,6 +376,8 @@ fn cascade_decline_bottoms_hit_and_misses() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast");
     runner.act(GameAction::PassPriority).expect("p0 pass");
@@ -438,6 +448,8 @@ fn discover_decline_sends_hit_to_hand() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast discover");
     runner.act(GameAction::PassPriority).expect("p0 pass");
@@ -521,6 +533,8 @@ fn discover_accept_hit_mv_equals_n_casts_to_stack() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast discover");
     runner.act(GameAction::PassPriority).expect("p0 pass");
@@ -605,6 +619,8 @@ fn accept_then_resolve_leaves_no_lingering_permission() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast");
     runner.act(GameAction::PassPriority).expect("p0 pass");

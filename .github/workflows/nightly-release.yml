@@ -16,6 +16,10 @@ permissions:
 jobs:
   cut-nightly-release:
     name: Cut Nightly Release
+    # Forks inherit this workflow's schedule but not upstream secrets
+    # (RELEASE_BOT_TOKEN), so a scheduled run in a fork can only fail noisily.
+    # Restrict the whole release graph to the canonical repository.
+    if: github.repository == 'phase-rs/phase'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:

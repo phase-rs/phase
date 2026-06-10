@@ -16,7 +16,7 @@
 //! `CardFace::metadata.spellbook`); the resolver reads it from the source.
 
 use crate::types::ability::{
-    ConjureCard, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility,
+    ConjureCard, ConjureSource, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -92,7 +92,9 @@ pub fn complete_draft(
     let conjure = ResolvedAbility::new(
         Effect::Conjure {
             cards: vec![ConjureCard {
-                name: card.to_string(),
+                source: ConjureSource::Named {
+                    name: card.to_string(),
+                },
                 count: QuantityExpr::Fixed { value: 1 },
             }],
             destination,

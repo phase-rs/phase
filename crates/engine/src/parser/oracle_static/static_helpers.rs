@@ -661,7 +661,10 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
             TargetFilter::Or {
                 filters: vec![
                     TargetFilter::StackSpell,
-                    TargetFilter::StackAbility { controller: None },
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None,
+                    },
                 ],
             },
             tag::<_, _, OracleError<'_>>("a spell or ability"),
@@ -671,7 +674,10 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
             tag::<_, _, OracleError<'_>>("a spell"),
         ),
         value(
-            TargetFilter::StackAbility { controller: None },
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+            },
             alt((
                 tag::<_, _, OracleError<'_>>("an activated or triggered ability"),
                 tag("a triggered or activated ability"),

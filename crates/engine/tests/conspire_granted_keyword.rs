@@ -25,7 +25,7 @@ use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::{Effect, QuantityExpr, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{PayCostKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -125,6 +125,8 @@ fn wort_grants_conspire_offers_cost_and_copies_when_paid() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting the red instant under Wort must be accepted");
 

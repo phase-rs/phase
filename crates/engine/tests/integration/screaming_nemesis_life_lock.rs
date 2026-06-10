@@ -42,6 +42,7 @@ use engine::game::static_abilities::player_has_cant_gain_life;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -149,6 +150,8 @@ fn screaming_nemesis_redirect_to_player_locks_that_player_only() {
             object_id: zap,
             card_id: zap_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting the 2-damage instant must succeed");
 
@@ -234,6 +237,8 @@ fn screaming_nemesis_redirect_to_creature_locks_no_player() {
             object_id: zap,
             card_id: zap_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting the 2-damage instant must succeed");
 

@@ -13,11 +13,12 @@ use crate::types::ability::{
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
     DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
-    FilterProp, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
-    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    EffectScope, FilterProp, GameRestriction, ManaProduction, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
+    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
+    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -343,6 +344,14 @@ pub struct SetCoverageSummary {
 /// Extract the effect variant name (e.g. "DealDamage", "Draw", "Unimplemented")
 /// by serializing to JSON and reading the serde `type` tag.
 fn effect_type_name(effect: &Effect) -> String {
+    // CR 701.26a/b: `Effect::SetTapState` serializes under one `"type"` tag,
+    // but the diagnostic label must preserve the four legacy names
+    // (Tap/Untap/TapAll/UntapAll) so per-effect coverage reporting reads the
+    // same set as before the collapse. `effect_variant_name` reconstructs them
+    // from `(scope, state)`.
+    if matches!(effect, Effect::SetTapState { .. }) {
+        return crate::types::ability::effect_variant_name(effect).to_string();
+    }
     serde_json::to_value(effect)
         .ok()
         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
@@ -364,15 +373,22 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
-        TargetFilter::StackAbility { controller: None } => "ability on stack".into(),
+        TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+        } => "ability on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(ControllerRef::You),
+            tag: None,
         } => "ability you control on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(ControllerRef::Opponent),
+            tag: None,
         } => "ability opponent controls on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(controller),
+            tag: None,
         } => format!("ability scoped to {controller:?} on stack"),
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
@@ -1689,9 +1705,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("filter".into(), fmt_target(target)));
             }
         }
+        // CR 701.26a/b: single-target tap/untap reports its `target` like other
+        // single-target effects; the mass scope reports a `filter` below.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::Destroy { target, .. }
-        | Effect::Tap { target }
-        | Effect::Untap { target }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Attach { target, .. }
@@ -1716,8 +1739,13 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::EpicCopy { .. } => {}
         Effect::Intensify { .. } => {}
         Effect::DestroyAll { target, .. }
-        | Effect::TapAll { target }
-        | Effect::UntapAll { target }
+        // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) reports a
+        // population `filter`, like the other mass effects.
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::DamageAll {
@@ -1818,12 +1846,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             d.push(("token".into(), desc));
         }
-        Effect::AddCounter {
-            counter_type,
-            count,
-            target,
-        }
-        | Effect::PutCounter {
+        Effect::PutCounter {
             counter_type,
             count,
             target,
@@ -2581,7 +2604,7 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     if def.condition.is_some() {
         d.push(("conditional".into(), "yes".into()));
     }
-    if def.sorcery_speed {
+    if def.is_sorcery_speed() {
         d.push(("timing".into(), "sorcery speed".into()));
     }
     if let Some(modal) = &def.modal {
@@ -6984,10 +7007,18 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     // "You may pay {X} rather than pay ..." — alternative cost patterns
                     effective_lower.contains("rather than pay")
                 }
-                Effect::TapAll { .. } => {
-                    effective_lower.contains("tap") && !effective_lower.contains("untap")
-                }
-                Effect::UntapAll { .. } => effective_lower.contains("untap"),
+                // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`)
+                // swallowed-clause detection.
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    state: TapStateChange::Tap,
+                    ..
+                } => effective_lower.contains("tap") && !effective_lower.contains("untap"),
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    state: TapStateChange::Untap,
+                    ..
+                } => effective_lower.contains("untap"),
                 Effect::PreventDamage { .. } => {
                     // "If a source would deal damage to you, prevent N of that damage"
                     // Parsed as PreventDamage without a description string.
@@ -7002,9 +7033,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 Effect::CastCopyOfCard { .. } => {
                     effective_lower.contains("copy") && effective_lower.contains("cast the copy")
                 }
-                Effect::Untap { .. } => {
-                    // "Untap this creature during each other player's untap step" and similar
-                    // Parsed as Untap without a description string.
+                // CR 701.26b: single-target untap (legacy `Effect::Untap`) —
+                // "Untap this creature during each other player's untap step"
+                // and similar, parsed without a description string. Single-target
+                // tap (legacy `Effect::Tap`) has no swallowed-clause heuristic and
+                // falls through to `false`.
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                } => {
                     effective_lower.contains("untap")
                         && (effective_lower.contains("untap step")
                             || effective_lower.contains("during each"))

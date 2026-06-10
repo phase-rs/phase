@@ -46,7 +46,9 @@ export function SelectField({
       <select
         {...props}
         disabled={disabled}
-        className={["appearance-none", sizeStyle.select, className].filter(Boolean).join(" ")}
+        className={["appearance-none", "select-dark", sizeStyle.select, className]
+          .filter(Boolean)
+          .join(" ")}
       >
         {children}
       </select>

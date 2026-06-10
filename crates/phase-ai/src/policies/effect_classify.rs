@@ -1,7 +1,8 @@
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::types::ability::{
-    ContinuousModification, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
+    ContinuousModification, Effect, EffectScope, PtValue, QuantityExpr, TapStateChange,
+    TargetFilter, TypeFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
@@ -66,9 +67,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // same semantics — the effect puts counters of `counter_type` onto a target.
         // MultiplyCounter (e.g., Doubling Season) amplifies existing counters: its
         // polarity is context-dependent (doubling -1/-1 on a creature is harmful).
-        Effect::AddCounter { counter_type, .. }
-        | Effect::PutCounter { counter_type, .. }
-        | Effect::PutCounterAll { counter_type, .. } => counter_sign_polarity(counter_type),
+        Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. } => {
+            counter_sign_polarity(counter_type)
+        }
         // CR 122.1 + CR 121: Removing counters inverts the placement polarity —
         // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
         // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
@@ -112,7 +113,14 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::PreventDamage { .. }
         | Effect::Animate { .. }
         | Effect::DoublePT { .. } => EffectPolarity::Beneficial,
-        Effect::Untap { .. } => EffectPolarity::Beneficial,
+        // CR 701.26b: untapping a single permanent is beneficial. The mass
+        // (`All`) scope is left Contextual via the catch-all, matching the
+        // legacy `UntapAll`.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+            ..
+        } => EffectPolarity::Beneficial,
         // Beneficial: resource generation and card advantage
         Effect::GainLife { .. }
         | Effect::Draw { .. }
@@ -126,6 +134,14 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Connive { .. }
         | Effect::BecomeMonarch
         | Effect::ExtraTurn { .. } => EffectPolarity::Beneficial,
+        // CR 701.26a: tapping a single permanent is harmful (denies its use).
+        // The mass (`All`) scope is left Contextual via the catch-all, matching
+        // the legacy `TapAll`.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+            ..
+        } => EffectPolarity::Harmful,
         // Harmful: removal, disruption, and forced actions
         Effect::Destroy { .. }
         | Effect::DealDamage { .. }
@@ -133,7 +149,6 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }
         | Effect::LoseLife { .. }
-        | Effect::Tap { .. }
         | Effect::Bounce { .. }
         | Effect::Counter { .. }
         | Effect::PhaseOut { .. }
@@ -186,7 +201,6 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
         // Beneficial effects
         Effect::Pump { target, .. }
-        | Effect::AddCounter { target, .. }
         | Effect::PutCounter { target, .. }
         | Effect::PutCounterAll { target, .. }
         | Effect::MultiplyCounter { target, .. }
@@ -194,12 +208,10 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::DoublePT { target, .. }
         | Effect::DoublePTAll { target, .. }
         | Effect::Regenerate { target, .. }
-        | Effect::Untap { target }
         | Effect::PreventDamage { target, .. }
         // Harmful effects
         | Effect::Destroy { target, .. }
         | Effect::DealDamage { target, .. }
-        | Effect::Tap { target }
         | Effect::RemoveCounter { target, .. }
         // Removal / disruption
         | Effect::Bounce { target, .. }
@@ -219,6 +231,15 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::ExtraTurn { target, .. }
         | Effect::SkipNextStep { target, .. }
         | Effect::MoveCounters { target, .. } => Some(target),
+        // CR 701.26a/b: only single-permanent tap/untap exposes a selectable
+        // target. The mass (`All`) scope's filter is a population filter and is
+        // not surfaced as a target (matching the legacy `TapAll`/`UntapAll`,
+        // which fell through to `None`).
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => Some(target),
         // GenericEffect and LoseLife have Option<TargetFilter>
         Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
             target.as_ref()

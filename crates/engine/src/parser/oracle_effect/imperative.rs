@@ -26,9 +26,10 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
-    FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PaymentCost, PlayerScope,
-    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter, ZoneOwner,
+    EffectScope, FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PaymentCost,
+    PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, StaticDefinition, TapStateChange, TargetFilter, TypeFilter,
+    TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -1484,10 +1485,28 @@ pub(super) fn parse_targeted_action_ast(
 
 pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
     match ast {
-        TargetedImperativeAst::Tap { target } => Effect::Tap { target },
-        TargetedImperativeAst::Untap { target } => Effect::Untap { target },
-        TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
-        TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
+        // CR 701.26a/b: map the parser AST tap/untap variants onto the
+        // parameterized `Effect::SetTapState` (scope = Single/All, state = Tap/Untap).
+        TargetedImperativeAst::Tap { target } => Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+        TargetedImperativeAst::Untap { target } => Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        },
+        TargetedImperativeAst::TapAll { target } => Effect::SetTapState {
+            target,
+            scope: EffectScope::All,
+            state: TapStateChange::Tap,
+        },
+        TargetedImperativeAst::UntapAll { target } => Effect::SetTapState {
+            target,
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        },
         TargetedImperativeAst::Goad { target } => Effect::Goad { target },
         TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },
         TargetedImperativeAst::Sacrifice {
@@ -3221,6 +3240,7 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
         return Some((
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
+                tag: None,
             },
             rem,
         ));
@@ -3230,7 +3250,13 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
             .parse(input)
             .is_ok()
     {
-        return Some((TargetFilter::StackAbility { controller: None }, input));
+        return Some((
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+            },
+            input,
+        ));
     }
     None
 }
@@ -3246,7 +3272,10 @@ pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
     } else {
         None
     };
-    TargetFilter::StackAbility { controller }
+    TargetFilter::StackAbility {
+        controller,
+        tag: None,
+    }
 }
 
 fn parse_explicit_targeted_attach(
@@ -7787,9 +7816,13 @@ mod tests {
             panic!("expected Or {{ ability, noncreature-spell }}, got {target:?}");
         };
         assert!(
-            filters
-                .iter()
-                .any(|f| matches!(f, TargetFilter::StackAbility { controller: None })),
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
             "missing the activated/triggered ability disjunct: {target:?}"
         );
         let spell_leg = filters
@@ -10962,7 +10995,8 @@ mod tests {
         assert!(matches!(
             controlled.0,
             TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
+                controller: Some(ControllerRef::You),
+                tag: None,
             }
         ));
 
@@ -10971,7 +11005,10 @@ mod tests {
         assert_eq!(unscoped.1, "");
         assert!(matches!(
             unscoped.0,
-            TargetFilter::StackAbility { controller: None }
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
         ));
 
         assert!(

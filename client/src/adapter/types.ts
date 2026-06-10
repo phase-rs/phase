@@ -1477,8 +1477,7 @@ export type GameAction =
   | { type: "PassPriority" }
   | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
-  | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[] } }
-  | { type: "CastSpellWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode: CastPaymentMode } }
+  | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode?: CastPaymentMode } }
   | { type: "Foretell"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number } }
   | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][]; bands?: ObjectId[][] } }
@@ -1521,20 +1520,15 @@ export type GameAction =
   | { type: "ChooseCastingVariant"; data: { index: number } }
   | { type: "KeepAllCopyTargets" }
   | { type: "ChoosePermanentTypeSlot"; data: { slot: CoreType } }
-  | { type: "CastSpellForFree"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId } }
-  | { type: "CastSpellForFreeWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId; payment_mode: CastPaymentMode } }
-  | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId } }
-  | { type: "CastSpellAsMiracleWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; payment_mode: CastPaymentMode } }
-  | { type: "CastSpellAsMadness"; data: { object_id: ObjectId; card_id: CardId } }
-  | { type: "CastSpellAsMadnessWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; payment_mode: CastPaymentMode } }
+  | { type: "CastSpellForFree"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId; payment_mode?: CastPaymentMode } }
+  | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode } }
+  | { type: "CastSpellAsMadness"; data: { object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode } }
   // CR 702.190a: Cast a spell from hand via the Sneak alternative cost during
   // the declare-blockers step, returning an unblocked attacker you control.
   // Applies to any card type; CR 702.190b enter-attacking-alongside is
   // handled engine-side for permanent spells only.
-  | { type: "CastSpellAsSneak"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId } }
-  | { type: "CastSpellAsSneakWithPaymentMode"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode: CastPaymentMode } }
-  | { type: "CastSpellAsWebSlinging"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId } }
-  | { type: "CastSpellAsWebSlingingWithPaymentMode"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode: CastPaymentMode } }
+  | { type: "CastSpellAsSneak"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode?: CastPaymentMode } }
+  | { type: "CastSpellAsWebSlinging"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode?: CastPaymentMode } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_object_id: ObjectId; creature_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
   | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice } }

@@ -35,6 +35,7 @@ use engine::types::zones::Zone;
 const P2: PlayerId = PlayerId(2);
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 fn add_mana(runner: &mut engine::game::scenario::GameRunner, player: PlayerId, mana: &[ManaType]) {
     let dummy = ObjectId(0);
@@ -183,6 +184,8 @@ fn chain_of_smog_copy_controlled_by_targeted_player_and_retargeted() {
             object_id: smog,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P0 casts Chain of Smog");
 
@@ -315,6 +318,8 @@ fn chain_of_smog_nested_copy_accepted_produces_second_generation_copy() {
             object_id: smog,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P0 casts Chain of Smog");
 
@@ -435,6 +440,8 @@ fn chain_of_smog_declined_copy_makes_no_copy() {
             object_id: smog,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P0 casts Chain of Smog");
 

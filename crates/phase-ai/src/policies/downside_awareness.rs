@@ -12,6 +12,8 @@ use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::effect_classify::{effect_polarity, EffectPolarity};
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 pub struct DownsideAwarenessPolicy;
 
@@ -162,6 +164,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(100),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(1)),

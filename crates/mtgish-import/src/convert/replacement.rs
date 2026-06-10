@@ -7,9 +7,10 @@
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp,
-    ManaReplacementScope, QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, RestrictionExpiry, TargetFilter, TypedFilter,
+    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectScope,
+    FilterProp, ManaReplacementScope, QuantityExpr, QuantityModification, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
+    TapStateChange, TargetFilter, TypedFilter,
 };
 use engine::types::card_type::Supertype;
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
@@ -1559,13 +1560,15 @@ fn build_replacement_exec(
         return Ok((None, ReplacementMode::Optional { decline: None }, exec));
     }
     let effect = match act {
-        // CR 614.12 + CR 121.6: Enters tapped — direct Effect::Tap.
-        A::EntersTapped => Effect::Tap {
+        // CR 614.12 + CR 121.6: Enters tapped — single-target tap of the source.
+        A::EntersTapped => Effect::SetTapState {
             target: target.clone(),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
         // CR 614.12 + CR 122.1: Enters with a counter (default 1) /
         // enters with N counters of a typed kind.
-        A::EntersWithACounter(ct) => Effect::AddCounter {
+        A::EntersWithACounter(ct) => Effect::PutCounter {
             counter_type: counter_type_name(ct),
             count: QuantityExpr::Fixed { value: 1 },
             target: target.clone(),
@@ -1584,7 +1587,7 @@ fn build_replacement_exec(
         A::EntersWithNumberCounters(g, ct) => {
             let mut count = quantity::convert(g)?;
             rewrite_variable_x_to_cost_x_paid(&mut count);
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type: counter_type_name(ct),
                 count,
                 target: target.clone(),
@@ -3128,7 +3131,14 @@ mod tests {
                     amount: QuantityExpr::Fixed { value: 2 }
                 },
                 decline: Some(decline),
-            } if matches!(&*decline.effect, Effect::Tap { target } if *target == TargetFilter::SelfRef)
+            } if matches!(
+                &*decline.effect,
+                Effect::SetTapState {
+                    target,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                } if *target == TargetFilter::SelfRef
+            )
         ));
     }
 
@@ -3442,7 +3452,7 @@ mod tests {
 
         let execute = defs[0].execute.as_ref().expect("ETB AddCounter execute");
         match &*execute.effect {
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type,
                 count,
                 target,
@@ -3479,7 +3489,7 @@ mod tests {
 
         let execute = defs[0].execute.as_ref().unwrap();
         match &*execute.effect {
-            Effect::AddCounter { count, .. } => match count {
+            Effect::PutCounter { count, .. } => match count {
                 QE::Offset { inner, offset } => {
                     assert_eq!(*offset, 1);
                     assert!(

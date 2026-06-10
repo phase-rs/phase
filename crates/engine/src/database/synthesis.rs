@@ -13,13 +13,14 @@ use crate::types::ability::{
     AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, KickerVariant,
-    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-    NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -1545,7 +1546,7 @@ pub fn synthesize_level_up(face: &mut CardFace) {
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() })
                     // CR 702.87a: "Activate only as a sorcery." `.sorcery_speed()`
-                    // sets the display flag and pushes `AsSorcery` for runtime.
+                    // pushes `ActivationRestriction::AsSorcery`, the single authority.
                     .sorcery_speed(),
                 )
             } else {
@@ -4613,7 +4614,7 @@ fn is_cumulative_upkeep_trigger(t: &TriggerDefinition) -> bool {
         && t.execute.as_deref().is_some_and(|outer| {
             matches!(
                 outer.effect.as_ref(),
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Age,
                     ..
                 }
@@ -4691,7 +4692,7 @@ pub(crate) fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> Trigger
     // counter on a permanent.
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::AddCounter {
+        Effect::PutCounter {
             counter_type: CounterType::Age,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
@@ -4772,8 +4773,10 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
     }
     // CR 702.39a + CR 701.26b: the parent body untaps a creature the defending
     // player controls.
-    let Effect::Untap {
+    let Effect::SetTapState {
         target: TargetFilter::Typed(tf),
+        scope: EffectScope::Single,
+        state: TapStateChange::Untap,
     } = &*execute.effect
     else {
         return false;
@@ -4829,14 +4832,21 @@ fn build_enlist_trigger() -> TriggerDefinition {
 
     // CR 702.154a: "you may tap … when you do, [pump]." The optional parent taps
     // the eligible creature; the reflexive pump rides as its sub-ability.
-    let execute = AbilityDefinition::new(AbilityKind::Spell, Effect::Tap { target: tap_target })
-        .optional()
-        .sub_ability(pump)
-        .description(
-            "Enlist — you may tap an untapped creature you control; if you do, this \
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: tap_target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )
+    .optional()
+    .sub_ability(pump)
+    .description(
+        "Enlist — you may tap an untapped creature you control; if you do, this \
              creature gets +X/+0 where X is that creature's power"
-                .to_string(),
-        );
+            .to_string(),
+    );
 
     TriggerDefinition::new(TriggerMode::Attacks)
         .valid_card(TargetFilter::SelfRef)
@@ -4886,7 +4896,14 @@ fn is_enlist_trigger(t: &TriggerDefinition) -> bool {
         return false;
     };
     execute.optional
-        && matches!(&*execute.effect, Effect::Tap { .. })
+        && matches!(
+            &*execute.effect,
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+                ..
+            }
+        )
         && execute
             .sub_ability
             .as_deref()
@@ -4936,8 +4953,10 @@ fn build_provoke_trigger() -> TriggerDefinition {
     // optional parent body untaps the chosen defender, then force-blocks it.
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Untap {
+        Effect::SetTapState {
             target: untap_target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         },
     )
     .optional()
@@ -6515,6 +6534,9 @@ fn build_fade_vanish_etb_replacement(
         event: ReplacementEvent::Moved,
         execute: Some(Box::new(etb_counters)),
         valid_card: Some(TargetFilter::SelfRef),
+        // CR 614.1c: battlefield-entry-scoped — the destination gate stops the
+        // def matching this permanent's own battlefield DEPARTURE.
+        destination_zone: Some(Zone::Battlefield),
         description: Some(format!(
             "CR {cr}: this permanent enters with {n} {} counter{} on it.",
             counter_type.as_str(),
@@ -6778,6 +6800,8 @@ pub fn synthesize_modular(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.43a: Modular {n} — this permanent enters with {n} +1/+1 counter{} on it.",
                 if n == 1 { "" } else { "s" }
@@ -6992,6 +7016,8 @@ pub fn synthesize_sunburst(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.44a: Sunburst — this permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it."
             )),
@@ -7265,7 +7291,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
         ));
 
         // Chain ability granting if needed, gated on "if that's another creature"
-        let counter_ability = if let Some(grant_effect) = grant_effect.clone() {
+        let mut counter_ability = if let Some(grant_effect) = grant_effect.clone() {
             let grant_sub = AbilityDefinition::new(AbilityKind::Spell, grant_effect)
                 .condition(AbilityCondition::Not {
                     condition: Box::new(AbilityCondition::TargetMatchesFilter {
@@ -7281,6 +7307,12 @@ pub fn synthesize_backup(face: &mut CardFace) {
         } else {
             counter_ability
         };
+
+        // CR 702.165a: mark the synthesized backup ability so "becomes the target
+        // of a backup ability" triggers can identify it on the stack. Stamped on
+        // the final body that reaches `.execute(...)` so the tag survives the
+        // chained sub-ability rebuild above.
+        counter_ability.ability_tag = Some(AbilityTag::Backup);
 
         // Build the ETB trigger
         // CR 702.165a: "when this creature enters"
@@ -7615,6 +7647,8 @@ pub fn synthesize_graft(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.58a: Graft {n} — this permanent enters with {n} +1/+1 counter{} on it.",
                 if n == 1 { "" } else { "s" }
@@ -7823,6 +7857,8 @@ pub fn synthesize_bloodthirst(face: &mut CardFace) {
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
             condition: bloodthirst_condition(value),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(bloodthirst_replacement_description(value)),
             ..ReplacementDefinition::new(ReplacementEvent::Moved)
         };
@@ -8047,6 +8083,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(sacrifice)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.82a + CR 614.1c: Devour {n} — as this creature enters, \
                  you may sacrifice any number of creatures; it enters with {n} \
@@ -8183,6 +8221,8 @@ pub fn synthesize_amplify(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(put_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.38a + CR 614.1c: Amplify {n} — as this creature enters, \
                  reveal any number of cards from your hand that share a creature \
@@ -10077,7 +10117,7 @@ mod transmute_synthesis_tests {
         // CR 702.53b: functions only while the card is in hand.
         assert_eq!(ability.activation_zone, Some(Zone::Hand));
         // CR 702.53a: "Activate only as a sorcery."
-        assert!(ability.sorcery_speed);
+        assert!(ability.is_sorcery_speed());
         assert!(ability
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -10187,7 +10227,7 @@ mod transfigure_synthesis_tests {
         // Transmute's Some(Hand).
         assert_eq!(ability.activation_zone, None);
         // CR 702.71a: "Activate only as a sorcery."
-        assert!(ability.sorcery_speed);
+        assert!(ability.is_sorcery_speed());
         assert!(ability
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -11020,6 +11060,8 @@ mod fabricate_runtime_tests {
                 object_id: obj_id,
                 card_id: next_card,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -12800,8 +12842,10 @@ mod provoke_synthesis_tests {
         );
 
         // CR 702.39a + CR 701.26b: parent body untaps the defending player's creature.
-        let Effect::Untap {
+        let Effect::SetTapState {
             target: TargetFilter::Typed(tf),
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         } = &*execute.effect
         else {
             panic!("execute body must be Effect::Untap over a TypedFilter");
@@ -12869,10 +12913,12 @@ mod provoke_synthesis_tests {
             .valid_card(TargetFilter::SelfRef)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::DefendingPlayer),
                     ),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ));
         assert!(
@@ -12932,7 +12978,12 @@ mod provoke_synthesis_tests {
         );
 
         // Parent body taps an eligible Enlist creature.
-        let Effect::Tap { target } = &*execute.effect else {
+        let Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        } = &*execute.effect
+        else {
             panic!("execute body must be Effect::Tap");
         };
         let TargetFilter::And { filters } = target else {
@@ -15332,7 +15383,7 @@ mod cumulative_upkeep_synthesis_tests {
 
         let outer = trigger.execute.as_deref().expect("execute set");
         match outer.effect.as_ref() {
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type,
                 count,
                 target,
@@ -15768,7 +15819,7 @@ mod scavenge_synthesis_tests {
         let def = &face.abilities[0];
         assert_eq!(def.kind, AbilityKind::Activated);
         assert_eq!(def.activation_zone, Some(Zone::Graveyard));
-        assert!(def.sorcery_speed);
+        assert!(def.is_sorcery_speed());
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -16835,7 +16886,7 @@ mod plot_synthesis_tests {
             .expect("plot should add a hand-activated ability");
 
         // CR 702.170a: sorcery-speed activation — AsSorcery restriction + flag.
-        assert!(activation.sorcery_speed, "plot is sorcery-speed");
+        assert!(activation.is_sorcery_speed(), "plot is sorcery-speed");
         assert!(activation
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -17185,14 +17236,15 @@ mod idempotency_tests {
 
 #[cfg(test)]
 mod sorcery_speed_invariant_tests {
-    //! CR 602.5d: Every activated ability tagged with the `sorcery_speed`
-    //! display flag MUST also carry `ActivationRestriction::AsSorcery` so the
+    //! CR 602.5d: Sorcery-speed timing is represented solely by
+    //! `ActivationRestriction::AsSorcery` in `activation_restrictions`, which the
     //! runtime legality gate (`game::restrictions::check_activation_restrictions`)
-    //! actually enforces sorcery timing. Historically the `sorcery_speed` bool
-    //! was display-only, and callers were required to separately push the enum
-    //! variant — a recurring source of bugs where equip abilities were
-    //! activatable at instant speed. Unifying the two via the `.sorcery_speed()`
-    //! builder (and this invariant) prevents the bug class from recurring.
+    //! enforces. Historically a parallel `sorcery_speed` bool existed for display,
+    //! and callers had to separately push the enum variant — a recurring source of
+    //! bugs where equip abilities were activatable at instant speed. The bool was
+    //! removed; `.sorcery_speed()` / `is_sorcery_speed()` are the single authority,
+    //! both backed by the `AsSorcery` restriction. These tests verify each
+    //! synthesizer pushes that restriction.
     use super::*;
     use crate::types::ability::ActivationRestriction;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -17208,11 +17260,11 @@ mod sorcery_speed_invariant_tests {
 
     fn assert_sorcery_invariant(def: &AbilityDefinition, context: &str) {
         walk_chain(def, |d| {
-            if d.sorcery_speed {
+            if d.is_sorcery_speed() {
                 assert!(
                     d.activation_restrictions
                         .contains(&ActivationRestriction::AsSorcery),
-                    "{context}: ability has sorcery_speed=true but \
+                    "{context}: ability is sorcery-speed but \
                      activation_restrictions is missing AsSorcery"
                 );
             }
@@ -17234,7 +17286,7 @@ mod sorcery_speed_invariant_tests {
 
         assert_eq!(face.abilities.len(), 1, "one equip ability");
         let def = &face.abilities[0];
-        assert!(def.sorcery_speed, "sorcery_speed display flag set");
+        assert!(def.is_sorcery_speed(), "ability is sorcery-speed");
         assert!(
             def.activation_restrictions
                 .contains(&ActivationRestriction::AsSorcery),
@@ -17258,7 +17310,7 @@ mod sorcery_speed_invariant_tests {
 
         assert_eq!(face.abilities.len(), 1, "one fortify ability");
         let def = &face.abilities[0];
-        assert!(def.sorcery_speed, "sorcery_speed display flag set");
+        assert!(def.is_sorcery_speed(), "ability is sorcery-speed");
         assert!(
             def.activation_restrictions
                 .contains(&ActivationRestriction::AsSorcery),
@@ -17298,7 +17350,10 @@ mod sorcery_speed_invariant_tests {
             "reconfigure synthesizes attach + unattach abilities"
         );
         for def in &face.abilities {
-            assert!(def.sorcery_speed, "reconfigure abilities are sorcery-speed");
+            assert!(
+                def.is_sorcery_speed(),
+                "reconfigure abilities are sorcery-speed"
+            );
             assert!(
                 def.activation_restrictions
                     .contains(&ActivationRestriction::AsSorcery),
@@ -17424,7 +17479,10 @@ mod sorcery_speed_invariant_tests {
         );
         let def = &face.abilities[0];
         assert!(matches!(def.kind, AbilityKind::Activated));
-        assert!(def.sorcery_speed, "craft is sorcery-speed (CR 702.167a)");
+        assert!(
+            def.is_sorcery_speed(),
+            "craft is sorcery-speed (CR 702.167a)"
+        );
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -17487,7 +17545,7 @@ mod sorcery_speed_invariant_tests {
         synthesize_level_up(&mut face);
 
         let def = &face.abilities[0];
-        assert!(def.sorcery_speed);
+        assert!(def.is_sorcery_speed());
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -17599,7 +17657,7 @@ mod sorcery_speed_invariant_tests {
         synthesize_scavenge(&mut face);
 
         let def = &face.abilities[0];
-        assert!(def.sorcery_speed);
+        assert!(def.is_sorcery_speed());
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -17612,12 +17670,12 @@ mod sorcery_speed_invariant_tests {
         assert_eq!(count, 1, "AsSorcery must not be duplicated");
     }
 
-    /// CR 602.5d: The shared invariant — corpus-wide, walk every synthesized
-    /// ability and its sub_ability chain; every ability with
-    /// `sorcery_speed=true` must carry `AsSorcery`. Runs the synthesis pipeline
-    /// against every keyword variant that has synthesis coverage and enforces
-    /// the invariant, so any future keyword synthesis regressing to a
-    /// display-only `sorcery_speed=true` fails this test.
+    /// CR 602.5d: Corpus-wide smoke test — run the synthesis pipeline against
+    /// every keyword variant that has synthesis coverage and walk each ability's
+    /// sub_ability chain, confirming every sorcery-speed ability carries
+    /// `AsSorcery`. Now that `is_sorcery_speed()` is defined as
+    /// `contains(AsSorcery)`, this is structurally guaranteed; the test remains
+    /// as broad synthesis coverage.
     #[test]
     fn sorcery_speed_flag_implies_as_sorcery_restriction_for_synthesized_abilities() {
         fn mana() -> ManaCost {
@@ -17679,7 +17737,7 @@ mod loyalty_sorcery_speed_tests {
         let r = parse_oracle_text("+2: Draw a card.", "Test Planeswalker", &[], &[], &[]);
         assert_eq!(r.abilities.len(), 1);
         let def = &r.abilities[0];
-        assert!(def.sorcery_speed, "loyalty sets sorcery_speed display flag");
+        assert!(def.is_sorcery_speed(), "loyalty ability is sorcery-speed");
         assert!(
             def.activation_restrictions
                 .contains(&ActivationRestriction::AsSorcery),
@@ -17701,7 +17759,7 @@ mod loyalty_sorcery_speed_tests {
         let r = parse_oracle_text("[+1]: Draw a card.", "Test Planeswalker", &[], &[], &[]);
         assert_eq!(r.abilities.len(), 1);
         let def = &r.abilities[0];
-        assert!(def.sorcery_speed);
+        assert!(def.is_sorcery_speed());
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -22202,7 +22260,7 @@ mod reinforce_synthesis_tests {
         assert_eq!(def.kind, AbilityKind::Activated);
         assert_eq!(def.activation_zone, Some(Zone::Hand));
         // Reinforce is instant-speed (no sorcery restriction).
-        assert!(!def.sorcery_speed);
+        assert!(!def.is_sorcery_speed());
 
         // CR 118.3: Composite cost — mana + discard-self.
         match def.cost.as_ref().expect("reinforce must have a cost") {
@@ -23870,6 +23928,8 @@ mod champion_runtime_tests {
                 object_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();

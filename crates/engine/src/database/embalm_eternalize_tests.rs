@@ -43,7 +43,7 @@ fn assert_token_copy_ability_shape(
     let def = &face.abilities[0];
     assert_eq!(def.kind, AbilityKind::Activated);
     assert_eq!(def.activation_zone, Some(Zone::Graveyard));
-    assert!(def.sorcery_speed, "activate only as a sorcery");
+    assert!(def.is_sorcery_speed(), "activate only as a sorcery");
 
     // CR 602.1a: activation cost (everything before the colon) — keyword mana
     // cost + exile-self-from-graveyard.
@@ -420,7 +420,7 @@ fn assert_face_has_token_copy_ability(face: &CardFace) {
                 && matches!(d.effect.as_ref(), Effect::CopyTokenOf { .. })
         })
         .expect("a graveyard-activated CopyTokenOf ability must be synthesized");
-    assert!(def.sorcery_speed, "activate only as a sorcery");
+    assert!(def.is_sorcery_speed(), "activate only as a sorcery");
     assert!(
         matches!(
             def.cost.as_ref(),

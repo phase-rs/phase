@@ -250,7 +250,7 @@ export function PreferencesModal({
       subtitle={t("modal.subtitle")}
       onClose={onClose}
       maxWidthClassName="max-w-5xl"
-      bodyClassName="thin-scrollbar overflow-y-auto p-4 sm:p-6"
+      bodyClassName="overflow-y-auto p-4 sm:p-6"
     >
       <div className="grid gap-4 md:grid-cols-[200px_minmax(0,1fr)]">
             <nav className="flex snap-x gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">

@@ -29,7 +29,6 @@ expression: result
       "duration": null,
       "description": "Equip {1}",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"

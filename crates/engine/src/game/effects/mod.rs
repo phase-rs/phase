@@ -8,9 +8,10 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, FilterProp,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
+    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
+    FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
+    ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -1584,7 +1585,6 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::Draw { count: amount, .. }
         | Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
-        | Effect::AddCounter { count: amount, .. }
         | Effect::Sacrifice { count: amount, .. }
         | Effect::Mill { count: amount, .. }
         | Effect::Scry { count: amount, .. }
@@ -1852,6 +1852,13 @@ pub(crate) fn try_resolve_batch(
 }
 
 /// Dispatch to the appropriate effect handler using typed pattern matching.
+///
+/// Canonical single-effect dispatch — one exhaustive match over `Effect`.
+/// Production callers outside `effects/` must enter through
+/// [`resolve_ability_chain`], which additionally handles ability-level
+/// conditions, `optional`, and chained sub-abilities. Calling a per-effect
+/// `<module>::resolve` directly bypasses those semantics; direct calls are
+/// reserved for tests and for dispatch inside this module tree.
 pub fn resolve_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -1871,11 +1878,9 @@ pub fn resolve_effect(
         Effect::Token { .. } => token::resolve(state, ability, events),
         Effect::GainLife { .. } => life::resolve_gain(state, ability, events),
         Effect::LoseLife { .. } => life::resolve_lose(state, ability, events),
-        Effect::Tap { .. } => tap_untap::resolve_tap(state, ability, events),
-        Effect::Untap { .. } => tap_untap::resolve_untap(state, ability, events),
-        Effect::TapAll { .. } => tap_untap::resolve_tap_all(state, ability, events),
-        Effect::UntapAll { .. } => tap_untap::resolve_untap_all(state, ability, events),
-        Effect::AddCounter { .. } => counters::resolve_add(state, ability, events),
+        // CR 701.26a/b: scope (Single vs All) and state (Tap vs Untap) are
+        // dispatched inside `resolve_set_tap_state`.
+        Effect::SetTapState { .. } => tap_untap::resolve_set_tap_state(state, ability, events),
         Effect::RemoveCounter { .. } => counters::resolve_remove(state, ability, events),
         Effect::Sacrifice { .. } => sacrifice::resolve(state, ability, events),
         Effect::DiscardCard { .. } => discard::resolve(state, ability, events),
@@ -2313,8 +2318,7 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
-        Effect::AddCounter { .. }
-        | Effect::PutCounter { .. }
+        Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::MoveCounters { .. } => events
@@ -2324,9 +2328,14 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
-        // CR 701.26a + CR 608.2c: Tap publishes the tapped set for downstream
-        // "each of those <type>" continuations (Urge to Feed class).
-        Effect::Tap { .. } | Effect::Untap { .. } => {
+        // CR 701.26a + CR 608.2c: single-target tap/untap publishes the tapped
+        // set for downstream "each of those <type>" continuations (Urge to Feed
+        // class). The mass (`All`) scope is not a target source — it falls
+        // through to the default arm, matching the legacy `TapAll`/`UntapAll`.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            ..
+        } => {
             let from_events: Vec<ObjectId> = events
                 .iter()
                 .filter_map(|event| match event {
@@ -2426,8 +2435,7 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::Discard { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::Discarded { .. })),
-        Effect::AddCounter { .. }
-        | Effect::PutCounter { .. }
+        Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::MoveCounters { .. } => events
@@ -2439,10 +2447,18 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::Token { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
-        Effect::Tap { .. } | Effect::TapAll { .. } => events
+        // CR 701.26a: a tap "did anything" iff some permanent became tapped.
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            ..
+        } => events
             .iter()
             .any(|event| matches!(event, GameEvent::PermanentTapped { .. })),
-        Effect::Untap { .. } | Effect::UntapAll { .. } => events
+        // CR 701.26b: an untap "did anything" iff some permanent became untapped.
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            ..
+        } => events
             .iter()
             .any(|event| matches!(event, GameEvent::PermanentUntapped { .. })),
         Effect::GainLife { .. } => events
@@ -3055,13 +3071,10 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::PairWith { target }
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::GainControl { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Sacrifice { target, .. }
-        | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::PutCounter { target, .. }
         | Effect::MoveCounters { target, .. }
@@ -3113,6 +3126,16 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::GiveControl { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
+        // CR 701.26a/b + CR 603.7c: only the single-permanent tap/untap exposes
+        // an event-context target. The mass (`All`) scope's `target` is a
+        // population filter, not a per-event target ref — it must not be
+        // auto-resolved here (matching the legacy `TapAll`/`UntapAll`, which had
+        // no event-context target at all).
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => target,
         // CR 603.7c + CR 608.2c: `GenericEffect` carries an optional `target` that may
         // be an event-context ref (e.g., `TriggeringSource` for "that land doesn't untap
         // during its controller's next untap step" on a TapsForMana trigger). Routing it
@@ -7104,8 +7127,10 @@ mod tests {
             Zone::Battlefield,
         );
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![TargetRef::Object(target)],
             source,
@@ -9249,8 +9274,10 @@ mod tests {
             PlayerId(0),
         );
         let ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature().subtype("Vampire".to_string())),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![TargetRef::Object(vampire)],
             source,

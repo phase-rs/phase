@@ -5,6 +5,7 @@ use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::engine::apply_as_current;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{
     StackEntry, StackEntryKind, TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
 };
@@ -302,6 +303,8 @@ fn scenario_very_hard_wasm_uses_giant_growth_to_win_combat() {
             object_id: growth,
             card_id: runner.state().objects[&growth].card_id,
             targets: Vec::new(),
+
+            payment_mode: CastPaymentMode::Auto,
         })
     );
 }

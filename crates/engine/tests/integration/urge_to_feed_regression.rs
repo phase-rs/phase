@@ -3,7 +3,8 @@
 
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, Effect, EffectOutcomeSignal, TargetFilter, TypeFilter,
+    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, TapStateChange, TargetFilter,
+    TypeFilter,
 };
 use engine::types::counter::CounterType;
 use engine::types::identifiers::TrackedSetId;
@@ -35,7 +36,14 @@ fn urge_to_feed_each_of_those_vampires_is_tracked_set_filtered() {
         .as_ref()
         .expect("tap clause should be sub_ability after -3/-3");
     assert!(
-        matches!(tap.effect.as_ref(), Effect::Tap { .. }),
+        matches!(
+            tap.effect.as_ref(),
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+                ..
+            }
+        ),
         "expected Tap after PT layer, got {:?}",
         tap.effect
     );

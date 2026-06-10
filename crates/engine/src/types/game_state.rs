@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost, AttackSubject,
-    BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
-    CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
-    KeywordAction, KickerVariant, ModalChoice, QuantityExpr, ResolvedAbility,
+    BeholdCostAction, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
+    ChooseFromZoneConstraint, ChosenAttribute, Comparator, ContinuousModification,
+    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
+    GameRestriction, KeywordAction, KickerVariant, ModalChoice, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
     TriggerCondition,
 };
@@ -1048,6 +1048,152 @@ pub struct PendingCounterMoveQueue {
     pub source_id: ObjectId,
 }
 
+/// CR 603.10a + CR 616.1: The not-yet-delivered tail of a simultaneous
+/// zone-move batch, parked when a per-object `Moved` replacement surfaces a
+/// replacement choice mid-batch (e.g. two simultaneously-applicable
+/// graveyard→exile redirects — Rest in Peace + Leyline of the Void — racing on
+/// the same object). Drained by `zone_pipeline::drain_pending_batch_deliveries`
+/// from the replacement-choice resume path after the chosen event delivers; the
+/// drain re-parks when the next object surfaces its own choice.
+///
+/// Shared by every batch flow that delivers many objects to one destination
+/// through the pipeline (mill: library→graveyard/exile/hand; mass bounce:
+/// battlefield→hand/library). Serializes as a plain `{ remaining, destination }`
+/// struct (the type name never appears on the wire), so the rename from the
+/// original mill-only `PendingMillDeliveries` is wire-transparent; the field-name
+/// alias on the holding `GameState` field carries the only readable name change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBatchDeliveries {
+    /// Objects whose per-object zone move has not yet been delivered.
+    pub remaining: Vec<ObjectId>,
+    /// The batch destination zone (graveyard for mill by default; hand for mass
+    /// bounce; exile/library for variants).
+    pub destination: Zone,
+    /// CR 400.7 attribution source for the rebuilt tail requests. `None` means
+    /// each object anchors itself (the mill idiom,
+    /// `ZoneMoveRequest::effect(obj, dest, obj)`); `Some` carries a shared
+    /// ability source (the seek idiom) so battlefield entries record
+    /// `entered_via_ability_source` and exile links key off the right source
+    /// across the pause boundary. Batch-uniform by the same design that makes
+    /// `destination` batch-wide (single-destination batches; per-card
+    /// heterogeneity is a flagged design extension, not forced in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
+    /// CR 614.1c tap-state re-seeded on each rebuilt tail request (the seek
+    /// `enter_tapped` mod survives the pause boundary).
+    #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
+    pub enter_tapped: EtbTapState,
+    /// Exile-link tracking re-seeded on each rebuilt tail request.
+    #[serde(default)]
+    pub exile_tracking: ZoneDeliveryExileTracking,
+    /// Post-batch cleanup that MUST run exactly once after every object in the
+    /// batch has been delivered (including across a CR 616.1 pause/resume). The
+    /// batch caller stashes it when the batch pauses mid-pile; the drain path
+    /// (`zone_pipeline::drain_pending_batch_deliveries`) runs it the moment the
+    /// tail empties without re-parking. `None` for batch flows whose only effect
+    /// is the moves themselves (mill, mass bounce). See [`BatchCompletion`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<BatchCompletion>,
+}
+
+/// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
+/// once its graveyard pile has been delivered. These flows partition a looked-at
+/// pile into a graveyard "rest" pile (delivered through the simultaneous-move
+/// batch so per-card `Moved` redirects fire — Rest in Peace / Leyline of the Void
+/// class) and a "kept" remainder whose placement/marker cleanup happens after the
+/// whole pile lands. Because a per-card redirect can pause the batch (two
+/// simultaneous redirects on one card need a CR 616.1 ordering choice), the
+/// cleanup cannot run inline at the end of the loop — it would run before the
+/// paused tail finished, then never again. Stashing it as typed data on
+/// [`PendingBatchDeliveries`] (not a closure) lets the drain run it exactly once
+/// on true completion, mirroring the `PendingCounterPostAction` continuation
+/// pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchCompletion {
+    /// CR 701.25a: After the surveil rest pile reaches the graveyard, the kept
+    /// cards rest on top of the player's library in the chosen order
+    /// (`top_cards[0]` becomes the topmost card).
+    SurveilKeepOnTop {
+        player: PlayerId,
+        top_cards: Vec<ObjectId>,
+    },
+    /// Manifest dread: after the non-manifested cards reach the graveyard, clear
+    /// the reveal markers on every looked-at card.
+    ManifestDreadCleanup {
+        player: PlayerId,
+        revealed: Vec<ObjectId>,
+    },
+    /// CR 303.4f / CR 616.1 + CR 701.20b: A reveal-until / dig kept card routed
+    /// onto the battlefield paused on an as-enters choice (aura host pick or a
+    /// replacement-ordering prompt) before the unkept "rest pile" was moved.
+    /// Defer the rest-pile move + reveal-marker cleanup onto the parked batch
+    /// tail so it runs exactly once after the kept card's entry resolves —
+    /// otherwise the rest cards strand in the library (the early-`return` bug).
+    RevealRestPile {
+        /// The player whose continuation drains after the pile lands.
+        player: PlayerId,
+        /// Unkept cards to move once the kept card finishes entering.
+        rest_cards: Vec<ObjectId>,
+        /// Where the rest pile goes (`Library` => bottom in a reposition, else
+        /// the destination zone).
+        rest_destination: Zone,
+        /// CR 701.20b: reveal markers to clear once the cards have moved (the
+        /// kept card plus the misses).
+        clear_markers: Vec<ObjectId>,
+        /// Dig only: `Some(kept)` publishes the kept cards as a fresh tracked set
+        /// and wires them as the continuation's targets (Zimone's Experiment
+        /// class). `None` for reveal-until, which has no tracked-set sub-ability.
+        publish_tracked_set: Option<Vec<ObjectId>>,
+        /// `Some(source_id)` emits `EffectResolved { RevealUntil, source_id }`
+        /// before draining the continuation — the direct `reveal_until::resolve`
+        /// path (no kept-choice) emits it inline at the end, so the deferred path
+        /// must too. `None` for the kept-choice / dig paths, which emit their own
+        /// `EffectResolved` before the pause (or rely on the continuation).
+        emit_reveal_until_resolved: Option<ObjectId>,
+    },
+    /// CR 610.3 + CR 614.1c: An "exile until ~ leaves" return (Banisher Priest /
+    /// Fiend Hunter / Oblivion Ring class) routed its exiled cards back to the
+    /// battlefield through the simultaneous-move batch so the delivery tail seeds
+    /// enters-with-counters statics. A returned creature can pause on an
+    /// as-enters / aura-host choice; defer the exile-link bookkeeping cleanup
+    /// (`UntilSourceLeaves` links are spent once their card returns) onto the
+    /// parked batch tail so the links are dropped exactly once after the whole
+    /// return pile lands — not before a paused card finishes returning.
+    RemoveExileLinks {
+        /// The exiled-card ids whose `UntilSourceLeaves` links are consumed by
+        /// this return and must be retained out of `state.exile_links`.
+        returned_ids: Vec<ObjectId>,
+    },
+    /// CR 702.49 + CR 616.1: A ninja entering via ninjutsu paused on a
+    /// battlefield-entry replacement-ordering choice (two co-played external
+    /// enter-tapped effects — Authority of the Consuls + Imposing Sovereign
+    /// class collide on the entry's tap field). The post-entry ninjutsu work —
+    /// the CR 702.49 cast-variant provenance tag, the CR 702.49c
+    /// tapped-and-attacking combat placement (no `AttackersDeclared`), and the
+    /// CR 702.49a `NinjutsuActivated` trigger event — cannot run before the
+    /// entry delivers; defer it onto the parked batch tail so the drain runs
+    /// it exactly once after the entry resolves.
+    NinjutsuPlacement {
+        player: PlayerId,
+        ninjutsu_obj_id: ObjectId,
+        cast_variant: CastVariantPaid,
+        defending_player: PlayerId,
+        attack_target: AttackTarget,
+    },
+    /// CR 701.51 + CR 616.1: An Attraction being opened paused on a
+    /// battlefield-entry replacement-ordering choice (Kismet / Frozen Aether
+    /// class enter-tapped effects). Defer the paused Attraction's open
+    /// bookkeeping (`in_attraction_deck` clear + `AttractionOpened`) and the
+    /// remaining opens of the same instruction onto the parked batch tail —
+    /// the remaining opens may themselves pause and re-defer through this same
+    /// completion.
+    AttractionOpenRemainder {
+        player: PlayerId,
+        object_id: ObjectId,
+        remaining: u32,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingEffectResolved {
     pub kind: EffectKind,
@@ -1192,6 +1338,11 @@ pub enum PendingCounterPostAction {
         source_id: Option<ObjectId>,
         duration: Option<Duration>,
         exile_tracking: ZoneDeliveryExileTracking,
+        /// Who drains `post_replacement_continuation` when this deferred tail
+        /// finally runs (CR 614.12a). `#[serde(default)]` = `DeliveryTail`,
+        /// matching every record minted before the field existed.
+        #[serde(default)]
+        drain: PostReplacementDrainOwner,
     },
     RecordStationed {
         spacecraft_id: ObjectId,
@@ -1211,6 +1362,30 @@ pub enum ZoneDeliveryExileTracking {
     #[default]
     None,
     TrackBySource,
+}
+
+/// CR 614.12a + CR 616.1: Which layer drains `post_replacement_continuation`
+/// after a post-replacement zone delivery (Phase-B divergence reconciliation,
+/// PLAN §7). The replacement-choice resume path historically drained the
+/// continuation in its own epilogue — WITH the spell-resolution ctx and with
+/// `post_replacement_source` cleared for zone changes — while the shared
+/// delivery tail drains it ctx-less without the clear. Parameterizing the tail
+/// (instead of keeping two divergent delivery copies) lets the resume path
+/// route through the shared `deliver` machinery while its epilogue keeps
+/// exclusive ownership of the drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PostReplacementDrainOwner {
+    /// The shared delivery tail (`apply_zone_delivery_tail`) drains the
+    /// continuation ctx-less — every direct pipeline delivery (effect moves,
+    /// stack resolution, land play, destroy/sacrifice lowering).
+    #[default]
+    DeliveryTail,
+    /// The caller's epilogue owns the drain; the tail skips it. Used by
+    /// `engine_replacement::handle_replacement_choice`, whose post-`Execute`
+    /// epilogue drains with the spell-resolution ctx and clears
+    /// `post_replacement_source` for zone changes (CR 614.12a ordering:
+    /// `apply_pending_spell_resolution` runs before the drain there).
+    CallerEpilogue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5710,6 +5885,19 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_counter_moves: Option<PendingCounterMoveQueue>,
 
+    /// CR 603.10a + CR 616.1: Pending simultaneous zone-move batch tail paused
+    /// by a per-object replacement choice (see [`PendingBatchDeliveries`]).
+    /// Drained by the replacement-choice resume path after the chosen event
+    /// delivers so the remaining objects complete their moves instead of
+    /// stranding. Serde alias keeps the old `pending_mill_deliveries` field name
+    /// readable from existing saves.
+    #[serde(
+        default,
+        alias = "pending_mill_deliveries",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pending_batch_deliveries: Option<PendingBatchDeliveries>,
+
     /// CR 122.1 + CR 616.1e: Pending counter-addition batch paused by a
     /// replacement choice. Drained before normal pending continuations so
     /// multi-recipient effects such as proliferate and double counters resume
@@ -6490,6 +6678,7 @@ impl GameState {
             pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_counter_moves: None,
+            pending_batch_deliveries: None,
             pending_counter_additions: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
@@ -6924,6 +7113,7 @@ impl PartialEq for GameState {
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_counter_moves == other.pending_counter_moves
+            && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities

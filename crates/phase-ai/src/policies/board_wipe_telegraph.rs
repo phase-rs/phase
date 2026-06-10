@@ -13,6 +13,8 @@ use crate::config::ThreatAwareness;
 use crate::deck_profile::DeckArchetype;
 use crate::features::DeckFeatures;
 use crate::threat_profile::castable_probabilities;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 pub struct BoardWipeTelegraphPolicy;
 
@@ -251,6 +253,8 @@ mod tests {
                 object_id: spell,
                 card_id: CardId(50),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -332,6 +336,8 @@ mod tests {
                 object_id: spell,
                 card_id: CardId(50),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -426,6 +432,8 @@ mod tests {
                 object_id: spell,
                 card_id: CardId(50),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),

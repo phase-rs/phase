@@ -19,6 +19,8 @@ use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
 };
 use crate::policies::stack_awareness::{has_pending_removal, will_target_die_from_stack};
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GateDecision {
@@ -662,6 +664,8 @@ mod tests {
                 object_id: growth,
                 card_id: state.objects.get(&growth).unwrap().card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(P0),
@@ -718,6 +722,8 @@ mod tests {
                 object_id: growth,
                 card_id: state.objects.get(&growth).unwrap().card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(P0),

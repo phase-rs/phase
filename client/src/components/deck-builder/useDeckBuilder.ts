@@ -190,40 +190,55 @@ export function useDeckBuilder({
     };
   }, [deck.main, format, isCommander]);
 
+  // Names whose copy-limit override has already been requested (in flight or
+  // resolved). A card's copy limit is static per name, so once queried it never
+  // needs re-querying — this keeps deck edits and repeated searches from
+  // re-issuing WASM calls for every card in the deck.
+  const queriedCopyLimitNamesRef = useRef<Set<string>>(new Set());
+
+  const prefetchDeckCopyLimits = useCallback((names: string[]) => {
+    const unique = Array.from(new Set(names)).filter(
+      (name) => !queriedCopyLimitNamesRef.current.has(name),
+    );
+    if (unique.length === 0) return;
+    for (const name of unique) {
+      queriedCopyLimitNamesRef.current.add(name);
+    }
+    Promise.all(
+      unique.map(async (name) => [name, await deckCopyLimit(name)] as const),
+    )
+      .then((results) => {
+        // No cancellation guard: limits are static per name, so a resolved
+        // batch is never stale — merging is always safe.
+        setDeckCopyLimits((prev) => {
+          const next = new Map(prev);
+          for (const [name, limit] of results) {
+            if (!limit) continue;
+            next.set(name, limit.type === "Unlimited" ? Infinity : limit.data);
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        // Retain previously resolved overrides and allow this batch to be
+        // retried after a transient WASM failure.
+        for (const name of unique) {
+          queriedCopyLimitNamesRef.current.delete(name);
+        }
+      });
+  }, []);
+
   // CR 100.2a / CR 903.5b: resolve per-card copy-limit overrides for every card
   // referenced anywhere in the deck. The engine is the single authority — the
-  // frontend never re-parses Oracle text. Mirrors the commander-eligibility
-  // effect's union-of-names keying and cancellation guard.
+  // frontend never re-parses Oracle text. Limits are static per card name, so
+  // the resolved map is a monotonic cache: merged into, never cleared.
   useEffect(() => {
-    const names = Array.from(
-      new Set([
-        ...deck.main.map((e) => e.name),
-        ...deck.sideboard.map((e) => e.name),
-        ...commanders,
-      ]),
-    );
-    if (names.length === 0) {
-      setDeckCopyLimits(new Map());
-      return;
-    }
-    let cancelled = false;
-    Promise.all(
-      names.map(async (name) => [name, await deckCopyLimit(name)] as const),
-    ).then((results) => {
-      if (cancelled) return;
-      const next = new Map<string, number>();
-      for (const [name, limit] of results) {
-        if (!limit) continue;
-        next.set(name, limit.type === "Unlimited" ? Infinity : limit.data);
-      }
-      setDeckCopyLimits(next);
-    }).catch(() => {
-      if (!cancelled) setDeckCopyLimits(new Map());
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [deck.main, deck.sideboard, commanders]);
+    prefetchDeckCopyLimits([
+      ...deck.main.map((e) => e.name),
+      ...deck.sideboard.map((e) => e.name),
+      ...commanders,
+    ]);
+  }, [deck.main, deck.sideboard, commanders, prefetchDeckCopyLimits]);
 
   // Synchronous per-card effective copy cap: the override when present, else the
   // format default (4 constructed / 1 singleton).
@@ -274,8 +289,9 @@ export function useDeckBuilder({
       }
       setSearchResults(cards);
       cacheCards(cards);
+      prefetchDeckCopyLimits(cards.map((card) => card.name));
     },
-    [cacheCards, initialDeckName, searchFilters],
+    [cacheCards, initialDeckName, prefetchDeckCopyLimits, searchFilters],
   );
 
   const handleSearchTrigger = useCallback(() => {

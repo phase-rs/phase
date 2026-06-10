@@ -22,25 +22,30 @@ pub fn resolve(
     // CR 613.1b: Layer 2 — control-changing effects are applied.
     let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
 
-    for target in &ability.targets {
-        if let TargetRef::Object(obj_id) = target {
-            // Verify target exists
-            if !state.objects.contains_key(obj_id) {
-                return Err(EffectError::ObjectNotFound(*obj_id));
-            }
+    let Effect::GainControl { target } = &ability.effect else {
+        return Err(EffectError::InvalidParam(
+            "expected GainControl effect".to_string(),
+        ));
+    };
 
-            // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
-            // The affected filter targets this specific object by ID.
-            state.add_transient_continuous_effect(
-                ability.source_id,
-                ability.controller,
-                duration.clone(),
-                TargetFilter::SpecificObject { id: *obj_id },
-                vec![ContinuousModification::ChangeController],
-                None,
-            );
-            mark_echo_due_for_new_controller(state, *obj_id);
+    let new_controller = gain_control_controller(ability, target);
+    let object_ids = gain_control_object_targets(state, ability, target);
+
+    for obj_id in object_ids {
+        if !state.objects.contains_key(&obj_id) {
+            return Err(EffectError::ObjectNotFound(obj_id));
         }
+
+        // CR 613.3: Create a transient continuous effect at Layer 2 (Control).
+        state.add_transient_continuous_effect(
+            ability.source_id,
+            new_controller,
+            duration.clone(),
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        mark_echo_due_for_new_controller(state, obj_id);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -49,6 +54,45 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 613.3: The player who gains control. Normally the ability controller;
+/// after a resolution-scoped `Choose(Opponent)` whose dependent effect is
+/// `GainControl { SelfRef }`, the chosen opponent is the recipient
+/// (Wishclaw Talisman — "an opponent gains control of ~").
+fn gain_control_controller(ability: &ResolvedAbility, target: &TargetFilter) -> PlayerId {
+    if matches!(target, TargetFilter::SelfRef) {
+        if let Some(&recipient) = ability.chosen_players.last() {
+            return recipient;
+        }
+    }
+    ability.controller
+}
+
+fn gain_control_object_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    // CR 608.2c: `SelfRef` binds to the ability source even when target
+    // propagation has populated `ability.targets`.
+    if matches!(filter, TargetFilter::SelfRef) {
+        return vec![ability.source_id];
+    }
+
+    let chosen_objects = super::effect_object_targets(filter, &ability.targets);
+
+    if !chosen_objects.is_empty() {
+        return chosen_objects;
+    }
+
+    crate::game::targeting::resolved_targets(ability, filter, state)
+        .into_iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .collect()
 }
 
 /// CR 110.2: Give control of target permanent to a specified recipient player.
@@ -818,6 +862,40 @@ mod tests {
             state.objects.get(&target_id).unwrap().controller,
             PlayerId(1),
             "control must revert to the owner once the tapped source leaves the battlefield",
+        );
+    }
+
+    /// Issue #564: Wishclaw Talisman encodes "an opponent gains control of ~"
+    /// as `Choose(Opponent)` → `GainControl { SelfRef }`. The chosen opponent
+    /// must receive control, not the activator.
+    #[test]
+    fn issue_564_gain_control_self_ref_uses_chosen_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let talisman = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wishclaw Talisman".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::GainControl {
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            talisman,
+            PlayerId(0),
+        );
+        ability.chosen_players = vec![PlayerId(1)];
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&talisman).unwrap().controller,
+            PlayerId(1),
+            "SelfRef GainControl after Choose(Opponent) must transfer to the chosen opponent"
         );
     }
 

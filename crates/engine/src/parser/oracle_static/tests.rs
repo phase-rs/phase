@@ -2194,7 +2194,7 @@ fn static_this_spell_cost_less_if_it_targets_spell_or_ability_targeting_large_cr
             if filters.iter().any(|f| matches!(f, TargetFilter::StackSpell))
                 && filters
                     .iter()
-                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None }))
+                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None, tag: None }))
     )));
     let stack_targets_filter = filters
         .iter()
@@ -4596,8 +4596,8 @@ fn quoted_ability_preserves_activation_restrictions() {
     assert_eq!(definition.kind, AbilityKind::Activated);
     assert!(definition.cost.is_some(), "should retain the tap cost");
     assert!(
-        definition.sorcery_speed,
-        "AsSorcery must set sorcery_speed on the granted ability"
+        definition.is_sorcery_speed(),
+        "AsSorcery must mark the granted ability as sorcery-speed"
     );
     assert!(
         definition
@@ -7496,6 +7496,103 @@ fn static_as_long_as_enchanted_creature_is_legendary_grants_to_enchanted_creatur
         )),
         "Expected AddKeyword(Ward), got {:?}",
         def.modifications
+    );
+    assert_eq!(def.condition, None);
+}
+
+// CR 105.2b + CR 613: the inverted attached-subject grant must bind its
+// `affected` filter to the enchanted creature for ANY characteristic, not just
+// `legendary`. A color qualifier ("is white") previously fell through and left
+// `affected = SelfRef` (the Aura), so the grant never reached the host (#2818,
+// Shield of the Oversoul).
+#[test]
+fn static_as_long_as_enchanted_creature_is_color_grants_to_enchanted_creature() {
+    let def =
+        parse_static_line("As long as enchanted creature is white, it gets +1/+1 and has flying.")
+            .expect("should parse color-qualified inverted attached grant");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![
+                FilterProp::EnchantedBy,
+                FilterProp::HasColor {
+                    color: ManaColor::White,
+                },
+            ]
+        )))
+    );
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(def.modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }
+    )));
+    // Qualifier folded into the affected filter — no residual presence condition.
+    assert_eq!(def.condition, None);
+}
+
+#[test]
+fn static_as_long_as_enchanted_creature_is_second_color_grants_to_enchanted_creature() {
+    // Shield of the Oversoul's second clause (green → indestructible).
+    let def = parse_static_line(
+        "As long as enchanted creature is green, it gets +1/+1 and has indestructible.",
+    )
+    .expect("should parse second color-qualified inverted attached grant");
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![
+                FilterProp::EnchantedBy,
+                FilterProp::HasColor {
+                    color: ManaColor::Green,
+                },
+            ]
+        )))
+    );
+    assert!(def.modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        }
+    )));
+    assert_eq!(def.condition, None);
+}
+
+#[test]
+fn static_as_long_as_enchanted_creature_is_type_grants_to_enchanted_creature() {
+    // A type qualifier folds into the affected filter the same way.
+    let def = parse_static_line("As long as enchanted creature is an artifact, it gets +1/+1.")
+        .expect("should parse type-qualified inverted attached grant");
+    let Some(TargetFilter::Typed(tf)) = def.affected.as_ref() else {
+        panic!("expected Typed affected filter, got {:?}", def.affected);
+    };
+    assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+    assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+    assert_eq!(def.condition, None);
+}
+
+#[test]
+fn static_as_long_as_equipped_creature_is_color_grants_to_equipped_creature() {
+    let def =
+        parse_static_line("As long as equipped creature is red, it gets +1/+1 and has haste.")
+            .expect("should parse equipped color-qualified inverted attached grant");
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![
+                FilterProp::EquippedBy,
+                FilterProp::HasColor {
+                    color: ManaColor::Red,
+                },
+            ]
+        )))
     );
     assert_eq!(def.condition, None);
 }

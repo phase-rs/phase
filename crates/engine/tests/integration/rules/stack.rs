@@ -4,6 +4,7 @@ use super::*;
 use std::collections::HashMap;
 
 use engine::types::ability::{Effect, TargetFilter, TargetRef};
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::{CardId, ObjectId};
 
@@ -31,6 +32,8 @@ fn stack_resolves_lifo() {
             object_id: bolt1_id,
             card_id: bolt1_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast bolt 1 should succeed");
 
@@ -50,6 +53,8 @@ fn stack_resolves_lifo() {
             object_id: bolt2_id,
             card_id: bolt2_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast bolt 2 should succeed");
 
@@ -119,6 +124,8 @@ fn active_player_gets_priority_after_resolve() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -165,6 +172,8 @@ fn empty_stack_after_all_spells_resolve() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -207,6 +216,8 @@ fn instant_resolves_with_damage_effect() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -252,6 +263,8 @@ fn both_players_must_pass_for_resolution() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 

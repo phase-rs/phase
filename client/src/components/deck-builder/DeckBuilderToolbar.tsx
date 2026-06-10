@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { FormatFilter } from "./FormatFilter";
+import { MenuSelect } from "../ui/MenuSelect";
 import { SelectField } from "../ui/SelectField";
 
 function PencilIcon({ className }: { className?: string }) {
@@ -119,19 +120,12 @@ export function DeckBuilderToolbar({
           {t("toolbar.clone")}
         </button>
         {savedDecks.length > 0 && (
-          <SelectField
-            onChange={(e) => e.target.value && onLoad(e.target.value)}
-            value=""
-            wrapperClassName="max-w-[8rem] shrink-0 sm:max-w-none"
-            className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:outline-none"
-          >
-            <option value="">{t("toolbar.loadDeck")}</option>
-            {savedDecks.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </SelectField>
+          <MenuSelect
+            label={t("toolbar.loadDeck")}
+            items={savedDecks.map((name) => ({ value: name, label: name }))}
+            onSelect={onLoad}
+            wrapperClassName="shrink-0"
+          />
         )}
       </div>
     </div>

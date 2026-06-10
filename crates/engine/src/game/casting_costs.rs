@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AdditionalCost,
-    BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot, CounterCostSelection, Effect,
-    KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility, SpellCastingOptionKind,
-    StaticCondition, TargetFilter, TypedFilter,
+    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AdditionalCost, BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot,
+    CounterCostSelection, Effect, KickerVariant, QuantityExpr, QuantityRef, ReplacementDefinition,
+    ResolvedAbility, SpellCastingOptionKind, StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -16,6 +16,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
+use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -4594,7 +4595,15 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // transition so zone-change triggers, counterspell targeting
     // (`FilterProp::InZone { Stack }`), and on-resolution bookkeeping all see
     // the spell as living on the stack.
-    super::zones::move_to_zone(state, object_id, Zone::Stack, events);
+    //
+    // CR 601.2a: "a player first moves that card ... to the stack" — part of the
+    // casting process, not a discrete replaceable event. Route through the zone
+    // pipeline under the `CastingToStack` exempt cause so this production caller
+    // goes through the single entry while the consult is skipped (PLAN §3). The
+    // spell moves itself, so the attribution source is the object.
+    let stack_req =
+        crate::game::zone_pipeline::ZoneMoveRequest::casting_to_stack(object_id, object_id);
+    crate::game::zone_pipeline::move_object(state, stack_req, events);
     if casting_variant == CastingVariant::Foretell {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_variant_paid = Some((
@@ -4989,18 +4998,69 @@ fn handle_resolution_cast_success(
     }
 }
 
-/// CR 614.1a + CR 608.2n: Stamp the "if this spell would be put into your
-/// graveyard, exile it instead" rider on a spell cast during resolution via
-/// `Effect::FreeCastFromZones` (Invoke Calamity). Sets a per-object marker on
-/// the spell rather than mutating its casting variant — the during-resolution
-/// cast has not yet pushed its resolvable `StackEntry::Spell` (that happens at
-/// finalize, after this cascade-check point), and the rider must apply
-/// regardless of the spell's origin zone or casting variant. The stack-
-/// resolution router reads the marker when the spell leaves the stack.
+/// CR 614.1a + CR 608.2n + CR 614.6: Install the "if this spell would be put
+/// into your graveyard, exile it instead" rider on a spell cast during
+/// resolution via `Effect::FreeCastFromZones` (Invoke Calamity) as a synthetic
+/// per-object `Moved` replacement on the cast spell rather than a bespoke
+/// boolean marker. The rider is exactly a self-scoped graveyard→exile redirect
+/// — the same class as Rest in Peace / Leyline of the Void, just scoped to this
+/// one spell (`valid_card: SelfRef`) — so it routes through the standard
+/// replacement pipeline when the spell leaves the stack (the stack-self-move
+/// scan exception discovers it). `destination_zone: Graveyard` gates it to the
+/// CR 608.2n default destination, so a flashback/aftermath/harmonize spell that
+/// already resolves to Exile (a static destination rule, not a replacement)
+/// never double-applies: its proposed move is stack→Exile, which the
+/// Graveyard-scoped def does not match.
+///
+/// Applied here (not by mutating the casting variant) because the
+/// during-resolution cast has not yet pushed its resolvable `StackEntry::Spell`
+/// (that happens at finalize, after this cascade-check point), and the rider
+/// must apply regardless of the spell's origin zone or casting variant.
+///
+/// Known scope gap (behavior-preserving vs the deleted boolean flag): the
+/// printed rider is "this turn"-scoped, but the synthetic def carries no
+/// duration — `ReplacementDefinition` has no duration field and
+/// `revert_layered_characteristics_to_base` only runs for battlefield exits, so
+/// the def lingers on the exiled card. Inert in practice (an exiled card's
+/// graveyard moves are rare and re-casting mints a new object per CR 400.7),
+/// but a `Duration` field on `ReplacementDefinition` is the eventual fix for
+/// the rider's "this turn" scope.
 fn apply_exile_instead_of_graveyard_rider(state: &mut GameState, cast_object: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&cast_object) {
-        obj.exile_from_stack_instead_of_graveyard = true;
+        obj.replacement_definitions
+            .push(exile_instead_of_graveyard_replacement());
     }
+}
+
+/// CR 614.1a + CR 608.2n: The synthetic self-scoped graveyard→exile redirect
+/// installed by the Invoke Calamity free-cast rider. Mirrors the Rest in Peace
+/// redirect shape (`ReplacementEvent::Moved`, `destination_zone: Graveyard`,
+/// `execute: ChangeZone { destination: Exile, target: SelfRef }`) but scoped to
+/// the cast spell via `valid_card: SelfRef`.
+fn exile_instead_of_graveyard_replacement() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Graveyard)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        ))
+        .description(
+            "CR 614.1a: if this spell would be put into its owner's graveyard, exile it instead."
+                .to_string(),
+        )
 }
 
 /// CR 608.2g: Unwind a cast-during-resolution-rejected cast — remove the
@@ -5863,7 +5923,7 @@ pub(super) fn max_x_value_excluding(
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::feasible_mana_capacity(state, id, player);
+            let mana = mana_sources::feasible_mana_capacity(state, id, player, None);
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);
@@ -6228,7 +6288,7 @@ pub(super) fn apply_committed_assist(
     };
     auto_tap_mana_sources(state, helper, &probe, events, None);
     if let Some(p) = state.players.iter_mut().find(|p| p.id == helper) {
-        mana_payment::pay_cost(&mut p.mana_pool, &probe).map_err(|e| {
+        mana_payment::pay_from_pool(&mut p.mana_pool, &probe).map_err(|e| {
             EngineError::ActionNotAllowed(format!(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))
@@ -6775,7 +6835,7 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
         PtStat, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -6783,6 +6843,247 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
+
+    /// CR 614.1a + CR 608.2n (PLAN §8 Risk #2): the Invoke Calamity free-cast
+    /// "if this spell would be put into your graveyard, exile it instead" rider
+    /// is installed by `apply_exile_instead_of_graveyard_rider` as a synthetic
+    /// self-scoped `Moved` replacement (the boolean flag is deleted). Driving a
+    /// real resolution of a spell carrying the rider must redirect its
+    /// stack→graveyard default move to exile through the replacement pipeline.
+    #[test]
+    fn invoke_calamity_rider_exiles_free_cast_spell_on_resolution() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Free-Cast Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        // Install the rider exactly as the FreeCastFromZones resolution path does.
+        super::apply_exile_instead_of_graveyard_rider(&mut state, spell);
+        assert!(
+            state.objects[&spell]
+                .replacement_definitions
+                .iter_all()
+                .any(|d| d.event == ReplacementEvent::Moved
+                    && d.destination_zone == Some(Zone::Graveyard)),
+            "rider installs a self-scoped graveyard→exile Moved replacement"
+        );
+
+        let resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            spell,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        super::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "the rider's synthetic Moved redirect must send the resolved spell to exile"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the redirected spell must not also reach the graveyard"
+        );
+    }
+
+    /// CR 608.2b + CR 616.1 (review fix): a free-cast spell carrying the Invoke
+    /// Calamity rider FIZZLES under a single Rest in Peace — the rider and RIP
+    /// are two simultaneous graveyard→exile redirect candidates, so the fizzle
+    /// arm parks a CR 616.1 ordering prompt. The paused fizzle must still run
+    /// the resolution epilogue (StackResolved emission + trigger-context /
+    /// die-result clears) before bailing — the pre-fix bare `return` skipped it,
+    /// leaking stale cross-resolution context and never emitting StackResolved.
+    /// Answering the prompt via the real `GameAction::ChooseReplacement` then
+    /// delivers the parked move to exile.
+    #[test]
+    fn invoke_calamity_rider_fizzle_under_rip_parks_choice_with_clean_epilogue() {
+        let mut state = GameState::new_two_player(42);
+
+        // Board-wide RIP-class redirect: any card's graveyard move → exile.
+        let rip = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(1),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            destination: Zone::Exile,
+                            origin: None,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            face_down_profile: None,
+                        },
+                    ))
+                    .description("Rest in Peace".to_string()),
+            );
+
+        // Target creature that will be removed to force the fizzle arm.
+        let target = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Target Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Free-cast spell carrying the rider, targeting the bear.
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Free-Cast Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        super::apply_exile_instead_of_graveyard_rider(&mut state, spell);
+        let resolved = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // CR 608.2b: remove the target so every target is illegal at resolution.
+        crate::game::zones::move_to_zone(&mut state, target, Zone::Graveyard, &mut Vec::new());
+
+        // Seed cross-resolution context the fizzle epilogue must clear even on
+        // the paused path (resolve_top does not touch these for a Spell entry
+        // before the fizzle arm, so a leaked value is attributable to the bail).
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 0,
+        });
+        state.current_trigger_events = vec![GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 0,
+        }];
+        state.current_trigger_match_count = Some(2);
+        state.die_result_this_resolution = Some(4);
+
+        let mut events = Vec::new();
+        super::stack::resolve_top(&mut state, &mut events);
+
+        // CR 616.1: rider + RIP are two applicable redirects → ordering prompt.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "two simultaneous graveyard→exile redirects must park a CR 616.1 ordering choice, got {:?}",
+            state.waiting_for
+        );
+        // Review fix: the fizzle epilogue runs before the pause-bail.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::StackResolved { object_id } if *object_id == spell
+            )),
+            "paused fizzle must still emit StackResolved"
+        );
+        assert!(
+            state.current_trigger_event.is_none(),
+            "paused fizzle must clear current_trigger_event"
+        );
+        assert!(
+            state.current_trigger_events.is_empty(),
+            "paused fizzle must clear current_trigger_events"
+        );
+        assert!(
+            state.current_trigger_match_count.is_none(),
+            "paused fizzle must clear current_trigger_match_count"
+        );
+        assert!(
+            state.die_result_this_resolution.is_none(),
+            "paused fizzle must clear die_result_this_resolution"
+        );
+
+        // Answer the CR 616.1 prompt through the real action pipeline; the
+        // resume path delivers the parked move with both redirects applied in
+        // the chosen order (both route to exile).
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("replacement-ordering choice must be acceptable");
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "the fizzled free-cast spell must be exiled by the redirect after the choice resolves"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the redirected spell must not also reach the graveyard"
+        );
+    }
 
     /// Reference implementation of the X-cap search: the pre-refactor linear
     /// ascent. Returns the largest `x` with `predicate(x)` true, clamped at 0.
@@ -11640,6 +11941,8 @@ battlefield, then shuffle.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting Whir of Invention must be accepted");
 
@@ -11885,6 +12188,8 @@ battlefield, then shuffle.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Convoke X-spell must be accepted");
 
@@ -12039,6 +12344,8 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting Everflowing Chalice must be accepted");
 
@@ -12133,6 +12440,8 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting Everflowing Chalice must be accepted");
 
@@ -12199,6 +12508,8 @@ many tokens that are copies of it.)";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting squad spell must be accepted");
 
@@ -12358,6 +12669,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the replicate spell must be accepted");
 
@@ -12422,6 +12735,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the granted-replicate spell must be accepted");
 
@@ -12496,6 +12811,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting targeted granted-Replicate spell must start");
 
@@ -12523,6 +12840,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the replicate spell must be accepted");
 
@@ -12565,6 +12884,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting Everflowing Chalice must be accepted");
 
@@ -12678,6 +12999,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 2 sorcery must be accepted");
 
@@ -12735,6 +13058,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect_err("casting Blight 2 with no creatures must be rejected");
 
@@ -12773,6 +13098,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 1 sorcery must be accepted");
         runner
@@ -12801,6 +13128,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 2 sorcery must be accepted");
 
@@ -12834,6 +13163,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 2 sorcery must be accepted");
         runner
@@ -12865,6 +13196,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 0 sorcery must be accepted");
         runner

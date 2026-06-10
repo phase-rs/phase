@@ -1,7 +1,9 @@
 use engine::game::game_object::GameObject;
+#[cfg(test)]
+use engine::types::ability::TapStateChange;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, BounceSelection, Effect, ReplacementDefinition, TargetFilter,
-    TriggerDefinition,
+    AbilityDefinition, AbilityKind, BounceSelection, Effect, EffectScope, ReplacementDefinition,
+    TargetFilter, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -353,8 +355,6 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
-        | Effect::Tap { target }
-        | Effect::Untap { target }
         | Effect::GainControl { target, .. }
         | Effect::PhaseOut { target }
         | Effect::Fight { target, .. }
@@ -373,8 +373,16 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::DoublePT { target, .. }
         | Effect::PreventDamage { target, .. }
         | Effect::Animate { target, .. }
-        | Effect::AddCounter { target, .. } => !matches!(target, TargetFilter::None),
+        | Effect::PutCounter { target, .. } => !matches!(target, TargetFilter::None),
         Effect::RevealHand { target, .. } => !matches!(target, TargetFilter::None),
+        // CR 701.26a/b: only single-permanent tap/untap declares a target. The
+        // mass (`All`) scope falls through to `false`, matching the legacy
+        // `TapAll`/`UntapAll`.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => !matches!(target, TargetFilter::None),
         _ => false,
     }
 }
@@ -478,8 +486,10 @@ mod tests {
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))),
             runtime_execute: None,

@@ -16,7 +16,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardLayout;
-use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -169,6 +169,8 @@ fn test_smoke_game_cast_spell() {
             object_id: bolt_id,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
 
@@ -333,6 +335,8 @@ fn sagu_wildling_cast_from_hand_prompts_adventure_choice() {
             object_id: sagu_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should be accepted");
     assert!(
@@ -412,6 +416,8 @@ fn day_of_black_sun_is_castable_with_x_zero_from_export() {
             object_id: day_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Day of Black Sun cast should be accepted");
 

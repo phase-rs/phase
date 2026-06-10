@@ -42,7 +42,7 @@ use crate::types::ability::{
     UnlessPayModifier, ZoneChangeClause,
 };
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject};
+use crate::types::ability::{AttackScope, AttackSubject, EffectScope, TapStateChange};
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -159,6 +159,7 @@ fn becomes_target_source_filter(controller: ControllerRef) -> TargetFilter {
             },
             TargetFilter::StackAbility {
                 controller: Some(controller),
+                tag: None,
             },
         ],
     }
@@ -2364,6 +2365,9 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
 /// Parallel to `static_condition_to_ability_condition` in `oracle_effect/mod.rs`.
 /// Returns `None` for variants that have no `TriggerCondition` equivalent —
 /// the caller falls through to the next strategy.
+///
+/// Exhaustive on purpose — when you add a `StaticCondition` variant, decide
+/// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
 fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<TriggerCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringPlayersTurn {
@@ -3242,7 +3246,11 @@ fn try_extract_that_players_turn(
             value(false, tag(" is")),
         )),
         opt(tag(" not")),
-        tag(" that player's turn"),
+        alt((
+            tag(" that player's turn"),
+            // CR 603.4: Glademuse — "if it's not their turn" (pronoun = triggering player).
+            tag(" their turn"),
+        )),
     )
         .parse(tail)
         .ok()?;
@@ -6453,6 +6461,9 @@ fn try_parse_event(
         BecomesTargetSpell {
             qualifier: Option<TargetFilter>,
         },
+        /// CR 702.165a: the targeting source is a Backup keyword ability on the
+        /// stack (e.g. Huge Truck "becomes the target of a backup ability").
+        BecomesTargetBackupAbility,
         DealtCombatDamage,
         DealtDamage,
         /// CR 120.10 + CR 120.2b: Excess noncombat damage received by the subject.
@@ -6588,6 +6599,20 @@ fn try_parse_event(
             value(SimpleEvent::TappedForMana, tag("is tapped for mana")),
         ))
         .or(alt((
+            // CR 702.165a: "becomes the target of a backup ability" — the source
+            // is specifically a Backup keyword ability on the stack. Lives in this
+            // second `alt` block (the first hit nom's tuple-arity limit); collision-
+            // free with every arm because no other phrase shares its "of a backup
+            // ability" suffix (neither generic spell-or-ability arm matches it).
+            value(
+                SimpleEvent::BecomesTargetBackupAbility,
+                tag("becomes the target of a backup ability"),
+            ),
+            // CR 115.1: Plural form for batched "become the target" triggers.
+            value(
+                SimpleEvent::BecomesTargetBackupAbility,
+                tag("become the target of a backup ability"),
+            ),
             value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
             // CR 701.26: Plural form for batched "one or more ... become untapped" triggers.
             value(SimpleEvent::BecomesUntapped, tag("become untapped")),
@@ -6696,6 +6721,16 @@ fn try_parse_event(
                     }
                 } else {
                     TargetFilter::StackSpell
+                });
+            }
+            // CR 702.165a + CR 115.1: the targeting source must be a Backup
+            // keyword ability on the stack — filtered by `AbilityTag::Backup`.
+            SimpleEvent::BecomesTargetBackupAbility => {
+                def.mode = TriggerMode::BecomesTarget;
+                set_trigger_subject(&mut def, subject);
+                def.valid_source = Some(TargetFilter::StackAbility {
+                    controller: None,
+                    tag: Some(AbilityTag::Backup),
                 });
             }
             SimpleEvent::DealtCombatDamage => {
@@ -14279,7 +14314,11 @@ mod tests {
             ),
         }
         match &*untap_sub.effect {
-            Effect::Untap { target } => {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            } => {
                 assert_eq!(
                     *target,
                     TargetFilter::SelfRef,
@@ -14563,7 +14602,10 @@ mod tests {
         assert!(
             matches!(
                 *untap_sub.effect,
-                Effect::UntapAll { .. } | Effect::Untap { .. }
+                Effect::SetTapState {
+                    state: TapStateChange::Untap,
+                    ..
+                }
             ),
             "second tier effect must be UntapAll/Untap, got {:?}",
             untap_sub.effect,
@@ -19777,6 +19819,40 @@ mod tests {
     }
 
     #[test]
+    fn trigger_becomes_target_of_backup_ability() {
+        // CR 702.165a: Huge Truck pattern — "becomes the target of a backup
+        // ability" parses to a `BecomesTarget` trigger whose `valid_source` is a
+        // stack ability tagged `Backup`, with the subject ("another creature you
+        // control") routed to `valid_card`.
+        let def = parse_trigger_line(
+            "Whenever another creature you control becomes the target of a backup ability, draw a card.",
+            "Huge Truck",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        // valid_source is the new backup-tag stack-ability filter — this is the
+        // assertion that flips if the converter arm is reverted.
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::StackAbility {
+                controller: None,
+                tag: Some(AbilityTag::Backup),
+            })
+        );
+        // Subject: "another creature you control" → Typed creature / You / Another.
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) = def.valid_card.expect("backup trigger has a subject filter")
+        else {
+            panic!("expected a Typed subject filter for the backup trigger");
+        };
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::Another));
+    }
+
+    #[test]
     fn trigger_batched_become_target_of_instant_or_sorcery_spell() {
         let def = parse_trigger_line(
             "Whenever one or more creatures you control become the target of an instant or sorcery spell, draw a card.",
@@ -23959,6 +24035,25 @@ mod tests {
     }
 
     #[test]
+    fn glademuse_attaches_not_their_turn_intervening_if() {
+        // Issue #873: "their" refers to the casting player, same as "that player's".
+        let def = parse_trigger_line(
+            "Whenever a player casts a spell, if it's not their turn, that player draws a card.",
+            "Glademuse",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::TriggeringPlayer,
+                }),
+            }),
+            "Glademuse must only trigger off-turn for the casting player"
+        );
+    }
+
+    #[test]
     fn fallback_if_you_control_a_creature() {
         // "if you control a creature" is handled by the nom bridge fallback
         let (cleaned, cond) = extract_if_condition("if you control a creature, draw a card");
@@ -25902,7 +25997,11 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::YouAttack);
         let execute = def.execute.as_deref().expect("execute ability");
         match execute.effect.as_ref() {
-            Effect::Tap { target } => match target {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            } => match target {
                 TargetFilter::Typed(t) => assert_eq!(
                     t.controller,
                     Some(ControllerRef::DefendingPlayer),
@@ -25957,7 +26056,11 @@ mod tests {
         );
         let execute = def.execute.as_deref().expect("execute ability");
         match execute.effect.as_ref() {
-            Effect::Tap { target } => match target {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            } => match target {
                 TargetFilter::Typed(t) => assert_eq!(
                     t.controller,
                     Some(ControllerRef::DefendingPlayer),
@@ -25979,7 +26082,11 @@ mod tests {
         );
         let execute = def.execute.as_deref().expect("execute ability");
         match execute.effect.as_ref() {
-            Effect::Tap { target } => match target {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            } => match target {
                 TargetFilter::Typed(t) => assert_eq!(
                     t.controller,
                     Some(ControllerRef::DefendingPlayer),
@@ -26061,8 +26168,10 @@ mod tests {
         // If the parser doesn't classify the synthetic effect, the negative
         // assertion is vacuously satisfied — the karazikar test covers the
         // positive case. If it DOES classify, the controller must remain `You`.
-        if let Effect::Tap {
+        if let Effect::SetTapState {
             target: TargetFilter::Typed(t),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         } = execute.effect.as_ref()
         {
             assert_eq!(
@@ -27836,7 +27945,9 @@ mod snapshot_tests {
 #[cfg(test)]
 mod slicer_control_handoff_tests {
     use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::{AbilityDefinition, ControllerRef, Effect, TargetFilter};
+    use crate::types::ability::{
+        AbilityDefinition, ControllerRef, Effect, EffectScope, TapStateChange, TargetFilter,
+    };
     use crate::types::TriggerMode;
 
     /// Walk a chained `AbilityDefinition` collecting one effect per node (parent
@@ -27879,7 +27990,14 @@ mod slicer_control_handoff_tests {
 
         // PayCost → Untap → Goad → GiveControl, all present.
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::Untap { .. })),
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            )),
             "untap sub-effect must be present, got {effects:#?}",
         );
         assert!(
@@ -27930,7 +28048,14 @@ mod slicer_control_handoff_tests {
         let effects = flatten_effects(trigger.execute.as_ref().expect("execute"));
         // The untap clause must survive…
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::Untap { .. })),
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            )),
             "untap sub-effect must be present, got {effects:#?}",
         );
         // …and the control handoff must be present in some valid lowered form,

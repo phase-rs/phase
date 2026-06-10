@@ -16,6 +16,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -84,6 +85,8 @@ fn tidecaller_mv_below_5_mills_chosen_target_three() {
             object_id: spell,
             card_id: spell_card,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting a 0-cost instant must succeed");
     runner.advance_until_stack_empty();
@@ -170,6 +173,8 @@ fn tidecaller_mv_5_or_more_mills_chosen_target_ten_not_caster() {
             object_id: spell,
             card_id: spell_card,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting a {5} sorcery must succeed");
 

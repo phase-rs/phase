@@ -206,6 +206,25 @@ pub fn apply_draw_after_replacement(
     state.last_effect_count = Some(drawn_count);
 
     for obj_id in cards_to_draw {
+        // Zone-pipeline bucketing (PLAN Risk #5, corrected Phase C round 4): this
+        // library -> hand draw delivery is NOT migrated to `move_object`.
+        // Rationale (two-part):
+        //   (1) `Moved` defs with an explicit `destination_zone` only target
+        //       Graveyard (Rest in Peace class) or Battlefield (as-enters
+        //       modifiers) — neither matches a Hand/Exile delivery.
+        //   (2) Self-ETB as-enters defs are stamped `destination_zone:
+        //       Battlefield` at construction (parser + synthesis), so the
+        //       destination-`None` Moved class that would otherwise match EVERY
+        //       destination no longer exists for this card class. The remaining
+        //       destination-`None` Moved defs are deliberate departure-watchers
+        //       (unearth / "would leave the battlefield" — battlefield-origin
+        //       only, irrelevant to a library -> hand move).
+        // Routing through the pipeline would therefore consult nothing and only
+        // add an unresumed-pause path. Draw-level replacements already apply at
+        // `ReplacementEvent::Draw` upstream of this delivery. The same finding
+        // covers the rest of the Hand/Exile C9 tail (gift_delivery, connive,
+        // explore, turns return-to-hand; haunt, discover, exile_top, cascade,
+        // collect_evidence, ripple exile-as-cost/effect).
         zones::move_to_zone(state, obj_id, Zone::Hand, events);
         // CR 121.1 + CR 504.1: Increment per-step + per-turn counters BEFORE
         // emitting the event so the ordinal embedded in `CardDrawn` reflects

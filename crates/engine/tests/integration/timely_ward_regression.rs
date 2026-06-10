@@ -20,6 +20,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 fn add_mana(runner: &mut engine::game::scenario::GameRunner, mana: &[ManaType]) {
     let dummy = ObjectId(0);
@@ -117,6 +118,8 @@ fn timely_ward_cast_targeting_noncommander_is_rejected_at_finalize() {
             object_id: timely_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast announcement should be accepted at instant speed via conditional flash");
     assert!(

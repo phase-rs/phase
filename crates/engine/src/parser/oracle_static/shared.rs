@@ -271,8 +271,7 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     description: &str,
 ) -> Option<StaticDefinition> {
     let condition_lower = split.condition_text.to_lowercase();
-    let condition_tp = TextPair::new(&split.condition_text, &condition_lower);
-    let affected = parse_attached_subject_is_legendary(&condition_tp)?;
+    let affected = parse_attached_subject_qualifier(&condition_lower)?;
 
     let effect_lower = split.effect_text.to_lowercase();
     let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
@@ -281,30 +280,25 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     parse_continuous_gets_has(predicate.original, affected, description)
 }
 
-pub(crate) fn parse_attached_subject_is_legendary(
-    condition: &TextPair<'_>,
-) -> Option<TargetFilter> {
-    let (rest, attachment_prop) = if let Some(rest) = nom_tag_tp(condition, "equipped ") {
-        (rest, FilterProp::EquippedBy)
-    } else {
-        (
-            nom_tag_tp(condition, "enchanted ")?,
-            FilterProp::EnchantedBy,
-        )
-    };
-    let rest = nom_tag_tp(&rest, "creature is legendary")?;
-    if !rest.original.trim().is_empty() {
+/// Parse the attached-subject qualifier of an inverted grant
+/// ("enchanted/equipped creature is `<characteristic>`") into the `affected`
+/// `TargetFilter` for the enchanted/equipped permanent.
+///
+/// Delegates to the canonical attached-subject predicate machinery
+/// (`oracle_nom::condition::parse_attached_subject_is_filter`) so the full
+/// characteristic class is covered — color (`HasColor`), type/subtype, and the
+/// `legendary`/`basic` supertypes — not just `legendary`. Previously only
+/// `"creature is legendary"` was recognized; every other characteristic fell
+/// through to the generic inverted rewrite, which left `affected = SelfRef`
+/// (the Aura/Equipment itself), so the grant never reached the host (#2818).
+pub(crate) fn parse_attached_subject_qualifier(condition_lower: &str) -> Option<TargetFilter> {
+    let (rest, filter) =
+        crate::parser::oracle_nom::condition::parse_attached_subject_is_filter(condition_lower)
+            .ok()?;
+    if !rest.trim().is_empty() {
         return None;
     }
-
-    Some(TargetFilter::Typed(TypedFilter::creature().properties(
-        vec![
-            attachment_prop,
-            FilterProp::HasSupertype {
-                value: Supertype::Legendary,
-            },
-        ],
-    )))
+    Some(filter)
 }
 
 pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
