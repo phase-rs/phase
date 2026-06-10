@@ -10295,6 +10295,18 @@ pub mod tests {
     }
 
     #[test]
+    fn legacy_source_is_renowned_card_data_tag_deserializes() {
+        let cond: TriggerCondition =
+            serde_json::from_str(r#"{"type":"SourceIsRenowned"}"#).unwrap();
+        assert_eq!(
+            cond,
+            TriggerCondition::IsRenowned {
+                subject: RenownSubject::Source,
+            }
+        );
+    }
+
+    #[test]
     fn is_renowned_event_subject_reads_event_object_flag() {
         // CR 702.112b: "if it's renowned" — the renowned designation belongs to the
         // event-subject creature (a creature OTHER than the source), resolved from

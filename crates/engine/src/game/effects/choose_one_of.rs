@@ -8,6 +8,8 @@ use crate::types::game_state::{GameState, PendingChooseOneOf, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
+use crate::game::turn_control;
+
 /// CR 701.55a-b + CR 608.2d: Prompt the instructed player to choose one
 /// branch at resolution. The branch itself is not pre-validated for
 /// possibility; the chosen instructions perform as much as possible.
@@ -30,6 +32,14 @@ pub fn resolve(
     }
 
     let players = choosing_players(state, ability, chooser);
+    if players.is_empty() {
+        // CR 608.2d: A branch choice must be made by an eligible player. An
+        // empty chooser set means the effect cannot legally begin — fail loud
+        // instead of silently resolving nothing (issue #927 class).
+        return Err(EffectError::InvalidParam(format!(
+            "ChooseOneOf: no eligible player for chooser {chooser:?}"
+        )));
+    }
     prompt_next(
         state,
         ability.controller,
@@ -71,6 +81,9 @@ pub(crate) fn prompt_next(
         context,
         remaining_players: players,
     };
+    // CR 117.3d: Route the authorized submitter to the chooser so the frontend
+    // and `WrongPlayer` guards agree on who may dispatch `ChooseBranch`.
+    state.priority_player = turn_control::authorized_submitter_for_player(state, player);
 }
 
 pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>) {
@@ -199,10 +212,18 @@ fn branch_descriptions(branches: &[AbilityDefinition]) -> Vec<String> {
         .iter()
         .enumerate()
         .map(|(index, branch)| {
-            branch
+            if let Some(description) = branch
                 .description
-                .clone()
-                .unwrap_or_else(|| format!("Option {}", index + 1))
+                .as_ref()
+                .map(|text| text.trim())
+                .filter(|text| !text.is_empty())
+            {
+                return description.to_string();
+            }
+            if let Effect::Token { name, .. } = &*branch.effect {
+                return format!("Create a {name} token");
+            }
+            format!("Option {}", index + 1)
         })
         .collect()
 }
@@ -211,10 +232,95 @@ fn branch_descriptions(branches: &[AbilityDefinition]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityKind, Comparator, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
+        AbilityKind, Comparator, PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr,
         QuantityRef, TargetFilter,
     };
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::PlayerId;
+
+    #[test]
+    fn empty_chooser_set_fails_loudly() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].is_eliminated = true;
+        state.players[1].is_eliminated = true;
+
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![branch],
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        let err = resolve(&mut state, &ability, &mut events).unwrap_err();
+        assert!(
+            err.to_string().contains("no eligible player"),
+            "expected chooser failure, got {err}"
+        );
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
+    }
+
+    #[test]
+    fn token_branches_without_descriptions_get_create_labels() {
+        let food = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Food".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".into(), "Food".into()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        );
+        let treasure = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".into(), "Treasure".into()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        );
+        let labels = branch_descriptions(&[food, treasure]);
+        assert_eq!(
+            labels,
+            vec!["Create a Food token", "Create a Treasure token"]
+        );
+    }
 
     #[test]
     fn life_lost_player_attribute_chooser_prompts_only_matching_opponents() {

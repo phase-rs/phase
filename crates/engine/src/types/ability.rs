@@ -11290,6 +11290,10 @@ pub enum RenownSubject {
     EventSubject,
 }
 
+fn default_renown_subject_source() -> RenownSubject {
+    RenownSubject::Source
+}
+
 /// Intervening-if condition for triggered abilities.
 /// Checked both when the trigger would fire and when it resolves on the stack.
 ///
@@ -11529,7 +11533,14 @@ pub enum TriggerCondition {
     ///   - `RenownSubject::EventSubject` — "if it's renowned" (CR 702.112b; the
     ///     triggering/event creature, a creature OTHER than the source, whose
     ///     renowned designation other spells and abilities can identify).
-    IsRenowned { subject: RenownSubject },
+    ///
+    /// `SourceIsRenowned` is a legacy card-data export tag (pre-subject parameterization);
+    /// deserializes as `RenownSubject::Source`.
+    #[serde(alias = "SourceIsRenowned")]
+    IsRenowned {
+        #[serde(default = "default_renown_subject_source")]
+        subject: RenownSubject,
+    },
     /// CR 711.2a + CR 711.2b: Level-up creature trigger gating — true when the source has at least
     /// `minimum` counters (and at most `maximum` if specified) matching `counters`.
     /// `CounterMatch::Any` sums across every counter type on the source; `OfType(ct)`
