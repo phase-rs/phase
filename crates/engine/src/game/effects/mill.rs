@@ -1,6 +1,6 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -104,8 +104,33 @@ pub fn apply_mill_after_replacement(
     let cards_to_mill: Vec<_> = player.library.iter().take(count).copied().collect();
     state.last_effect_count = Some(cards_to_mill.len() as i32);
 
+    // CR 701.17a + CR 614.6: Route each milled card through the zone-change
+    // pipeline (`zone_pipeline::move_object`) rather than the raw
+    // `zones::move_to_zone`. The raw move never proposed a per-card ZoneChange,
+    // so `Moved` redirects ("if a card would be put into a graveyard from
+    // anywhere, exile it instead" — Rest in Peace / Leyline of the Void class)
+    // never fired for milled cards. The pipeline proposes the inner ZoneChange
+    // and consults those replacements before delivery, fixing the known bug.
+    //
+    // Attribution: the milled card itself anchors the `Effect` cause (mill to a
+    // graveyard creates no exile-link, and a `Moved` replacement's `valid_card`
+    // is evaluated against the moved card, so this matches the pre-pipeline raw
+    // behavior while enabling the replacement consult).
     for obj_id in cards_to_mill {
-        zones::move_to_zone(state, obj_id, destination, events);
+        let req = ZoneMoveRequest::effect(obj_id, destination, obj_id);
+        match zone_pipeline::move_object(state, req, events) {
+            ZoneMoveResult::Done => {}
+            // CR 616.1: A per-card `Moved` replacement that needs a player choice
+            // (multiple applicable replacements racing on one milled card) is not
+            // yet resumable mid-batch — no real card produces this on a
+            // library->graveyard mill (RIP / Leyline redirects are mandatory and
+            // non-interactive). Park the surfaced choice (`state.waiting_for` is
+            // already set by the pipeline) and stop; the remaining tail awaits the
+            // batch-continuation infrastructure (PLAN §5a / Risk #10).
+            ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                return Ok(());
+            }
+        }
     }
 
     Ok(())

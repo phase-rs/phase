@@ -302,8 +302,7 @@ pub(crate) enum ZoneDeliveryResult {
 ///
 /// `pub(crate)` while `ZoneMoveResult` is `pub(crate)`: every caller lives in the
 /// engine crate. (PLAN §1.3 writes `pub fn`; widening to `pub` only matters once
-/// a cross-crate consumer exists, which it does not in Phase A.)
-#[allow(dead_code)]
+/// a cross-crate consumer exists, which it does not yet.)
 pub(crate) fn move_object(
     state: &mut GameState,
     req: ZoneMoveRequest,
