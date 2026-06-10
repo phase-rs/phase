@@ -33,6 +33,9 @@ const CARD_TYPES = [
   "Land",
   "Planeswalker",
 ];
+const FILTER_SELECT_CLASS =
+  "w-full cursor-pointer rounded-[16px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:border-white/20 focus:outline-none";
+const FILTER_OPTION_CLASS = "bg-[#0a0f1b] text-slate-100";
 
 export type BrowserLegalityFilter = "all" | GameFormat;
 
@@ -303,13 +306,16 @@ export function CardSearch({
       </div>
 
       <SelectField
+        wrapperClassName="w-full"
         value={filters.type}
         onChange={(e) => handleTypeChange(e.target.value)}
-        className="rounded-[16px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:border-white/20 focus:outline-none"
+        className={FILTER_SELECT_CLASS}
       >
-        <option value="">{t("search.allTypes")}</option>
+        <option value="" className={FILTER_OPTION_CLASS}>
+          {t("search.allTypes")}
+        </option>
         {CARD_TYPES.map((cardType) => (
-          <option key={cardType} value={cardType}>
+          <option key={cardType} value={cardType} className={FILTER_OPTION_CLASS}>
             {cardType}
           </option>
         ))}
@@ -328,12 +334,13 @@ export function CardSearch({
       </div>
 
       <SelectField
+        wrapperClassName="w-full"
         value={filters.browseFormat}
         onChange={(e) => handleBrowseFormatChange(e.target.value as BrowserLegalityFilter)}
-        className="rounded-[16px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:border-white/20 focus:outline-none"
+        className={FILTER_SELECT_CLASS}
       >
         {browserFormats.map(({ value, label }) => (
-          <option key={value} value={value}>
+          <option key={value} value={value} className={FILTER_OPTION_CLASS}>
             {label}
           </option>
         ))}

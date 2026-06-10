@@ -1904,6 +1904,120 @@ mod tests {
         assert!(state.legacy_post_replacement_resolved_effect.is_none());
     }
 
+    /// Issue #575: Non-Moved `Sacrifice { Typed }` post-replacements (Dralnu)
+    /// inject the source as a pre-selected sacrifice target. Re-broadening the
+    /// Devour guard to all events would route this through `EffectZoneChoice`.
+    #[test]
+    fn issue_575_dealt_damage_sacrifice_injects_source_target() {
+        let mut state = GameState::new_two_player(42);
+        let dralnu = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dralnu, Lich Lord".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::permanent()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &template,
+            Some(dralnu),
+            None,
+            Some(&ReplacementEvent::DealtDamage),
+            &mut events,
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "DealtDamage sacrifice must use injected source target, not a chooser; got {:?}",
+            state.waiting_for
+        );
+        assert!(waiting.is_none());
+        assert_eq!(state.objects[&dralnu].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&other].zone, Zone::Battlefield);
+    }
+
+    /// Issue #575: Moved (ETB) `Sacrifice { Typed }` post-replacements (Devour)
+    /// suppress source injection so the chooser prompt opens.
+    #[test]
+    fn issue_575_moved_sacrifice_typed_opens_chooser_not_source_injection() {
+        let mut state = GameState::new_two_player(42);
+        let devourer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Devourer".to_string(),
+            Zone::Battlefield,
+        );
+        let fodder_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sacrifice Fodder A".to_string(),
+            Zone::Battlefield,
+        );
+        let fodder_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Sacrifice Fodder B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [devourer, fodder_a, fodder_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &template,
+            Some(devourer),
+            None,
+            Some(&ReplacementEvent::Moved),
+            &mut events,
+        );
+
+        assert!(
+            matches!(waiting, Some(WaitingFor::EffectZoneChoice { .. }))
+                || matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "Moved Devour-shape sacrifice must prompt a chooser; waiting={waiting:?} state={:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.objects[&devourer].zone,
+            Zone::Battlefield,
+            "devourer must not be auto-sacrificed via source injection"
+        );
+    }
+
     /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
     /// the pre-fold `post_replacement_resolved_effect` field (Resolved
     /// binding state) migrates into the new unified slot. Resolved wins over

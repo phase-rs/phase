@@ -279,7 +279,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             if optional_modal_present {
                 def = def.mode(ReplacementMode::Optional { decline: None });
             }
-            def = def.execute(parse_effect_chain(&effect_after_modal, AbilityKind::Spell));
+            def = def.execute(parse_effect_chain(effect_after_modal, AbilityKind::Spell));
         }
         // CR 121.1 + CR 504.1 + CR 614.6: Detect Alhammarret's Archive's
         // "except the first one [you|they] draw in each of [your|their] draw
@@ -3909,16 +3909,16 @@ fn extract_replacement_effect(text: &str) -> Option<String> {
 /// Uses a nom `tag` over the lowercased text for dispatch (no `starts_with`),
 /// then peels the matched byte length off the original case-preserving slice
 /// so downstream chain parsing sees the original capitalization.
-fn strip_optional_instead_lead_in(effect_text: &str) -> (bool, String) {
+fn strip_optional_instead_lead_in(effect_text: &str) -> (bool, &str) {
     let lower = effect_text.to_lowercase();
     let strip_result: nom::IResult<&str, (), OracleError<'_>> =
         preceded(tag("you may instead "), nom::combinator::success(())).parse(lower.as_str());
     let Ok((rest_lower, ())) = strip_result else {
-        return (false, effect_text.to_string());
+        return (false, effect_text);
     };
     let offset = lower.len() - rest_lower.len();
     let rest_orig = effect_text[offset..].trim_start();
-    (true, rest_orig.to_string())
+    (true, rest_orig)
 }
 
 #[derive(Clone, Copy)]

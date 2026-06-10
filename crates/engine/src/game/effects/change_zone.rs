@@ -5573,6 +5573,75 @@ mod tests {
         );
     }
 
+    /// Issue #567: `ChangeZoneAll::resolve_all` must stash remaining matches on
+    /// `NeedsChoice` and resume via `drain_pending_change_zone_iteration` — the
+    /// same contract as the targeted `ChangeZone` loop (issue #535).
+    #[test]
+    fn issue_567_change_zone_all_with_replacement_choice_processes_all_matches() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let shock_a = add_shock_in_library_for_test(&mut state, 601, PlayerId(0));
+        let shock_b = add_shock_in_library_for_test(&mut state, 602, PlayerId(0));
+        for id in [shock_a, shock_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let life_before = state.players[0].life;
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "expected first ReplacementChoice, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_change_zone_iteration.is_some(),
+            "resolve_all must stash remaining library matches on NeedsChoice"
+        );
+
+        let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline first replacement");
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "expected a SECOND ReplacementChoice for shock_b, got {:?} — remaining matches were abandoned",
+            state.waiting_for
+        );
+
+        let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline second replacement");
+
+        assert_eq!(state.objects[&shock_a].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&shock_b].zone, Zone::Battlefield);
+        assert!(state.objects[&shock_a].tapped);
+        assert!(state.objects[&shock_b].tapped);
+        assert_eq!(state.players[0].life, life_before);
+        assert!(state.pending_change_zone_iteration.is_none());
+    }
+
     /// Helper: replicates the shock-land-in-library scaffolding used across
     /// the resume-loop tests below.
     #[cfg(test)]

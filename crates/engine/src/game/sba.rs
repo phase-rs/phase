@@ -1441,7 +1441,7 @@ pub(crate) fn is_valid_attachment_target(
     // non-battlefield zone via `FilterProp::InZone`, the host must be on the
     // battlefield. Mirrors the cast-time `extract_explicit_zones` branch in
     // `game::targeting::find_legal_targets`.
-    let allowed_zones = explicit_enchant_zones(filter);
+    let allowed_zones = crate::game::targeting::extract_explicit_zones(filter);
     if allowed_zones.is_empty() {
         if target.zone != Zone::Battlefield {
             return false;
@@ -1455,28 +1455,6 @@ pub(crate) fn is_valid_attachment_target(
         attacher.controller,
     );
     crate::game::filter::matches_target_filter(state, target_id, filter, &ctx)
-}
-
-/// CR 303.4a: Collect every `FilterProp::InZone` zone reachable through the
-/// `TargetFilter` AST. Mirrors `game::targeting::extract_explicit_zones`; kept
-/// private here so the SBA helper does not depend on a `pub(crate)` lift in
-/// the targeting module.
-fn explicit_enchant_zones(filter: &crate::types::ability::TargetFilter) -> Vec<Zone> {
-    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
-    match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
-            .iter()
-            .filter_map(|p| match p {
-                FilterProp::InZone { zone } => Some(*zone),
-                _ => None,
-            })
-            .collect(),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().flat_map(explicit_enchant_zones).collect()
-        }
-        TargetFilter::Not { filter } => explicit_enchant_zones(filter),
-        _ => vec![],
-    }
 }
 
 /// CR 704.5t: If a player's venture marker is on the bottommost room of a dungeon card,
