@@ -9969,6 +9969,147 @@ pub mod tests {
         ));
     }
 
+    /// Test that DealtDamageBySourceThisTurn works with ZoneChanged events
+    /// (for creatures dying from 0 toughness due to -1/-1 counters from infect)
+    #[test]
+    fn test_dealt_damage_by_source_with_zone_changed_event() {
+        use crate::types::game_state::DamageRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let source = ObjectId(10); // The permanent with the trigger (e.g., Rot Wolf)
+        let dying_creature = ObjectId(20); // The creature that died from 0 toughness
+
+        // Record damage: source dealt 2 damage to dying_creature (infect damage)
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: source,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(dying_creature),
+            target_controller: PlayerId(0),
+            amount: 2,
+            is_combat: false,
+            ..Default::default()
+        });
+
+        let condition = TriggerCondition::DealtDamageBySourceThisTurn;
+        // ZoneChanged event for battlefield → graveyard (0-toughness death)
+        let event = GameEvent::ZoneChanged {
+            object_id: dying_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                dying_creature,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        };
+
+        // Matching source + matching dying creature → true
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+
+        // Non-matching source → false
+        let wrong_source = ObjectId(99);
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(wrong_source),
+            Some(&event),
+        ));
+
+        // Non-matching dying creature → false
+        let wrong_event = GameEvent::ZoneChanged {
+            object_id: ObjectId(88),
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                ObjectId(88),
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&wrong_event),
+        ));
+    }
+
+    /// Test that ZoneChangeCountThisTurn correctly counts creature deaths
+    /// (for Smeagol's "if a creature died under your control this turn" condition)
+    #[test]
+    fn test_zone_change_count_this_turn_creature_died() {
+        use crate::types::ability::{QuantityExpr, QuantityRef, TargetFilter, TypedFilter};
+        use crate::types::zones::Zone;
+
+        let mut state = setup();
+        let source = ObjectId(10); // The permanent with the trigger (e.g., Smeagol)
+        let dying_creature = ObjectId(20); // A creature that died under your control
+
+        // Record a zone change: creature died (battlefield → graveyard)
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            dying_creature,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        record.controller = PlayerId(0); // Under your control
+        record
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature); // It's a creature
+        state.zone_changes_this_turn.push(record);
+
+        let condition = TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Graveyard),
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+
+        // Should be true: 1 creature died under your control
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+
+        // Add another creature death under opponent's control
+        let opponent_creature = ObjectId(21);
+        let mut opp_record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            opponent_creature,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        opp_record.controller = PlayerId(1); // Opponent's creature
+        state.zone_changes_this_turn.push(opp_record);
+
+        // Should still be true: 1 creature died under your control (opponent's doesn't count)
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+    }
+
     #[test]
     fn test_no_monarch_trigger_condition() {
         // CR 725.1: NoMonarch is true only when no player holds the monarch.

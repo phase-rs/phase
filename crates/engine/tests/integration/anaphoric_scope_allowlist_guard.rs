@@ -187,7 +187,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "conclave mentor",
     "consume",
     "consuming ferocity",
-    "crumble",
     "crush underfoot",
     "dark confidant",
     "dark tutelage",
@@ -285,7 +284,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "signature slam",
     "sister hospitaller",
     "sly spy",
-    "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
     "south wind avatar",
@@ -520,17 +518,18 @@ fn anaphoric_scope_set_is_frozen() {
     // dropping both to 153. Enlist keyword synthesis then surfaced the tapped
     // creature's power anaphor for 15 Enlist cards, taking the count to 168. If
     // #512/#511 land, this shrinks further. Sly Spy added, taking count to 169.
+    // Crumble and Solitude removed (parser fix), taking count to 167.
     assert_eq!(
         observed.len(),
-        169,
-        "Expected exactly 169 cards retaining ObjectScope::Anaphoric (pronoun \
+        167,
+        "Expected exactly 167 cards retaining ObjectScope::Anaphoric (pronoun \
          'its' antecedents). Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        169,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 169 cards."
+        167,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 167 cards."
     );
 }
 
