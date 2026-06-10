@@ -586,23 +586,6 @@ pub(crate) fn apply_damage_after_replacement(
         state.damage_dealt_this_turn.push_back(record);
     }
 
-    // CR 710.2: Dealing damage to an opponent is a crime
-    if actual_amount > 0 {
-        let is_opponent = match t {
-            TargetRef::Player(pid) => *pid != ctx.controller,
-            TargetRef::Object(obj_id) => state
-                .objects
-                .get(obj_id)
-                .map(|obj| obj.controller != ctx.controller)
-                .unwrap_or(false),
-        };
-        if is_opponent {
-            events.push(GameEvent::CrimeCommitted {
-                player_id: ctx.controller,
-            });
-        }
-    }
-
     // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to damage dealt.
     if ctx.has_lifelink
         && actual_amount > 0
@@ -1440,57 +1423,6 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.objects[&obj_id].damage_marked, 3);
-    }
-
-    /// CR 710.2: Dealing damage to an opponent is a crime
-    #[test]
-    fn deal_damage_to_opponent_emits_crime_committed() {
-        let mut state = GameState::new_two_player(42);
-        let ability = make_ability(3, vec![TargetRef::Player(PlayerId(1))]);
-        let mut events = Vec::new();
-
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                GameEvent::CrimeCommitted {
-                    player_id: PlayerId(0)
-                }
-            )),
-            "dealing damage to opponent should emit CrimeCommitted event"
-        );
-    }
-
-    /// CR 710.2: Dealing damage to own permanent is not a crime
-    #[test]
-    fn deal_damage_to_own_permanent_does_not_emit_crime_committed() {
-        let mut state = GameState::new_two_player(42);
-        let obj_id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Bear".to_string(),
-            Zone::Battlefield,
-        );
-        state
-            .objects
-            .get_mut(&obj_id)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Creature);
-        let ability = make_ability(3, vec![TargetRef::Object(obj_id)]);
-        let mut events = Vec::new();
-
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, GameEvent::CrimeCommitted { .. })),
-            "dealing damage to own permanent should not emit CrimeCommitted event"
-        );
     }
 
     #[test]
