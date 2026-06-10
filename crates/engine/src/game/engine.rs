@@ -5281,14 +5281,17 @@ fn handle_play_land(
                     // early-return — then surface the parked prompt; the land
                     // epilogue must not run yet.
                     crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                        // CR 305.1 + CR 400.7i: stamp land-play provenance so
+                        // effects can find the permanent the played land became.
                         mark_land_played_from_zone(state, object_id, origin_zone);
                         return Ok(state.waiting_for.clone());
                     }
                 }
-                // Stamp the play origin (engine bookkeeping for "where it was
-                // played from"). Set fresh AFTER delivery — the ctx re-stamp
-                // knob is for preserving a pre-move value, which this site does
-                // not have (it is recording a brand-new origin).
+                // CR 305.1 + CR 400.7i: stamp land-play provenance ("where it
+                // was played from") so effects can find the permanent the
+                // played land became. Set fresh AFTER delivery — the ctx
+                // re-stamp knob is for preserving a pre-move value, which this
+                // site does not have (it is recording a brand-new origin).
                 mark_land_played_from_zone(state, object_id, origin_zone);
             }
 

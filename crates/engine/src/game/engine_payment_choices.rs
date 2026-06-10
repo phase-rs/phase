@@ -429,13 +429,15 @@ fn pay_top_library_exile_cost(
             // counter-replacement pause (no battlefield entry); the arm is
             // present for exhaustiveness. A redirect to the battlefield that
             // paused would have no continuation home in this synchronous cost
-            // path, so flag it loudly rather than silently dropping the tail.
+            // path, so fail the payment loudly — continuing would silently
+            // drop the parked tail and corrupt the cost state in release
+            // builds where a debug_assert is a no-op.
             crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
-                debug_assert!(
-                    false,
+                return Err(EngineError::InvalidAction(
                     "top-library exile cost delivery surfaced a replacement pause; \
                      no continuation exists in this cost path"
-                );
+                        .to_string(),
+                ));
             }
         }
     }
