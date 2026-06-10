@@ -3,6 +3,7 @@ use super::*;
 
 use std::collections::HashMap;
 
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::StackEntryKind;
 use engine::types::identifiers::CardId;
 use engine::types::triggers::TriggerMode;
@@ -33,6 +34,8 @@ fn etb_changes_zone_trigger_fires_on_zone_change() {
             object_id: bear_id,
             card_id: bear_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -104,6 +107,8 @@ fn multiple_changes_zone_triggers_fire() {
             object_id: elf_id,
             card_id: elf_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -157,6 +162,8 @@ fn trigger_goes_on_stack_with_priority() {
             object_id: bear_id,
             card_id: bear_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 

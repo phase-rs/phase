@@ -17,6 +17,7 @@
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -74,6 +75,8 @@ fn leyline_bonus_unlocks_auto_tapped_cast() {
             object_id: threat_id,
             card_id: threat_card,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting Big Threat must succeed — Leyline's bonus mana must reach the pool");
     assert_eq!(
@@ -103,6 +106,8 @@ fn leyline_bonus_fires_exactly_once_during_cast() {
             object_id: threat_id,
             card_id: threat_card,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast must succeed");
 

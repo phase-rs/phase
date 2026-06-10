@@ -25,8 +25,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, CastOfferKind, CastingVariant, CastingVariantChoiceOption, ConvokeMode,
-    GameState, PendingCast, WaitingFor,
+    ActionResult, CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption,
+    ConvokeMode, GameState, PendingCast, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -1786,6 +1786,8 @@ impl<'a> SpellCast<'a> {
                 object_id: spell,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("CastSpell must be accepted by the engine");
 

@@ -8,6 +8,7 @@ use super::rules::{GameRunner, GameScenario, Phase, WaitingFor, P0};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{Effect, StaticDefinition, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor as EngineWaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
@@ -149,6 +150,8 @@ fn unstoppable_plan_untaps_after_cast_from_hand() {
             object_id: plan,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Unstoppable Plan is 0-cost in scenario shell");
     runner.advance_until_stack_empty();

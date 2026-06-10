@@ -57,7 +57,12 @@ fn capture_attachment_snapshot(
 /// revert (CR 712.14), exile permission clearing (CR 113.6e), monstrous reset
 /// (CR 701.37b), counter clearing (CR 122.2), layer pruning, and mana-tap
 /// cleanup.
-fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zone, to: Zone) {
+pub(crate) fn apply_zone_exit_cleanup(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+) {
     // CR 400.7: An object that changes zones becomes a new object with no
     // memory of its previous existence. Both the short-lived `revealed_cards`
     // (cleared at action boundaries) and the persistent `public_revealed_cards`
@@ -329,6 +334,31 @@ pub fn create_object(
     id
 }
 
+/// CR 700.11: A player has "descended this turn" when a permanent card has
+/// been put into their graveyard from anywhere this turn. Single authority for
+/// the descend bookkeeping, shared by `move_to_zone` and the merge-split
+/// component delivery (`merge::put_component_into_zone`). Tokens are not cards
+/// and do not count.
+pub(crate) fn record_descend_on_graveyard_arrival(
+    state: &mut GameState,
+    object_id: ObjectId,
+    owner: PlayerId,
+) {
+    let is_permanent_card = state.objects.get(&object_id).is_some_and(|obj| {
+        !obj.is_token
+            && obj
+                .card_types
+                .core_types
+                .iter()
+                .any(|ct| ct.is_permanent_type())
+    });
+    if is_permanent_card {
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
+            player.descended_this_turn = true;
+        }
+    }
+}
+
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
 pub fn move_to_zone(
     state: &mut GameState,
@@ -471,24 +501,9 @@ pub fn move_to_zone(
         obj_mut.reset_for_battlefield_entry(state.turn_number);
     }
 
-    // Track descended: a permanent card was put into its owner's graveyard.
+    // CR 700.11: a permanent card was put into its owner's graveyard.
     if to == Zone::Graveyard {
-        let is_permanent_card = obj_mut.card_types.core_types.iter().any(|ct| {
-            matches!(
-                ct,
-                CoreType::Creature
-                    | CoreType::Artifact
-                    | CoreType::Enchantment
-                    | CoreType::Planeswalker
-                    | CoreType::Land
-                    | CoreType::Battle
-            )
-        });
-        if is_permanent_card && !obj_mut.is_token {
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
-                player.descended_this_turn = true;
-            }
-        }
+        record_descend_on_graveyard_arrival(state, object_id, owner);
     }
 
     // Mark layers dirty when objects enter the battlefield, or the hand (so

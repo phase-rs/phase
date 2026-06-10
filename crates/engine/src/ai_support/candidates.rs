@@ -15,8 +15,8 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, ConvokeMode, CounterCostChoice, CounterMoveChoice, GameState, PayCostKind,
-    TargetSelectionSlot, WaitingFor,
+    CastOfferKind, CastPaymentMode, ConvokeMode, CounterCostChoice, CounterMoveChoice, GameState,
+    PayCostKind, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -2440,6 +2440,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     GameAction::CastSpellAsMiracle {
                         object_id: *object_id,
                         card_id,
+
+                        payment_mode: CastPaymentMode::Auto,
                     },
                     TacticalClass::Spell,
                     Some(*player),
@@ -2470,6 +2472,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     GameAction::CastSpellAsMiracle {
                         object_id: *object_id,
                         card_id,
+
+                        payment_mode: CastPaymentMode::Auto,
                     },
                     TacticalClass::Spell,
                     Some(*player),
@@ -2501,6 +2505,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     GameAction::CastSpellAsMadness {
                         object_id: *object_id,
                         card_id,
+
+                        payment_mode: CastPaymentMode::Auto,
                     },
                     TacticalClass::Spell,
                     Some(*player),
@@ -2680,6 +2686,8 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                         object_id,
                         card_id: obj.card_id,
                         targets: Vec::new(),
+
+                        payment_mode: CastPaymentMode::Auto,
                     },
                     TacticalClass::Spell,
                     Some(player),
@@ -2699,6 +2707,8 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                     object_id,
                     card_id: obj.card_id,
                     source_id,
+
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 TacticalClass::Spell,
                 Some(player),
@@ -3155,6 +3165,8 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                             hand_object: hand_id,
                             card_id,
                             creature_to_return: creature_id,
+
+                            payment_mode: CastPaymentMode::Auto,
                         },
                         TacticalClass::Ability,
                         Some(player),
@@ -3208,6 +3220,8 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                             hand_object: hand_id,
                             card_id,
                             creature_to_return: creature_id,
+
+                            payment_mode: CastPaymentMode::Auto,
                         },
                         TacticalClass::Spell,
                         Some(player),
@@ -5749,7 +5763,8 @@ mod tests {
                     hand_object,
                     card_id,
                     creature_to_return,
-                } if *hand_object == web_spell
+
+                    payment_mode: CastPaymentMode::Auto,} if *hand_object == web_spell
                     && *card_id == CardId(2)
                     && *creature_to_return == tapped_creature
             )),

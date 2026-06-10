@@ -13,6 +13,8 @@ use crate::cast_facts::{
 };
 use crate::config::{AiConfig, PolicyPenalties};
 use crate::eval::{strategic_intent, StrategicIntent};
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 pub struct PolicyContext<'a> {
     pub state: &'a GameState,
@@ -369,6 +371,8 @@ mod tests {
                 object_id: spell_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -440,6 +444,8 @@ mod tests {
                 object_id,
                 card_id: CardId(9),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),

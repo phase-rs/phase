@@ -6,6 +6,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityCost, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -60,6 +61,8 @@ fn cast_demanding_dragon_to_unless_prompt() -> (GameRunner, ObjectId) {
             object_id: dragon,
             card_id: runner.state().objects[&dragon].card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Demanding Dragon");
 

@@ -20,6 +20,7 @@
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 
@@ -66,6 +67,8 @@ fn scry_with_two_watchers_still_prompts_and_fires_triggers() {
             object_id: spell,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast the scry spell");
     runner.advance_until_stack_empty();

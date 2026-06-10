@@ -10,7 +10,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::game_state::CastingVariant;
-use engine::types::game_state::{CastOfferKind, StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -52,6 +52,8 @@ fn elusive_otter_creature_face_cast_does_not_panic() {
             object_id: otter_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should be accepted");
     assert!(
@@ -113,6 +115,8 @@ fn elusive_otter_adventure_face_cast_does_not_panic() {
             object_id: otter_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should be accepted");
     runner
