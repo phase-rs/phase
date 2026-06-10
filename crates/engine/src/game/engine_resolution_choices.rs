@@ -2859,12 +2859,34 @@ pub(super) fn handle_resolution_choice(
                 .filter(|&&id| id != keep)
                 .copied()
                 .collect();
-            for id in to_remove {
-                zones::move_to_zone(state, id, Zone::Graveyard, events);
+            // CR 704.5j + CR 614.6 + CR 603.10a: the losing legends are put into
+            // their owners' graveyards simultaneously as a single state-based
+            // action. Route them through the zone-change pipeline so a `Moved`
+            // graveyard→exile redirect (Rest in Peace / Leyline of the Void)
+            // fires on each — the raw `move_to_zone` never proposed the inner
+            // ZoneChange, silently dropping those redirects. `move_objects_
+            // simultaneously` co-stamps the departures so leaves-the-battlefield
+            // observers see each other (CR 603.10a). The legends move themselves
+            // as an SBA (no external source), so each anchors its own
+            // attribution. A CR 616.1 ordering choice mid-batch parks the prompt
+            // and stashes the undelivered tail; surface the parked prompt instead
+            // of clobbering it with `Priority`.
+            let reqs: Vec<_> = to_remove
+                .into_iter()
+                .map(|id| {
+                    crate::game::zone_pipeline::ZoneMoveRequest::effect(id, Zone::Graveyard, id)
+                })
+                .collect();
+            match crate::game::zone_pipeline::move_objects_simultaneously(state, reqs, events) {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {
+                    ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                        player: state.active_player,
+                    })
+                }
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
             }
-            ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
-                player: state.active_player,
-            })
         }
         // CR 702.140c + CR 730.2a: The mutate spell's controller chose whether the
         // spell merges on top of or under the target creature. `merge::handle_mutate_
@@ -2884,10 +2906,23 @@ pub(super) fn handle_resolution_choice(
         // then resolution is complete — return to priority so the resulting zone
         // change's triggers/SBAs are processed.
         (WaitingFor::CipherEncodeChoice { card_id, .. }, GameAction::CipherEncode { creature }) => {
-            crate::game::cipher::handle_encode_choice(state, card_id, creature, events);
-            ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
-                player: state.active_player,
-            })
+            // CR 616.1: a declined cipher card hitting a graveyard→exile redirect
+            // can surface a replacement-ordering choice, which `handle_encode_choice`
+            // parks centrally via `move_object`. Surface the parked prompt instead
+            // of clobbering it with `Priority`; otherwise resolution is complete,
+            // so return to priority and let the resulting zone change's triggers /
+            // SBAs process.
+            match crate::game::cipher::handle_encode_choice(state, card_id, creature, events) {
+                crate::game::zone_pipeline::ZoneMoveResult::Done => {
+                    ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                        player: state.active_player,
+                    })
+                }
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+            }
         }
         // CR 903.9a: Owner decides whether to return their commander to the command zone.
         // Accept = move to command zone; Decline = leave in current zone (marked as
