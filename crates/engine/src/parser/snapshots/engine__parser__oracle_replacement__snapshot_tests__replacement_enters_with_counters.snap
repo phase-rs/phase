@@ -34,5 +34,6 @@ expression: def
     "type": "SelfRef"
   },
   "description": "~ enters the battlefield with two +1/+1 counters on it.",
-  "condition": null
+  "condition": null,
+  "destination_zone": "Battlefield"
 }

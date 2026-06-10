@@ -100,7 +100,8 @@ expression: "&ir"
           "type": "SelfRef"
         },
         "description": "~ enters with X charge counters on it.",
-        "condition": null
+        "condition": null,
+        "destination_zone": "Battlefield"
       }
     }
   ],

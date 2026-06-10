@@ -1666,6 +1666,144 @@ mod tests {
         assert!(!state.battlefield.contains(&creature));
     }
 
+    /// Fix-1 discriminating test (CR 614.1c): a self-scoped as-enters
+    /// replacement ("~ enters with a +1/+1 counter on it") is definitionally
+    /// battlefield-ENTRY-scoped — it must NOT match the permanent's own
+    /// battlefield DEPARTURE. Pre-fix the parsed def carried no
+    /// `destination_zone`, so an SBA death folded the counter into the
+    /// ZoneChange and `deliver_replaced_zone_change`'s non-battlefield arm
+    /// applied phantom counters (+ CounterAdded events) to the corpse in the
+    /// graveyard.
+    #[test]
+    fn sba_death_does_not_apply_own_enters_with_counter_replacement() {
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Giada", 1, 0);
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            "Giada, Font of Hope enters with a +1/+1 counter on it.",
+            "Giada, Font of Hope",
+        )
+        .expect("enters-with-counter must parse to a replacement");
+        assert_eq!(
+            def.event,
+            crate::types::replacements::ReplacementEvent::Moved
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.players[0].graveyard.contains(&creature),
+            "zero-toughness creature dies normally"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "an as-enters replacement must not prompt on the permanent's own death"
+        );
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no phantom +1/+1 counters on the corpse — the as-enters def must not match a departure"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterAdded { object_id, .. } if *object_id == creature
+            )),
+            "no CounterAdded event for the departed card"
+        );
+    }
+
+    /// Fix-1 discriminating test (CR 614.1c + CR 616.1): under a SINGLE Rest in
+    /// Peace, an SBA death must apply exactly one replacement (the
+    /// graveyard→exile redirect) with NO CR 616.1 ordering prompt — pre-fix the
+    /// dying creature's own as-enters def was a second spurious candidate on its
+    /// own departure (prompt and/or phantom counters on the exiled card).
+    #[test]
+    fn sba_death_under_single_rip_exiles_directly_no_prompt_no_counters() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Giada", 1, 0);
+        let own_def = crate::parser::oracle_replacement::parse_replacement_line(
+            "Giada, Font of Hope enters with a +1/+1 counter on it.",
+            "Giada, Font of Hope",
+        )
+        .expect("enters-with-counter must parse to a replacement");
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .replacement_definitions
+            .push(own_def);
+
+        let rip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ))
+            .description("Rest in Peace".to_string());
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(redirect);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "single applicable replacement (RIP) — no CR 616.1 ordering prompt"
+        );
+        assert!(
+            state.exile.contains(&creature),
+            "RIP redirects the death to exile in one pass"
+        );
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no phantom +1/+1 counters on the exiled card"
+        );
+    }
+
     #[test]
     fn sba_lethal_damage_creature_dies() {
         let mut state = setup();

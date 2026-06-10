@@ -548,6 +548,71 @@ mod tests {
         assert!(state.players[1].hand.contains(&obj_id));
     }
 
+    /// Fix-1 discriminating test (CR 614.1c): a self-scoped as-enters
+    /// replacement ("~ enters with a +1/+1 counter on it") must NOT match the
+    /// permanent's own battlefield DEPARTURE. Pre-fix the parsed def carried no
+    /// `destination_zone`, so a bounce to hand folded the counter into the
+    /// ZoneChange and applied phantom counters (+ CounterAdded) to the card in
+    /// its owner's hand.
+    #[test]
+    fn bounce_does_not_apply_own_enters_with_counter_replacement() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Giada".to_string(),
+            Zone::Battlefield,
+        );
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            "Giada, Font of Hope enters with a +1/+1 counter on it.",
+            "Giada, Font of Hope",
+        )
+        .expect("enters-with-counter must parse to a replacement");
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+                selection: BounceSelection::Targeted,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[1].hand.contains(&obj_id),
+            "bounce delivers to hand"
+        );
+        assert_eq!(
+            state.objects[&obj_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no phantom +1/+1 counters on the bounced card — the as-enters def must not match a departure"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterAdded { object_id, .. } if *object_id == obj_id
+            )),
+            "no CounterAdded event for the bounced card"
+        );
+    }
+
     #[test]
     fn test_bounce_moves_stack_spell_to_hand() {
         let mut state = GameState::new_two_player(42);

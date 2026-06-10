@@ -6515,6 +6515,9 @@ fn build_fade_vanish_etb_replacement(
         event: ReplacementEvent::Moved,
         execute: Some(Box::new(etb_counters)),
         valid_card: Some(TargetFilter::SelfRef),
+        // CR 614.1c: battlefield-entry-scoped — the destination gate stops the
+        // def matching this permanent's own battlefield DEPARTURE.
+        destination_zone: Some(Zone::Battlefield),
         description: Some(format!(
             "CR {cr}: this permanent enters with {n} {} counter{} on it.",
             counter_type.as_str(),
@@ -6778,6 +6781,8 @@ pub fn synthesize_modular(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.43a: Modular {n} — this permanent enters with {n} +1/+1 counter{} on it.",
                 if n == 1 { "" } else { "s" }
@@ -6992,6 +6997,8 @@ pub fn synthesize_sunburst(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.44a: Sunburst — this permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it."
             )),
@@ -7621,6 +7628,8 @@ pub fn synthesize_graft(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.58a: Graft {n} — this permanent enters with {n} +1/+1 counter{} on it.",
                 if n == 1 { "" } else { "s" }
@@ -7829,6 +7838,8 @@ pub fn synthesize_bloodthirst(face: &mut CardFace) {
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
             condition: bloodthirst_condition(value),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(bloodthirst_replacement_description(value)),
             ..ReplacementDefinition::new(ReplacementEvent::Moved)
         };
@@ -8053,6 +8064,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(sacrifice)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.82a + CR 614.1c: Devour {n} — as this creature enters, \
                  you may sacrifice any number of creatures; it enters with {n} \
@@ -8189,6 +8202,8 @@ pub fn synthesize_amplify(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(put_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.38a + CR 614.1c: Amplify {n} — as this creature enters, \
                  reveal any number of cards from your hand that share a creature \

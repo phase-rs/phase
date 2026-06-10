@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 585
 expression: "&lowered"
 ---
 {
@@ -104,7 +103,8 @@ expression: "&lowered"
         "type": "SelfRef"
       },
       "description": "~ enters with X +1/+1 counters on it.",
-      "condition": null
+      "condition": null,
+      "destination_zone": "Battlefield"
     }
   ],
   "extractedKeywords": []

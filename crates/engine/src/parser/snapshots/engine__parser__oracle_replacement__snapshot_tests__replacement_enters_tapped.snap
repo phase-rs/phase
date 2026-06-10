@@ -29,5 +29,6 @@ expression: def
     "type": "SelfRef"
   },
   "description": "~ enters the battlefield tapped.",
-  "condition": null
+  "condition": null,
+  "destination_zone": "Battlefield"
 }
