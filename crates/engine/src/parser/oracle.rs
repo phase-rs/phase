@@ -77,10 +77,11 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    lower_static_ir, parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
-    parse_chosen_creature_type_static_prefix, parse_collect_evidence_alt_cost,
-    parse_every_creature_type_static_prefix, parse_spells_alternative_cost, parse_static_line,
-    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
+    parse_cast_spells_alternative_cost_multi, parse_chosen_creature_type_static_prefix,
+    parse_collect_evidence_alt_cost, parse_every_creature_type_static_prefix,
+    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
+    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -1194,7 +1195,7 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    if lower == "your speed can increase beyond 4." || lower == "your speed can increase beyond 4" {
+    if is_speed_unlock_sentence(&lower) {
         return false;
     }
 
@@ -2194,9 +2195,7 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        if lower == "your speed can increase beyond 4."
-            || lower == "your speed can increase beyond 4"
-        {
+        if is_speed_unlock_sentence(&lower) {
             let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
             if !defs.is_empty() {
                 result.statics.extend(defs);
