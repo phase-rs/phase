@@ -601,24 +601,43 @@ pub(crate) fn finish_ninjutsu_entry(
     attack_target: AttackTarget,
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 702.49: Track which alt-cost variant was paid this turn on the
-    // cast-variant-paid tag (placement + tapped + summoning sickness is
-    // delegated to the shared helper).
-    if let Some(obj) = state.objects.get_mut(&ninjutsu_obj_id) {
-        obj.cast_variant_paid = Some((cast_variant, state.turn_number));
+    // Arrival gate (twin of `finish_attraction_open`'s CR 701.51c gate): the
+    // cast-variant tag and the CR 702.49c combat placement are battlefield
+    // semantics — `ZoneMoveResult::Done` also covers prevented/redirected
+    // deliveries, so running them unconditionally would tag a non-battlefield
+    // object and place it into `combat.attackers`. Unreachable today (no
+    // supported `Moved` redirect targets a battlefield entry's destination
+    // away from the battlefield), but the gate keeps the helper correct by
+    // construction rather than by census.
+    if state
+        .objects
+        .get(&ninjutsu_obj_id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+    {
+        // CR 702.49: Track which alt-cost variant was paid this turn on the
+        // cast-variant-paid tag (placement + tapped + summoning sickness is
+        // delegated to the shared helper).
+        if let Some(obj) = state.objects.get_mut(&ninjutsu_obj_id) {
+            obj.cast_variant_paid = Some((cast_variant, state.turn_number));
+        }
+
+        // CR 702.49c: Place onto combat.attackers alongside the returned creature's
+        // defender WITHOUT firing AttackersDeclared (no "whenever ~ attacks" triggers).
+        super::combat::place_attacking_alongside(
+            state,
+            ninjutsu_obj_id,
+            defending_player,
+            attack_target,
+            events,
+        );
     }
 
-    // CR 702.49c: Place onto combat.attackers alongside the returned creature's
-    // defender WITHOUT firing AttackersDeclared (no "whenever ~ attacks" triggers).
-    super::combat::place_attacking_alongside(
-        state,
-        ninjutsu_obj_id,
-        defending_player,
-        attack_target,
-        events,
-    );
-
-    // CR 702.49a: Emit event for "whenever you activate a ninjutsu ability" triggers.
+    // CR 702.49a: Emit event for "whenever you activate a ninjutsu ability"
+    // triggers. Deliberately OUTSIDE the arrival gate, unlike the Attraction
+    // twin's `AttractionOpened`: CR 701.51c explicitly suppresses the "opens an
+    // Attraction" trigger when the entry is prevented/replaced, but ninjutsu's
+    // activation event occurred when the ability was activated (cost paid,
+    // attacker returned) — a redirected entry does not un-activate it.
     events.push(GameEvent::NinjutsuActivated {
         player_id: player,
         source_id: ninjutsu_obj_id,
