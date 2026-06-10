@@ -1277,8 +1277,49 @@ pub(super) fn handle_resolution_choice(
                     }
                 };
                 if let Some(zone) = move_unkept_to {
-                    for &obj_id in &unkept {
-                        zones::move_to_zone(state, obj_id, zone, events);
+                    // CR 614.6 + CR 603.10a: route the unkept pile through the
+                    // zone-change pipeline so a per-card `Moved` graveyard→exile
+                    // redirect (Rest in Peace / Leyline of the Void) fires on each
+                    // — the raw `move_to_zone` never proposed the inner ZoneChange,
+                    // silently dropping those redirects for dig's "the rest into
+                    // your graveyard" class. `zone` here is never Library (the
+                    // Library case pushed back above and yielded `None`), so the
+                    // batch always has a `Moved`-redirect-eligible destination.
+                    // CR 400.7: each unkept card anchors its own attribution.
+                    //
+                    // On a mid-pile CR 616.1 ordering pause, defer the
+                    // priority/continuation drain (a cleanup-only `RevealRestPile`
+                    // completion: empty pile, no markers/publish, just
+                    // `finish_with_continuation`) so it runs once the pile lands,
+                    // and surface the parked prompt instead of draining over it.
+                    let reqs: Vec<_> = unkept
+                        .iter()
+                        .map(|&obj_id| {
+                            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                                obj_id, zone, obj_id,
+                            )
+                        })
+                        .collect();
+                    match crate::game::zone_pipeline::move_objects_simultaneously(
+                        state, reqs, events,
+                    ) {
+                        crate::game::zone_pipeline::BatchMoveResult::Done => {}
+                        crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                            crate::game::zone_pipeline::defer_completion_on_pause(
+                                state,
+                                crate::types::game_state::BatchCompletion::RevealRestPile {
+                                    player,
+                                    rest_cards: Vec::new(),
+                                    rest_destination: zone,
+                                    clear_markers: Vec::new(),
+                                    publish_tracked_set: None,
+                                    emit_reveal_until_resolved: None,
+                                },
+                            );
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     }
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
