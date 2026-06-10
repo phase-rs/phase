@@ -1999,8 +1999,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             ..
         } => {
+            use crate::types::ability::PtValue;
+            let fmt_pt = |v: &PtValue| match v {
+                PtValue::Fixed(n) => n.to_string(),
+                PtValue::Variable(s) => s.clone(),
+                PtValue::Quantity(_) => "dyn".to_string(),
+            };
             if let (Some(p), Some(t)) = (power, toughness) {
-                d.push(("p/t".into(), format!("{p}/{t}")));
+                d.push(("p/t".into(), format!("{}/{}", fmt_pt(p), fmt_pt(t))));
             }
             if !types.is_empty() {
                 d.push(("types".into(), types.join(" ")));

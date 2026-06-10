@@ -24,8 +24,8 @@
 //! variant is introduced.
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Duration, Effect, QuantityExpr, TargetFilter,
-    TypedFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, Duration, Effect, PtValue, QuantityExpr,
+    TargetFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -54,8 +54,8 @@ fn build_awaken_rider(count: u32) -> AbilityDefinition {
     let animate = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Animate {
-            power: Some(0),
-            toughness: Some(0),
+            power: Some(PtValue::Fixed(0)),
+            toughness: Some(PtValue::Fixed(0)),
             // "Creature" → AddType (CoreType::Creature); "Elemental" → AddSubtype.
             // Both are required to make the land a 0/0 *Elemental creature*; the
             // Land core type is retained because `remove_types` is empty.
@@ -162,8 +162,8 @@ mod tests {
                 target,
                 keywords,
             } => {
-                assert_eq!(*power, Some(0));
-                assert_eq!(*toughness, Some(0));
+                assert_eq!(*power, Some(PtValue::Fixed(0)));
+                assert_eq!(*toughness, Some(PtValue::Fixed(0)));
                 assert!(types.contains(&"Creature".to_string()));
                 assert!(types.contains(&"Elemental".to_string()));
                 assert!(

@@ -6776,10 +6776,14 @@ pub enum Effect {
         target: TargetFilter,
     },
     Animate {
+        /// CR 613.4 / Layer 7b: fixed base power. Use `PtValue::Fixed(n)` for known
+        /// values and `PtValue::Quantity(q)` for dynamic quantities (e.g. CostXPaid,
+        /// SourcePower). `None` leaves printed power unchanged.
         #[serde(default)]
-        power: Option<i32>,
+        power: Option<PtValue>,
+        /// CR 613.4 / Layer 7b: fixed base toughness. Same semantics as `power`.
         #[serde(default)]
-        toughness: Option<i32>,
+        toughness: Option<PtValue>,
         #[serde(default)]
         types: Vec<String>,
         /// CR 205.1a: Core types to remove from the permanent (e.g., Creature for Glimmer cycle).

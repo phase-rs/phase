@@ -1622,8 +1622,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             power,
             toughness,
         } => Effect::Animate {
-            power: Some(power),
-            toughness: Some(toughness),
+            power: Some(PtValue::Fixed(power)),
+            toughness: Some(PtValue::Fixed(toughness)),
             types: vec!["Creature".to_string()],
             remove_types: vec![],
             target,
@@ -8497,8 +8497,8 @@ mod tests {
                 keywords,
                 ..
             } => {
-                assert_eq!(power, Some(3));
-                assert_eq!(toughness, Some(3));
+                assert_eq!(power, Some(PtValue::Fixed(3)));
+                assert_eq!(toughness, Some(PtValue::Fixed(3)));
                 assert!(keywords.contains(&crate::types::keywords::Keyword::Haste));
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
@@ -9101,8 +9101,8 @@ mod tests {
             Effect::Animate {
                 power, toughness, ..
             } => {
-                assert_eq!(power, Some(0));
-                assert_eq!(toughness, Some(0));
+                assert_eq!(power, Some(PtValue::Fixed(0)));
+                assert_eq!(toughness, Some(PtValue::Fixed(0)));
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
         }
@@ -9127,8 +9127,8 @@ mod tests {
                 target,
                 ..
             } => {
-                assert_eq!(power, Some(2));
-                assert_eq!(toughness, Some(2));
+                assert_eq!(power, Some(PtValue::Fixed(2)));
+                assert_eq!(toughness, Some(PtValue::Fixed(2)));
                 assert_eq!(
                     target,
                     default_earthbend_target(),
