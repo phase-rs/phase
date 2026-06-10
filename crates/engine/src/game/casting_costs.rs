@@ -5008,6 +5008,15 @@ fn handle_resolution_cast_success(
 /// during-resolution cast has not yet pushed its resolvable `StackEntry::Spell`
 /// (that happens at finalize, after this cascade-check point), and the rider
 /// must apply regardless of the spell's origin zone or casting variant.
+///
+/// Known scope gap (behavior-preserving vs the deleted boolean flag): the
+/// printed rider is "this turn"-scoped, but the synthetic def carries no
+/// duration — `ReplacementDefinition` has no duration field and
+/// `revert_layered_characteristics_to_base` only runs for battlefield exits, so
+/// the def lingers on the exiled card. Inert in practice (an exiled card's
+/// graveyard moves are rare and re-casting mints a new object per CR 400.7),
+/// but a `Duration` field on `ReplacementDefinition` is the eventual fix for
+/// the rider's "this turn" scope.
 fn apply_exile_instead_of_graveyard_rider(state: &mut GameState, cast_object: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&cast_object) {
         obj.replacement_definitions
@@ -6818,7 +6827,7 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
         PtStat, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -6891,6 +6900,176 @@ mod tests {
             state.objects[&spell].zone,
             Zone::Exile,
             "the rider's synthetic Moved redirect must send the resolved spell to exile"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the redirected spell must not also reach the graveyard"
+        );
+    }
+
+    /// CR 608.2b + CR 616.1 (review fix): a free-cast spell carrying the Invoke
+    /// Calamity rider FIZZLES under a single Rest in Peace — the rider and RIP
+    /// are two simultaneous graveyard→exile redirect candidates, so the fizzle
+    /// arm parks a CR 616.1 ordering prompt. The paused fizzle must still run
+    /// the resolution epilogue (StackResolved emission + trigger-context /
+    /// die-result clears) before bailing — the pre-fix bare `return` skipped it,
+    /// leaking stale cross-resolution context and never emitting StackResolved.
+    /// Answering the prompt via the real `GameAction::ChooseReplacement` then
+    /// delivers the parked move to exile.
+    #[test]
+    fn invoke_calamity_rider_fizzle_under_rip_parks_choice_with_clean_epilogue() {
+        let mut state = GameState::new_two_player(42);
+
+        // Board-wide RIP-class redirect: any card's graveyard move → exile.
+        let rip = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(1),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            destination: Zone::Exile,
+                            origin: None,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            face_down_profile: None,
+                        },
+                    ))
+                    .description("Rest in Peace".to_string()),
+            );
+
+        // Target creature that will be removed to force the fizzle arm.
+        let target = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Target Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Free-cast spell carrying the rider, targeting the bear.
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Free-Cast Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        super::apply_exile_instead_of_graveyard_rider(&mut state, spell);
+        let resolved = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // CR 608.2b: remove the target so every target is illegal at resolution.
+        crate::game::zones::move_to_zone(&mut state, target, Zone::Graveyard, &mut Vec::new());
+
+        // Seed cross-resolution context the fizzle epilogue must clear even on
+        // the paused path (resolve_top does not touch these for a Spell entry
+        // before the fizzle arm, so a leaked value is attributable to the bail).
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 0,
+        });
+        state.current_trigger_events = vec![GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 0,
+        }];
+        state.current_trigger_match_count = Some(2);
+        state.die_result_this_resolution = Some(4);
+
+        let mut events = Vec::new();
+        super::stack::resolve_top(&mut state, &mut events);
+
+        // CR 616.1: rider + RIP are two applicable redirects → ordering prompt.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "two simultaneous graveyard→exile redirects must park a CR 616.1 ordering choice, got {:?}",
+            state.waiting_for
+        );
+        // Review fix: the fizzle epilogue runs before the pause-bail.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::StackResolved { object_id } if *object_id == spell
+            )),
+            "paused fizzle must still emit StackResolved"
+        );
+        assert!(
+            state.current_trigger_event.is_none(),
+            "paused fizzle must clear current_trigger_event"
+        );
+        assert!(
+            state.current_trigger_events.is_empty(),
+            "paused fizzle must clear current_trigger_events"
+        );
+        assert!(
+            state.current_trigger_match_count.is_none(),
+            "paused fizzle must clear current_trigger_match_count"
+        );
+        assert!(
+            state.die_result_this_resolution.is_none(),
+            "paused fizzle must clear die_result_this_resolution"
+        );
+
+        // Answer the CR 616.1 prompt through the real action pipeline; the
+        // resume path delivers the parked move with both redirects applied in
+        // the chosen order (both route to exile).
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("replacement-ordering choice must be acceptable");
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "the fizzled free-cast spell must be exiled by the redirect after the choice resolves"
         );
         assert!(
             !state.players[0].graveyard.contains(&spell),

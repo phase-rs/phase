@@ -384,15 +384,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // CR 608.2n + CR 614.6: route the stack → graveyard/exile
                     // move through the pipeline so self-scoped `Moved` redirects
                     // (the Invoke Calamity rider) and board-wide RIP/Leyline
-                    // redirects fire. A CR 616.1 ordering choice is parked by
-                    // `move_object`; the spell is already off the stack, so bail
-                    // and let the replacement-choice resume path deliver it.
+                    // redirects fire. On a CR 616.1 ordering pause (rider + RIP
+                    // = two simultaneous graveyard→exile candidates) the prompt
+                    // AND the move are parked by `move_object`; the spell has
+                    // left the stack either way, so fall through to the shared
+                    // fizzle epilogue below (StackResolved + trigger-context /
+                    // die-result clears) exactly as the delivered path does, and
+                    // let the replacement-choice resume path deliver the parked
+                    // move. A bare early return here leaked stale
+                    // cross-resolution context and never emitted StackResolved
+                    // (review fix).
                     let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
-                    match zone_pipeline::move_object(state, req, events) {
-                        ZoneMoveResult::Done => {}
-                        ZoneMoveResult::NeedsChoice(_)
-                        | ZoneMoveResult::NeedsAuraAttachmentChoice => return,
-                    }
+                    let _ = zone_pipeline::move_object(state, req, events);
                 }
                 events.push(GameEvent::StackResolved {
                     object_id: entry.id,
