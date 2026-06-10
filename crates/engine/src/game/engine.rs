@@ -1756,8 +1756,8 @@ fn apply_action(
                     let front_snapshot = super::printed_cards::snapshot_object_face(obj);
                     super::printed_cards::apply_back_face_to_object(obj, back);
                     obj.back_face = Some(front_snapshot);
-                    // CR 712.12: Mark MDFC back-face so apply_zone_exit_cleanup
-                    // reverts to front face when the permanent leaves the battlefield.
+                    // CR 712.8a: Mark MDFC back-face so apply_zone_exit_cleanup
+                    // reverts to front face on any zone exit to a non-battlefield zone.
                     // Do NOT set obj.transformed — MDFC face choice ≠ transform
                     obj.modal_back_face = true;
                 } else {

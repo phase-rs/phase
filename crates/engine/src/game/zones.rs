@@ -116,7 +116,8 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     }
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
-        // CR 712.14 + CR 400.7: Transformed permanents revert to front face on zone change.
+        // CR 712.8a + CR 400.7: Transformed permanents revert to front face when
+        // moving to any zone other than the battlefield or stack.
         if obj_mut.transformed {
             if let Some(back_face) = obj_mut.back_face.clone() {
                 let current_back = snapshot_object_face(obj_mut);
@@ -126,9 +127,10 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
             }
         }
 
-        // CR 712.12 + CR 400.7: MDFC permanents that entered as their back face
-        // revert to front face when leaving the battlefield.
-        if obj_mut.modal_back_face && from == Zone::Battlefield {
+        // CR 712.8a + CR 400.7: MDFC objects showing their back face revert to
+        // front face in any zone other than the battlefield (the back face is only
+        // valid on the stack while the spell is being cast or on the battlefield).
+        if obj_mut.modal_back_face && to != Zone::Battlefield {
             if let Some(back_face) = obj_mut.back_face.clone() {
                 let current_back = snapshot_object_face(obj_mut);
                 apply_back_face_to_object(obj_mut, back_face);
@@ -1795,9 +1797,10 @@ mod tests {
         );
     }
 
-    /// CR 712.12 + CR 400.7: An MDFC permanent that entered the battlefield as
+    /// CR 712.8a + CR 400.7: An MDFC permanent that entered the battlefield as
     /// its back face (modal_back_face = true) must revert to its front face when
-    /// it leaves the battlefield.
+    /// it leaves the battlefield (battlefield is the only non-stack zone where
+    /// back face is permitted).
     #[test]
     fn mdfc_back_face_reverts_to_front_face_on_leaving_battlefield() {
         use crate::game::game_object::BackFaceData;
@@ -1887,7 +1890,7 @@ mod tests {
         move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
 
         let obj = &state.objects[&id];
-        // CR 712.12: must revert to front face.
+        // CR 712.8a: must revert to front face.
         assert!(
             !obj.modal_back_face,
             "modal_back_face must be cleared after leaving battlefield"
@@ -1897,10 +1900,10 @@ mod tests {
         assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
     }
 
-    /// CR 712.12: MDFC back-face revert does NOT apply on stack → graveyard
-    /// (countered spell). The revert is guarded to battlefield exits only.
+    /// CR 712.8a: A countered MDFC spell (stack → graveyard) must also revert to
+    /// front face — the graveyard is "a zone other than the battlefield or stack."
     #[test]
-    fn mdfc_back_face_not_reverted_on_stack_to_graveyard() {
+    fn mdfc_back_face_reverts_on_countered_spell_to_graveyard() {
         use crate::game::game_object::BackFaceData;
         use crate::game::printed_cards::apply_back_face_to_object;
         use crate::types::card_type::{CardType, CoreType};
@@ -1964,12 +1967,15 @@ mod tests {
         let mut events = Vec::new();
         move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
 
-        // Guard: revert is only triggered on Battlefield exits, not Stack exits.
+        // CR 712.8a: graveyard is not battlefield/stack — must show front face.
         let obj = &state.objects[&id];
         assert!(
-            obj.modal_back_face,
-            "flag not cleared — stack exit is not guarded"
+            !obj.modal_back_face,
+            "flag must be cleared when spell goes to graveyard"
         );
-        assert_eq!(obj.name, "Back Face", "face not reverted on stack exit");
+        assert_eq!(
+            obj.name, "Front Face",
+            "must revert to front face in graveyard"
+        );
     }
 }
