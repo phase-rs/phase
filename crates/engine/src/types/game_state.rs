@@ -1069,6 +1069,23 @@ pub struct PendingBatchDeliveries {
     /// The batch destination zone (graveyard for mill by default; hand for mass
     /// bounce; exile/library for variants).
     pub destination: Zone,
+    /// CR 400.7 attribution source for the rebuilt tail requests. `None` means
+    /// each object anchors itself (the mill idiom,
+    /// `ZoneMoveRequest::effect(obj, dest, obj)`); `Some` carries a shared
+    /// ability source (the seek idiom) so battlefield entries record
+    /// `entered_via_ability_source` and exile links key off the right source
+    /// across the pause boundary. Batch-uniform by the same design that makes
+    /// `destination` batch-wide (single-destination batches; per-card
+    /// heterogeneity is a flagged design extension, not forced in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<ObjectId>,
+    /// CR 614.1c tap-state re-seeded on each rebuilt tail request (the seek
+    /// `enter_tapped` mod survives the pause boundary).
+    #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
+    pub enter_tapped: EtbTapState,
+    /// Exile-link tracking re-seeded on each rebuilt tail request.
+    #[serde(default)]
+    pub exile_tracking: ZoneDeliveryExileTracking,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

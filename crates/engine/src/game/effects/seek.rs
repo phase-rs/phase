@@ -489,9 +489,17 @@ mod tests {
             ),
             "per-card ordering prompt must be parked"
         );
-        assert!(
-            state.pending_batch_deliveries.is_some(),
-            "the undelivered tail must be stashed for the resume path"
+        let stash = state
+            .pending_batch_deliveries
+            .as_ref()
+            .expect("the undelivered tail must be stashed for the resume path");
+        // Fix-4: the re-stash must carry the batch-uniform request context so
+        // the drain rebuilds equivalent requests — seek attributes every move to
+        // `ability.source_id` (CR 400.7), not to each moved object itself.
+        assert_eq!(
+            stash.source_id,
+            Some(ObjectId(100)),
+            "stashed tail must preserve the seek's ability-source attribution"
         );
         assert!(
             !events.iter().any(|e| matches!(

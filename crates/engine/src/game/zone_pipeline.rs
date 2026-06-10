@@ -453,13 +453,7 @@ fn deliver_batch(
                 // stash the rest of the batch so no object strands. The paused
                 // object rides in `state.pending_replacement` and is delivered
                 // by the resume path.
-                let remaining: Vec<ObjectId> = queue.map(|r| r.object_id).collect();
-                if !remaining.is_empty() {
-                    state.pending_batch_deliveries = Some(PendingBatchDeliveries {
-                        remaining,
-                        destination,
-                    });
-                }
+                stash_batch_tail(state, queue.collect(), destination);
                 return BatchMoveResult::NeedsChoice;
             }
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -480,13 +474,7 @@ fn deliver_batch(
                 // Reaching this arm for a batch flow is a bug to be surfaced if
                 // a battlefield-entry batch is ever added; today it is dead
                 // code for every batch caller.
-                let remaining: Vec<ObjectId> = queue.map(|r| r.object_id).collect();
-                if !remaining.is_empty() {
-                    state.pending_batch_deliveries = Some(PendingBatchDeliveries {
-                        remaining,
-                        destination,
-                    });
-                }
+                stash_batch_tail(state, queue.collect(), destination);
                 return BatchMoveResult::NeedsChoice;
             }
         }
@@ -503,17 +491,57 @@ fn deliver_batch(
     BatchMoveResult::Done
 }
 
+/// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
+/// can finish it. Captures the batch-uniform request context (CR 400.7
+/// attribution source, CR 614.1c tap-state, exile tracking) from the first tail
+/// request so the rebuilt requests are equivalent to the originals — without
+/// this the re-stash collapsed every tail request to
+/// `ZoneMoveRequest::effect(obj, dest, obj)`, dropping seek's `enter_tapped`
+/// mod and ability-source attribution across the pause boundary.
+///
+/// Batch-uniform contract (mirrors the single-`destination` design): every
+/// batch caller builds requests with one shared mod/attribution set, so the
+/// first tail request is representative. A request whose source equals its own
+/// `object_id` is the self-anchor idiom (mill) and stashes `source_id: None` so
+/// the drain re-anchors each object to itself.
+fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destination: Zone) {
+    let Some(first) = tail.first() else {
+        return;
+    };
+    let source_id = first.source().filter(|&s| s != first.object_id);
+    let enter_tapped = first.mods.enter_tapped;
+    let exile_tracking = first.exile_links.tracking;
+    state.pending_batch_deliveries = Some(PendingBatchDeliveries {
+        remaining: tail.into_iter().map(|r| r.object_id).collect(),
+        destination,
+        source_id,
+        enter_tapped,
+        exile_tracking,
+    });
+}
+
 /// CR 603.10a + CR 616.1: Resume a parked batch-delivery tail after the
 /// per-object replacement choice that paused it resolved (and its object's
 /// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
-/// the next object surfaces its own prompt.
+/// the next object surfaces its own prompt. Rebuilds each tail request with the
+/// stashed batch-uniform context (attribution source, tap-state, exile
+/// tracking) so the resumed deliveries match the originals.
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.pending_batch_deliveries.take() {
         let ids = pending.remaining.clone();
         let reqs: Vec<ZoneMoveRequest> = pending
             .remaining
             .into_iter()
-            .map(|obj_id| ZoneMoveRequest::effect(obj_id, pending.destination, obj_id))
+            .map(|obj_id| {
+                let mut req = ZoneMoveRequest::effect(
+                    obj_id,
+                    pending.destination,
+                    pending.source_id.unwrap_or(obj_id),
+                );
+                req.mods.enter_tapped = pending.enter_tapped;
+                req.exile_links.tracking = pending.exile_tracking;
+                req
+            })
             .collect();
         let _ = deliver_batch(state, reqs, &ids, events);
     }
