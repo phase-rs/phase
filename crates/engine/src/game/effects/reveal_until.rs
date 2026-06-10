@@ -1,6 +1,7 @@
 use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::game::zones;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -138,10 +139,27 @@ pub fn resolve(
                 zones::move_to_zone(state, hit, Zone::Hand, events);
             }
             Zone::Battlefield => {
-                zones::move_to_zone(state, hit, Zone::Battlefield, events);
-                if enter_tapped.resolve(false) {
-                    if let Some(obj) = state.objects.get_mut(&hit) {
-                        obj.tapped = true;
+                // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield entry
+                // through the zone-change pipeline so the full delivery tail runs
+                // — intrinsic enters-with counters (a revealed planeswalker /
+                // battle must enter with its loyalty / defense or it dies to
+                // CR 704.5i), enters-with-counters statics, and the CR 614.1
+                // tap-state. The pipeline applies `enter_tapped` from the seeded
+                // `EntryMods`, so the previous manual `obj.tapped = true` is
+                // dropped (it would double the work the tail already does).
+                let mut req = ZoneMoveRequest::effect(hit, Zone::Battlefield, ability.source_id);
+                req.mods.enter_tapped = enter_tapped;
+                match zone_pipeline::move_object(state, req, events) {
+                    ZoneMoveResult::Done => {}
+                    // CR 616.1 / CR 303.4f: a battlefield-entry replacement or
+                    // aura-host choice is parked centrally by `move_object`; bail
+                    // before the rest-pile move and `EffectResolved` so the prompt
+                    // is not clobbered. (Realistically unreachable for the dig
+                    // classes — no kept-to-battlefield card is an aura and no
+                    // Moved redirect targets the battlefield — but the bail keeps
+                    // the resolver safe by construction.)
+                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        return Ok(())
                     }
                 }
                 // CR 508.4: "put that card onto the battlefield tapped and
@@ -241,6 +259,16 @@ pub(crate) fn move_rest(
 }
 
 /// Put cards on the bottom of the player's library in random order.
+//
+// Zone-pipeline bucketing: `move_to_library_position` is a library-placement
+// SIBLING raw mover (PLAN §0 / §5 "library-placement sibling treatment"),
+// deferred to Phase D. `move_object`'s `placement: Some(LibraryPosition)` arm
+// today still delegates straight to `move_to_library_at_index` and skips the
+// replacement consult (zone_pipeline.rs Phase-A stub), so routing through it
+// would gain nothing now — these are library→bottom reposition moves with no
+// Moved-redirect class to consult (a card going to the bottom of the library is
+// not "put into a graveyard/exile/hand"). Migrate alongside the other library-
+// placement sibling call sites when Phase D wires cross-zone placement.
 fn shuffle_to_bottom(state: &mut GameState, cards: &[ObjectId], events: &mut Vec<GameEvent>) {
     let mut shuffled = cards.to_vec();
     shuffled.shuffle(&mut state.rng);
@@ -407,6 +435,59 @@ mod tests {
 
         // Creature should be on the battlefield
         assert!(state.battlefield.contains(&creature));
+    }
+
+    /// C5 discriminating test (CR 614.1c + CR 306.5b): a planeswalker revealed
+    /// to the battlefield must enter with its intrinsic loyalty counters. The
+    /// old raw `move_to_zone` skipped the delivery tail, so the planeswalker
+    /// entered with 0 loyalty and was put into the graveyard by CR 704.5i.
+    /// Routing through `move_object` seeds the intrinsic counters via the
+    /// CR 614.1c pipeline.
+    #[test]
+    fn reveal_until_planeswalker_enters_with_intrinsic_loyalty() {
+        use crate::types::card_type::CoreType;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+
+        let walker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Planeswalker".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&walker).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.loyalty = Some(4);
+            obj.base_loyalty = Some(4);
+        }
+
+        let ability = make_reveal_until_ability(
+            PlayerId(0),
+            TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                crate::types::ability::TypeFilter::Planeswalker,
+            )),
+            Zone::Battlefield,
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 614.1c: entered with 4 loyalty counters (not 0).
+        assert!(
+            state.battlefield.contains(&walker),
+            "planeswalker must be on the battlefield, not graveyard"
+        );
+        assert_eq!(
+            state.objects[&walker]
+                .counters
+                .get(&CounterType::Loyalty)
+                .copied(),
+            Some(4),
+            "planeswalker must enter with its intrinsic loyalty counters via the CR 614.1c delivery tail"
+        );
     }
 
     #[test]
