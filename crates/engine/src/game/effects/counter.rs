@@ -153,17 +153,18 @@ pub fn resolve(
                     if casting_variant.restores_front_face_after_stack_exit() {
                         super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
                     }
-                    // CR 608.2b + CR 614.6: route the stack -> graveyard/exile
+                    // CR 701.6a + CR 614.6: route the stack -> graveyard/exile
                     // move through the zone-change pipeline so `Moved` redirects
                     // ("if a card would be put into a graveyard from anywhere,
                     // exile it instead" — Rest in Peace / Leyline of the Void)
                     // fire on the countered spell. The raw `move_to_zone` never
                     // proposed the inner ZoneChange, silently dropping those
                     // redirects (PLAN §8 Risk #3 — confirmed bug). A CR 616.1
-                    // ordering choice (two simultaneous redirects) parks
-                    // `state.waiting_for` via the pipeline; the spell is already
-                    // off the stack (countered), so bail before `EffectResolved`
-                    // and let the replacement-choice resume path deliver it.
+                    // ordering choice (two simultaneous redirects) is parked by
+                    // `move_object` itself (centralized park at its
+                    // `replace_event` NeedsChoice arm); the spell is already off
+                    // the stack (countered), so bail before `EffectResolved` and
+                    // let the replacement-choice resume path deliver it.
                     let req = ZoneMoveRequest::effect(obj_id, dest, ability.source_id);
                     match zone_pipeline::move_object(state, req, events) {
                         ZoneMoveResult::Done => {}
@@ -333,15 +334,19 @@ pub fn resolve_all(
             if casting_variant.restores_front_face_after_stack_exit() {
                 super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
             }
-            // CR 608.2b + CR 614.6: route through the pipeline so graveyard
+            // CR 701.6a + CR 614.6: route through the pipeline so graveyard
             // redirects (Rest in Peace / Leyline of the Void) fire — same
             // bug-fix as the single-target path (PLAN §8 Risk #3). A single
             // applicable redirect never prompts; only two simultaneous
-            // redirects produce a CR 616.1 ordering choice, which is the
-            // multi-card mass continuation class generalized in mass-bounce
-            // (Phase C4). Bail on a pause: the spells already countered are off
-            // the stack; the remaining tail is the C4-class gap (no parsed mass
-            // counter combines with a double graveyard redirect today).
+            // redirects produce a CR 616.1 ordering choice, which `move_object`
+            // parks (centralized park). Bail on the parked pause: the paused
+            // spell delivers via the replacement-choice resume path, but stack
+            // entries after it in this mass counter are not yet processed and
+            // are abandoned — the destination varies per spell
+            // (exiles_on_counter), so the single-destination
+            // `PendingBatchDeliveries` continuation does not fit; no parsed
+            // card combines mass counter with a double graveyard redirect, so
+            // this residual gap is documented rather than built for.
             let req = ZoneMoveRequest::effect(obj_id, dest, ability.source_id);
             match zone_pipeline::move_object(state, req, events) {
                 ZoneMoveResult::Done => {}

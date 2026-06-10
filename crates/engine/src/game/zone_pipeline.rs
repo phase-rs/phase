@@ -443,13 +443,12 @@ fn deliver_batch(
         let destination = req.to;
         match move_object(state, req, events) {
             ZoneMoveResult::Done => {}
-            ZoneMoveResult::NeedsChoice(player) => {
-                // CR 616.1: park the surfaced prompt (the pipeline sets only
-                // `pending_replacement`; the wait-state is the caller's to set)
-                // and stash the rest of the batch so no object strands. The
-                // paused object rides in `state.pending_replacement` and is
-                // delivered by the resume path.
-                replacement::park_waiting_for(state, player);
+            ZoneMoveResult::NeedsChoice(_) => {
+                // CR 616.1: `move_object` already parked the surfaced prompt
+                // (centralized park at its `replace_event` NeedsChoice arm);
+                // stash the rest of the batch so no object strands. The paused
+                // object rides in `state.pending_replacement` and is delivered
+                // by the resume path.
                 let remaining: Vec<ObjectId> = queue.map(|r| r.object_id).collect();
                 if !remaining.is_empty() {
                     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
@@ -1203,6 +1202,26 @@ pub(crate) fn execute_zone_move(
             ZoneMoveResult::Done
         }
         ReplacementResult::Prevented => ZoneMoveResult::Done,
-        ReplacementResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+        ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1: `replace_event` sets only `pending_replacement` — the
+            // wait-state was historically each caller's to set, and callers that
+            // forgot stranded the object as a zone ghost (move parked in
+            // `pending_replacement`, prompt never surfaced because the engine
+            // gates `ChooseReplacement` on the wait state). Park HERE, at the
+            // single unparked origin, so every single-move caller (counter,
+            // bounce, seek, and all future migrations) is safe by construction.
+            //
+            // Idempotence: callers that still set the wait state themselves
+            // (change_zone's `park_waiting_for` arms, end_phase /
+            // exile_from_top_until's `replacement_choice_waiting_for`) recompute
+            // the identical value from the same `pending_replacement`.
+            // `park_waiting_for` also keeps the CR 614.12a devour guard: it
+            // never clobbers an already-surfaced `EffectZoneChoice`. The
+            // delivery-tail NeedsChoice path above is NOT parked here — its
+            // wait state is already set by the counter-pause / devour machinery
+            // (`replacement_pause_delivery_result` reads it).
+            replacement::park_waiting_for(state, player);
+            ZoneMoveResult::NeedsChoice(player)
+        }
     }
 }

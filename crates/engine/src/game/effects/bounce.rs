@@ -173,7 +173,10 @@ pub fn resolve(
             }
             1 => {
                 // CR 614.6: route through the pipeline so destination redirects
-                // fire (single applicable redirect never prompts).
+                // fire. A single applicable redirect never prompts; a CR 616.1
+                // ordering choice (two simultaneous redirects) is parked by
+                // `move_object` itself — bail and let the replacement-choice
+                // resume path deliver the paused move.
                 let req = ZoneMoveRequest::effect(eligible[0], destination, ability.source_id);
                 if let ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice =
                     zone_pipeline::move_object(state, req, events)
@@ -256,7 +259,10 @@ pub fn resolve(
             }
             1 => {
                 // CR 614.6: route through the pipeline so destination redirects
-                // fire (single applicable redirect never prompts).
+                // fire. A single applicable redirect never prompts; a CR 616.1
+                // ordering choice (two simultaneous redirects) is parked by
+                // `move_object` itself — bail and let the replacement-choice
+                // resume path deliver the paused move.
                 let req = ZoneMoveRequest::effect(matching[0], destination, ability.source_id);
                 if let ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice =
                     zone_pipeline::move_object(state, req, events)
@@ -315,10 +321,11 @@ pub fn resolve(
         // intentionally excluded here.
         // CR 614.6: route each targeted bounce through the pipeline so
         // destination redirects fire. A single applicable redirect never
-        // prompts; a CR 616.1 ordering choice parks `state.waiting_for` (and any
-        // remaining targets are abandoned — single-target is the dominant shape,
-        // and no parsed card combines a multi-target bounce with a double
-        // destination redirect).
+        // prompts; a CR 616.1 ordering choice (two simultaneous redirects) is
+        // parked by `move_object` itself — bail and let the replacement-choice
+        // resume path deliver the paused move. Any remaining targets are
+        // abandoned (single-target is the dominant shape, and no parsed card
+        // combines a multi-target bounce with a double destination redirect).
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
         let move_dest = if matches!(current_zone, Some(Zone::Battlefield | Zone::Graveyard)) {
             Some(destination)
