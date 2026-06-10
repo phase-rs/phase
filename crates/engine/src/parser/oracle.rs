@@ -1881,9 +1881,6 @@ pub(crate) fn parse_oracle_ir(
             }
             def.cost = Some(cost);
             def.description = Some(ability_text.to_string());
-            if constraints.sorcery_speed() {
-                def.sorcery_speed = true;
-            }
             let mut restrictions = constraints.restrictions;
             restrictions.push(ActivationRestriction::LevelCounterRange { minimum, maximum });
             def.activation_restrictions = restrictions;
@@ -2292,9 +2289,6 @@ pub(crate) fn parse_oracle_ir(
                 // CR 719.3c: Solved abilities only activate while Case is solved.
                 def.activation_restrictions
                     .push(ActivationRestriction::IsSolved);
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 // CR 602.5d: `constraints.restrictions` already contains
                 // `AsSorcery` when the source text said "Activate only as a
                 // sorcery"; extend preserves it so the legality gate fires.
@@ -2324,9 +2318,6 @@ pub(crate) fn parse_oracle_ir(
                 // CR 207.2c: Channel is an ability word; the underlying ability activates from hand.
                 def.activation_zone = Some(Zone::Hand);
                 def.description = Some(line.to_string());
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 if !constraints.restrictions.is_empty() {
                     def.activation_restrictions = constraints.restrictions;
                 }
@@ -2357,9 +2348,6 @@ pub(crate) fn parse_oracle_ir(
                     parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
                 def.cost = Some(cost);
                 def.description = Some(line.to_string());
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 def.activation_restrictions.extend(constraints.restrictions);
                 // CR 702.142a: "Activate only if this creature attacked this turn
                 // and only once each turn."
@@ -2396,9 +2384,6 @@ pub(crate) fn parse_oracle_ir(
                     parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
                 def.cost = Some(cost);
                 def.description = Some(line.to_string());
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 def.activation_restrictions.extend(constraints.restrictions);
                 def.activation_restrictions
                     .push(ActivationRestriction::OnlyOnce);
@@ -2434,9 +2419,6 @@ pub(crate) fn parse_oracle_ir(
                 def.description = Some(line.to_string());
                 // CR 702.57a: a forecast ability is activated only from hand.
                 def.activation_zone = Some(Zone::Hand);
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 def.activation_restrictions.extend(constraints.restrictions);
                 // CR 702.57b: only during the owner's upkeep, only once each turn.
                 def.activation_restrictions
@@ -3682,9 +3664,6 @@ fn parse_activated_ability_definition(
     }
     def.cost = Some(cost);
     def.description = Some(description.to_string());
-    if constraints.sorcery_speed() {
-        def.sorcery_speed = true;
-    }
     if !constraints.restrictions.is_empty() {
         def.activation_restrictions = constraints.restrictions;
     }
@@ -4022,7 +4001,6 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
 /// cap-raise from ever taking effect.
 fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
     // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
-    def.sorcery_speed = true;
     if !def
         .activation_restrictions
         .contains(&ActivationRestriction::AsSorcery)
@@ -7726,7 +7704,7 @@ mod tests {
         );
 
         assert_eq!(r.abilities.len(), 1);
-        assert!(r.abilities[0].sorcery_speed);
+        assert!(r.abilities[0].is_sorcery_speed());
         assert!(r.abilities[0]
             .activation_restrictions
             .contains(&crate::types::ability::ActivationRestriction::AsSorcery));
@@ -7768,7 +7746,7 @@ mod tests {
 
         // Tap cost + sorcery-speed activation restriction.
         assert_eq!(ability.cost, Some(crate::types::ability::AbilityCost::Tap));
-        assert!(ability.sorcery_speed);
+        assert!(ability.is_sorcery_speed());
         assert!(ability
             .activation_restrictions
             .contains(&crate::types::ability::ActivationRestriction::AsSorcery));
@@ -14844,7 +14822,7 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert!(matches!(*r.abilities[0].effect, Effect::TimeTravel));
-        assert!(r.abilities[0].sorcery_speed);
+        assert!(r.abilities[0].is_sorcery_speed());
     }
 
     // ── Exert (CR 701.43d) ──

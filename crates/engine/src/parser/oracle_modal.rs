@@ -594,9 +594,6 @@ pub(crate) fn lower_oracle_block(
             let mut def =
                 build_modal_ability(AbilityKind::Activated, &header, &modes, host_self_reference)
                     .cost(parse_oracle_cost(&cost_text));
-            if constraints.sorcery_speed() {
-                def.sorcery_speed = true;
-            }
             def.activation_restrictions = constraints.restrictions;
             result.abilities.push(def);
         }

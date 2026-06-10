@@ -1183,7 +1183,10 @@ fn any_ability_has_constraint(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_has_activation_restriction(def: &AbilityDefinition) -> bool {
-    !def.activation_restrictions.is_empty() || def.sorcery_speed
+    // CR 602.5d: sorcery-speed timing is now represented as
+    // `ActivationRestriction::AsSorcery` in `activation_restrictions`, so the
+    // non-empty check below already covers it.
+    !def.activation_restrictions.is_empty()
 }
 
 // CR 702.122 + CR 602.5b: Crew with a once-per-turn activation limit.

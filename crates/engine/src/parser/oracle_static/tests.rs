@@ -4596,8 +4596,8 @@ fn quoted_ability_preserves_activation_restrictions() {
     assert_eq!(definition.kind, AbilityKind::Activated);
     assert!(definition.cost.is_some(), "should retain the tap cost");
     assert!(
-        definition.sorcery_speed,
-        "AsSorcery must set sorcery_speed on the granted ability"
+        definition.is_sorcery_speed(),
+        "AsSorcery must mark the granted ability as sorcery-speed"
     );
     assert!(
         definition

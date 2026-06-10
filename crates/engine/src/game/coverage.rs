@@ -2583,7 +2583,7 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     if def.condition.is_some() {
         d.push(("conditional".into(), "yes".into()));
     }
-    if def.sorcery_speed {
+    if def.is_sorcery_speed() {
         d.push(("timing".into(), "sorcery speed".into()));
     }
     if let Some(modal) = &def.modal {
