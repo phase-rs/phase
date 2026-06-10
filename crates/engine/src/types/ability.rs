@@ -4289,6 +4289,12 @@ pub enum SolveCondition {
         comparator: Comparator,
         threshold: u32,
     },
+    /// CR 719.3a: A general game-state solve condition decomposed via the single
+    /// condition authority (`parse_inner_condition` → `StaticCondition`) and
+    /// evaluated at end step through `layers::evaluate_condition`. Covers life
+    /// totals, hand size, control counts, event history, quantity comparisons —
+    /// every condition shape the engine already understands.
+    Condition { condition: StaticCondition },
     /// Fallback for conditions the parser cannot decompose.
     Text { description: String },
 }

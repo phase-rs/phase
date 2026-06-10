@@ -4130,6 +4130,16 @@ fn split_and_when_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             normalize_compound_pronouns(&capitalize_first(condition[second_start..].trim()));
         return Some(vec![first, second]);
     }
+    // CR 603.2: "When ~ enters and at the beginning of your upkeep" (Gathering
+    // Stone) — two independent trigger events sharing one effect.
+    if let Ok((_, (before, _))) = split_once_on(cond_lower, " and at the beginning of ") {
+        let pos = before.len();
+        let first = condition[..pos].trim().to_string();
+        let second_start = pos + " and ".len();
+        let second =
+            normalize_compound_pronouns(&capitalize_first(condition[second_start..].trim()));
+        return Some(vec![first, second]);
+    }
     if let Ok((_, (before, _))) = split_once_on(cond_lower, " and when ") {
         let pos = before.len();
         let first = condition[..pos].trim().to_string();
@@ -27053,6 +27063,56 @@ mod snapshot_tests {
         );
         assert_eq!(defs.len(), 2, "compound trigger should split into 2");
         insta::assert_json_snapshot!(defs[0]);
+    }
+
+    #[test]
+    fn trigger_compound_enters_and_upkeep_splits() {
+        let defs = parse_trigger_lines_at_index(
+            "When this artifact enters and at the beginning of your upkeep, look at the top card of your library. If it's a card of the chosen type, you may reveal it and put it into your hand.",
+            "Gathering Stone",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            defs.len(),
+            2,
+            "enters+upkeep compound must split into 2 triggers"
+        );
+        assert!(
+            matches!(defs[0].mode, TriggerMode::ChangesZone),
+            "first half should be ETB, got {:?}",
+            defs[0].mode
+        );
+        assert!(
+            matches!(defs[1].mode, TriggerMode::Phase),
+            "second half should be upkeep phase, got {:?}",
+            defs[1].mode
+        );
+        let expected_condition = Some(AbilityCondition::RevealedHasCardType {
+            card_types: vec![],
+            additional_filter: Some(FilterProp::IsChosenCreatureType),
+            subtype_filter: None,
+        });
+        for (idx, def) in defs.iter().enumerate() {
+            let execute = def
+                .execute
+                .as_deref()
+                .unwrap_or_else(|| panic!("trigger {idx} should keep the shared effect"));
+            assert!(
+                matches!(&*execute.effect, Effect::Dig { .. }),
+                "trigger {idx} should look at the top card, got {:?}",
+                execute.effect
+            );
+            let reveal = execute
+                .sub_ability
+                .as_deref()
+                .unwrap_or_else(|| panic!("trigger {idx} should keep the chosen-type reveal gate"));
+            assert_eq!(
+                reveal.condition,
+                expected_condition.clone(),
+                "trigger {idx} should keep the chosen-type gate"
+            );
+        }
     }
 
     #[test]

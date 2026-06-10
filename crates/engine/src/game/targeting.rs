@@ -434,11 +434,14 @@ pub fn resolve_event_context_targets(
 ///    "it" anaphor on top-level LTB triggers — Rancor, Spirit Loop). When
 ///    `ability.targets` is non-empty, `ParentTarget` semantically inherits
 ///    the parent's chosen targets, so fall through to tier 3.
-/// 3. **Event context**: filters like `TriggeringSource`, `DefendingPlayer`,
-///    `AttachedTo` resolve from `state.current_trigger_event` without
-///    requiring player selection (CR 603.7c).
-/// 4. **Pre-selected targets**: the ability's chosen targets from CR 601.2c
-///    casting / CR 603.3d trigger placement.
+/// 3. **Pre-selected targets that satisfy this filter**: the ability's chosen
+///    targets from CR 601.2c casting / CR 603.3d trigger placement. Matching
+///    chosen targets override event-context fallbacks so player-chosen stack
+///    targets are not replaced by the ETB trigger's `ZoneChanged` source
+///    (issue #2351).
+/// 4. **Event context**: filters like `TriggeringSource`, `DefendingPlayer`,
+///    `StackSpell` on spell-cast triggers, `AttachedTo` resolve from
+///    `state.current_trigger_event` without requiring player selection (CR 603.7c).
 ///
 /// Returns the targets from the first non-empty tier, owning the result so
 /// callers don't need to branch over which tier resolved.
@@ -501,10 +504,104 @@ pub fn resolved_targets(
     if use_self {
         return vec![TargetRef::Object(ability.source_id)];
     }
+    // CR 603.7c: Pure event-context filters always resolve from the trigger
+    // event / combat state, even when parent chain propagation populated
+    // `ability.targets` with unrelated chosen targets (DefendingPlayer, etc.).
+    if is_pure_event_context_filter(target_filter) {
+        if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
+        {
+            return vec![target];
+        }
+    }
+    // CR 608.2c: ParentTarget / ParentTargetSlot inherit propagated targets;
+    // StackSpell uses player-chosen stack targets at ETB (issue #2351).
+    // Slot indexing for ParentTargetSlot happens in `effect_object_targets`.
+    if !ability.targets.is_empty()
+        && matches!(
+            target_filter,
+            TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::StackSpell
+        )
+    {
+        return ability.targets.clone();
+    }
+    // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
+    // event-context resolution when the player chose targets at activation/
+    // trigger placement. Per-opponent fanout stores `[Player, Object, …]`
+    // pairs — only the object slots must satisfy the resolving filter
+    // (Haytham Kenway exile). Without this ordering, a StackSpell filter on
+    // an ETB trigger would bind to the ZoneChanged source (issue #2351).
+    if !ability.targets.is_empty() && chosen_targets_satisfy_filter(state, ability, target_filter) {
+        return ability.targets.clone();
+    }
     if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id) {
         return vec![target];
     }
     ability.targets.clone()
+}
+
+fn is_pure_event_context_filter(target_filter: &TargetFilter) -> bool {
+    matches!(
+        target_filter,
+        TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageTarget
+    )
+}
+
+/// True when every object target (or every target if there are no object
+/// targets) satisfies the resolving filter. Player targets in per-opponent
+/// fanout pairs are ignored for Typed filters.
+fn chosen_targets_satisfy_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> bool {
+    let object_targets: Vec<&TargetRef> = ability
+        .targets
+        .iter()
+        .filter(|t| matches!(t, TargetRef::Object(_)))
+        .collect();
+    let candidates = if object_targets.is_empty() {
+        ability.targets.iter().collect::<Vec<_>>()
+    } else {
+        object_targets
+    };
+    !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|target| target_ref_matches_resolved_filter(state, ability, target_filter, target))
+}
+
+fn target_ref_matches_resolved_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    target: &TargetRef,
+) -> bool {
+    let ctx = super::filter::FilterContext::from_ability(ability);
+    match target {
+        TargetRef::Object(id) if state.stack.iter().any(|entry| entry.id == *id) => {
+            super::filter::matches_stack_target_filter(state, *id, target_filter, &ctx)
+        }
+        TargetRef::Object(id) => {
+            super::filter::matches_target_filter(state, *id, target_filter, &ctx)
+        }
+        TargetRef::Player(player) => super::filter::player_matches_target_filter_in_state(
+            state,
+            target_filter,
+            *player,
+            ctx.source_controller,
+        ),
+    }
 }
 
 /// Resolve a `TargetFilter` to object ids for effects that operate over every
@@ -3391,6 +3488,29 @@ mod tests {
         );
     }
 
+    /// CR 506.2 + CR 608.2c: event-context filters must not consume propagated
+    /// chosen targets that belong to a different effect in the same ability.
+    #[test]
+    fn resolved_targets_event_context_ignores_non_matching_chosen_targets() {
+        use crate::game::combat::{AttackTarget, AttackerInfo};
+        let (mut state, chosen_target, attacker) = setup_with_creatures();
+        let combat = state.combat.get_or_insert_with(Default::default);
+        combat.attackers.push(AttackerInfo::new(
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+            PlayerId(0),
+        ));
+
+        let ability = make_resolved_with_targets(vec![TargetRef::Object(chosen_target)], attacker);
+        let result = resolved_targets(&ability, &TargetFilter::DefendingPlayer, &state);
+
+        assert_eq!(
+            result,
+            vec![TargetRef::Player(PlayerId(0))],
+            "DefendingPlayer must resolve from combat context, not the propagated chosen target"
+        );
+    }
+
     /// CR 608.2c (issue #323): `SelfRef` always resolves to the source object,
     /// even when `ability.targets` is non-empty. The chained "Exile ~"
     /// sub-ability of cards like Treasured Find / Arc Blade gets its
@@ -3430,6 +3550,44 @@ mod tests {
         let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
 
         assert_eq!(result, vec![TargetRef::Object(attacker)]);
+    }
+
+    /// CR 601.2c (issue #2351): player-chosen stack targets must not be replaced
+    /// by the ETB trigger's ZoneChanged source when resolving StackSpell.
+    #[test]
+    fn resolved_targets_stack_spell_prefers_chosen_target_over_etb_event() {
+        let mut state = GameState::new_two_player(42);
+        let aven = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Aven Interrupter".to_string(),
+            Zone::Battlefield,
+        );
+        let bolt = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: aven,
+            from: Some(Zone::Stack),
+            to: Zone::Battlefield,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                aven,
+                Some(Zone::Stack),
+                Zone::Battlefield,
+            )),
+        });
+        let ability = make_resolved_with_targets(vec![TargetRef::Object(bolt)], aven);
+        let result = resolved_targets(&ability, &TargetFilter::StackSpell, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(bolt)],
+            "chosen stack spell must win over the ETB ZoneChanged source"
+        );
     }
 
     /// CR 601.2c: Tier 3 — when neither self-ref nor event-context applies,

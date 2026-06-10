@@ -4163,9 +4163,11 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
         TriggerCondition::SolveConditionMet => source_id
-            .and_then(|id| state.objects.get(&id))
-            .and_then(|obj| obj.case_state.as_ref())
-            .is_some_and(|cs| !cs.is_solved && evaluate_solve_condition(state, cs, controller)),
+            .and_then(|id| state.objects.get(&id).map(|obj| (id, obj)))
+            .and_then(|(id, obj)| obj.case_state.as_ref().map(|cs| (id, cs)))
+            .is_some_and(|(id, cs)| {
+                !cs.is_solved && evaluate_solve_condition(state, cs, controller, id)
+            }),
         // CR 716.2a: True when the source Class is at or above the specified level.
         TriggerCondition::ClassLevelGE { level } => {
             source_id.is_some_and(|id| eval_class_level_ge(state, id, *level))
@@ -4848,6 +4850,7 @@ fn evaluate_solve_condition(
     state: &GameState,
     cs: &crate::game::game_object::CaseState,
     controller: PlayerId,
+    source_id: ObjectId,
 ) -> bool {
     use crate::types::ability::SolveCondition;
 
@@ -4873,6 +4876,12 @@ fn evaluate_solve_condition(
                 })
                 .count() as i32;
             comparator.evaluate(count, *threshold as i32)
+        }
+        // CR 719.3a: A general game-state solve condition is evaluated at the
+        // controller's end step through the single condition
+        // evaluator that powers intervening-ifs and static abilities.
+        SolveCondition::Condition { condition } => {
+            crate::game::layers::evaluate_condition(state, condition, controller, source_id)
         }
         SolveCondition::Text { .. } => false, // Undecomposed conditions never auto-solve
     }
