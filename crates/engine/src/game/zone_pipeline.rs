@@ -22,8 +22,8 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ExileLink, ExileLinkKind, GameState, PendingBatchDeliveries, PendingCounterPostAction,
-    WaitingFor, ZoneDeliveryExileTracking,
+    BatchCompletion, ExileLink, ExileLinkKind, GameState, PendingBatchDeliveries,
+    PendingCounterPostAction, WaitingFor, ZoneDeliveryExileTracking,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -443,8 +443,78 @@ pub(crate) fn move_objects_simultaneously(
     reqs: Vec<ZoneMoveRequest>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    move_objects_simultaneously_then(state, reqs, None, events)
+}
+
+/// CR 603.10a + CR 616.1: As [`move_objects_simultaneously`], but runs a typed
+/// post-loop cleanup ([`BatchCompletion`]) exactly once after every object in the
+/// batch has been delivered — whether the batch completes synchronously or is
+/// paused mid-pile by a per-card CR 616.1 ordering choice and finished by the
+/// drain path. This is the rest-pile entry (surveil graveyard pile + kept-on-top
+/// reorder; manifest dread graveyard pile + reveal-marker cleanup): the moves run
+/// through the pipeline so each card's `Moved` redirects fire, and the cleanup
+/// that used to run inline at the end of the loop now rides on the parked tail so
+/// a pause can never run it early or twice.
+pub(crate) fn move_objects_simultaneously_then(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    completion: Option<BatchCompletion>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
-    deliver_batch(state, reqs, &ids, events)
+    let destination = reqs.first().map(|r| r.to);
+    match deliver_batch(state, reqs, &ids, events) {
+        BatchMoveResult::Done => {
+            // Synchronous completion (the common single-redirect path): run the
+            // cleanup now.
+            if let Some(completion) = completion {
+                run_batch_completion(state, completion, events);
+            }
+            BatchMoveResult::Done
+        }
+        BatchMoveResult::NeedsChoice => {
+            // Paused mid-pile. `deliver_batch` stashed the undelivered tail when
+            // it was non-empty; when the paused object was the LAST in the batch
+            // the tail is empty and nothing was stashed. Either way, ensure a
+            // pending record carries the completion so the drain runs it once the
+            // paused object's redirect resolves. `destination` is irrelevant for
+            // an empty tail (no object re-delivers), so the first request's
+            // destination is a safe placeholder.
+            if let Some(completion) = completion {
+                ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard)).completion =
+                    Some(completion);
+            }
+            BatchMoveResult::NeedsChoice
+        }
+    }
+}
+
+/// CR 603.10a + CR 616.1: Dispatch a [`BatchCompletion`] to its post-loop
+/// behavior. The data lives in `types::game_state`; the behavior lives in
+/// `engine_resolution_choices` (kept-card placement / reveal-marker cleanup +
+/// continuation drain) so this module stays free of resolution semantics.
+fn run_batch_completion(
+    state: &mut GameState,
+    completion: BatchCompletion,
+    events: &mut Vec<GameEvent>,
+) {
+    crate::game::engine_resolution_choices::run_batch_completion(state, completion, events);
+}
+
+/// Return the live parked-batch record, creating an empty-tail one (the
+/// paused-on-last-card case) if `deliver_batch` did not stash a tail. Used only
+/// to hang a [`BatchCompletion`] off a paused batch.
+fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut PendingBatchDeliveries {
+    state
+        .pending_batch_deliveries
+        .get_or_insert_with(|| PendingBatchDeliveries {
+            remaining: Vec::new(),
+            destination,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            completion: None,
+        })
 }
 
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
@@ -533,6 +603,10 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
         source_id,
         enter_tapped,
         exile_tracking,
+        // The post-loop cleanup (if any) is attached by the batch caller after
+        // it observes the `NeedsChoice`; `move_objects_simultaneously` itself
+        // has no completion to stash.
+        completion: None,
     });
 }
 
@@ -544,6 +618,7 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 /// tracking) so the resumed deliveries match the originals.
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.pending_batch_deliveries.take() {
+        let completion = pending.completion;
         let ids = pending.remaining.clone();
         let reqs: Vec<ZoneMoveRequest> = pending
             .remaining
@@ -559,7 +634,29 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 req
             })
             .collect();
-        let _ = deliver_batch(state, reqs, &ids, events);
+        let destination = pending.destination;
+        match deliver_batch(state, reqs, &ids, events) {
+            BatchMoveResult::Done => {
+                // CR 603.10a + CR 616.1: the whole pile has now landed. Run the
+                // post-loop cleanup exactly once on true completion (it never ran
+                // inline because the loop paused). `Done` here is reachable only
+                // when `deliver_batch` did NOT re-park, so the completion fires at
+                // most once per batch.
+                if let Some(completion) = completion {
+                    run_batch_completion(state, completion, events);
+                }
+            }
+            BatchMoveResult::NeedsChoice => {
+                // Re-parked on the next object's CR 616.1 choice;
+                // `deliver_batch` stashed a fresh tail (or, when the re-paused
+                // object was the last in the tail, stashed nothing — create an
+                // empty record). Re-attach the cleanup so it survives the next
+                // pause boundary and runs once the remaining tail finally drains.
+                if let Some(completion) = completion {
+                    ensure_batch_record(state, destination).completion = Some(completion);
+                }
+            }
+        }
     }
 }
 

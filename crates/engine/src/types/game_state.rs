@@ -1086,6 +1086,43 @@ pub struct PendingBatchDeliveries {
     /// Exile-link tracking re-seeded on each rebuilt tail request.
     #[serde(default)]
     pub exile_tracking: ZoneDeliveryExileTracking,
+    /// Post-batch cleanup that MUST run exactly once after every object in the
+    /// batch has been delivered (including across a CR 616.1 pause/resume). The
+    /// batch caller stashes it when the batch pauses mid-pile; the drain path
+    /// (`zone_pipeline::drain_pending_batch_deliveries`) runs it the moment the
+    /// tail empties without re-parking. `None` for batch flows whose only effect
+    /// is the moves themselves (mill, mass bounce). See [`BatchCompletion`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<BatchCompletion>,
+}
+
+/// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
+/// once its graveyard pile has been delivered. These flows partition a looked-at
+/// pile into a graveyard "rest" pile (delivered through the simultaneous-move
+/// batch so per-card `Moved` redirects fire — Rest in Peace / Leyline of the Void
+/// class) and a "kept" remainder whose placement/marker cleanup happens after the
+/// whole pile lands. Because a per-card redirect can pause the batch (two
+/// simultaneous redirects on one card need a CR 616.1 ordering choice), the
+/// cleanup cannot run inline at the end of the loop — it would run before the
+/// paused tail finished, then never again. Stashing it as typed data on
+/// [`PendingBatchDeliveries`] (not a closure) lets the drain run it exactly once
+/// on true completion, mirroring the `PendingCounterPostAction` continuation
+/// pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchCompletion {
+    /// CR 701.25a: After the surveil rest pile reaches the graveyard, the kept
+    /// cards rest on top of the player's library in the chosen order
+    /// (`top_cards[0]` becomes the topmost card).
+    SurveilKeepOnTop {
+        player: PlayerId,
+        top_cards: Vec<ObjectId>,
+    },
+    /// Manifest dread: after the non-manifested cards reach the graveyard, clear
+    /// the reveal markers on every looked-at card.
+    ManifestDreadCleanup {
+        player: PlayerId,
+        revealed: Vec<ObjectId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
