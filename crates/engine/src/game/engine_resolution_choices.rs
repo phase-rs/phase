@@ -271,7 +271,7 @@ fn apply_search_partition(
             source_id,
             controller,
         );
-        crate::game::effects::change_zone::resolve(state, &change_zone, events)
+        crate::game::effects::resolve_ability_chain(state, &change_zone, events, 0)
             .map_err(|e| EngineError::InvalidAction(format!("search-split primary move: {e:?}")))?;
     }
     // Rest is never Battlefield across the A/B/C cluster; the standard rest mover
@@ -734,7 +734,7 @@ pub(super) fn handle_resolution_choice(
                         ObjectId(0),
                         player,
                     );
-                    let _ = effects::draw::resolve(state, &draw_ability, events);
+                    let _ = effects::resolve_ability_chain(state, &draw_ability, events, 0);
                 }
                 LearnOption::Skip => {}
             }

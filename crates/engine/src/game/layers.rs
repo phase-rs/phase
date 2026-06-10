@@ -1127,6 +1127,13 @@ fn rebuild_static_index_at_top() -> bool {
     true
 }
 
+/// Unconditional full layer evaluation (CR 613.1).
+///
+/// Production code must NOT call this directly — go through [`flush_layers`],
+/// which consumes the `LayersDirty` lattice and keeps the public-state dirty
+/// marks consistent with what was recomputed. To force a full pass, call
+/// `mark_layers_full` then `flush_layers`. Direct calls are reserved for
+/// tests that deliberately force a full evaluation regardless of dirty state.
 pub fn evaluate_layers(state: &mut GameState) {
     #[cfg(test)]
     FULL_EVALUATE_LAYERS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
