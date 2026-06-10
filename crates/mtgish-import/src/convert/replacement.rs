@@ -1568,7 +1568,7 @@ fn build_replacement_exec(
         },
         // CR 614.12 + CR 122.1: Enters with a counter (default 1) /
         // enters with N counters of a typed kind.
-        A::EntersWithACounter(ct) => Effect::AddCounter {
+        A::EntersWithACounter(ct) => Effect::PutCounter {
             counter_type: counter_type_name(ct),
             count: QuantityExpr::Fixed { value: 1 },
             target: target.clone(),
@@ -1587,7 +1587,7 @@ fn build_replacement_exec(
         A::EntersWithNumberCounters(g, ct) => {
             let mut count = quantity::convert(g)?;
             rewrite_variable_x_to_cost_x_paid(&mut count);
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type: counter_type_name(ct),
                 count,
                 target: target.clone(),
@@ -3452,7 +3452,7 @@ mod tests {
 
         let execute = defs[0].execute.as_ref().expect("ETB AddCounter execute");
         match &*execute.effect {
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type,
                 count,
                 target,
@@ -3489,7 +3489,7 @@ mod tests {
 
         let execute = defs[0].execute.as_ref().unwrap();
         match &*execute.effect {
-            Effect::AddCounter { count, .. } => match count {
+            Effect::PutCounter { count, .. } => match count {
                 QE::Offset { inner, offset } => {
                     assert_eq!(*offset, 1);
                     assert!(

@@ -99,7 +99,7 @@ pub fn resolve(
             ability.source_id,
             ability.duration.as_ref(),
             false,
-            false,
+            crate::types::zones::EtbTapState::Unspecified,
             None,
             &[],
             None,

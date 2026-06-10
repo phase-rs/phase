@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, Comparator, CostObjectCount, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
-    TypedFilter,
+    AbilityCost, ActivationRestriction, Comparator, CostObjectCount, FilterProp, QuantityExpr,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -431,17 +431,6 @@ pub enum BloodthirstValue {
     X,
 }
 
-/// CR 602.5b: Activation-frequency restriction on an activated-ability-like
-/// action (e.g. Crew). `OncePerTurn` models "Activate only once each turn";
-/// `Unlimited` is the default with no restriction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(tag = "type", content = "data")]
-pub enum ActivationCadence {
-    #[default]
-    Unlimited,
-    OncePerTurn,
-}
-
 /// All MTG keywords as typed enum variants.
 /// Simple (unit) variants for keywords with no parameters.
 /// Parameterized variants carry associated data (ManaCost for costs, amounts, etc.).
@@ -570,10 +559,13 @@ pub enum Keyword {
     Absorb(u32),
     /// CR 702.122 (Crew) + CR 602.5b: `power` is the total power required to
     /// crew; `once_per_turn` carries an optional "Activate only once each turn"
-    /// restriction.
+    /// restriction (`Some(ActivationRestriction::OnlyOnceEachTurn)`), or `None`
+    /// for the unrestricted default. Boxed to break the
+    /// `Keyword → ActivationRestriction → ParsedCondition → Keyword` size cycle
+    /// (`ParsedCondition::SourceLacksKeyword` holds a `Keyword` by value).
     Crew {
         power: u32,
-        once_per_turn: ActivationCadence,
+        once_per_turn: Option<Box<ActivationRestriction>>,
     },
     /// CR 702.124: Partner and its variant keywords for co-commander pairing.
     Partner(PartnerType),
@@ -1715,7 +1707,7 @@ impl FromStr for Keyword {
                 "crew" => {
                     return Ok(Keyword::Crew {
                         power: p.parse().unwrap_or(1),
-                        once_per_turn: ActivationCadence::Unlimited,
+                        once_per_turn: None,
                     });
                 }
                 "partner" => return Ok(Keyword::Partner(PartnerType::With(p.clone()))),
@@ -2322,6 +2314,25 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
     fn uint(v: &serde_json::Value) -> u32 {
         v.as_u64().unwrap_or(0) as u32
     }
+    // CR 602.5b: Crew's `once_per_turn` cadence. Accepts the current
+    // `Option<ActivationRestriction>` shape (`null` / `{"type":"OnlyOnceEachTurn"}`)
+    // and the legacy `ActivationCadence` tagged shape
+    // (`{"type":"Unlimited"}` / `{"type":"OncePerTurn"}`), mapping both to
+    // `Some(ActivationRestriction::OnlyOnceEachTurn)` for the once-each-turn case.
+    fn crew_cadence_from_value(
+        v: &serde_json::Value,
+    ) -> Result<Option<Box<ActivationRestriction>>, String> {
+        if v.is_null() {
+            return Ok(None);
+        }
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("Unlimited") => Ok(None),
+            Some("OncePerTurn") => Ok(Some(Box::new(ActivationRestriction::OnlyOnceEachTurn))),
+            _ => serde_json::from_value::<ActivationRestriction>(v.clone())
+                .map(|r| Some(Box::new(r)))
+                .map_err(|e| format!("Crew once_per_turn: {e}")),
+        }
+    }
     fn bloodthirst(v: &serde_json::Value) -> Result<BloodthirstValue, String> {
         if let Some(s) = v.as_str() {
             Ok(parse_bloodthirst_value(s))
@@ -2721,10 +2732,9 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
                 let power = obj.get("power").map(uint).unwrap_or(1);
                 let once_per_turn = obj
                     .get("once_per_turn")
-                    .map(|v| serde_json::from_value(v.clone()))
-                    .transpose()
-                    .map_err(|e| format!("ActivationCadence: {e}"))?
-                    .unwrap_or(ActivationCadence::Unlimited);
+                    .map(crew_cadence_from_value)
+                    .transpose()?
+                    .flatten();
                 Ok(Keyword::Crew {
                     power,
                     once_per_turn,
@@ -2732,7 +2742,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             } else {
                 Ok(Keyword::Crew {
                     power: uint(data),
-                    once_per_turn: ActivationCadence::Unlimited,
+                    once_per_turn: None,
                 })
             }
         }
@@ -3070,7 +3080,7 @@ mod tests {
             Keyword::from_str("Crew:3").unwrap(),
             Keyword::Crew {
                 power: 3,
-                once_per_turn: ActivationCadence::Unlimited
+                once_per_turn: None
             }
         );
         assert_eq!(Keyword::from_str("Rampage:2").unwrap(), Keyword::Rampage(2));

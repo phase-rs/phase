@@ -18,13 +18,6 @@ use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
-/// Parse a "target <type phrase>" from Oracle text.
-///
-/// Matches "target creature", "target artifact or enchantment you control", etc.
-pub fn parse_target_phrase(input: &str) -> OracleResult<'_, TargetFilter> {
-    preceded((tag("target"), space1), parse_type_phrase).parse(input)
-}
-
 /// Parse a type phrase into a `TargetFilter`.
 ///
 /// Handles: optional "non" prefix, optional supertype, optional color prefix,
@@ -509,8 +502,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_target_phrase_creature() {
-        let (rest, filter) = parse_target_phrase("target creature with power").unwrap();
+    fn test_parse_type_phrase_creature() {
+        let (rest, filter) = parse_type_phrase("creature with power").unwrap();
         assert_eq!(rest, " with power");
         match filter {
             TargetFilter::Typed(tf) => {
@@ -521,9 +514,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_target_phrase_artifact_or_enchantment() {
-        let (rest, filter) =
-            parse_target_phrase("target artifact or enchantment you control").unwrap();
+    fn test_parse_type_phrase_artifact_or_enchantment() {
+        let (rest, filter) = parse_type_phrase("artifact or enchantment you control").unwrap();
         assert_eq!(rest, "");
         match filter {
             TargetFilter::Typed(tf) => {
@@ -538,11 +530,6 @@ mod tests {
             }
             _ => panic!("expected Typed filter"),
         }
-    }
-
-    #[test]
-    fn test_parse_target_phrase_no_target_prefix() {
-        assert!(parse_target_phrase("creature").is_err());
     }
 
     #[test]

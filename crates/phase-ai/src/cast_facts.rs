@@ -373,7 +373,7 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::DoublePT { target, .. }
         | Effect::PreventDamage { target, .. }
         | Effect::Animate { target, .. }
-        | Effect::AddCounter { target, .. } => !matches!(target, TargetFilter::None),
+        | Effect::PutCounter { target, .. } => !matches!(target, TargetFilter::None),
         Effect::RevealHand { target, .. } => !matches!(target, TargetFilter::None),
         // CR 701.26a/b: only single-permanent tap/untap declares a target. The
         // mass (`All`) scope falls through to `false`, matching the legacy

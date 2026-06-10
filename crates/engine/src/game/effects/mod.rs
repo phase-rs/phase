@@ -1585,7 +1585,6 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
         | Effect::Draw { count: amount, .. }
         | Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
-        | Effect::AddCounter { count: amount, .. }
         | Effect::Sacrifice { count: amount, .. }
         | Effect::Mill { count: amount, .. }
         | Effect::Scry { count: amount, .. }
@@ -1882,7 +1881,6 @@ pub fn resolve_effect(
         // CR 701.26a/b: scope (Single vs All) and state (Tap vs Untap) are
         // dispatched inside `resolve_set_tap_state`.
         Effect::SetTapState { .. } => tap_untap::resolve_set_tap_state(state, ability, events),
-        Effect::AddCounter { .. } => counters::resolve_add(state, ability, events),
         Effect::RemoveCounter { .. } => counters::resolve_remove(state, ability, events),
         Effect::Sacrifice { .. } => sacrifice::resolve(state, ability, events),
         Effect::DiscardCard { .. } => discard::resolve(state, ability, events),
@@ -2320,8 +2318,7 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
-        Effect::AddCounter { .. }
-        | Effect::PutCounter { .. }
+        Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::MoveCounters { .. } => events
@@ -2438,8 +2435,7 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::Discard { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::Discarded { .. })),
-        Effect::AddCounter { .. }
-        | Effect::PutCounter { .. }
+        Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::MoveCounters { .. } => events
@@ -3079,7 +3075,6 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::GainControl { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Sacrifice { target, .. }
-        | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::PutCounter { target, .. }
         | Effect::MoveCounters { target, .. }

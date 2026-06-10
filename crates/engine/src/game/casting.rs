@@ -38104,7 +38104,6 @@ mod tests {
                 .push(ActivationRestriction::AsSorcery);
             def.activation_restrictions
                 .push(ActivationRestriction::OnlyOnceEachTurn);
-            def.sorcery_speed = true;
             def
         }
 

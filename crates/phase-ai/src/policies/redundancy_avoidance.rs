@@ -314,7 +314,7 @@ fn redundancy_delta(
         // broader "+1/+1 counters are almost always beneficial" / diminishing-
         // returns case remains deferred (see module TODOs) — only this strictly
         // redundant zero-count sub-case fires here.
-        Effect::AddCounter { count, .. } => zero_quantity_redundancy(
+        Effect::PutCounter { count, .. } => zero_quantity_redundancy(
             state,
             source_id,
             ai_player,
@@ -420,7 +420,6 @@ fn redundancy_delta(
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::ChooseCard { .. }
-        | Effect::PutCounter { .. }
         | Effect::PutCounterAll { .. }
         | Effect::MultiplyCounter { .. }
         | Effect::DoublePT { .. }
@@ -1276,7 +1275,7 @@ mod tests {
         let obj_id = make_creature_with_ability(
             &mut state,
             "Zero Counters",
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 0 },
                 target: TargetFilter::SelfRef,
@@ -1303,7 +1302,7 @@ mod tests {
         let obj_id = make_creature_with_ability(
             &mut state,
             "Real Counters",
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,

@@ -1546,7 +1546,7 @@ pub fn synthesize_level_up(face: &mut CardFace) {
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() })
                     // CR 702.87a: "Activate only as a sorcery." `.sorcery_speed()`
-                    // sets the display flag and pushes `AsSorcery` for runtime.
+                    // pushes `ActivationRestriction::AsSorcery`, the single authority.
                     .sorcery_speed(),
                 )
             } else {
@@ -4614,7 +4614,7 @@ fn is_cumulative_upkeep_trigger(t: &TriggerDefinition) -> bool {
         && t.execute.as_deref().is_some_and(|outer| {
             matches!(
                 outer.effect.as_ref(),
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Age,
                     ..
                 }
@@ -4692,7 +4692,7 @@ pub(crate) fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> Trigger
     // counter on a permanent.
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::AddCounter {
+        Effect::PutCounter {
             counter_type: CounterType::Age,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
@@ -6534,6 +6534,9 @@ fn build_fade_vanish_etb_replacement(
         event: ReplacementEvent::Moved,
         execute: Some(Box::new(etb_counters)),
         valid_card: Some(TargetFilter::SelfRef),
+        // CR 614.1c: battlefield-entry-scoped — the destination gate stops the
+        // def matching this permanent's own battlefield DEPARTURE.
+        destination_zone: Some(Zone::Battlefield),
         description: Some(format!(
             "CR {cr}: this permanent enters with {n} {} counter{} on it.",
             counter_type.as_str(),
@@ -6797,6 +6800,8 @@ pub fn synthesize_modular(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.43a: Modular {n} — this permanent enters with {n} +1/+1 counter{} on it.",
                 if n == 1 { "" } else { "s" }
@@ -7011,6 +7016,8 @@ pub fn synthesize_sunburst(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.44a: Sunburst — this permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it."
             )),
@@ -7640,6 +7647,8 @@ pub fn synthesize_graft(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.58a: Graft {n} — this permanent enters with {n} +1/+1 counter{} on it.",
                 if n == 1 { "" } else { "s" }
@@ -7848,6 +7857,8 @@ pub fn synthesize_bloodthirst(face: &mut CardFace) {
             execute: Some(Box::new(etb_counters)),
             valid_card: Some(TargetFilter::SelfRef),
             condition: bloodthirst_condition(value),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(bloodthirst_replacement_description(value)),
             ..ReplacementDefinition::new(ReplacementEvent::Moved)
         };
@@ -8072,6 +8083,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(sacrifice)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.82a + CR 614.1c: Devour {n} — as this creature enters, \
                  you may sacrifice any number of creatures; it enters with {n} \
@@ -8208,6 +8221,8 @@ pub fn synthesize_amplify(face: &mut CardFace) {
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(put_counters)),
             valid_card: Some(TargetFilter::SelfRef),
+            // CR 614.1c: battlefield-entry-scoped (departure gate).
+            destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.38a + CR 614.1c: Amplify {n} — as this creature enters, \
                  reveal any number of cards from your hand that share a creature \
@@ -10102,7 +10117,7 @@ mod transmute_synthesis_tests {
         // CR 702.53b: functions only while the card is in hand.
         assert_eq!(ability.activation_zone, Some(Zone::Hand));
         // CR 702.53a: "Activate only as a sorcery."
-        assert!(ability.sorcery_speed);
+        assert!(ability.is_sorcery_speed());
         assert!(ability
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -10212,7 +10227,7 @@ mod transfigure_synthesis_tests {
         // Transmute's Some(Hand).
         assert_eq!(ability.activation_zone, None);
         // CR 702.71a: "Activate only as a sorcery."
-        assert!(ability.sorcery_speed);
+        assert!(ability.is_sorcery_speed());
         assert!(ability
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -15366,7 +15381,7 @@ mod cumulative_upkeep_synthesis_tests {
 
         let outer = trigger.execute.as_deref().expect("execute set");
         match outer.effect.as_ref() {
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type,
                 count,
                 target,
@@ -15802,7 +15817,7 @@ mod scavenge_synthesis_tests {
         let def = &face.abilities[0];
         assert_eq!(def.kind, AbilityKind::Activated);
         assert_eq!(def.activation_zone, Some(Zone::Graveyard));
-        assert!(def.sorcery_speed);
+        assert!(def.is_sorcery_speed());
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -16869,7 +16884,7 @@ mod plot_synthesis_tests {
             .expect("plot should add a hand-activated ability");
 
         // CR 702.170a: sorcery-speed activation — AsSorcery restriction + flag.
-        assert!(activation.sorcery_speed, "plot is sorcery-speed");
+        assert!(activation.is_sorcery_speed(), "plot is sorcery-speed");
         assert!(activation
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -17219,14 +17234,15 @@ mod idempotency_tests {
 
 #[cfg(test)]
 mod sorcery_speed_invariant_tests {
-    //! CR 602.5d: Every activated ability tagged with the `sorcery_speed`
-    //! display flag MUST also carry `ActivationRestriction::AsSorcery` so the
+    //! CR 602.5d: Sorcery-speed timing is represented solely by
+    //! `ActivationRestriction::AsSorcery` in `activation_restrictions`, which the
     //! runtime legality gate (`game::restrictions::check_activation_restrictions`)
-    //! actually enforces sorcery timing. Historically the `sorcery_speed` bool
-    //! was display-only, and callers were required to separately push the enum
-    //! variant — a recurring source of bugs where equip abilities were
-    //! activatable at instant speed. Unifying the two via the `.sorcery_speed()`
-    //! builder (and this invariant) prevents the bug class from recurring.
+    //! enforces. Historically a parallel `sorcery_speed` bool existed for display,
+    //! and callers had to separately push the enum variant — a recurring source of
+    //! bugs where equip abilities were activatable at instant speed. The bool was
+    //! removed; `.sorcery_speed()` / `is_sorcery_speed()` are the single authority,
+    //! both backed by the `AsSorcery` restriction. These tests verify each
+    //! synthesizer pushes that restriction.
     use super::*;
     use crate::types::ability::ActivationRestriction;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -17242,11 +17258,11 @@ mod sorcery_speed_invariant_tests {
 
     fn assert_sorcery_invariant(def: &AbilityDefinition, context: &str) {
         walk_chain(def, |d| {
-            if d.sorcery_speed {
+            if d.is_sorcery_speed() {
                 assert!(
                     d.activation_restrictions
                         .contains(&ActivationRestriction::AsSorcery),
-                    "{context}: ability has sorcery_speed=true but \
+                    "{context}: ability is sorcery-speed but \
                      activation_restrictions is missing AsSorcery"
                 );
             }
@@ -17268,7 +17284,7 @@ mod sorcery_speed_invariant_tests {
 
         assert_eq!(face.abilities.len(), 1, "one equip ability");
         let def = &face.abilities[0];
-        assert!(def.sorcery_speed, "sorcery_speed display flag set");
+        assert!(def.is_sorcery_speed(), "ability is sorcery-speed");
         assert!(
             def.activation_restrictions
                 .contains(&ActivationRestriction::AsSorcery),
@@ -17292,7 +17308,7 @@ mod sorcery_speed_invariant_tests {
 
         assert_eq!(face.abilities.len(), 1, "one fortify ability");
         let def = &face.abilities[0];
-        assert!(def.sorcery_speed, "sorcery_speed display flag set");
+        assert!(def.is_sorcery_speed(), "ability is sorcery-speed");
         assert!(
             def.activation_restrictions
                 .contains(&ActivationRestriction::AsSorcery),
@@ -17332,7 +17348,10 @@ mod sorcery_speed_invariant_tests {
             "reconfigure synthesizes attach + unattach abilities"
         );
         for def in &face.abilities {
-            assert!(def.sorcery_speed, "reconfigure abilities are sorcery-speed");
+            assert!(
+                def.is_sorcery_speed(),
+                "reconfigure abilities are sorcery-speed"
+            );
             assert!(
                 def.activation_restrictions
                     .contains(&ActivationRestriction::AsSorcery),
@@ -17458,7 +17477,10 @@ mod sorcery_speed_invariant_tests {
         );
         let def = &face.abilities[0];
         assert!(matches!(def.kind, AbilityKind::Activated));
-        assert!(def.sorcery_speed, "craft is sorcery-speed (CR 702.167a)");
+        assert!(
+            def.is_sorcery_speed(),
+            "craft is sorcery-speed (CR 702.167a)"
+        );
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -17521,7 +17543,7 @@ mod sorcery_speed_invariant_tests {
         synthesize_level_up(&mut face);
 
         let def = &face.abilities[0];
-        assert!(def.sorcery_speed);
+        assert!(def.is_sorcery_speed());
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -17633,7 +17655,7 @@ mod sorcery_speed_invariant_tests {
         synthesize_scavenge(&mut face);
 
         let def = &face.abilities[0];
-        assert!(def.sorcery_speed);
+        assert!(def.is_sorcery_speed());
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -17646,12 +17668,12 @@ mod sorcery_speed_invariant_tests {
         assert_eq!(count, 1, "AsSorcery must not be duplicated");
     }
 
-    /// CR 602.5d: The shared invariant — corpus-wide, walk every synthesized
-    /// ability and its sub_ability chain; every ability with
-    /// `sorcery_speed=true` must carry `AsSorcery`. Runs the synthesis pipeline
-    /// against every keyword variant that has synthesis coverage and enforces
-    /// the invariant, so any future keyword synthesis regressing to a
-    /// display-only `sorcery_speed=true` fails this test.
+    /// CR 602.5d: Corpus-wide smoke test — run the synthesis pipeline against
+    /// every keyword variant that has synthesis coverage and walk each ability's
+    /// sub_ability chain, confirming every sorcery-speed ability carries
+    /// `AsSorcery`. Now that `is_sorcery_speed()` is defined as
+    /// `contains(AsSorcery)`, this is structurally guaranteed; the test remains
+    /// as broad synthesis coverage.
     #[test]
     fn sorcery_speed_flag_implies_as_sorcery_restriction_for_synthesized_abilities() {
         fn mana() -> ManaCost {
@@ -17713,7 +17735,7 @@ mod loyalty_sorcery_speed_tests {
         let r = parse_oracle_text("+2: Draw a card.", "Test Planeswalker", &[], &[], &[]);
         assert_eq!(r.abilities.len(), 1);
         let def = &r.abilities[0];
-        assert!(def.sorcery_speed, "loyalty sets sorcery_speed display flag");
+        assert!(def.is_sorcery_speed(), "loyalty ability is sorcery-speed");
         assert!(
             def.activation_restrictions
                 .contains(&ActivationRestriction::AsSorcery),
@@ -17735,7 +17757,7 @@ mod loyalty_sorcery_speed_tests {
         let r = parse_oracle_text("[+1]: Draw a card.", "Test Planeswalker", &[], &[], &[]);
         assert_eq!(r.abilities.len(), 1);
         let def = &r.abilities[0];
-        assert!(def.sorcery_speed);
+        assert!(def.is_sorcery_speed());
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
@@ -22236,7 +22258,7 @@ mod reinforce_synthesis_tests {
         assert_eq!(def.kind, AbilityKind::Activated);
         assert_eq!(def.activation_zone, Some(Zone::Hand));
         // Reinforce is instant-speed (no sorcery restriction).
-        assert!(!def.sorcery_speed);
+        assert!(!def.is_sorcery_speed());
 
         // CR 118.3: Composite cost — mana + discard-self.
         match def.cost.as_ref().expect("reinforce must have a cost") {

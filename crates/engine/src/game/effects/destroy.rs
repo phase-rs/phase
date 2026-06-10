@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zones;
+use crate::game::zone_pipeline::{
+    self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
+};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter, TargetRef,
     TypedFilter,
@@ -39,12 +41,14 @@ pub fn apply_destroy_after_replacement(
                 ProposedEvent::zone_change(object_id, Zone::Battlefield, Zone::Graveyard, source);
             match replacement::replace_event(state, zone_proposed, events) {
                 ReplacementResult::Execute(zone_event) => {
-                    if let ProposedEvent::ZoneChange {
-                        object_id: oid, to, ..
-                    } = zone_event
-                    {
-                        zones::move_to_zone(state, oid, to, events);
-                        crate::game::layers::mark_layers_full(state);
+                    // CR 701.8a + CR 614: the inner ZoneChange already cleared the
+                    // replacement consult — seal it as a proof token and deliver
+                    // through the single pipeline tail so a destruction redirected
+                    // to the battlefield (e.g. "would die → return tapped/with
+                    // counters") gets the same enter_tapped / enter_with_counters /
+                    // ETB-counter-static treatment as any other entry.
+                    if !deliver_destruction_zone_change(state, zone_event, source, events) {
+                        return false;
                     }
                 }
                 ReplacementResult::Prevented => {}
@@ -56,14 +60,44 @@ pub fn apply_destroy_after_replacement(
             events.push(GameEvent::CreatureDestroyed { object_id });
             true
         }
-        ProposedEvent::ZoneChange { object_id, to, .. } => {
-            // Destroy replacement redirected directly to a zone change.
-            zones::move_to_zone(state, object_id, to, events);
-            crate::game::layers::mark_layers_full(state);
-            true
+        ProposedEvent::ZoneChange { .. } => {
+            // CR 614.6: the outer Destroy replacement redirected directly to a
+            // zone change. Deliver through the pipeline tail so a redirect to the
+            // battlefield gets the full delivery treatment, not a bare move.
+            deliver_destruction_zone_change(state, event, None, events)
         }
         _ => true,
     }
+}
+
+/// CR 701.8a + CR 614.6: Deliver a post-replacement destruction `ZoneChange`
+/// through the single zone-pipeline tail (`zone_pipeline::deliver`).
+///
+/// The event has already cleared the replacement consult, so it is sealed via
+/// the `approve_post_replacement` proof token (which preserves its `applied`
+/// set and re-validates that it is a ZoneChange). Routing through `deliver`
+/// gives a destruction redirected to the battlefield the full enter-tapped /
+/// enter-with-counters / ETB-counter-static delivery tail instead of a bare
+/// `move_to_zone`. Returns `true` on completion, `false` if the delivery tail
+/// itself surfaced a replacement choice (`state.waiting_for` is already set).
+fn deliver_destruction_zone_change(
+    state: &mut GameState,
+    zone_event: ProposedEvent,
+    source: Option<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Ok(approved) = ApprovedZoneChange::approve_post_replacement(zone_event) else {
+        // Defensive: the inner proposal is always a ZoneChange.
+        return true;
+    };
+    let ctx = DeliveryCtx {
+        source_id: source,
+        exile_links: ExileLinkSpec::default(),
+    };
+    !matches!(
+        zone_pipeline::deliver(state, approved, ctx, events),
+        ZoneDeliveryResult::NeedsChoice(_)
+    )
 }
 
 /// Outcome of destroying a single object through the guarded path.

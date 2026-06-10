@@ -2016,7 +2016,6 @@ fn effect_references_target_creature_quantity(effect: &Effect) -> bool {
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::AddCounter { count: amount, .. }
         | Effect::Sacrifice { count: amount, .. } => {
             quantity_expr_references_target_creature(amount)
         }

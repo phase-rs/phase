@@ -3326,7 +3326,6 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::LoseLife { .. }
         // CR 701.26a/b: all tap/untap scopes are treated identically here.
         | Effect::SetTapState { .. }
-        | Effect::AddCounter { .. }
         | Effect::RemoveCounter { .. }
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }

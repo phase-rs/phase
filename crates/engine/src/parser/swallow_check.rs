@@ -24,11 +24,12 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ContinuousModification, CopyRetargetPermission, Effect,
-    FilterProp, ModalSelectionConstraint, OpponentMayScope, PlayerFilter, QuantityExpr,
-    ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, ContinuousModification,
+    CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
+    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
+    TargetFilter, TriggerDefinition,
 };
-use crate::types::keywords::{ActivationCadence, Keyword};
+use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -1183,17 +1184,21 @@ fn any_ability_has_constraint(parsed: &ParsedAbilities) -> bool {
 }
 
 fn def_has_activation_restriction(def: &AbilityDefinition) -> bool {
-    !def.activation_restrictions.is_empty() || def.sorcery_speed
+    // CR 602.5d: sorcery-speed timing is now represented as
+    // `ActivationRestriction::AsSorcery` in `activation_restrictions`, so the
+    // non-empty check below already covers it.
+    !def.activation_restrictions.is_empty()
 }
 
 // CR 702.122 + CR 602.5b: Crew with a once-per-turn activation limit.
 fn keyword_has_activation_limit(keyword: &Keyword) -> bool {
     matches!(
         keyword,
-        Keyword::Crew {
-            once_per_turn: ActivationCadence::OncePerTurn,
-            ..
-        }
+        Keyword::Crew { once_per_turn, .. }
+            if matches!(
+                once_per_turn.as_deref(),
+                Some(ActivationRestriction::OnlyOnceEachTurn)
+            )
     )
 }
 
