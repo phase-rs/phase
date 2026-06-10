@@ -17,7 +17,6 @@ expression: "&ir"
         "duration": null,
         "description": "Flying, first strike, lifelink, protection from Demons and from Dragons",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

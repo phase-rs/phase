@@ -1330,10 +1330,3 @@ pub(crate) struct ActivatedConstraintAst {
     /// so the sentence does not produce an `Unimplemented` fallback.
     pub(crate) any_player_may_activate: bool,
 }
-
-impl ActivatedConstraintAst {
-    pub(crate) fn sorcery_speed(&self) -> bool {
-        self.restrictions
-            .contains(&ActivationRestriction::AsSorcery)
-    }
-}

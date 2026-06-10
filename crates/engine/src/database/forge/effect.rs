@@ -258,7 +258,7 @@ fn translate_put_counter(
         .to_lowercase();
     let count = resolve_quantity(params, "CounterNum", resolver);
     let target = resolve_target(params, "ValidTgts");
-    Ok(Effect::AddCounter {
+    Ok(Effect::PutCounter {
         counter_type,
         count,
         target,

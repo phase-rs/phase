@@ -590,10 +590,6 @@ pub(super) fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
         Effect::PutCounter {
             count: QuantityExpr::Fixed { value },
             ..
-        }
-        | Effect::AddCounter {
-            count: QuantityExpr::Fixed { value },
-            ..
         } => Some(*value as u32),
         _ => None,
     }
@@ -610,7 +606,7 @@ pub(super) fn extract_distribution_total(
     }
     let count_expr = match effect {
         Effect::DealDamage { amount, .. } => amount,
-        Effect::PutCounter { count, .. } | Effect::AddCounter { count, .. } => count,
+        Effect::PutCounter { count, .. } => count,
         _ => return None,
     };
     let (inner, _) = count_expr.peel_up_to();

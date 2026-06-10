@@ -3328,7 +3328,6 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Untap { .. }
         | Effect::TapAll { .. }
         | Effect::UntapAll { .. }
-        | Effect::AddCounter { .. }
         | Effect::RemoveCounter { .. }
         | Effect::DiscardCard { .. }
         | Effect::Mill { .. }

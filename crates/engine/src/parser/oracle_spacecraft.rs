@@ -211,9 +211,6 @@ impl ThresholdParser<'_> {
             }
             def.cost = Some(cost);
             def.description = Some(description.to_string());
-            if constraints.sorcery_speed() {
-                def.sorcery_speed = true;
-            }
             let mut restrictions = constraints.restrictions;
             restrictions.push(ActivationRestriction::CounterThreshold {
                 counters: CounterMatch::OfType(CounterType::Generic(STATION_COUNTER.to_string())),

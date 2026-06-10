@@ -670,7 +670,6 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::LoseLife
         | EffectKind::Tap
         | EffectKind::Untap
-        | EffectKind::AddCounter
         | EffectKind::RemoveCounter
         | EffectKind::Sacrifice
         | EffectKind::DiscardCard

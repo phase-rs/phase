@@ -6102,13 +6102,6 @@ pub enum Effect {
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
     },
-    AddCounter {
-        counter_type: CounterType,
-        #[serde(default = "default_quantity_one")]
-        count: QuantityExpr,
-        #[serde(default = "default_target_filter_any")]
-        target: TargetFilter,
-    },
     RemoveCounter {
         #[serde(default)]
         counter_type: Option<CounterType>,
@@ -6687,6 +6680,14 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 122.1: Place counters on target objects.
+    /// `#[serde(alias = "AddCounter")]` (CR 122.1) accepts persisted game-session
+    /// snapshots that serialized the former duplicate `AddCounter` variant tag
+    /// (e.g. an age/charge-counter ability mid-resolution on the stack). Both
+    /// variants always shared an identical field set and resolver
+    /// (`counters::resolve_add`); the duplicate was eliminated in favor of this
+    /// single placement variant.
+    #[serde(alias = "AddCounter")]
     PutCounter {
         counter_type: CounterType,
         #[serde(default = "default_quantity_one")]
@@ -8637,7 +8638,6 @@ impl Effect {
             | Effect::Counter { target, .. }
             | Effect::Tap { target, .. }
             | Effect::Untap { target, .. }
-            | Effect::AddCounter { target, .. }
             | Effect::RemoveCounter { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
@@ -8946,7 +8946,6 @@ impl Effect {
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
-            | Effect::AddCounter { count, .. }
             | Effect::Sacrifice { count, .. }
             | Effect::Mill { count, .. }
             | Effect::Scry { count, .. }
@@ -9143,7 +9142,6 @@ impl Effect {
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
-            | Effect::AddCounter { count, .. }
             | Effect::Sacrifice { count, .. }
             | Effect::Mill { count, .. }
             | Effect::Scry { count, .. }
@@ -9352,7 +9350,6 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Untap { .. } => "Untap",
         Effect::TapAll { .. } => "TapAll",
         Effect::UntapAll { .. } => "UntapAll",
-        Effect::AddCounter { .. } => "AddCounter",
         Effect::RemoveCounter { .. } => "RemoveCounter",
         Effect::Sacrifice { .. } => "Sacrifice",
         Effect::DiscardCard { .. } => "DiscardCard",
@@ -9544,7 +9541,6 @@ pub enum EffectKind {
     LoseLife,
     Tap,
     Untap,
-    AddCounter,
     RemoveCounter,
     Sacrifice,
     DiscardCard,
@@ -9745,7 +9741,6 @@ impl From<&Effect> for EffectKind {
             Effect::Untap { .. } => EffectKind::Untap,
             Effect::TapAll { .. } => EffectKind::TapAll,
             Effect::UntapAll { .. } => EffectKind::UntapAll,
-            Effect::AddCounter { .. } => EffectKind::AddCounter,
             Effect::RemoveCounter { .. } => EffectKind::RemoveCounter,
             Effect::Sacrifice { .. } => EffectKind::Sacrifice,
             Effect::DiscardCard { .. } => EffectKind::DiscardCard,
@@ -10207,107 +10202,86 @@ impl TargetChoiceTiming {
 ///
 /// `Serialize` is hand-written (see `impl Serialize for AbilityDefinition`) so
 /// it can emit the computed `consumes_source` UI key alongside the field set.
-/// **Any field change here MUST be mirrored in `AbilityDefinitionRepr` and the
-/// exhaustive destructure in `impl Serialize` — a new field fails to compile at
-/// that destructure until it is mirrored (#506).**
-#[derive(Clone, PartialEq, Eq, Deserialize)]
+/// `Deserialize` is hand-written (see `impl<'de> Deserialize for AbilityDefinition`)
+/// so the legacy `sorcery_speed: bool` field migrates into
+/// `activation_restrictions` as `ActivationRestriction::AsSorcery` (CR 602.5d).
+/// **Any field change here MUST be mirrored in `AbilityDefinitionRepr`, the
+/// exhaustive destructure in `impl Serialize`, and `AbilityDefinitionDe` — a new
+/// field fails to compile at the Serialize destructure until it is mirrored (#506).**
+#[derive(Clone, PartialEq, Eq)]
 pub struct AbilityDefinition {
     pub kind: AbilityKind,
     pub effect: Box<Effect>,
-    #[serde(default)]
     pub cost: Option<AbilityCost>,
-    #[serde(default)]
     pub sub_ability: Option<Box<AbilityDefinition>>,
     /// CR 608.2c: Alternative branch executed when the condition on this ability is NOT met.
     /// Populated by "Otherwise, [effect]" Oracle text clauses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub else_ability: Option<Box<AbilityDefinition>>,
-    #[serde(default)]
     pub duration: Option<Duration>,
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub target_prompt: Option<String>,
-    #[serde(default)]
-    pub sorcery_speed: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// CR 602.5d: "Activate only as a sorcery." Represented by the presence of
+    /// `ActivationRestriction::AsSorcery` in `activation_restrictions` — the
+    /// single authority for sorcery-speed timing. The legacy `sorcery_speed`
+    /// JSON field is migrated into this `Vec` by the hand-written `Deserialize`.
     pub activation_restrictions: Vec<ActivationRestriction>,
     /// CR 602.1: Zone from which this ability can be activated.
     /// `None` = battlefield (default). `Some(Zone::Hand)` for Channel, Cycling, etc.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_zone: Option<Zone>,
     /// CR 702.142b: Tag identifying the keyword origin of this ability.
     /// Used by effects that reference abilities by keyword class (e.g., "boast abilities").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_tag: Option<AbilityTag>,
     /// Condition that must be met for this ability to execute during resolution.
-    #[serde(default)]
     pub condition: Option<AbilityCondition>,
     /// When true, targeting is optional ("up to one"). Player may choose zero targets.
-    #[serde(default)]
     pub optional_targeting: bool,
     /// CR 609.3: When true, the controller chooses whether to perform this effect ("You may X").
-    #[serde(default)]
     pub optional: bool,
     /// CR 608.2d: When set, an opponent (not the controller) chooses whether to perform this
     /// optional effect. Requires `optional: true`. Opponents are prompted in APNAP order.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional_for: Option<OpponentMayScope>,
     /// Variable-count targeting: min/max targets the player can choose.
     /// When present, resolution enters MultiTargetSelection instead of immediate resolve.
     /// CR 601.2c + CR 115.1d.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_target: Option<MultiTargetSpec>,
     /// CR 115.1 + CR 601.2c: Additional legality constraints across selected targets.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
     /// CR 601.2c + CR 608.2d: Timing for object/player choices represented by
     /// this ability's target filter. Stack timing is true targeting; resolution
     /// timing is used for non-target instructions such as "return a land card
     /// from your graveyard" after another instruction has changed zone state.
-    #[serde(default, skip_serializing_if = "TargetChoiceTiming::is_stack")]
     pub target_choice_timing: TargetChoiceTiming,
     /// CR 601.2d: When set, the controller distributes this effect among chosen targets.
     /// Triggers WaitingFor::DistributeAmong during casting target selection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribute: Option<DistributionUnit>,
     /// CR 118.12: "Effect unless [player] pays {cost}" — resolution-time payment modifier.
     /// Triggered abilities and normal spell/activated definitions use the same runtime
     /// `ResolvedAbility::unless_pay` pipeline.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_pay: Option<UnlessPayModifier>,
     /// Modal metadata for activated/triggered abilities with "Choose one —" etc.
     /// When present, the ability pauses for mode selection before resolving.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
     /// The individual mode abilities for modal activated/triggered abilities.
     /// Each entry is one selectable mode. Only meaningful when `modal` is Some.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_abilities: Vec<AbilityDefinition>,
     /// CR 609.3: Repeat this ability N times, where N = resolve_quantity(repeat_for).
     /// Produced by "for each [X], [effect]" leading patterns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
     /// Minimum legal announced value for X. Defaults to zero; set to one by
     /// "X can't be 0" annotations.
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub min_x_value: u32,
     /// Stack-copy restriction from "This ability can't be copied."
-    #[serde(default, skip_serializing_if = "is_false")]
     pub cant_be_copied: bool,
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_reduction: Option<CostReduction>,
     /// When true, after this ability's effect resolves, moved/created objects are forwarded
     /// to the sub_ability: the moved object becomes sub's source_id, and the original source
     /// becomes a target. Used for "put onto the battlefield attached to [source]" patterns.
-    #[serde(default)]
     pub forward_result: bool,
     /// Player scope for "each player/opponent [effect]" patterns.
     /// When set, the effect iterates over matching players (each becomes the acting player).
     /// Produced by "each opponent discards", "each player draws", etc.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_scope: Option<PlayerFilter>,
     /// CR 101.4 + CR 800.4: Override the default APNAP turn-order start for
     /// `player_scope` iteration. `None` = use the active player (standard
@@ -10315,41 +10289,35 @@ pub struct AbilityDefinition {
     /// ability's controller (Join Forces: "Starting with you, each player may
     /// pay any amount of mana"). The iteration site in `effects/mod.rs` reads
     /// this via `players::apnap_order_from(state, starting_with, controller)`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starting_with: Option<ControllerRef>,
     /// CR 115.1 + CR 701.9b: Selection mode for this ability's target slot(s).
     /// `Chosen` (default) = the controller chooses each target per CR 115.1.
     /// `Random` = the game uniformly selects from each slot's legal-target set
     /// (Mana Clash, Goblin Lyre, Pixie Queen, Vexing Sphinx, Maddening Hex, etc.).
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
-    #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
     /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
     /// this ability's target(s) at stack placement. `None` = controller chooses
     /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
     /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
     /// sacrifices.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
     /// non-count companion to `repeat_for`. When `Some`, the resolution chain
     /// is re-followed ("repeat this process") under this predicate instead of
     /// a fixed iteration count. Mutually exclusive with `repeat_for` in
     /// practice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_until: Option<RepeatContinuation>,
     /// CR 608.2c: How this ability links to its parent when present as a
     /// `sub_ability`. `ContinuationStep` (default) = part of the parent's action;
     /// `SequentialSibling` = independent following instruction. Set during
     /// `lower_effect_chain_ir` from the `ClauseBoundary` PRECEDING this clause.
-    #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
     /// CR 608.2c + CR 122.1: when this ability is a `ChooseOneOf` branch driven
     /// by a counter-kind iteration (`repeat_for: DistinctCounterKindsAmong`),
     /// `Some(RebindToIteratedKind)` marks the branch whose `PutCounter`
     /// counter type must be rewritten to the current iteration's counter kind
     /// before resolution. `None` (default) = branch is fixed (e.g. "+1/+1").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iteration_kind_binding: Option<IterationKindBinding>,
 }
 
@@ -10374,7 +10342,6 @@ struct AbilityDefinitionRepr<'a> {
     duration: &'a Option<Duration>,
     description: &'a Option<String>,
     target_prompt: &'a Option<String>,
-    sorcery_speed: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     activation_restrictions: &'a Vec<ActivationRestriction>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -10439,7 +10406,6 @@ impl Serialize for AbilityDefinition {
             duration,
             description,
             target_prompt,
-            sorcery_speed,
             activation_restrictions,
             activation_zone,
             ability_tag,
@@ -10477,7 +10443,6 @@ impl Serialize for AbilityDefinition {
             duration,
             description,
             target_prompt,
-            sorcery_speed: *sorcery_speed,
             activation_restrictions,
             activation_zone,
             ability_tag,
@@ -10519,6 +10484,136 @@ impl Serialize for AbilityDefinition {
             consumes_source: self.consumes_source(),
         }
         .serialize(s)
+    }
+}
+
+/// Private deserialization mirror for `AbilityDefinition`. Mirrors the field set
+/// (and serde defaults) of `AbilityDefinition` and additionally tolerates the
+/// legacy `sorcery_speed: bool` field, which is migrated into
+/// `activation_restrictions` as `ActivationRestriction::AsSorcery` (CR 602.5d).
+/// Any field change on `AbilityDefinition` must be mirrored here. The serialized
+/// `consumes_source` UI key (#506) is computed-only and ignored on the way in
+/// (no `deny_unknown_fields`).
+#[derive(Deserialize)]
+struct AbilityDefinitionDe {
+    kind: AbilityKind,
+    effect: Box<Effect>,
+    #[serde(default)]
+    cost: Option<AbilityCost>,
+    #[serde(default)]
+    sub_ability: Option<Box<AbilityDefinition>>,
+    #[serde(default)]
+    else_ability: Option<Box<AbilityDefinition>>,
+    #[serde(default)]
+    duration: Option<Duration>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    target_prompt: Option<String>,
+    /// CR 602.5d: legacy field. `true` migrates to `AsSorcery` in
+    /// `activation_restrictions`. Newly serialized data omits this key.
+    #[serde(default)]
+    sorcery_speed: bool,
+    #[serde(default)]
+    activation_restrictions: Vec<ActivationRestriction>,
+    #[serde(default)]
+    activation_zone: Option<Zone>,
+    #[serde(default)]
+    ability_tag: Option<AbilityTag>,
+    #[serde(default)]
+    condition: Option<AbilityCondition>,
+    #[serde(default)]
+    optional_targeting: bool,
+    #[serde(default)]
+    optional: bool,
+    #[serde(default)]
+    optional_for: Option<OpponentMayScope>,
+    #[serde(default)]
+    multi_target: Option<MultiTargetSpec>,
+    #[serde(default)]
+    target_constraints: Vec<TargetSelectionConstraint>,
+    #[serde(default)]
+    target_choice_timing: TargetChoiceTiming,
+    #[serde(default)]
+    distribute: Option<DistributionUnit>,
+    #[serde(default)]
+    unless_pay: Option<UnlessPayModifier>,
+    #[serde(default)]
+    modal: Option<ModalChoice>,
+    #[serde(default)]
+    mode_abilities: Vec<AbilityDefinition>,
+    #[serde(default)]
+    repeat_for: Option<QuantityExpr>,
+    #[serde(default)]
+    min_x_value: u32,
+    #[serde(default)]
+    cant_be_copied: bool,
+    #[serde(default)]
+    cost_reduction: Option<CostReduction>,
+    #[serde(default)]
+    forward_result: bool,
+    #[serde(default)]
+    player_scope: Option<PlayerFilter>,
+    #[serde(default)]
+    starting_with: Option<ControllerRef>,
+    #[serde(default)]
+    target_selection_mode: TargetSelectionMode,
+    #[serde(default)]
+    target_chooser: Option<TargetFilter>,
+    #[serde(default)]
+    repeat_until: Option<RepeatContinuation>,
+    #[serde(default)]
+    sub_link: SubAbilityLink,
+    #[serde(default)]
+    iteration_kind_binding: Option<IterationKindBinding>,
+}
+
+impl<'de> Deserialize<'de> for AbilityDefinition {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let de = AbilityDefinitionDe::deserialize(deserializer)?;
+        let mut activation_restrictions = de.activation_restrictions;
+        // CR 602.5d: migrate the legacy `sorcery_speed: bool` into the single
+        // authority `activation_restrictions` (dedup if already present).
+        if de.sorcery_speed && !activation_restrictions.contains(&ActivationRestriction::AsSorcery)
+        {
+            activation_restrictions.push(ActivationRestriction::AsSorcery);
+        }
+        Ok(AbilityDefinition {
+            kind: de.kind,
+            effect: de.effect,
+            cost: de.cost,
+            sub_ability: de.sub_ability,
+            else_ability: de.else_ability,
+            duration: de.duration,
+            description: de.description,
+            target_prompt: de.target_prompt,
+            activation_restrictions,
+            activation_zone: de.activation_zone,
+            ability_tag: de.ability_tag,
+            condition: de.condition,
+            optional_targeting: de.optional_targeting,
+            optional: de.optional,
+            optional_for: de.optional_for,
+            multi_target: de.multi_target,
+            target_constraints: de.target_constraints,
+            target_choice_timing: de.target_choice_timing,
+            distribute: de.distribute,
+            unless_pay: de.unless_pay,
+            modal: de.modal,
+            mode_abilities: de.mode_abilities,
+            repeat_for: de.repeat_for,
+            min_x_value: de.min_x_value,
+            cant_be_copied: de.cant_be_copied,
+            cost_reduction: de.cost_reduction,
+            forward_result: de.forward_result,
+            player_scope: de.player_scope,
+            starting_with: de.starting_with,
+            target_selection_mode: de.target_selection_mode,
+            target_chooser: de.target_chooser,
+            repeat_until: de.repeat_until,
+            sub_link: de.sub_link,
+            iteration_kind_binding: de.iteration_kind_binding,
+        })
     }
 }
 
@@ -10617,7 +10712,6 @@ impl AbilityDefinition {
             duration: None,
             description: None,
             target_prompt: None,
-            sorcery_speed: false,
             activation_restrictions: Vec::new(),
             activation_zone: None,
             ability_tag: None,
@@ -10741,7 +10835,6 @@ impl AbilityDefinition {
     /// planeswalker loyalty (CR 606.3), and any future keyword that is required
     /// to be activated at sorcery speed.
     pub fn sorcery_speed(mut self) -> Self {
-        self.sorcery_speed = true;
         if !self
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery)
@@ -10750,6 +10843,15 @@ impl AbilityDefinition {
                 .push(ActivationRestriction::AsSorcery);
         }
         self
+    }
+
+    /// CR 602.5d: `true` when this ability is restricted to sorcery-speed
+    /// timing, i.e. `activation_restrictions` contains `AsSorcery`. Single
+    /// authority for the sorcery-speed query (replaces the former
+    /// `sorcery_speed` bool field).
+    pub fn is_sorcery_speed(&self) -> bool {
+        self.activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery)
     }
 
     pub fn activation_restrictions(mut self, restrictions: Vec<ActivationRestriction>) -> Self {

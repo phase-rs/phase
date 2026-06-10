@@ -50,7 +50,6 @@ expression: "&ir"
         "duration": null,
         "description": "{2}{G}: Create a 1/1 green Saproling creature token.",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,

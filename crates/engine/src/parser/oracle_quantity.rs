@@ -5,6 +5,15 @@
 //! typed `QuantityRef` / `QuantityExpr` values. This is distinct from `oracle_util`,
 //! which provides raw text extraction primitives (number parsing, mana symbol
 //! counting, phrase matching).
+//!
+//! **Frozen for new grammar.** New quantity-phrase recognition belongs in
+//! `oracle_nom/quantity.rs` (the combinator grammar this module delegates
+//! to), not here — this module's remaining surface is the legacy semantic
+//! entry points (`parse_cda_quantity`, `parse_quantity_ref`,
+//! `parse_event_context_quantity`, `parse_for_each_clause`) and their
+//! context wiring. Adding a new phrase table or `tag()` alternative here
+//! re-creates the parallel-grammar split that the oracle-parser skill's
+//! "Where New Grammar Goes" section exists to prevent.
 
 use std::str::FromStr;
 
