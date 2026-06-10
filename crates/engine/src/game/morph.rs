@@ -130,10 +130,16 @@ pub fn play_face_down(
     // dropped (the tail is the single authority, mirroring `manifest_card` and
     // change_zone's face-down path).
     //
-    // CR 616.1 / CR 303.4f: a face-down 2/2 vanilla creature is not an Aura and
-    // carries no Moved redirect or counter-replacement choice, so a battlefield-
-    // entry pause is unreachable; the bail keeps the helper safe by construction
-    // (the prompt is parked centrally by `move_object`).
+    // CR 616.1: a battlefield-entry pause IS reachable here — two co-played
+    // external enter-tapped `Moved` effects (Authority of the Consuls +
+    // Imposing Sovereign class) both write the entry event's tap field, a
+    // material same-field collision that surfaces an ordering prompt (see
+    // `paused_face_down_morph_entry_resumes_face_down`). The bail is correct
+    // and complete: the face-down profile rides the parked event, and the
+    // resume path (`engine_replacement::handle_replacement_choice`'s ZoneChange
+    // arm) applies it through the shared CR 708.3 helper
+    // (`zone_pipeline::apply_face_down_entry_profile`), so the entry resumes
+    // face down with nothing left for this helper to do.
     match super::zone_pipeline::move_object(
         state,
         super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
@@ -248,9 +254,13 @@ pub fn manifest_card(
     // which the raw `move_to_zone` + manual override skipped. The manual
     // post-move override is dropped (the tail is the single authority).
     //
-    // CR 616.1 / CR 303.4f: a face-down 2/2 vanilla creature is not an Aura and
-    // carries no Moved redirect or counter-replacement choice, so a battlefield-
-    // entry pause is unreachable; the bail keeps the helper safe by construction.
+    // CR 616.1: a battlefield-entry pause IS reachable — two co-played external
+    // enter-tapped `Moved` effects (Authority of the Consuls + Imposing
+    // Sovereign class) collide on the entry's tap field and surface an ordering
+    // prompt. The bail is correct and complete: the face-down profile rides the
+    // parked event and the resume path applies it through the shared CR 708.3
+    // helper (`zone_pipeline::apply_face_down_entry_profile`), so the manifest
+    // resumes face down with nothing left for this helper to do.
     match super::zone_pipeline::move_object(
         state,
         super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
@@ -368,6 +378,103 @@ mod tests {
         assert!(obj.keywords.is_empty());
         assert!(obj.abilities.is_empty());
         assert!(obj.color.is_empty());
+    }
+
+    /// CR 616.1 + CR 708.3 discriminating test (fail-first): a face-down morph
+    /// entry parked on a replacement-ordering prompt must resume FACE DOWN.
+    ///
+    /// Reachability: two co-played external enter-tapped `Moved` defs (Authority
+    /// of the Consuls + Imposing Sovereign class — both parse as ChangeZone
+    /// Moved defs) both write the entry event's tap field; same-field writes are
+    /// non-commuting and the engine has no same-value dedupe, so the set is
+    /// material and CR 616.1 prompts — `move_object` parks the morph entry.
+    ///
+    /// The resume path (`handle_replacement_choice`'s ZoneChange arm) previously
+    /// destructured the approved event with `..`, DISCARDING
+    /// `face_down_profile`, and delivered via the raw mover — the morph resumed
+    /// FACE UP, violating CR 708.3 and leaking the hidden card to the opponent.
+    #[test]
+    fn paused_face_down_morph_entry_resumes_face_down() {
+        use crate::game::engine::apply_as_current;
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        // Two external enter-tapped Moved replacements on the opponent's board.
+        for (offset, name) in [
+            (0u64, "Authority of the Consuls"),
+            (1, "Imposing Sovereign"),
+        ] {
+            let oid = ObjectId(9000 + offset);
+            let mut src = GameObject::new(
+                oid,
+                CardId(900 + offset),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            src.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Spell,
+                    crate::types::ability::Effect::Tap {
+                        target: TargetFilter::SelfRef,
+                    },
+                ))
+                .destination_zone(Zone::Battlefield)
+                .description(name.to_string())]
+            .into();
+            state.objects.insert(oid, src);
+            state.battlefield.push_back(oid);
+        }
+
+        let id = setup_morph_creature(&mut state, player);
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+
+        // CR 616.1: the colliding enter-tapped writes parked the entry — the
+        // card has NOT moved yet and the prompt is live.
+        let WaitingFor::ReplacementChoice {
+            player: chooser, ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected parked ReplacementChoice for the enter-tapped collision, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Hand,
+            "entry must be parked, not delivered, while the prompt is live"
+        );
+        state.priority_player = chooser;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume replacement choice");
+
+        let obj = &state.objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield, "entry delivered after resume");
+        assert!(
+            obj.tapped,
+            "both enter-tapped replacements applied to the resumed entry"
+        );
+        assert!(
+            obj.face_down,
+            "resumed morph entry must be FACE DOWN (CR 708.3) — face-up resume leaks the hidden card"
+        );
+        assert_eq!(obj.power, Some(2), "vanilla 2/2 face-down profile");
+        assert_eq!(obj.toughness, Some(2), "vanilla 2/2 face-down profile");
+        assert_eq!(obj.name, "", "face-down profile hides the printed name");
+        assert!(obj.card_types.subtypes.is_empty());
+        assert!(
+            obj.back_face.is_some(),
+            "real face snapshot stored so turn-face-up can restore it"
+        );
     }
 
     #[test]

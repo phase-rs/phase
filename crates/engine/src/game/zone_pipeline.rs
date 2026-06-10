@@ -1078,6 +1078,31 @@ fn legal_aura_attachment_targets(
     targets
 }
 
+/// CR 708.3 + CR 708.2a: Turn an object face down as part of its battlefield
+/// entry — snapshot the real face into `back_face`, then overwrite the live
+/// characteristics with the face-down profile (the morph/manifest vanilla 2/2
+/// plus any effect-specified extra types/subtypes) so the original is
+/// restorable by `turn_face_up`. Mirrors `manifest_card`'s historical sequence.
+///
+/// Single authority shared by the normal delivery tail
+/// (`deliver_replaced_zone_change`) and the replacement-choice resume arm
+/// (`engine_replacement::handle_replacement_choice`). The resume arm previously
+/// discarded the event's `face_down_profile`, so a face-down entry that parked
+/// on a CR 616.1 ordering prompt (two external enter-tapped effects — Authority
+/// of the Consuls + Imposing Sovereign class) resumed FACE UP, leaking the
+/// morpher's hidden card.
+pub(crate) fn apply_face_down_entry_profile(
+    state: &mut GameState,
+    object_id: ObjectId,
+    profile: &FaceDownProfile,
+) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        let original = crate::game::printed_cards::snapshot_object_face(obj);
+        crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
+        obj.back_face = Some(original);
+    }
+}
+
 /// Deliver a zone-change event that has already passed through replacement.
 pub(crate) fn deliver_replaced_zone_change(
     state: &mut GameState,
@@ -1142,18 +1167,14 @@ pub(crate) fn deliver_replaced_zone_change(
         // CR 708.3: An object put onto the battlefield face down is turned face
         // down BEFORE it enters, so its ETB abilities don't trigger and its
         // characteristics are the face-down profile (CR 708.2a), not the real
-        // card's. Mirror `manifest_card`'s sequence: snapshot the real face into
-        // `back_face`, overwrite with the face-down 2/2 (+ any specified extra
-        // types/subtypes), then store the snapshot so the original is restorable.
-        // Done before the controller-override and ETB-counter/trigger blocks
-        // below so triggers (if any later applied) see the face-down state.
+        // card's. Done before the controller-override and ETB-counter/trigger
+        // blocks below so triggers (if any later applied) see the face-down
+        // state. Shared single authority with the replacement-choice resume arm
+        // (`engine_replacement::handle_replacement_choice`), so a paused
+        // face-down entry cannot resume face-up.
         if to == Zone::Battlefield {
             if let Some(profile) = &face_down_profile {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    let original = crate::game::printed_cards::snapshot_object_face(obj);
-                    crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
-                    obj.back_face = Some(original);
-                }
+                apply_face_down_entry_profile(state, object_id, profile);
             }
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
