@@ -446,6 +446,21 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 701.17a + CR 616.1: A mill batch paused mid-delivery because a
+            // milled card's Moved replacements needed an ordering choice (Rest in
+            // Peace + Leyline of the Void class). The chosen event was delivered
+            // by the ZoneChange arm above; drain the parked tail. The drain may
+            // re-park when the next milled card surfaces its own prompt — in
+            // that case it sets `state.waiting_for` for us to propagate.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_mill_deliveries.is_some()
+            {
+                effects::mill::drain_pending_mill_deliveries(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_copy_token_resolution.is_some()
             {
@@ -543,6 +558,15 @@ pub(super) fn handle_replacement_choice(
                     player: state.active_player,
                 };
                 effects::token_copy::drain_pending_copy_token_resolution(state, events);
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 701.17a + CR 616.1: the paused milled card's event was
+            // prevented outright — the remaining parked tail still mills.
+            if state.pending_mill_deliveries.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                effects::mill::drain_pending_mill_deliveries(state, events);
                 return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,

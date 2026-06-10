@@ -1048,6 +1048,22 @@ pub struct PendingCounterMoveQueue {
     pub source_id: ObjectId,
 }
 
+/// CR 701.17a + CR 616.1: The not-yet-delivered tail of a mill batch, parked
+/// when a per-card `Moved` replacement on a milled card surfaces a replacement
+/// choice (e.g. two simultaneously-applicable graveyard→exile redirects — Rest
+/// in Peace + Leyline of the Void — racing on the same milled card). Drained by
+/// `mill::drain_pending_mill_deliveries` from the replacement-choice resume
+/// path after the chosen event delivers; the drain re-parks when the next card
+/// surfaces its own choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMillDeliveries {
+    /// Milled cards whose per-card zone move has not yet been delivered.
+    pub remaining: Vec<ObjectId>,
+    /// The mill destination zone (graveyard by default; exile/hand for
+    /// top-of-library move variants).
+    pub destination: Zone,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingEffectResolved {
     pub kind: EffectKind,
@@ -5710,6 +5726,14 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_counter_moves: Option<PendingCounterMoveQueue>,
 
+    /// CR 701.17a + CR 616.1: Pending mill-delivery tail paused by a per-card
+    /// replacement choice (see [`PendingMillDeliveries`]). Drained by the
+    /// replacement-choice resume path after the chosen event delivers so the
+    /// remaining milled cards complete their moves instead of stranding in the
+    /// library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_mill_deliveries: Option<PendingMillDeliveries>,
+
     /// CR 122.1 + CR 616.1e: Pending counter-addition batch paused by a
     /// replacement choice. Drained before normal pending continuations so
     /// multi-recipient effects such as proliferate and double counters resume
@@ -6490,6 +6514,7 @@ impl GameState {
             pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_counter_moves: None,
+            pending_mill_deliveries: None,
             pending_counter_additions: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
@@ -6924,6 +6949,7 @@ impl PartialEq for GameState {
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_counter_moves == other.pending_counter_moves
+            && self.pending_mill_deliveries == other.pending_mill_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
