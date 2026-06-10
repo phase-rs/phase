@@ -641,6 +641,16 @@ fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
     state.stack.is_empty() && matches!(state.phase, Phase::Upkeep | Phase::Draw)
 }
 
+/// CR 117.1d + CR 601.2g: True when the player has a spell the castability gate
+/// accepts via manual mana-ability payment even though the simulation oracle
+/// (`SimulationFilter`) rejects the Auto-mode `CastSpell` candidate (issue #562,
+/// #583). Frontends surface these via `spell_costs` + manual cast dispatch.
+fn has_feasibly_castable_spell(state: &GameState, player: PlayerId) -> bool {
+    crate::game::casting::spell_objects_available_to_cast(state, player)
+        .iter()
+        .any(|&object_id| crate::game::casting::can_cast_object_now(state, player, object_id))
+}
+
 /// Determines whether the frontend should auto-pass the current priority window.
 ///
 /// Returns `true` when auto-passing is recommended:
@@ -659,6 +669,10 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
 
     if auto_passes_initial_priority_by_default(state) {
         return true;
+    }
+
+    if has_feasibly_castable_spell(state, player) {
+        return false;
     }
 
     if !has_meaningful_priority_action(state, actions) {

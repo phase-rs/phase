@@ -77,6 +77,24 @@ pub(super) fn handle_replacement_choice(
             let mut zone_change_object_id = None;
             let mut enters_battlefield = false;
             match event {
+                // TODO(zone-pipeline Phase B): this arm is a divergent partial
+                // copy of `zone_pipeline::deliver_replaced_zone_change` — it has
+                // now dropped two fields (`played_from_zone`, patched below;
+                // `face_down_profile`, patched via the shared CR 708.3 helper)
+                // and still skips the tail's devour snapshot,
+                // EntersWithAdditionalCounters statics, `attach_to`,
+                // `entered_via_ability_source`, exile-link tracking, and the
+                // CR 701.24a library-shuffle arms. Route it through
+                // `ApprovedZoneChange::approve_post_replacement` +
+                // `zone_pipeline::deliver` when the Phase-B token migration
+                // reconciles the divergences that block it this round: (1) the
+                // post-`Execute` epilogue below drains
+                // `post_replacement_continuation` with the spell-resolution ctx
+                // and clears `post_replacement_source` for zone changes, while
+                // the tail drains it ctx-less and without the clear; (2)
+                // `pending_spell_resolution` ordering (the tail's drain would run
+                // before `apply_pending_spell_resolution`); (3) the bespoke
+                // `played_from_zone` preservation (PLAN Open Question #3).
                 ProposedEvent::ZoneChange {
                     object_id,
                     to,
@@ -85,6 +103,7 @@ pub(super) fn handle_replacement_choice(
                     enter_with_counters,
                     controller_override,
                     enter_transformed,
+                    face_down_profile,
                     ..
                 } => {
                     let played_from_zone = state
@@ -92,6 +111,22 @@ pub(super) fn handle_replacement_choice(
                         .get(&object_id)
                         .and_then(|obj| obj.played_from_zone);
                     zones::move_to_zone(state, object_id, to, events);
+                    // CR 708.3 + CR 708.2a: a face-down entry (morph / manifest /
+                    // "put it onto the battlefield face down") that parked on a
+                    // CR 616.1 ordering prompt must still enter FACE DOWN —
+                    // shared single authority with the delivery tail. Applied
+                    // immediately after the move and before the tap-state /
+                    // controller-override / ETB-counter blocks, mirroring the
+                    // tail's ordering so any later-applied triggers see the
+                    // face-down state. Discarding this field delivered the
+                    // resumed morph face-up, leaking the hidden card.
+                    if to == Zone::Battlefield {
+                        if let Some(profile) = &face_down_profile {
+                            crate::game::zone_pipeline::apply_face_down_entry_profile(
+                                state, object_id, profile,
+                            );
+                        }
+                    }
                     // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
                     // defaults. Override only when the replacement pipeline changed them.
                     if to == Zone::Battlefield {
@@ -601,10 +636,37 @@ pub(super) fn handle_replacement_choice(
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
-            if let Some(ctx) = state.pending_spell_resolution.take() {
-                zones::move_to_zone(state, ctx.object_id, Zone::Graveyard, events);
-            }
+            //
+            // CR 614.6: this graveyard fallback is a FRESH, never-consulted
+            // event — the consulted (and prevented) event was the battlefield
+            // ENTRY (`to: Battlefield`), so routing the fallback through the
+            // pipeline cannot double-apply: the prevention definition is
+            // Battlefield-scoped and cannot re-match a →Graveyard move. A
+            // board-wide `Moved` graveyard→exile redirect (Rest in Peace /
+            // Leyline of the Void) now fires on the discarded spell — the
+            // un-migrated twin of stack.rs's C2 prevented-permanent site. The
+            // dead continuation is cleared BEFORE the move so a CR 616.1
+            // ordering pause (two simultaneous redirects) cannot leave it for
+            // the next resume's epilogue to drain; on a pause, surface the
+            // parked prompt (its resume delivers the chosen event through the
+            // ZoneChange arm above).
             state.pending_continuation = None;
+            if let Some(ctx) = state.pending_spell_resolution.take() {
+                match crate::game::zone_pipeline::move_object(
+                    state,
+                    crate::game::zone_pipeline::ZoneMoveRequest::spell_resolution_default(
+                        ctx.object_id,
+                        Zone::Graveyard,
+                    ),
+                    events,
+                ) {
+                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                    | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        return Ok(state.waiting_for.clone());
+                    }
+                }
+            }
             Ok(WaitingFor::Priority {
                 player: state.active_player,
             })
@@ -1291,6 +1353,122 @@ mod tests {
         assert!(
             state.objects[&target].tapped,
             "Tap accepted after replacement choice must tap the target"
+        );
+    }
+
+    /// CR 608.3e + CR 614.6 discriminating test (fail-first): when a permanent
+    /// spell's ETB is fully prevented after a replacement choice
+    /// (`ReplacementResult::Prevented` while `pending_spell_resolution` is set),
+    /// the graveyard fallback is a FRESH, never-consulted event — it must route
+    /// through the zone pipeline so a board-wide `Moved` graveyard→exile
+    /// redirect (Rest in Peace / Leyline of the Void) fires on the discarded
+    /// spell. The raw `move_to_zone` fallback dropped the redirect — the
+    /// un-migrated twin of the stack.rs C2 prevented-permanent site.
+    ///
+    /// STAGING NOTE: no ZoneChange registry applier can yield `Prevented`
+    /// today, so the natural entry-prevention pause is not constructible
+    /// end-to-end; the parked choice is staged as a regeneration-shield Destroy
+    /// prevention (the canonical `Prevented` producer) with
+    /// `pending_spell_resolution` set. The assertion target —
+    /// `handle_replacement_choice`'s Prevented-arm CR 608.3e fallback — is
+    /// driven through the real `GameAction::ChooseReplacement` resume entry.
+    #[test]
+    fn prevented_etb_graveyard_fallback_consults_moved_redirects() {
+        use crate::types::ability::AbilityDefinition;
+        use crate::types::ability::Effect;
+        use crate::types::ability::TargetFilter;
+        use crate::types::game_state::{CastingVariant, PendingSpellResolution};
+        use crate::types::proposed_event::ReplacementId;
+
+        let mut state = GameState::new_two_player(42);
+
+        // The resolving permanent spell, still on the stack (CR 608.3e: its
+        // prevented ETB routes it to its owner's graveyard instead).
+        let spell = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Prevented Permanent".to_string(),
+            Zone::Stack,
+        );
+
+        // Rest in Peace–class graveyard→exile Moved redirect on the battlefield.
+        let rip = make_creature(&mut state, PlayerId(1), "Rest in Peace");
+        state.objects.get_mut(&rip).unwrap().replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+                .destination_zone(Zone::Graveyard)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        origin: None,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                ))]
+            .into();
+
+        // The paused entry's spell-resolution bookkeeping.
+        state.pending_spell_resolution = Some(PendingSpellResolution {
+            object_id: spell,
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            convoked_creatures: vec![],
+        });
+
+        // Staged Prevented producer: a regeneration shield on a creature being
+        // destroyed — choosing it yields `ReplacementResult::Prevented`.
+        let bear = make_creature(&mut state, PlayerId(0), "Bear");
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Destroy)
+            .regeneration_shield()
+            .description("Regenerate".to_string())]
+        .into();
+        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            proposed: ProposedEvent::Destroy {
+                object_id: bear,
+                source: None,
+                cant_regenerate: false,
+                applied: std::collections::HashSet::new(),
+            },
+            candidates: vec![ReplacementId {
+                source: bear,
+                index: 0,
+            }],
+            depth: 0,
+            is_optional: false,
+        });
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
+        state.priority_player = PlayerId(0);
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume replacement choice");
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "prevented-ETB graveyard fallback must consult the graveyard→exile \
+             Moved redirect (CR 614.6) — raw delivery left the spell in the graveyard"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the spell must not reach the graveyard with Rest in Peace out"
         );
     }
 

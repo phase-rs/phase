@@ -2781,10 +2781,10 @@ fn casting_variant_candidates(
 
     // CR 702.109a: Dash is an opt-in alternative cost from hand; surface it as a
     // candidate so the gate offers it (and so it is reachable when the printed
-    // cost is unaffordable).
+    // cost is unaffordable). Read the *effective* spell keywords so a Dash cost
+    // granted by a static (CR 604.1) is honored, not just printed Dash.
     if obj.zone == Zone::Hand
-        && obj
-            .keywords
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Dash(_)))
     {
@@ -2807,10 +2807,11 @@ fn casting_variant_candidates(
 
     // CR 702.137a: Spectacle is an opt-in alternative cost from hand, available
     // only if an opponent lost life this turn (a static ability functioning on
-    // the stack). Surface the candidate only while that condition holds.
+    // the stack). Surface the candidate only while that condition holds. Read
+    // the *effective* spell keywords so a Spectacle cost granted by a static
+    // (CR 604.1) is honored, not just printed Spectacle.
     if obj.zone == Zone::Hand
-        && obj
-            .keywords
+        && effective_spell_keywords(state, player, object_id)
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Spectacle(_)))
         && an_opponent_lost_life_this_turn(state, player)
@@ -3060,12 +3061,16 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
 
     // CR 702.109a: Dash — when casting from hand with Keyword::Dash, the dash
-    // mana cost replaces the printed cost (opt-in via `variant_override`).
+    // mana cost replaces the printed cost (opt-in via `variant_override`). Read
+    // the *effective* spell keywords so a Dash cost granted by a static
+    // (CR 604.1) is honored, not just printed Dash.
     let dash_cost = if obj.zone == Zone::Hand {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Dash(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Dash(cost) => Some(cost.clone()),
+                _ => None,
+            })
     } else {
         None
     };
@@ -3088,12 +3093,16 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 702.137a: Spectacle — when casting from hand with Keyword::Spectacle, the
     // spectacle mana cost replaces the printed cost (opt-in via `variant_override`,
-    // gated on an opponent having lost life this turn at offer time).
+    // gated on an opponent having lost life this turn at offer time). Read the
+    // *effective* spell keywords so a Spectacle cost granted by a static
+    // (CR 604.1) is honored, not just printed Spectacle.
     let spectacle_cost = if obj.zone == Zone::Hand {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Spectacle(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Spectacle(cost) => Some(cost.clone()),
+                _ => None,
+            })
     } else {
         None
     };
@@ -7147,10 +7156,13 @@ pub fn handle_cast_spell_with_payment_mode(
     // affordable, present the choice; auto-route when only dash is payable.
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Hand {
-            if let Some(dash_cost) = obj.keywords.iter().find_map(|k| match k {
-                crate::types::keywords::Keyword::Dash(cost) => Some(cost.clone()),
-                _ => None,
-            }) {
+            if let Some(dash_cost) = effective_spell_keywords(state, player, object_id)
+                .iter()
+                .find_map(|k| match k {
+                    crate::types::keywords::Keyword::Dash(cost) => Some(cost.clone()),
+                    _ => None,
+                })
+            {
                 // CR 601.2f: affordability and displayed costs reflect active
                 // cost modifiers, applied to both the printed and dash costs.
                 let normal_cost =
@@ -9335,12 +9347,10 @@ pub fn can_pay_cost_after_auto_tap(
 /// predicate directly — only the castability/legal-actions surface widens to
 /// "manual is reachable."
 ///
-/// Colored-shard feasibility under non-tap sources is conservatively rejected:
-/// if any colored shard remains after the existing pool is subtracted, this
-/// predicate returns `false`. Pure-generic feasibility is sufficient for the
-/// principal repro (Krark-Clan Ironworks producing `{C}{C}` — issue #562).
-/// Colored-shard widening — covering Phyrexian Altar, Lion's Eye Diamond, and
-/// other any-color non-tap mana abilities — is tracked in issue #1234.
+/// Colored-shard feasibility under non-tap sources is evaluated via
+/// [`super::mana_sources::can_cover_shards_with_activatable_mana`], which
+/// respects CR 106.6 spend restrictions and avoids double-counting the same
+/// activation toward both shard and generic coverage (issues #583, #2011).
 //
 // CR 117.1d + CR 601.2g: Mana abilities (including sacrifice-cost,
 // discard-cost, and pay-life mana abilities) may be activated during cost
@@ -9415,11 +9425,17 @@ fn can_feasibly_pay_mana_cost_without_x(
         crate::types::mana::ManaCost::Cost { shards, generic } => (shards, *generic),
     };
 
-    // CR 117.1: Colored-shard feasibility under non-tap mana sources is
-    // deferred (see issue #1234 — Phyrexian Altar, Lion's Eye Diamond, etc.).
-    // Pure-generic residual is sufficient for the principal repro (KCI
-    // sacrificing artifacts for `{C}{C}`).
-    if !residual_shards.is_empty() {
+    // CR 117.1d + CR 601.2g: Residual shard feasibility under non-tap mana
+    // sources (issue #583: Vivi Ornitier {0} combination mana; extends #1234).
+    let (shards_covered, shard_consumed) =
+        super::mana_sources::can_cover_shards_with_activatable_mana(
+            state,
+            player,
+            source_id,
+            spell_ctx.as_ref(),
+            residual_shards,
+        );
+    if !residual_shards.is_empty() && !shards_covered {
         return false;
     }
     if residual_generic == 0 {
@@ -9432,6 +9448,10 @@ fn can_feasibly_pay_mana_cost_without_x(
     // controller could currently activate (covering Sacrifice / Discard /
     // PayLife costs that auto-tap cannot simulate).
     //
+    // Subtract mana already allocated to shard coverage so one activation is
+    // not counted twice (issue #583 review: power-2 Vivi must not cover {1}
+    // generic after paying {U}{R}).
+    //
     // The per-permanent sum over-counts in chain-sacrifice configurations
     // (e.g. 2× KCI + 1 fodder reports cap=4 when the actual reachable yield
     // is 2). The trade-off — over-count rather than under-count, since
@@ -9443,8 +9463,11 @@ fn can_feasibly_pay_mana_cost_without_x(
         .battlefield
         .iter()
         .filter(|id| Some(**id) != excluded)
-        .map(|&id| super::mana_sources::feasible_mana_capacity(state, id, player))
-        .sum();
+        .map(|&id| {
+            super::mana_sources::feasible_mana_capacity(state, id, player, spell_ctx.as_ref())
+        })
+        .sum::<u32>()
+        .saturating_sub(shard_consumed);
 
     capacity >= residual_generic
 }

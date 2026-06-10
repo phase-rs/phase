@@ -88,7 +88,7 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
-    ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
+    ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
     ContinuousModification, ControllerRef, DamageModification, DamageSource,
     DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GameRestriction,
     IntensityScope, IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec,
@@ -4374,6 +4374,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only: "conjure a duplicate of <reference> into/onto zone" — copies a
+    // referenced card. Tried before the named form (disjoint: this requires
+    // "a duplicate of", the other "named ").
+    if let Some(effect) = try_parse_conjure_duplicate(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only: "conjure a card named X into/onto zone" — Conjure keyword action.
     if let Some(effect) = try_parse_conjure(tp) {
         return parsed_clause(effect);
@@ -4594,7 +4601,9 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
     let card_name = &after_named_orig[..card_name_lower.len()];
 
     cards.push(ConjureCard {
-        name: card_name.to_string(),
+        source: ConjureSource::Named {
+            name: card_name.to_string(),
+        },
         count,
     });
 
@@ -4607,7 +4616,9 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
         let (next_name_lower, next_zone_rest) = parse_conjure_card_name(after_and)?;
         let next_name = &after_and_orig[..next_name_lower.len()];
         cards.push(ConjureCard {
-            name: next_name.to_string(),
+            source: ConjureSource::Named {
+                name: next_name.to_string(),
+            },
             count: QuantityExpr::Fixed { value: 1 },
         });
         next_zone_rest
@@ -4625,6 +4636,71 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
 
     Some(Effect::Conjure {
         cards,
+        destination,
+        tapped,
+    })
+}
+
+/// Digital-only keyword action: Parse "conjure a duplicate of {reference} into/onto {zone}".
+/// The reference is either an explicit target ("target creature card exiled with ~")
+/// or an anaphoric pronoun ("it" / "that card") resolving to the parent target.
+/// The conjured card copies the referenced card's copiable characteristics (CR 707.2).
+fn try_parse_conjure_duplicate(tp: TextPair) -> Option<Effect> {
+    // Gate: must start with "conjure a duplicate of " (nom tag dispatch).
+    let (rest, _) = tag::<_, _, OracleError<'_>>("conjure a duplicate of ")
+        .parse(tp.lower)
+        .ok()?;
+
+    // Split the reference text (before) from the trailing zone clause (the
+    // remaining text starting at the " into "/" onto " connector).
+    let (zone_rest, reference_lower) = alt((
+        take_until::<_, _, OracleError<'_>>(" into "),
+        take_until(" onto "),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // Resolve the reference, but only CLAIM the clause when it is *fully*
+    // modeled — otherwise return None so the card stays a loud
+    // `Effect::Unimplemented` rather than silently dropping a qualifier (a
+    // "swallowed clause", which the coverage-honesty gate rightly rejects).
+    //
+    // "target … card" → an explicit target filter, accepted only if `parse_target`
+    // consumes the entire reference (so e.g. "exiled with ~" can't be dropped).
+    // A bare anaphor ("it" / "that card" / "this card") → the inherited parent
+    // target. Anything else is left loud.
+    let duplicate_of = if tag::<_, _, OracleError<'_>>("target ")
+        .parse(reference_lower)
+        .is_ok()
+    {
+        let (filter, ref_rest) = parse_target(reference_lower);
+        if !ref_rest.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+            return None;
+        }
+        filter
+    } else {
+        match reference_lower.trim() {
+            "it" | "that card" | "this card" => TargetFilter::ParentTarget,
+            _ => return None,
+        }
+    };
+
+    // Parse destination zone and optional "tapped" suffix, then require the
+    // clause to be fully consumed — trailing text would be silently dropped.
+    let (destination, zone_rest) = parse_conjure_zone(zone_rest)?;
+    let (zone_rest, tapped) = match tag::<_, _, OracleError<'_>>(" tapped").parse(zone_rest) {
+        Ok((after, _)) => (after, true),
+        Err(_) => (zone_rest, false),
+    };
+    if !zone_rest.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    Some(Effect::Conjure {
+        cards: vec![ConjureCard {
+            source: ConjureSource::Duplicate { duplicate_of },
+            count: QuantityExpr::Fixed { value: 1 },
+        }],
         destination,
         tapped,
     })
@@ -38732,7 +38808,7 @@ mod tests {
                 tapped,
             } => {
                 assert_eq!(cards.len(), 1);
-                assert_eq!(cards[0].name, "Regal Force");
+                assert_eq!(cards[0].named_name(), Some("Regal Force"));
                 assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 1 });
                 assert_eq!(destination, Zone::Battlefield);
                 assert!(!tapped);
@@ -38751,7 +38827,7 @@ mod tests {
                 tapped,
             } => {
                 assert_eq!(cards.len(), 1);
-                assert_eq!(cards[0].name, "Reassembling Skeleton");
+                assert_eq!(cards[0].named_name(), Some("Reassembling Skeleton"));
                 assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 3 });
                 assert_eq!(destination, Zone::Graveyard);
                 assert!(!tapped);
@@ -38770,7 +38846,7 @@ mod tests {
                 tapped,
             } => {
                 assert_eq!(cards.len(), 1);
-                assert_eq!(cards[0].name, "Forest");
+                assert_eq!(cards[0].named_name(), Some("Forest"));
                 assert_eq!(destination, Zone::Battlefield);
                 assert!(tapped);
             }
@@ -38790,9 +38866,9 @@ mod tests {
                 tapped,
             } => {
                 assert_eq!(cards.len(), 2);
-                assert_eq!(cards[0].name, "Darksteel Ingot");
+                assert_eq!(cards[0].named_name(), Some("Darksteel Ingot"));
                 assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 1 });
-                assert_eq!(cards[1].name, "Darksteel Plate");
+                assert_eq!(cards[1].named_name(), Some("Darksteel Plate"));
                 assert_eq!(cards[1].count, QuantityExpr::Fixed { value: 1 });
                 assert_eq!(destination, Zone::Hand);
                 assert!(!tapped);
@@ -38811,7 +38887,7 @@ mod tests {
                 tapped,
             } => {
                 assert_eq!(cards.len(), 1);
-                assert_eq!(cards[0].name, "Lightning Bolt");
+                assert_eq!(cards[0].named_name(), Some("Lightning Bolt"));
                 assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 4 });
                 assert_eq!(destination, Zone::Library);
                 assert!(!tapped);
@@ -38831,12 +38907,71 @@ mod tests {
                 tapped,
             } => {
                 assert_eq!(cards.len(), 1);
-                assert_eq!(cards[0].name, "Mishra's Foundry");
+                assert_eq!(cards[0].named_name(), Some("Mishra's Foundry"));
                 assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 2 });
                 assert_eq!(destination, Zone::Battlefield);
                 assert!(tapped);
             }
             other => panic!("expected Conjure, got: {other:?}"),
+        }
+    }
+
+    /// CR 707.2: "conjure a duplicate of <anaphoric reference>" copies the
+    /// parent-target card; the reference resolves to `ParentTarget`.
+    #[test]
+    fn conjure_duplicate_anaphoric_into_hand() {
+        let e = parse_effect("conjure a duplicate of that card into your hand");
+        match e {
+            Effect::Conjure {
+                cards,
+                destination,
+                tapped,
+            } => {
+                assert_eq!(cards.len(), 1);
+                assert!(
+                    matches!(
+                        &cards[0].source,
+                        ConjureSource::Duplicate { duplicate_of }
+                            if *duplicate_of == TargetFilter::ParentTarget
+                    ),
+                    "expected Duplicate(ParentTarget), got: {:?}",
+                    cards[0].source
+                );
+                assert_eq!(destination, Zone::Hand);
+                assert!(!tapped);
+            }
+            other => panic!("expected Conjure, got: {other:?}"),
+        }
+    }
+
+    /// CR 707.2: "conjure a duplicate of target … card" — when the target
+    /// reference is fully modeled it parses to a `Duplicate` source carrying that
+    /// target filter; otherwise it is left loud (`Unimplemented`). Either way the
+    /// reference is never silently dropped (no swallowed clause).
+    #[test]
+    fn conjure_duplicate_target_onto_battlefield() {
+        let e = parse_effect("conjure a duplicate of target creature card onto the battlefield");
+        match e {
+            Effect::Conjure {
+                cards, destination, ..
+            } => {
+                assert_eq!(cards.len(), 1);
+                assert!(
+                    matches!(
+                        &cards[0].source,
+                        ConjureSource::Duplicate { duplicate_of }
+                            if *duplicate_of != TargetFilter::ParentTarget
+                                && *duplicate_of != TargetFilter::Any
+                    ),
+                    "a claimed target reference must be a non-trivial Duplicate filter, got: {:?}",
+                    cards[0].source
+                );
+                assert_eq!(destination, Zone::Battlefield);
+            }
+            // Acceptable: target reference not fully modeled, so left loud rather
+            // than silently swallowing the reference.
+            Effect::Unimplemented { .. } => {}
+            other => panic!("expected Conjure or Unimplemented, got: {other:?}"),
         }
     }
 

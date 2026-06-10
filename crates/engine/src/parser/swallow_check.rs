@@ -1974,11 +1974,54 @@ fn detect_condition_as_long_as(
     if any_static_has_per_object_as_long_as_gate(parsed) {
         return;
     }
+    if any_static_has_attached_subject_qualifier_grant(parsed) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "Condition_AsLongAs".into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
+}
+
+/// CR 611.3a + CR 613: an inverted attached-subject grant
+/// ("As long as enchanted/equipped creature is `<characteristic>`, it gets …")
+/// represents its "as long as" qualifier by folding the characteristic into the
+/// grant's `affected` attached-subject filter (e.g. `creature + EnchantedBy +
+/// HasColor{White}`), not as a separate `condition`. The qualifier IS
+/// represented — the static only applies while the host matches the folded
+/// characteristic — so the clause is not swallowed.
+///
+/// This is precise: when the qualifier is unparseable the inverted grant falls
+/// back to `affected: SelfRef` (not an attached-subject filter), so this
+/// exemption never masks a genuinely-dropped qualifier.
+fn any_static_has_attached_subject_qualifier_grant(parsed: &ParsedAbilities) -> bool {
+    parsed.statics.iter().any(|static_def| {
+        static_def.description.as_ref().is_some_and(|description| {
+            let lower = description.to_ascii_lowercase(); // allow-noncombinator: swallow detector marker scan on parsed static description
+            lower.contains("as long as enchanted ") || lower.contains("as long as equipped ")
+        }) && static_def
+            .affected
+            .as_ref()
+            .is_some_and(target_filter_is_attached_subject)
+    })
+}
+
+fn target_filter_is_attached_subject(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                crate::types::ability::FilterProp::EnchantedBy
+                    | crate::types::ability::FilterProp::EquippedBy
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_is_attached_subject)
+        }
+        TargetFilter::Not { filter } => target_filter_is_attached_subject(filter),
+        _ => false,
+    }
 }
 
 fn any_static_has_per_object_as_long_as_gate(parsed: &ParsedAbilities) -> bool {
@@ -2575,6 +2618,33 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn condition_as_long_as_accepts_inverted_attached_subject_color_grant() {
+        // CR 611.3a + CR 613: Shield of the Oversoul folds "is white/green" into
+        // the grant's `affected` attached-subject filter, so the "as long as"
+        // qualifier is represented (not swallowed) despite `condition: None`.
+        let parsed = parse_named(
+            "Enchant creature\n\
+             As long as enchanted creature is white, it gets +1/+1 and has flying.\n\
+             As long as enchanted creature is green, it gets +1/+1 and has indestructible.",
+            "Shield of the Oversoul",
+            &["Enchantment", "Aura"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Condition_AsLongAs"));
+    }
+
+    #[test]
+    fn condition_as_long_as_accepts_inverted_equipped_subject_grant() {
+        let parsed = parse_named(
+            "Equip {2}\nAs long as equipped creature is red, it gets +1/+1 and has haste.",
+            "Test Equipment",
+            &["Artifact", "Equipment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Condition_AsLongAs"));
     }
 
     #[test]
