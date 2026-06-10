@@ -1113,7 +1113,7 @@ fn stack_ability_matches_filter(
     source_controller: PlayerId,
 ) -> bool {
     match filter {
-        TargetFilter::StackAbility { controller } => {
+        TargetFilter::StackAbility { controller, tag } => {
             if !matches!(
                 &entry.kind,
                 // CR 113.3b / CR 113.3c: Activated and triggered abilities are
@@ -1124,6 +1124,16 @@ fn stack_ability_matches_filter(
                     | StackEntryKind::KeywordAction { .. }
             ) {
                 return false;
+            }
+            // CR 113.7a + CR 115.1: when a keyword-origin `tag` is required (e.g.
+            // `AbilityTag::Backup` for "becomes the target of a backup ability"),
+            // the stack ability must carry that tag. The ability exists on the
+            // stack independently of its source, so the tag is read from the
+            // resolved ability itself.
+            if let Some(tag) = tag {
+                if entry.ability().and_then(|a| a.context.ability_tag.as_ref()) != Some(tag) {
+                    return false;
+                }
             }
             stack_entry_controller_matches(entry, controller.as_ref(), source_controller)
         }

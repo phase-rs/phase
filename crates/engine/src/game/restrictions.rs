@@ -581,6 +581,9 @@ fn effective_activation_limit(
         // this fn is only called for abilities carrying an `OnlyOnceEachTurn`
         // restriction, which the synthesized cycling ability never has.
         AbilityTag::Cycling => "cycling",
+        // CR 702.165a: Backup is a triggered ability — it is never activated, so
+        // it carries no activation limit and this arm is unreachable here.
+        AbilityTag::Backup => "backup",
     };
     // Scan battlefield for ModifyActivationLimit statics that affect this keyword
     let mut limit: u32 = 1;

@@ -159,6 +159,7 @@ fn becomes_target_source_filter(controller: ControllerRef) -> TargetFilter {
             },
             TargetFilter::StackAbility {
                 controller: Some(controller),
+                tag: None,
             },
         ],
     }
@@ -6453,6 +6454,9 @@ fn try_parse_event(
         BecomesTargetSpell {
             qualifier: Option<TargetFilter>,
         },
+        /// CR 702.165a: the targeting source is a Backup keyword ability on the
+        /// stack (e.g. Huge Truck "becomes the target of a backup ability").
+        BecomesTargetBackupAbility,
         DealtCombatDamage,
         DealtDamage,
         /// CR 120.10 + CR 120.2b: Excess noncombat damage received by the subject.
@@ -6588,6 +6592,20 @@ fn try_parse_event(
             value(SimpleEvent::TappedForMana, tag("is tapped for mana")),
         ))
         .or(alt((
+            // CR 702.165a: "becomes the target of a backup ability" — the source
+            // is specifically a Backup keyword ability on the stack. Lives in this
+            // second `alt` block (the first hit nom's tuple-arity limit); collision-
+            // free with every arm because no other phrase shares its "of a backup
+            // ability" suffix (neither generic spell-or-ability arm matches it).
+            value(
+                SimpleEvent::BecomesTargetBackupAbility,
+                tag("becomes the target of a backup ability"),
+            ),
+            // CR 115.1: Plural form for batched "become the target" triggers.
+            value(
+                SimpleEvent::BecomesTargetBackupAbility,
+                tag("become the target of a backup ability"),
+            ),
             value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
             // CR 701.26: Plural form for batched "one or more ... become untapped" triggers.
             value(SimpleEvent::BecomesUntapped, tag("become untapped")),
@@ -6696,6 +6714,16 @@ fn try_parse_event(
                     }
                 } else {
                     TargetFilter::StackSpell
+                });
+            }
+            // CR 702.165a + CR 115.1: the targeting source must be a Backup
+            // keyword ability on the stack — filtered by `AbilityTag::Backup`.
+            SimpleEvent::BecomesTargetBackupAbility => {
+                def.mode = TriggerMode::BecomesTarget;
+                set_trigger_subject(&mut def, subject);
+                def.valid_source = Some(TargetFilter::StackAbility {
+                    controller: None,
+                    tag: Some(AbilityTag::Backup),
                 });
             }
             SimpleEvent::DealtCombatDamage => {
@@ -19774,6 +19802,40 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn trigger_becomes_target_of_backup_ability() {
+        // CR 702.165a: Huge Truck pattern — "becomes the target of a backup
+        // ability" parses to a `BecomesTarget` trigger whose `valid_source` is a
+        // stack ability tagged `Backup`, with the subject ("another creature you
+        // control") routed to `valid_card`.
+        let def = parse_trigger_line(
+            "Whenever another creature you control becomes the target of a backup ability, draw a card.",
+            "Huge Truck",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        // valid_source is the new backup-tag stack-ability filter — this is the
+        // assertion that flips if the converter arm is reverted.
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::StackAbility {
+                controller: None,
+                tag: Some(AbilityTag::Backup),
+            })
+        );
+        // Subject: "another creature you control" → Typed creature / You / Another.
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) = def.valid_card.expect("backup trigger has a subject filter")
+        else {
+            panic!("expected a Typed subject filter for the backup trigger");
+        };
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::Another));
     }
 
     #[test]

@@ -11267,7 +11267,8 @@ mod tests {
         assert!(matches!(
             target,
             TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
+                controller: Some(ControllerRef::You),
+                tag: None,
             }
         ));
         assert!(

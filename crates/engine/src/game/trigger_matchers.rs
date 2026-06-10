@@ -8113,6 +8113,7 @@ mod tests {
                 },
                 TargetFilter::StackAbility {
                     controller: Some(controller),
+                    tag: None,
                 },
             ],
         }
@@ -8197,6 +8198,87 @@ mod tests {
         trigger.valid_source = Some(TargetFilter::StackSpell);
 
         // Event: trigger_owner becomes the target of an activated ability
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    /// Build a stack `TriggeredAbility` carrying an optional keyword `ability_tag`,
+    /// mirroring how a synthesized Backup ETB ability reaches the stack.
+    fn setup_with_tagged_triggered_ability(tag: Option<AbilityTag>) -> (GameState, ObjectId) {
+        let mut state = setup();
+        let ability_id = ObjectId(60);
+        let mut ability = ResolvedAbility::new(
+            crate::types::ability::Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(1),
+        );
+        ability.context.ability_tag = tag;
+        state.stack.push_back(StackEntry {
+            id: ability_id,
+            source_id: ObjectId(10),
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(10),
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        (state, ability_id)
+    }
+
+    #[test]
+    fn becomes_target_backup_ability_matches_tagged_source() {
+        // CR 702.165a: a `BecomesTarget` trigger whose `valid_source` filters on
+        // `AbilityTag::Backup` matches when the targeting stack ability carries
+        // that tag (Huge Truck targeted by a backup ability).
+        let (state, ability_id) = setup_with_tagged_triggered_ability(Some(AbilityTag::Backup));
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackAbility {
+            controller: None,
+            tag: Some(AbilityTag::Backup),
+        });
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_backup_ability_rejects_untagged_source() {
+        // CR 702.165a: an untagged stack ability (a plain triggered/activated
+        // ability) is NOT a backup ability and must not fire the trigger.
+        let (state, ability_id) = setup_with_tagged_triggered_ability(None);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(TargetFilter::StackAbility {
+            controller: None,
+            tag: Some(AbilityTag::Backup),
+        });
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,

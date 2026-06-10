@@ -2844,9 +2844,14 @@ pub enum TargetFilter {
     },
     /// Matches non-mana activated or triggered abilities on the stack.
     /// Used by "counter target activated or triggered ability" effects.
+    /// CR 113.7a: once activated or triggered, an ability exists on the stack
+    /// independently of its source — `tag` matches by keyword-origin marker
+    /// (e.g. `AbilityTag::Backup` for "becomes the target of a backup ability").
     StackAbility {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<AbilityTag>,
     },
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
@@ -10067,6 +10072,8 @@ pub enum AbilityTag {
     /// a `GameEvent::Cycled` (CR 702.29c) that "When you cycle this card"
     /// triggers match.
     Cycling,
+    /// CR 702.165a: ability originated from a Backup keyword definition.
+    Backup,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
@@ -14366,7 +14373,13 @@ mod tests {
     #[test]
     fn stack_ability_filter_accepts_legacy_unit_json() {
         let filter: TargetFilter = serde_json::from_str(r#"{"type":"StackAbility"}"#).unwrap();
-        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        );
         assert_eq!(
             serde_json::to_string(&filter).unwrap(),
             r#"{"type":"StackAbility"}"#
@@ -14380,7 +14393,8 @@ mod tests {
         assert_eq!(
             filter,
             TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
+                controller: Some(ControllerRef::You),
+                tag: None
             }
         );
         assert_eq!(

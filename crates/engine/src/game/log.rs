@@ -305,6 +305,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 // CR 702.29c: Cycling emits a dedicated `GameEvent::Cycled`, not a
                 // `KeywordAbilityActivated` event, so this arm is unreachable.
                 AbilityTag::Cycling => " activates cycling: ",
+                // CR 702.165a: Backup is a triggered ability — it never emits a
+                // `KeywordAbilityActivated` event, so this arm is unreachable.
+                AbilityTag::Backup => " activates backup: ",
             };
             vec![
                 player_seg(state, *player_id),
