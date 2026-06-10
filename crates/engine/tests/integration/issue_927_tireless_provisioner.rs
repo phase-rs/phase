@@ -1,5 +1,12 @@
-//! Regression for issue #927: Tireless Provisioner's landfall trigger must
+//! Regression pins for issue #927: Tireless Provisioner's landfall trigger must
 //! prompt the controller to choose Food or Treasure, not auto-resolve a branch.
+//!
+//! Note: these tests pin already-correct engine behavior — they were verified
+//! to pass against the pre-fix `origin/main` engine (the parse, prompt, and
+//! branch routing all held on base). The discriminating coverage for this PR's
+//! engine deltas (empty-chooser fail-loud guard, token-name branch-label
+//! fallback) lives in the `choose_one_of.rs` unit tests, which fail against
+//! the base logic.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
