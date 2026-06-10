@@ -5,7 +5,6 @@ use rand::Rng;
 use crate::game::effects::change_zone;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zones;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -26,22 +25,87 @@ pub(crate) enum DiscardOutcome {
 }
 
 /// CR 701.9a: To discard a card, move it from its owner's hand to their graveyard.
-/// CR 702.187b: Mayhem's cast permission is gated by the graveyard card having
-/// been discarded this turn, so stamp that marker at the same completion point
-/// that records the discard event.
+/// CR 614.6: A `Moved` replacement ("if a card would be put into a graveyard,
+/// exile it instead" — Rest in Peace / Leyline of the Void) watches the
+/// hand → graveyard zone change, so the discard's inner move must be proposed
+/// as a `ZoneChange` and run through the replacement pipeline rather than moved
+/// raw. CR 702.187b: Mayhem's cast permission is gated by the graveyard card
+/// having been discarded this turn, so stamp that marker only when the card
+/// actually reaches the graveyard.
+///
+/// `applied` carries the `HashSet<ReplacementId>` from the outer Discard pass so
+/// re-proposing the inner `ZoneChange` does not re-run Discard-level definitions
+/// (madness) that already applied — this mirrors `discard_applier`'s lowering.
 pub(crate) fn complete_discard_to_graveyard(
     state: &mut GameState,
     object_id: ObjectId,
     player_id: PlayerId,
+    source_id: Option<ObjectId>,
+    applied: HashSet<crate::types::ReplacementId>,
     events: &mut Vec<GameEvent>,
-) {
-    zones::move_to_zone(state, object_id, Zone::Graveyard, events);
+) -> DiscardOutcome {
+    // CR 614.6 + CR 701.9a: lower the accepted discard to an inner hand →
+    // graveyard `ZoneChange` carrying the outer pass's `applied` set, then run
+    // it through the pipeline so `Moved` redirects (Rest in Peace class) get
+    // their consult. A plain discard previously moved raw and never saw them.
+    let proposed = ProposedEvent::ZoneChange {
+        object_id,
+        from: Zone::Hand,
+        to: Zone::Graveyard,
+        cause: source_id,
+        attach_to: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_with_counters: Vec::new(),
+        controller_override: None,
+        enter_transformed: false,
+        face_down_profile: None,
+        applied,
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            change_zone::deliver_replaced_zone_change(state, event, source_id, None, false, events);
+        }
+        ReplacementResult::Prevented => {
+            // CR 614.6: a prevented event never happens — the card never left
+            // the hand, so per CR 701.9a (to discard = move hand → graveyard)
+            // NO discard occurred. Skip record_discard / the Mayhem stamp / the
+            // `Discarded` event. This is distinct from a REDIRECTED discard
+            // (CR 701.9c: a card put elsewhere instead is still discarded —
+            // the Execute arm above and the madness path both record + emit).
+            return DiscardOutcome::Complete;
+        }
+        ReplacementResult::NeedsChoice(player) => {
+            // KNOWN GAP (documented, counter.rs resolve_all style): a CR 616.1
+            // ordering choice on the inner ZoneChange (TWO materially-different
+            // Moved redirects simultaneously applicable to one discard — e.g.
+            // Rest in Peace + Wheel of Sun and Moon) parks here BEFORE the
+            // discard bookkeeping. The paused card delivers via the generic
+            // replacement-choice resume (`handle_replacement_choice`'s
+            // ZoneChange arm), which has no discard context — so for that card
+            // `record_discard` / the Mayhem stamp / the `Discarded` event
+            // ("whenever you discard" triggers, Megrim class) are skipped, and
+            // a multi-card discard's remaining cards are abandoned by the
+            // caller's early return (same systemic shape as the forced-discard
+            // EffectResolved limitation noted in `resolve`). A resume-side
+            // discard-bookkeeping continuation needs a new serialized state
+            // slot + resume wiring; not built for a two-material-redirect board
+            // no parsed deck assembles. Single-redirect boards (RIP alone)
+            // never prompt and are fully correct.
+            return DiscardOutcome::NeedsReplacementChoice(player);
+        }
+    }
     crate::game::restrictions::record_discard(state, player_id);
-    crate::game::restrictions::record_card_discarded(state, object_id);
+    // CR 701.9c + CR 702.187b: stamp the Mayhem discard marker only if the card
+    // actually landed in the graveyard — a redirect (RIP → exile) leaves it
+    // elsewhere, matching the Madness → exile path.
+    if state.objects.get(&object_id).map(|o| o.zone) == Some(Zone::Graveyard) {
+        crate::game::restrictions::record_card_discarded(state, object_id);
+    }
     events.push(GameEvent::Discarded {
         player_id,
         object_id,
     });
+    DiscardOutcome::Complete
 }
 
 /// CR 701.9a: To discard a card, move it from owner's hand to their graveyard.
@@ -121,12 +185,35 @@ pub fn resolve(
                         ProposedEvent::Discard {
                             player_id: pid,
                             object_id: oid,
+                            applied,
                             ..
                         } => {
-                            complete_discard_to_graveyard(state, oid, pid, events);
+                            // CR 614.6: a plain discard's inner hand → graveyard
+                            // move still consults `Moved` redirects (RIP class);
+                            // `complete_discard_to_graveyard` re-proposes it
+                            // carrying `applied` so Discard-level definitions
+                            // don't re-run.
+                            if let DiscardOutcome::NeedsReplacementChoice(player) =
+                                complete_discard_to_graveyard(
+                                    state,
+                                    oid,
+                                    pid,
+                                    Some(ability.source_id),
+                                    applied,
+                                    events,
+                                )
+                            {
+                                state.waiting_for =
+                                    crate::game::replacement::replacement_choice_waiting_for(
+                                        player, state,
+                                    );
+                                return Ok(());
+                            }
                         }
                         zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                             // Replacement redirected (e.g., Madness → exile instead of graveyard).
+                            // The lowered ZoneChange already re-looped through the
+                            // pipeline (CR 616.1f), so `Moved` redirects were consulted.
                             change_zone::deliver_replaced_zone_change(
                                 state, zone_event, None, None, false, events,
                             );
@@ -273,12 +360,22 @@ pub(crate) fn discard_as_cost_with_source(
             ProposedEvent::Discard {
                 player_id: pid,
                 object_id: oid,
+                applied,
                 ..
             } => {
-                complete_discard_to_graveyard(state, oid, pid, events);
+                // CR 614.6: a plain discard's inner hand → graveyard move still
+                // consults `Moved` redirects (RIP class); re-propose carrying the
+                // outer pass's `applied` so Discard-level definitions don't re-run.
+                if let DiscardOutcome::NeedsReplacementChoice(choice_player) =
+                    complete_discard_to_graveyard(state, oid, pid, source_id, applied, events)
+                {
+                    return DiscardOutcome::NeedsReplacementChoice(choice_player);
+                }
             }
             zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                 // CR 614.1c: Replacement redirected destination (e.g., Madness → exile).
+                // The lowered ZoneChange already re-looped through the pipeline
+                // (CR 616.1f), so `Moved` redirects were consulted.
                 // CR 702.35: The card was still discarded — record and emit event
                 // so "whenever you discard" triggers fire.
                 change_zone::deliver_replaced_zone_change(
@@ -345,6 +442,158 @@ mod tests {
             },
         )));
         replacement
+    }
+
+    /// Rest in Peace / Leyline of the Void class: "If a card would be put into a
+    /// graveyard from anywhere, exile it instead." A `Moved` replacement keyed on
+    /// `destination_zone = Graveyard`, hosted on the battlefield permanent (it
+    /// watches OTHER cards, so `valid_card` is `None` = any card). Mirrors the
+    /// parser output of `parse_graveyard_exile_replacement`.
+    fn rest_in_peace_exile_replacement() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ))
+            .destination_zone(Zone::Graveyard)
+    }
+
+    /// D1 discriminating test (CR 614.6): a PLAIN discard's inner hand →
+    /// graveyard move must consult `Moved` redirects. With Rest in Peace on the
+    /// battlefield, a discarded card is exiled, not put into the graveyard. On
+    /// the old path (`complete_discard_to_graveyard` moved raw) the card landed
+    /// in the graveyard and this assertion failed.
+    #[test]
+    fn plain_discard_consults_rest_in_peace_and_exiles() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".into(),
+            Zone::Hand,
+        );
+        // Rest in Peace permanent hosting the graveyard → exile Moved replacement.
+        let rip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rest in Peace".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(rest_in_peace_exile_replacement());
+
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 614.6: the discard was redirected to exile, never reaching the graveyard.
+        assert!(
+            state.exile.contains(&card),
+            "RIP must exile the discarded card"
+        );
+        assert!(!state.players[0].graveyard.contains(&card));
+        // CR 701.9c: still counts as a discard — the event fires for "whenever you discard".
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::Discarded { object_id, .. } if *object_id == card)));
+        // CR 702.187b: the Mayhem marker is NOT stamped when the card was redirected.
+        assert_eq!(state.objects[&card].discarded_turn, None);
+    }
+
+    /// D1 double-consult guard: the madness class (a Discard-level definition
+    /// lowering hand → exile) still works and is not re-applied. The discarded
+    /// card ends in exile via the madness redirect, with no Moved present, and
+    /// the `applied` set prevents the Discard definition from running twice.
+    #[test]
+    fn madness_class_discard_still_works_without_double_consult() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Madness Spell".into(),
+            Zone::Hand,
+        );
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Discard);
+        replacement.valid_card = Some(TargetFilter::SelfRef);
+        replacement.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        )));
+        state
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .replacement_definitions
+            .push(replacement);
+
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.exile.contains(&card),
+            "madness redirects discard to exile"
+        );
+        assert!(!state.players[0].graveyard.contains(&card));
+        // Discarded exactly once.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::Discarded { object_id, .. } if *object_id == card
+                ))
+                .count(),
+            1,
+            "discard recorded exactly once (no double-consult)"
+        );
     }
 
     #[test]

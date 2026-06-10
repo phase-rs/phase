@@ -534,7 +534,7 @@ mod tests {
             ObjectId(999),
             None,
             false,
-            false,
+            crate::types::zones::EtbTapState::Unspecified,
             None,
             &[],
             None,

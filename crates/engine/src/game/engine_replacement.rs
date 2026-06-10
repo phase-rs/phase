@@ -255,8 +255,24 @@ pub(super) fn handle_replacement_choice(
                 // CR 701.17a: Mill accepted after replacement choice — delegate
                 // to the shared helper so count clamping and library movement
                 // match the non-choice delivery.
+                //
+                // CR 616.1: a milled card's own `Moved` replacements (Rest in
+                // Peace + Leyline of the Void class) can surface a per-card
+                // ordering choice mid-delivery. The helper parks that prompt
+                // (`state.waiting_for` set, tail in `pending_batch_deliveries`)
+                // and returns `false`. Early-return so the unconditional
+                // `waiting_for = Priority` reset below does NOT clobber the
+                // parked prompt — mirroring the `apply_etb_counters`
+                // early-return in the ZoneChange arm. The resume path drains the
+                // tail via `zone_pipeline::drain_pending_batch_deliveries`.
                 mill @ ProposedEvent::Mill { .. } => {
-                    let _ = apply_mill_after_replacement(state, mill, events);
+                    // `EffectError` has no `EngineError` conversion here, so the
+                    // prior `let _ =` swallowed it; preserve that by mapping an
+                    // error to "delivered" (no pause) and only reacting to the
+                    // pause signal.
+                    if !apply_mill_after_replacement(state, mill, events).unwrap_or(true) {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 119.1: Life gain accepted after replacement choice.
                 gain @ ProposedEvent::LifeGain { .. } => {
@@ -271,14 +287,27 @@ pub(super) fn handle_replacement_choice(
                 // replacement pipeline may have modified `object_id`/`player_id`
                 // (e.g., Madness redirects surface as a ZoneChange variant handled
                 // by the ZoneChange arm above, not here).
+                //
+                // CR 614.6: the inner hand → graveyard move re-proposes a
+                // `ZoneChange` carrying `applied`, so `Moved` redirects (RIP
+                // class) are consulted here too. A redirect that itself needs a
+                // CR 616.1 choice parks `state.waiting_for`; early-return so the
+                // unconditional reset below does not clobber it.
                 ProposedEvent::Discard {
                     player_id,
                     object_id,
-                    ..
+                    source_id,
+                    applied,
                 } => {
-                    effects::discard::complete_discard_to_graveyard(
-                        state, object_id, player_id, events,
-                    );
+                    if let effects::discard::DiscardOutcome::NeedsReplacementChoice(player) =
+                        effects::discard::complete_discard_to_graveyard(
+                            state, object_id, player_id, source_id, applied, events,
+                        )
+                    {
+                        state.waiting_for =
+                            crate::game::replacement::replacement_choice_waiting_for(player, state);
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 106.3 + CR 106.4: Mana production accepted after replacement choice.
                 // In practice CR 614.5 mana-type replacements don't require a choice and
@@ -446,6 +475,22 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 603.10a + CR 616.1: A simultaneous zone-move batch (mill or
+            // mass bounce) paused mid-delivery because an object's Moved
+            // replacements needed an ordering choice (Rest in Peace + Leyline of
+            // the Void class). The chosen event was delivered by the ZoneChange
+            // arm above; drain the parked tail. The drain may re-park when the
+            // next object surfaces its own prompt — in that case it sets
+            // `state.waiting_for` for us to propagate.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_batch_deliveries.is_some()
+            {
+                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_copy_token_resolution.is_some()
             {
@@ -543,6 +588,15 @@ pub(super) fn handle_replacement_choice(
                     player: state.active_player,
                 };
                 effects::token_copy::drain_pending_copy_token_resolution(state, events);
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 603.10a + CR 616.1: the paused batch object's event was
+            // prevented outright — the remaining parked tail still delivers.
+            if state.pending_batch_deliveries.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
                 return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,

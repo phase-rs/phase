@@ -380,15 +380,48 @@ pub(super) fn handle_resolution_choice(
             crate::game::morph::manifest_card(state, player, manifest_id, events)
                 .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
 
-            for card_id in graveyard_cards {
-                zones::move_to_zone(state, card_id, Zone::Graveyard, events);
+            // CR 614.6 + CR 701.17a class: route the non-manifested cards to the
+            // graveyard through the simultaneous-move batch so each card's own
+            // `Moved` redirects (Rest in Peace / Leyline of the Void: "would be
+            // put into a graveyard from anywhere → exile instead") fire — a raw
+            // `move_to_zone` proposed no per-card ZoneChange and silently skipped
+            // them. The reveal-marker cleanup is the post-loop work; it must run
+            // exactly once after the whole pile lands, so on a mid-pile CR 616.1
+            // pause it is deferred onto the parked batch tail and the drain runs
+            // it. The common single-redirect path never pauses and runs cleanup
+            // inline below.
+            let reqs: Vec<_> = graveyard_cards
+                .iter()
+                .map(|&card_id| {
+                    crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                        card_id,
+                        Zone::Graveyard,
+                        card_id,
+                    )
+                })
+                .collect();
+            // The reveal-marker cleanup + continuation drain (the post-loop work)
+            // is carried as the batch completion so it runs exactly once whether
+            // the pile lands synchronously or across a CR 616.1 pause.
+            let completion = crate::types::game_state::BatchCompletion::ManifestDreadCleanup {
+                player,
+                revealed: cards,
+            };
+            match crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                reqs,
+                Some(completion),
+                events,
+            ) {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {
+                    // `move_objects_simultaneously_then` already ran the
+                    // completion (reveal-marker cleanup + `finish_with_continuation`).
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
             }
-
-            for &card_id in &cards {
-                state.revealed_cards.remove(&card_id);
-            }
-
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
             WaitingFor::CastOffer {
@@ -469,23 +502,65 @@ pub(super) fn handle_resolution_choice(
         ) => {
             let mut misses = revealed_misses;
             if accept {
-                zones::move_to_zone(state, hit_card, accept_zone, events);
-                // CR 110.5b: the kept card enters tapped when requested.
-                if enter_tapped.resolve(false) {
-                    if let Some(obj) = state.objects.get_mut(&hit_card) {
-                        obj.tapped = true;
+                if accept_zone == Zone::Battlefield {
+                    // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield
+                    // entry through the zone-change pipeline so the delivery tail
+                    // seeds intrinsic enters-with counters (a kept planeswalker /
+                    // battle must enter with its loyalty / defense or it dies to
+                    // CR 704.5i) and applies the CR 614.1 tap-state. Mirrors the
+                    // synchronous `reveal_until::resolve` battlefield path. The
+                    // previous manual `obj.tapped = true` is dropped (the tail does
+                    // it from the seeded `EntryMods`).
+                    let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                        hit_card,
+                        Zone::Battlefield,
+                        source_id,
+                    );
+                    req.mods.enter_tapped = enter_tapped;
+                    match crate::game::zone_pipeline::move_object(state, req, events) {
+                        crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                        // CR 303.4f / CR 616.1: the accepted card's battlefield
+                        // entry paused on an as-enters choice. The pause is parked
+                        // centrally; defer the rest-pile move + reveal-marker
+                        // cleanup onto the batch tail so the drain runs it once the
+                        // entry resolves — otherwise the misses strand (the
+                        // early-`return` bug). `EffectResolved` was already emitted
+                        // before this prompt, so the completion does not re-emit it.
+                        crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                        | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            let mut clear_markers = misses.clone();
+                            clear_markers.push(hit_card);
+                            crate::game::zone_pipeline::defer_completion_on_pause(
+                                state,
+                                crate::types::game_state::BatchCompletion::RevealRestPile {
+                                    player,
+                                    rest_cards: misses,
+                                    rest_destination,
+                                    clear_markers,
+                                    publish_tracked_set: None,
+                                    emit_reveal_until_resolved: None,
+                                },
+                            );
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     }
-                }
-                // CR 508.4: "...tapped and attacking" — place the accepted card
-                // in combat. `source_id` (the ability source / trigger attacker)
-                // supplies the defending player, matching the synchronous path.
-                if enters_attacking && accept_zone == Zone::Battlefield {
-                    let controller = state
-                        .objects
-                        .get(&hit_card)
-                        .map(|obj| obj.controller)
-                        .unwrap_or(player);
-                    crate::game::combat::enter_attacking(state, hit_card, source_id, controller);
+                    // CR 508.4: "...tapped and attacking" — place the accepted card
+                    // in combat. `source_id` (the ability source / trigger attacker)
+                    // supplies the defending player, matching the synchronous path.
+                    if enters_attacking {
+                        let controller = state
+                            .objects
+                            .get(&hit_card)
+                            .map(|obj| obj.controller)
+                            .unwrap_or(player);
+                        crate::game::combat::enter_attacking(
+                            state, hit_card, source_id, controller,
+                        );
+                    }
+                } else {
+                    zones::move_to_zone(state, hit_card, accept_zone, events);
                 }
             } else if decline_zone == rest_destination {
                 misses.push(hit_card);
@@ -1146,6 +1221,7 @@ pub(super) fn handle_resolution_choice(
                 kept_destination,
                 rest_destination,
                 enter_tapped,
+                source_id: dig_source_id,
                 ..
             },
             GameAction::SelectCards { cards: kept },
@@ -1211,11 +1287,54 @@ pub(super) fn handle_resolution_choice(
             }
             if let Some(kept_zone) = kept_destination {
                 for &obj_id in &kept {
-                    zones::move_to_zone(state, obj_id, kept_zone, events);
-                    if enter_tapped && kept_zone == Zone::Battlefield {
-                        if let Some(obj) = state.objects.get_mut(&obj_id) {
-                            obj.tapped = true;
+                    if kept_zone == Zone::Battlefield {
+                        // CR 614.1c + CR 306.5b / CR 310.4b: route battlefield
+                        // entries through the zone-change pipeline so the delivery
+                        // tail seeds intrinsic enters-with counters and applies the
+                        // CR 614.1 tap-state. The previous manual `obj.tapped` is
+                        // dropped (the tail does it from the seeded EntryMods).
+                        // CR 400.7: attribute the entry to the dig's source when
+                        // known; otherwise the moved object anchors itself (the
+                        // pre-pipeline raw move recorded no source).
+                        let mut req = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                            obj_id,
+                            Zone::Battlefield,
+                            dig_source_id.unwrap_or(obj_id),
+                        );
+                        req.mods.enter_tapped =
+                            crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
+                        match crate::game::zone_pipeline::move_object(state, req, events) {
+                            crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+                            // CR 303.4f / CR 616.1: the kept card's battlefield
+                            // entry paused on an as-enters choice (aura host pick /
+                            // replacement ordering). The pause is already parked;
+                            // defer the rest-pile move + tracked-set publish +
+                            // continuation wiring onto the batch tail so the drain
+                            // runs it once the entry resolves — otherwise the
+                            // unkept cards strand in the library (they were not yet
+                            // moved). The drain fires on both the replacement-choice
+                            // resume and the aura-attachment resume.
+                            crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                            | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                crate::game::zone_pipeline::defer_completion_on_pause(
+                                    state,
+                                    crate::types::game_state::BatchCompletion::RevealRestPile {
+                                        player,
+                                        rest_cards: unkept.clone(),
+                                        rest_destination: rest_destination
+                                            .unwrap_or(Zone::Graveyard),
+                                        clear_markers: Vec::new(),
+                                        publish_tracked_set: Some(kept.clone()),
+                                        emit_reveal_until_resolved: None,
+                                    },
+                                );
+                                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                         }
+                    } else {
+                        zones::move_to_zone(state, obj_id, kept_zone, events);
                     }
                 }
             }
@@ -1259,23 +1378,39 @@ pub(super) fn handle_resolution_choice(
                 .filter(|id| !top_cards.contains(id))
                 .copied()
                 .collect();
-            // CR 701.25a: every looked-at card not kept on top is put into the
-            // graveyard (emitting its zone-change events).
-            for &obj_id in &to_graveyard {
-                zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-            }
-            // CR 701.25a: the kept cards rest on top of the library in the
-            // player's chosen order (top_cards[0] becomes the topmost card).
-            let player_state = state
-                .players
-                .iter_mut()
-                .find(|candidate| candidate.id == player)
-                .expect("player exists");
-            player_state.library.retain(|id| !top_cards.contains(id));
-            for (index, &card_id) in top_cards.iter().enumerate() {
-                player_state.library.insert(index, card_id);
-            }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            // CR 701.25a + CR 614.6: every looked-at card not kept on top is put
+            // into the graveyard through the simultaneous-move batch so each
+            // card's own `Moved` redirects (Rest in Peace / Leyline of the Void:
+            // "would be put into a graveyard from anywhere → exile instead") fire.
+            // A raw `move_to_zone` proposed no per-card ZoneChange and silently
+            // skipped them. The kept-on-top library placement is the post-loop
+            // work; it must run exactly once after the whole pile lands, so on a
+            // mid-pile CR 616.1 pause it is deferred onto the parked batch tail
+            // and the drain runs it. The common single-redirect path never pauses
+            // and runs the placement inline below.
+            let reqs: Vec<_> = to_graveyard
+                .iter()
+                .map(|&obj_id| {
+                    crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                        obj_id,
+                        Zone::Graveyard,
+                        obj_id,
+                    )
+                })
+                .collect();
+            // The kept-on-top library placement + continuation drain (the
+            // post-loop work) is carried as the batch completion so it runs
+            // exactly once whether the pile lands synchronously or across a CR
+            // 616.1 pause.
+            let completion =
+                crate::types::game_state::BatchCompletion::SurveilKeepOnTop { player, top_cards };
+            crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                reqs,
+                Some(completion),
+                events,
+            );
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
             WaitingFor::RevealChoice {
@@ -1743,7 +1878,6 @@ pub(super) fn handle_resolution_choice(
                 let is_partition = !matches!(
                     cont.chain.effect,
                     crate::types::ability::Effect::PutCounter { .. }
-                        | crate::types::ability::Effect::AddCounter { .. }
                 );
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {
@@ -3010,6 +3144,93 @@ fn finish_with_continuation(
     set_priority(state, player);
     effects::drain_pending_continuation(state, events);
     state.waiting_for.clone()
+}
+
+/// CR 701.25a / manifest dread: run the post-loop cleanup a rest-pile batch
+/// deferred when it paused mid-pile. Called by
+/// `zone_pipeline::drain_pending_batch_deliveries` the moment the batch tail
+/// empties, so the kept-card placement / reveal-marker cleanup and the
+/// continuation drain happen exactly once — the same effect the synchronous
+/// (never-paused) path runs inline.
+pub(crate) fn run_batch_completion(
+    state: &mut GameState,
+    completion: crate::types::game_state::BatchCompletion,
+    events: &mut Vec<GameEvent>,
+) {
+    use crate::types::game_state::BatchCompletion;
+    match completion {
+        BatchCompletion::SurveilKeepOnTop { player, top_cards } => {
+            surveil_keep_on_top(state, player, &top_cards);
+            finish_with_continuation(state, player, events);
+        }
+        BatchCompletion::ManifestDreadCleanup { player, revealed } => {
+            for card_id in &revealed {
+                state.revealed_cards.remove(card_id);
+            }
+            finish_with_continuation(state, player, events);
+        }
+        // CR 701.20b: The kept card's battlefield entry paused (aura host pick /
+        // replacement ordering). Now that it has resolved, move the unkept rest
+        // pile, clear the reveal markers, run the dig tracked-set publish +
+        // continuation wiring (if any), then drain the continuation — exactly the
+        // tail the synchronous path runs inline.
+        BatchCompletion::RevealRestPile {
+            player,
+            rest_cards,
+            rest_destination,
+            clear_markers,
+            publish_tracked_set,
+            emit_reveal_until_resolved,
+        } => {
+            // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
+            // through `route_rest_partition` (ordered library bottom); the
+            // reveal-until path routes through `move_rest` (CR 701.20a — "on the
+            // bottom of your library in a random order" shuffles). Dispatch on the
+            // dig-only payload so each site keeps its synchronous semantics.
+            if publish_tracked_set.is_some() {
+                route_rest_partition(state, &rest_cards, rest_destination, events);
+            } else {
+                effects::reveal_until::move_rest(state, &rest_cards, rest_destination, events);
+            }
+            for card_id in &clear_markers {
+                state.revealed_cards.remove(card_id);
+            }
+            if let Some(kept) = publish_tracked_set {
+                effects::publish_fresh_tracked_set(state, kept.clone());
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
+                    cont.chain.context.optional_effect_performed = !kept.is_empty();
+                }
+            }
+            if let Some(source_id) = emit_reveal_until_resolved {
+                events.push(crate::types::events::GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::RevealUntil,
+                    source_id,
+                });
+            }
+            finish_with_continuation(state, player, events);
+        }
+    }
+}
+
+/// CR 701.25a: place the kept surveil cards on top of the player's library in
+/// the chosen order (`top_cards[0]` becomes the topmost card). Shared by the
+/// synchronous surveil handler and the deferred batch completion so the ordering
+/// is identical on both paths.
+fn surveil_keep_on_top(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    top_cards: &[ObjectId],
+) {
+    let player_state = state
+        .players
+        .iter_mut()
+        .find(|candidate| candidate.id == player)
+        .expect("player exists");
+    player_state.library.retain(|id| !top_cards.contains(id));
+    for (index, &card_id) in top_cards.iter().enumerate() {
+        player_state.library.insert(index, card_id);
+    }
 }
 
 fn resume_with_error_propagation(

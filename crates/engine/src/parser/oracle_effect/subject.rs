@@ -2,6 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::combinator::{all_consuming, map, opt, rest, value, verify};
+use nom::multi::separated_list1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
@@ -2651,104 +2652,117 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
     )
 }
 
+/// One verb-phrase atom of a "can't …" restriction list, mapped to the
+/// `StaticMode`(s) it denies.
+///
+/// The negation prefix and list separators are owned by
+/// [`parse_restriction_modes`]; atoms never re-encode "can't". Compound
+/// Oracle wordings ("can't attack, block, or crew Vehicles" — Bound in Gold;
+/// "can't block or be blocked"; "can't be equipped or enchanted") are list
+/// compositions of these atoms, never enumerated permutations — each
+/// compound emits exactly its members' modes (so "equipped or enchanted"
+/// does NOT collapse to a CantBeAttached superset; Fortifications are
+/// excluded by the Oracle wording).
+fn parse_restriction_list_atom(input: &str) -> OracleResult<'_, Vec<StaticMode>> {
+    alt((
+        // CR 508.1d: attack restriction.
+        value(vec![StaticMode::CantAttack], tag("attack")),
+        // CR 509.1a: "block this creature" / "block ~" / "block it" —
+        // source-referential variant used by activated abilities; the mode
+        // applies to the subject (the would-be blocker), so the object is
+        // not encoded. Must precede the bare "block" atom.
+        value(
+            vec![StaticMode::CantBlock],
+            (
+                tag("block "),
+                alt((tag("this creature"), tag("~"), tag("it"))),
+            ),
+        ),
+        // CR 509.1a: block restriction.
+        value(vec![StaticMode::CantBlock], tag("block")),
+        // CR 509.1a: "be blocked [this turn]". Followed-by-filter forms
+        // ("… except by <filter>", "… by <filter>") fail the outer
+        // all_consuming list and fall through to their dedicated arms.
+        value(
+            vec![StaticMode::CantBeBlocked],
+            (tag("be blocked"), opt(tag(" this turn"))),
+        ),
+        // CR 701.21: sacrifice prohibition.
+        value(
+            vec![StaticMode::Other("CantBeSacrificed".to_string())],
+            tag("be sacrificed"),
+        ),
+        // CR 702.5: aura attachment prohibition. The bare "enchanted"
+        // alternate covers the elided-"be" second leg of "can't be equipped
+        // or enchanted" (the negation and "be" distribute over the list).
+        value(
+            vec![StaticMode::Other("CantBeEnchanted".to_string())],
+            (
+                alt((tag("be enchanted"), tag("enchanted"))),
+                opt(tag(" by other auras")),
+            ),
+        ),
+        // CR 702.6: equipment attachment prohibition.
+        value(
+            vec![StaticMode::Other("CantBeEquipped".to_string())],
+            tag("be equipped"),
+        ),
+        // CR 101.2: "be countered" overrides counterspell effects; the
+        // subject path owns the "spells you control" / "green spells you
+        // control" grammar.
+        value(vec![StaticMode::CantBeCountered], tag("be countered")),
+        // CR 701.27: transform prohibition (e.g., Immerwolf).
+        value(
+            vec![StaticMode::Other("CantTransform".to_string())],
+            tag("transform"),
+        ),
+        // CR 702.122c: "crew [Vehicles]".
+        value(
+            vec![StaticMode::CantCrew],
+            (tag("crew"), opt(tag(" vehicles"))),
+        ),
+    ))
+    .parse(input)
+}
+
 /// Parse restriction predicates into one or more `StaticMode` variants.
 /// Handles simple ("can't block") and compound ("can't attack or block") patterns.
 pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
-    // CR 701.21: "~ can't be sacrificed" — prohibition on sacrifice.
-    if lower == "can't be sacrificed" || lower == "cannot be sacrificed" {
-        return Some(vec![StaticMode::Other("CantBeSacrificed".to_string())]);
-    }
-    // CR 702.5: "~ can't be enchanted [by other auras]" — aura attachment prohibition.
-    if lower == "can't be enchanted"
-        || lower == "cannot be enchanted"
-        || lower == "can't be enchanted by other auras"
-        || lower == "cannot be enchanted by other auras"
+    // Negation prefix × verb-phrase-list grammar (CLAUDE.md "Compose nom
+    // combinators, don't enumerate permutations"): "can't"/"cannot" applies
+    // once and distributes over a comma/or-separated list of
+    // [`parse_restriction_list_atom`]s, covering every compound wording
+    // without enumerating the cross-product. Parameterized forms that carry
+    // a trailing filter ("… except by <filter>", "… by <filter>") fail the
+    // all_consuming list and fall through to their dedicated arms below.
+    if let Ok((_, atom_modes)) = all_consuming(preceded(
+        (
+            alt((tag::<_, _, OracleError<'_>>("can't"), tag("cannot"))),
+            tag(" "),
+        ),
+        // A static line's terminal period can reach here (the predicate keeps it
+        // when no trailing duration strips it), so absorb an optional trailing
+        // "." in the combinator before `all_consuming`'s eof rather than trimming
+        // the input — mirroring the dedicated `can't be regenerated` arm below.
+        terminated(
+            separated_list1(
+                alt((tag(", or "), tag(", "), tag(" or "))),
+                parse_restriction_list_atom,
+            ),
+            opt(tag(".")),
+        ),
+    ))
+    .parse(lower)
     {
-        return Some(vec![StaticMode::Other("CantBeEnchanted".to_string())]);
-    }
-    // CR 702.6: "~ can't be equipped" — equipment attachment prohibition.
-    if lower == "can't be equipped" || lower == "cannot be equipped" {
-        return Some(vec![StaticMode::Other("CantBeEquipped".to_string())]);
-    }
-    // CR 701.3 + CR 702.5 + CR 702.6: "can't be equipped or enchanted" compound —
-    // binds to both attach-type prohibitions. Fortifications are excluded by the
-    // Oracle wording, so we do NOT emit CantBeAttached (which is a superset).
-    if lower == "can't be equipped or enchanted" || lower == "cannot be equipped or enchanted" {
-        return Some(vec![
-            StaticMode::Other("CantBeEquipped".to_string()),
-            StaticMode::Other("CantBeEnchanted".to_string()),
-        ]);
-    }
-    // CR 701.27: "~ can't transform" — prohibition on transform (e.g., Immerwolf).
-    if lower == "can't transform" || lower == "cannot transform" {
-        return Some(vec![StaticMode::Other("CantTransform".to_string())]);
+        return Some(atom_modes.concat());
     }
     // CR 701.19c: "~ can't be regenerated" — marks the subject so regeneration
     // shields are not applied. Backstop for the "cannot" phrasing and any caller
     // that routes through the generic " can't " / " cannot " split before
     // reaching the dedicated arm in `try_parse_subject_restriction_clause`.
+    // Kept outside the atom list: it tolerates a trailing period.
     if parse_cant_be_regenerated_predicate(lower.trim()).is_ok() {
         return Some(vec![StaticMode::CantBeRegenerated]);
-    }
-    // CR 101.2: Spell/ability restriction predicate; the subject path owns
-    // the "spells you control" / "green spells you control" grammar.
-    if lower == "can't be countered" || lower == "cannot be countered" {
-        return Some(vec![StaticMode::CantBeCountered]);
-    }
-    // Simple restrictions
-    if lower == "can't block" || lower == "cannot block" {
-        return Some(vec![StaticMode::CantBlock]);
-    }
-    // "can't block this creature" / "can't block ~" — source-referential variant used in
-    // activated abilities; grants CantBlock to the targeted creature (CR 509.1a).
-    if let Ok((rest, _)) = alt((
-        tag::<_, _, OracleError<'_>>("can't block "),
-        tag("cannot block "),
-    ))
-    .parse(lower)
-    {
-        let rest = rest.trim();
-        if rest == "this creature" || rest == "~" || rest == "it" {
-            return Some(vec![StaticMode::CantBlock]);
-        }
-    }
-    if lower == "can't attack" || lower == "cannot attack" {
-        return Some(vec![StaticMode::CantAttack]);
-    }
-    if lower == "can't be blocked"
-        || lower == "cannot be blocked"
-        || lower == "can't be blocked this turn"
-        || lower == "cannot be blocked this turn"
-    {
-        return Some(vec![StaticMode::CantBeBlocked]);
-    }
-    // CR 508.1d + CR 509.1a: Compound "can't attack or block"
-    if lower == "can't attack or block" || lower == "cannot attack or block" {
-        return Some(vec![StaticMode::CantAttack, StaticMode::CantBlock]);
-    }
-    // CR 702.122c: "~ can't crew [Vehicles]"
-    if lower == "can't crew"
-        || lower == "cannot crew"
-        || lower == "can't crew vehicles"
-        || lower == "cannot crew vehicles"
-    {
-        return Some(vec![StaticMode::CantCrew]);
-    }
-    // CR 508.1d + CR 509.1a + CR 702.122c: Bound in Gold / Intercessor's Arrest
-    if lower == "can't attack, block, or crew vehicles"
-        || lower == "cannot attack, block, or crew vehicles"
-        || lower == "can't attack, block, or crew"
-        || lower == "cannot attack, block, or crew"
-    {
-        return Some(vec![
-            StaticMode::CantAttack,
-            StaticMode::CantBlock,
-            StaticMode::CantCrew,
-        ]);
-    }
-    // CR 509.1a + "can't be blocked": Compound "can't block or be blocked"
-    if lower == "can't block or be blocked" || lower == "cannot block or be blocked" {
-        return Some(vec![StaticMode::CantBlock, StaticMode::CantBeBlocked]);
     }
     // CR 509.1b + CR 611.2: "can't be blocked [this turn] except by <filter>" —
     // granted evasion restriction (Fast // Furious: "It can't be blocked this turn
@@ -4284,6 +4298,40 @@ mod tests {
                 StaticMode::CantCrew,
             ])
         );
+    }
+
+    #[test]
+    fn parse_restriction_modes_tolerates_trailing_period() {
+        // A static line's terminal period can reach `parse_restriction_modes`
+        // (e.g. via `try_parse_subject_restriction_clause`, whose predicate keeps
+        // the period when no trailing duration strips it). The compound atom-list
+        // grammar must tolerate it, matching the dedicated `can't be regenerated`
+        // arm which already does.
+        assert_eq!(
+            parse_restriction_modes("can't attack or block."),
+            Some(vec![StaticMode::CantAttack, StaticMode::CantBlock])
+        );
+    }
+
+    #[test]
+    fn cant_attack_or_block_with_trailing_period_builds_both_modes() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "Creatures you control can't attack or block.",
+            &mut ctx,
+        )
+        .expect("compound restriction with a trailing period should parse");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+        let modes: Vec<_> = static_abilities.iter().map(|s| s.mode.clone()).collect();
+        assert_eq!(modes, vec![StaticMode::CantAttack, StaticMode::CantBlock]);
     }
 
     #[test]

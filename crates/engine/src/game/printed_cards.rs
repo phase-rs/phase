@@ -749,7 +749,6 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Untap { .. }
         | Effect::TapAll { .. }
         | Effect::UntapAll { .. }
-        | Effect::AddCounter { .. }
         | Effect::RemoveCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }

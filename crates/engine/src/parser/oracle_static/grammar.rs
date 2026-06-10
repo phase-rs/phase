@@ -1091,9 +1091,6 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
             crate::parser::oracle::strip_activated_constraints(effect_text);
         let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
         def.cost = Some(cost);
-        if constraints.sorcery_speed() {
-            def.sorcery_speed = true;
-        }
         def.activation_restrictions.extend(constraints.restrictions);
         def.description = Some(text.to_string());
         def

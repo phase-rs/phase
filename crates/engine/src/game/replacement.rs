@@ -3290,6 +3290,27 @@ pub fn find_applicable_replacements(
         ProposedEvent::Discard { object_id, .. } => Some(*object_id),
         _ => None,
     };
+    // CR 608.2n + CR 614.1a + CR 614.12: A spell on the stack can carry its own
+    // self-scoped `Moved` replacement that fires as it leaves the stack ("If
+    // this spell would be put into your graveyard, exile it instead" — the
+    // Invoke Calamity free-cast rider). The default `[Battlefield, Command]`
+    // scan misses a stack-resident object, and the `is_entering` exception is
+    // gated on `to: Battlefield`, so a stack→graveyard self-move would not
+    // discover the object's own replacement. Mirror the entering-object
+    // exception's shape: include the MOVING object as a candidate source when
+    // its own move originates on the stack. This is a per-event check on the one
+    // moving object (no extra zone sweep) — the loop below still iterates the
+    // same `active_replacements` set; this only lets that one object pass the
+    // zone gate, and the `is_stack_self_move && !in_scanned_zone` SelfRef guard
+    // keeps it scoped to that object's own definitions.
+    let stack_self_moving_object_id = match event {
+        ProposedEvent::ZoneChange {
+            object_id,
+            from: Zone::Stack,
+            ..
+        } => Some(*object_id),
+        _ => None,
+    };
 
     let zones_to_scan = [Zone::Battlefield, Zone::Command];
     // CR 702.26b + CR 114.4: `active_replacements` owns the phased-out /
@@ -3301,6 +3322,9 @@ pub fn find_applicable_replacements(
         let in_scanned_zone = zones_to_scan.contains(&obj.zone);
         let is_entering = entering_object_id == Some(obj.id);
         let is_being_discarded = discarding_object_id == Some(obj.id);
+        // CR 608.2n + CR 614.1a: the stack-resident object whose own move this
+        // event represents (see `stack_self_moving_object_id` above).
+        let is_stack_self_move = stack_self_moving_object_id == Some(obj.id);
 
         // CR 702.52a: Dredge functions only while the card is in a player's
         // graveyard. The default Battlefield/Command scan misses it, so include a
@@ -3321,7 +3345,12 @@ pub fn find_applicable_replacements(
                         .is_some_and(|p| p.library.len() as u32 >= *n))
             });
 
-        if !in_scanned_zone && !is_entering && !is_being_discarded && !is_applicable_dredge {
+        if !in_scanned_zone
+            && !is_entering
+            && !is_being_discarded
+            && !is_applicable_dredge
+            && !is_stack_self_move
+        {
             continue;
         }
 
@@ -3339,6 +3368,15 @@ pub fn find_applicable_replacements(
                 continue;
             }
             if is_being_discarded
+                && !in_scanned_zone
+                && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
+            {
+                continue;
+            }
+            // CR 614.12: a stack-resident object reached only via the
+            // stack-self-move exception can apply only its own self-replacement
+            // effects (mirrors the entering-object / discarded-card guards).
+            if is_stack_self_move
                 && !in_scanned_zone
                 && repl_def.valid_card != Some(crate::types::ability::TargetFilter::SelfRef)
             {
@@ -3796,11 +3834,6 @@ fn extract_etb_counters_from_effect(
             counter_type,
             count,
             ..
-        }
-        | Effect::AddCounter {
-            counter_type,
-            count,
-            ..
         } => {
             // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
             // object for ETB replacements. `CostXPaid` reads the spell's paid X
@@ -3891,9 +3924,6 @@ impl EventModifiers {
             } | Effect::Untap {
                 target: TargetFilter::SelfRef,
             } | Effect::PutCounter {
-                target: TargetFilter::SelfRef,
-                ..
-            } | Effect::AddCounter {
                 target: TargetFilter::SelfRef,
                 ..
             } | Effect::ChangeZone { .. }

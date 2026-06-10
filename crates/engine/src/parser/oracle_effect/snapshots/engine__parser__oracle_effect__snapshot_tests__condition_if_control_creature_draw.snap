@@ -20,7 +20,6 @@ expression: def
   "duration": null,
   "description": null,
   "target_prompt": null,
-  "sorcery_speed": false,
   "condition": {
     "type": "QuantityCheck",
     "lhs": {

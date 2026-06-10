@@ -1,13 +1,11 @@
 use rand::seq::SliceRandom;
 
-use crate::game::effects::change_zone;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::zones::Zone;
 
 /// Seek — MTG Arena Alchemy digital-only mechanic. No CR rule number applies.
 /// Randomly pick card(s) from library matching filter, put to destination.
@@ -69,34 +67,41 @@ pub fn resolve(
     matching.shuffle(&mut state.rng);
     let pick_count = count.min(matching.len());
 
-    for &card_id in &matching[..pick_count] {
-        match destination {
-            Zone::Battlefield => {
-                // Route through replacement pipeline for ETB effects
-                change_zone::execute_zone_move(
-                    state,
-                    card_id,
-                    Zone::Library,
-                    Zone::Battlefield,
-                    ability.source_id,
-                    None,
-                    false,
-                    enter_tapped.is_tapped(),
-                    None,
-                    &[],
-                    None,
-                    crate::game::exile_links::should_track_exiled_by_source(
-                        state,
-                        ability.source_id,
-                        ability,
-                    ),
-                    events,
-                );
+    // CR 614.6: route every sought card through the zone-change pipeline
+    // (`zone_pipeline::move_objects_simultaneously`) rather than a raw move for
+    // non-battlefield destinations. The raw move never proposed a per-card
+    // ZoneChange, so a `Moved` redirect ("if a card would be put into a
+    // graveyard/hand from anywhere, ... instead") never fired; the battlefield
+    // path already used the pipeline for ETB effects, so both destinations now
+    // share one entry. Attribution stays `ability.source_id` so battlefield
+    // entries record `entered_via_ability_source` and exile-link tracking keys
+    // off the seek's source, matching the pre-batch single-move behavior.
+    let track_exiled =
+        crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
+    let reqs: Vec<ZoneMoveRequest> = matching[..pick_count]
+        .iter()
+        .map(|&card_id| {
+            let mut req = ZoneMoveRequest::effect(card_id, destination, ability.source_id);
+            req.mods.enter_tapped = enter_tapped;
+            if track_exiled {
+                req = req.track_exiled_by_source();
             }
-            _ => {
-                zones::move_to_zone(state, card_id, destination, events);
-            }
-        }
+            req
+        })
+        .collect();
+
+    // CR 616.1: a `Moved` redirect (or, for a battlefield entry, an as-enters
+    // choice) can surface a player choice mid-batch. `move_objects_simultaneously`
+    // parks `state.waiting_for` and stashes the undelivered tail in
+    // `state.pending_batch_deliveries`; bail before emitting `EffectResolved` so
+    // the surfaced prompt is not clobbered and no later pick overwrites the
+    // parked replacement. The resume path
+    // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the batch.
+    if matches!(
+        zone_pipeline::move_objects_simultaneously(state, reqs, events),
+        BatchMoveResult::NeedsChoice
+    ) {
+        return Ok(());
     }
 
     events.push(GameEvent::EffectResolved {
@@ -117,6 +122,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     fn make_seek_ability(filter: TargetFilter, count: u32) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -399,6 +405,112 @@ mod tests {
         let player = &state.players[0];
         assert!(!player.hand.contains(&land));
         assert!(player.hand.contains(&creature));
+    }
+
+    /// D2 discriminating test (CR 616.1): a multi-card seek whose per-card moves
+    /// surface a replacement-ordering choice must PARK the prompt and stash the
+    /// undelivered tail — never push `EffectResolved` over the parked prompt nor
+    /// overwrite `pending_replacement` with a later pick. Two simultaneously-
+    /// applicable graveyard→exile redirects make each seeked-to-graveyard card
+    /// prompt for CR 616.1 ordering, so the first card pauses the batch.
+    ///
+    /// On the old per-card loop (raw `move_to_zone`, ignored result) the loop
+    /// ran to completion and emitted `EffectResolved` over the parked state.
+    #[test]
+    fn seek_parks_on_per_card_replacement_choice_and_stashes_tail() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Two graveyard→exile Moved redirects → CR 616.1 ordering prompt per card.
+        for (desc, card) in [
+            ("Rest in Peace redirect", CardId(1000)),
+            ("Leyline of the Void redirect", CardId(1001)),
+        ] {
+            let source = create_object(
+                &mut state,
+                card,
+                PlayerId(0),
+                "Redirect Source".to_string(),
+                Zone::Battlefield,
+            );
+            let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .destination_zone(Zone::Graveyard)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        origin: None,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                ))
+                .description(desc.to_string());
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions = vec![redirect].into();
+        }
+
+        // Two creatures in the controller's library to seek to the graveyard.
+        add_library_creature(&mut state, 1, PlayerId(0), "Bear 1");
+        add_library_creature(&mut state, 2, PlayerId(0), "Bear 2");
+
+        let ability = ResolvedAbility::new(
+            Effect::Seek {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 2 },
+                from_top: None,
+                destination: Zone::Graveyard,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The first card's CR 616.1 prompt must be parked, the tail stashed, and
+        // EffectResolved NOT emitted over the parked prompt.
+        assert!(
+            matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+            ),
+            "per-card ordering prompt must be parked"
+        );
+        let stash = state
+            .pending_batch_deliveries
+            .as_ref()
+            .expect("the undelivered tail must be stashed for the resume path");
+        // Fix-4: the re-stash must carry the batch-uniform request context so
+        // the drain rebuilds equivalent requests — seek attributes every move to
+        // `ability.source_id` (CR 400.7), not to each moved object itself.
+        assert_eq!(
+            stash.source_id,
+            Some(ObjectId(100)),
+            "stashed tail must preserve the seek's ability-source attribution"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Seek,
+                    ..
+                }
+            )),
+            "EffectResolved must not be pushed over a parked replacement prompt"
+        );
     }
 
     #[test]

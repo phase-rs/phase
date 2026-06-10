@@ -1,4 +1,4 @@
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
     BounceSelection, ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
     TargetFilter, TargetRef, TypedFilter,
@@ -172,7 +172,17 @@ pub fn resolve(
                 // CR 608.2d: empty pool — the effect does nothing.
             }
             1 => {
-                zones::move_to_zone(state, eligible[0], destination, events);
+                // CR 614.6: route through the pipeline so destination redirects
+                // fire. A single applicable redirect never prompts; a CR 616.1
+                // ordering choice (two simultaneous redirects) is parked by
+                // `move_object` itself — bail and let the replacement-choice
+                // resume path deliver the paused move.
+                let req = ZoneMoveRequest::effect(eligible[0], destination, ability.source_id);
+                if let ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice =
+                    zone_pipeline::move_object(state, req, events)
+                {
+                    return Ok(());
+                }
             }
             _ => {
                 // CR 608.2c + CR 608.2d: surface card selection scoped to the
@@ -248,7 +258,17 @@ pub fn resolve(
                 // not get to return anything."
             }
             1 => {
-                zones::move_to_zone(state, matching[0], destination, events);
+                // CR 614.6: route through the pipeline so destination redirects
+                // fire. A single applicable redirect never prompts; a CR 616.1
+                // ordering choice (two simultaneous redirects) is parked by
+                // `move_object` itself — bail and let the replacement-choice
+                // resume path deliver the paused move.
+                let req = ZoneMoveRequest::effect(matching[0], destination, ability.source_id);
+                if let ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice =
+                    zone_pipeline::move_object(state, req, events)
+                {
+                    return Ok(());
+                }
             }
             _ => {
                 // CR 608.2d: surface the card selection scoped to the chosen
@@ -299,18 +319,33 @@ pub fn resolve(
         // return-to-hand effects move targeted spell objects off the stack;
         // activated and triggered ability stack entries are not cards and are
         // intentionally excluded here.
+        // CR 614.6: route each targeted bounce through the pipeline so
+        // destination redirects fire. A single applicable redirect never
+        // prompts; a CR 616.1 ordering choice (two simultaneous redirects) is
+        // parked by `move_object` itself — bail and let the replacement-choice
+        // resume path deliver the paused move. Any remaining targets are
+        // abandoned (single-target is the dominant shape, and no parsed card
+        // combines a multi-target bounce with a double destination redirect).
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
-        if matches!(current_zone, Some(Zone::Battlefield | Zone::Graveyard)) {
-            zones::move_to_zone(state, obj_id, destination, events);
+        let move_dest = if matches!(current_zone, Some(Zone::Battlefield | Zone::Graveyard)) {
+            Some(destination)
         } else if current_zone == Some(Zone::Stack) && destination == Zone::Hand {
-            if let Some(casting_variant) = stack_spell_casting_variant(state, obj_id) {
-                let stack_destination =
-                    if casting_variant.exiles_when_leaving_stack_for_any_reason() {
-                        Zone::Exile
-                    } else {
-                        destination
-                    };
-                zones::move_to_zone(state, obj_id, stack_destination, events);
+            stack_spell_casting_variant(state, obj_id).map(|casting_variant| {
+                if casting_variant.exiles_when_leaving_stack_for_any_reason() {
+                    Zone::Exile
+                } else {
+                    destination
+                }
+            })
+        } else {
+            None
+        };
+        if let Some(move_dest) = move_dest {
+            let req = ZoneMoveRequest::effect(obj_id, move_dest, ability.source_id);
+            if let ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice =
+                zone_pipeline::move_object(state, req, events)
+            {
+                return Ok(());
             }
         }
     }
@@ -328,8 +363,9 @@ pub fn resolve(
 /// zone if `Effect::BounceAll.destination` is set.
 ///
 /// Mirrors `destroy::resolve_all` in shape: collect matching object IDs from
-/// the battlefield via `crate::game::filter::matches_target_filter`, then
-/// move each to the destination zone with `zones::move_to_zone`.
+/// the battlefield via `crate::game::filter::matches_target_filter`, then move
+/// each to the destination zone through the zone-change pipeline
+/// (`zone_pipeline::move_objects_simultaneously`) so destination redirects fire.
 ///
 /// CR 114.5: Emblems are not on the battlefield (they live in the command
 /// zone), so the battlefield scan naturally excludes them — no extra guard
@@ -431,26 +467,41 @@ pub fn resolve_all(
         }
     }
 
-    let mut bounced_ids = Vec::new();
-    for &obj_id in &matching {
-        // CR 400.3 + CR 400.7: Move each matching permanent to the
-        // destination zone. The single-bounce resolver runs the same
-        // `zones::move_to_zone` primitive — no replacement-pipeline detour
-        // is needed because mass-bounce events are not destruction events
-        // (CR 614.6 doesn't apply here).
-        let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
-        if current_zone == Some(Zone::Battlefield) {
-            zones::move_to_zone(state, obj_id, destination, events);
-            bounced_ids.push(obj_id);
-        }
+    // CR 400.3 + CR 400.7 + CR 614.6: Route each matching permanent through the
+    // zone-change pipeline (the shared `move_objects_simultaneously` batch
+    // entry), not a raw `zones::move_to_zone`. The raw move never proposed a
+    // per-object ZoneChange, so `Moved` redirects watching the bounce
+    // destination ("if a creature would be returned to a hand, ..." /
+    // "would leave the battlefield, ..." class) silently never fired
+    // (PLAN §8 Risk #4). The previous justification — "mass-bounce events are
+    // not destruction events (CR 614.6 doesn't apply here)" — was wrong by
+    // citation: CR 614.6 governs replacement semantics generally and CR 614.1
+    // replacements watch zone-change *events*, not only destruction. The batch
+    // entry proposes each inner ZoneChange and consults those replacements
+    // before delivery, then stamps CR 603.10a co-departure over the subset that
+    // actually left the battlefield.
+    //
+    // CR 616.1: two simultaneous destination-redirects on one bounced permanent
+    // surface an ordering choice. `move_objects_simultaneously` parks it and the
+    // undelivered tail in `state.pending_batch_deliveries`; the
+    // replacement-choice resume path drains it. A single applicable redirect
+    // never prompts (the realistic path), so the common mass bounce never
+    // pauses. `state.last_effect_count` is set up front from the matched pool so
+    // it is correct even if the batch pauses mid-delivery.
+    state.last_effect_count = Some(matching.len() as i32);
+    let reqs: Vec<ZoneMoveRequest> = matching
+        .iter()
+        .map(|&obj_id| ZoneMoveRequest::effect(obj_id, destination, ability.source_id))
+        .collect();
+    if let BatchMoveResult::NeedsChoice =
+        zone_pipeline::move_objects_simultaneously(state, reqs, events)
+    {
+        // CR 616.1: a redirect ordering choice paused mid-batch; the prompt is
+        // parked and the tail stashed. Bail before `EffectResolved` so it is not
+        // emitted over the parked prompt; the resume path finishes the batch.
+        return Ok(());
     }
 
-    // CR 603.10a + CR 608.2f: Every permanent in this mass bounce left the
-    // battlefield as part of the same resolution event, so leaves-the-battlefield
-    // observers among the bounced group observe each other via last-known info.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &bounced_ids));
-
-    state.last_effect_count = Some(matching.len() as i32);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
@@ -495,6 +546,71 @@ mod tests {
 
         assert!(!state.battlefield.contains(&obj_id));
         assert!(state.players[1].hand.contains(&obj_id));
+    }
+
+    /// Fix-1 discriminating test (CR 614.1c): a self-scoped as-enters
+    /// replacement ("~ enters with a +1/+1 counter on it") must NOT match the
+    /// permanent's own battlefield DEPARTURE. Pre-fix the parsed def carried no
+    /// `destination_zone`, so a bounce to hand folded the counter into the
+    /// ZoneChange and applied phantom counters (+ CounterAdded) to the card in
+    /// its owner's hand.
+    #[test]
+    fn bounce_does_not_apply_own_enters_with_counter_replacement() {
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Giada".to_string(),
+            Zone::Battlefield,
+        );
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            "Giada, Font of Hope enters with a +1/+1 counter on it.",
+            "Giada, Font of Hope",
+        )
+        .expect("enters-with-counter must parse to a replacement");
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+                selection: BounceSelection::Targeted,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[1].hand.contains(&obj_id),
+            "bounce delivers to hand"
+        );
+        assert_eq!(
+            state.objects[&obj_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no phantom +1/+1 counters on the bounced card — the as-enters def must not match a departure"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterAdded { object_id, .. } if *object_id == obj_id
+            )),
+            "no CounterAdded event for the bounced card"
+        );
     }
 
     #[test]

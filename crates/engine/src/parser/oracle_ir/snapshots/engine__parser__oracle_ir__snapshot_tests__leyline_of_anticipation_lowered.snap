@@ -23,7 +23,6 @@ expression: "&lowered"
       "duration": null,
       "description": "If this card is in your opening hand, you may begin the game with it on the battlefield.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": true,

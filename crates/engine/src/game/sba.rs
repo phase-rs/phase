@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use crate::game::layers;
 use crate::game::replacement::{self, ReplacementResult};
+use crate::game::zone_pipeline::{
+    self, ApprovedZoneChange, DeliveryCtx, EntryMods, ExileLinkSpec, ZoneChangeCause,
+    ZoneDeliveryResult, ZoneMoveRequest, ZoneMoveResult,
+};
 use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -438,6 +442,45 @@ fn collect_commander_damage_losers(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
+/// CR 704.5 + CR 614.6: Move an SBA-departing permanent (zero toughness / zero
+/// loyalty / zero defense / legend-rule loser / unattached aura) from the
+/// battlefield to its owner's graveyard THROUGH the zone-change pipeline so
+/// `Moved` redirects ("if a card would be put into a graveyard from anywhere,
+/// exile it instead" — Rest in Peace / Leyline of the Void class) are consulted.
+/// These are "leaves the battlefield" / "dies" events (CR 603.6c + CR 700.4),
+/// so the redirect must apply — a bare `zones::move_to_zone` skipped that
+/// consult.
+///
+/// Returns `true` when a CR 616.1 ordering choice (or, defensively, an
+/// as-enters choice) surfaced and parked `state.waiting_for`; the caller MUST
+/// bail (return) before stamping co-departure so the parked prompt is not
+/// clobbered — mirroring the `check_lethal_damage` regeneration-pause arm. The
+/// CR 704.3 fixpoint re-runs after the choice resolves and re-derives any
+/// undelivered SBA deaths, so bailing strands nothing.
+///
+/// `StateBasedAction` is a full-pipeline (non-exempt) cause and carries no
+/// source, so the departing object anchors its own CR 400.7 attribution
+/// (matching the pre-pipeline raw move, which recorded no source).
+#[must_use]
+fn move_to_graveyard_via_pipeline(
+    state: &mut GameState,
+    id: crate::types::identifiers::ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let req = ZoneMoveRequest {
+        object_id: id,
+        to: Zone::Graveyard,
+        cause: ZoneChangeCause::StateBasedAction,
+        mods: EntryMods::default(),
+        placement: None,
+        exile_links: ExileLinkSpec::default(),
+    };
+    matches!(
+        zone_pipeline::move_object(state, req, events),
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice
+    )
+}
+
 /// CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
 /// CR 702.26b: Phased-out permanents are treated as though they don't exist —
 /// state-based actions scan only phased-in permanents.
@@ -462,7 +505,11 @@ fn check_zero_toughness(
         .collect();
 
     for &id in &to_destroy {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        // CR 614.6: zero-toughness death is a "leaves the battlefield" event —
+        // consult Moved redirects via the pipeline; bail on a CR 616.1 pause.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return;
+        }
         *any_performed = true;
     }
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
@@ -524,11 +571,69 @@ fn check_lethal_damage(
                     );
                     match replacement::replace_event(state, zone_proposed, events) {
                         ReplacementResult::Execute(zone_event) => {
-                            if let ProposedEvent::ZoneChange {
-                                object_id: oid, to, ..
-                            } = zone_event
+                            // CR 704.5g + CR 614.6: the inner ZoneChange already
+                            // cleared the replacement consult — seal it as a proof
+                            // token and deliver through the single pipeline tail so
+                            // a lethal-damage death redirected to the battlefield
+                            // (Rest in Peace / "would die -> return" class) gets the
+                            // full enter-tapped / enter-with-counters / ETB-counter
+                            // delivery treatment instead of a bare move.
+                            if let Ok(approved) =
+                                ApprovedZoneChange::approve_post_replacement(zone_event)
                             {
-                                zones::move_to_zone(state, oid, to, events);
+                                let ctx = DeliveryCtx {
+                                    source_id: source,
+                                    exile_links: ExileLinkSpec::default(),
+                                };
+                                // CR 704.3: completing all SBAs may require a
+                                // replacement choice surfaced by the delivery tail
+                                // (e.g. CR 614.12a Devour as-enters). Pause exactly
+                                // as the regeneration NeedsChoice arm below does;
+                                // `state.waiting_for` is already set by the tail.
+                                if let ZoneDeliveryResult::NeedsChoice(_) =
+                                    zone_pipeline::deliver(state, approved, ctx, events)
+                                {
+                                    return;
+                                }
+                                // Degenerate-self-redirect guard: a Moved replacement
+                                // that lands the dying creature back on the
+                                // battlefield delivers a Battlefield->Battlefield
+                                // ZoneChange, which `zones::move_to_zone`'s CR 603.2g
+                                // no-op guard rejects — `reset_for_battlefield_entry`
+                                // never runs, so the lethal `damage_marked` survives
+                                // and the next SBA fixpoint pass re-derives the same
+                                // destruction and re-fires the one-shot replacement
+                                // every iteration (counter / event stacking, capped
+                                // at MAX_SBA_ITERATIONS). Scrub only the marked
+                                // damage so the fixpoint terminates: a "remains on
+                                // the battlefield instead of dying" effect is
+                                // regeneration-shaped — CR 701.19a/b replaces
+                                // destruction with "remove all damage marked on it"
+                                // while the permanent STAYS the same object — so the
+                                // damage scrub matches that semantics. This is NOT a
+                                // CR 400.7 new-object re-entry and deliberately does
+                                // not claim to be one.
+                                //
+                                // TODO(zone-pipeline C0b): no card currently parses
+                                // to a would-die->battlefield Moved redirect (the
+                                // parser builds die->exile / shuffle-back redirects;
+                                // Persist/Undying are dies-triggers), so the rest of
+                                // the entry state is knowingly left stale here:
+                                // incarnation epoch (CR 400.7), summoning sickness
+                                // (CR 302.6), counters, entered_battlefield_turn —
+                                // while the delivery tail above DOES re-apply
+                                // CR 614.1c entry counters. If a real battlefield-
+                                // redirect card class appears, decide whether it is
+                                // regeneration-shaped (stays the same object;
+                                // suppress the CR 614.1c tail re-application) or a
+                                // true leave-and-re-enter (run the full battlefield-
+                                // entry reset instead of this scrub).
+                                if let Some(obj) = state.objects.get_mut(&object_id) {
+                                    if obj.zone == Zone::Battlefield {
+                                        obj.damage_marked = 0;
+                                        obj.dealt_deathtouch_damage = false;
+                                    }
+                                }
                             }
                         }
                         ReplacementResult::Prevented => {}
@@ -727,7 +832,12 @@ fn check_unattached_auras(
     for (id, action) in actions {
         match action {
             UnattachedAuraAction::ToGraveyard => {
-                zones::move_to_zone(state, id, Zone::Graveyard, events);
+                // CR 704.5m + CR 614.6: an Aura attached to nothing is put into
+                // its owner's graveyard — a "leaves the battlefield" event that
+                // must consult Moved redirects. Bail on a CR 616.1 pause.
+                if move_to_graveyard_via_pipeline(state, id, events) {
+                    return;
+                }
             }
             UnattachedAuraAction::BestowRevert => {
                 // CR 702.103f: revert in place — restore Creature form, drop
@@ -890,7 +1000,12 @@ fn check_role_uniqueness(
         // Tie-break by ObjectId so behavior is deterministic when timestamps collide.
         roles.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0 .0.cmp(&a.0 .0)));
         for (id, _) in roles.into_iter().skip(1) {
-            zones::move_to_zone(state, id, Zone::Graveyard, events);
+            // CR 704.5j + CR 614.6: the legend-rule loser is put into the
+            // graveyard — a "dies" event that must consult Moved redirects. Bail
+            // on a CR 616.1 pause (the fixpoint re-derives the rest).
+            if move_to_graveyard_via_pipeline(state, id, events) {
+                return;
+            }
             *any_performed = true;
         }
     }
@@ -919,7 +1034,10 @@ fn check_zero_loyalty(
         .collect();
 
     for &id in &to_destroy {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        // CR 704.5i + CR 614.6: zero-loyalty death must consult Moved redirects.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return;
+        }
         *any_performed = true;
     }
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
@@ -966,7 +1084,10 @@ fn check_zero_defense(
         .collect();
 
     for &id in &to_destroy {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        // CR 704.5v + CR 614.6: zero-defense battle death must consult redirects.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return;
+        }
         *any_performed = true;
     }
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
@@ -1094,8 +1215,13 @@ fn check_battle_protector(
 
         match legal_choices.len() {
             0 => {
-                // CR 310.10 / CR 704.5w: No legal protector exists — graveyard.
-                zones::move_to_zone(state, battle_id, Zone::Graveyard, events);
+                // CR 310.10 / CR 704.5w + CR 614.6: No legal protector exists —
+                // the battle is put into the graveyard, a "leaves the
+                // battlefield" event that must consult Moved redirects. Bail on a
+                // CR 616.1 pause (the SBA fixpoint re-runs and finds the rest).
+                if move_to_graveyard_via_pipeline(state, battle_id, events) {
+                    return;
+                }
                 *any_performed = true;
             }
             1 => {
@@ -1196,7 +1322,13 @@ fn check_saga_sacrifice(
             object_id: saga_id,
             player_id: owner,
         });
-        zones::move_to_zone(state, saga_id, Zone::Graveyard, events);
+        // CR 704.5s + CR 614.6: the final-chapter Saga is sacrificed (put into
+        // its owner's graveyard) — a "leaves the battlefield" event that must
+        // consult Moved redirects. Bail on a CR 616.1 pause (the SBA fixpoint
+        // re-runs and finds any remaining Sagas).
+        if move_to_graveyard_via_pipeline(state, saga_id, events) {
+            return;
+        }
         *any_performed = true;
     }
 }
@@ -1471,6 +1603,205 @@ mod tests {
 
         assert!(!state.battlefield.contains(&id));
         assert!(state.players[0].graveyard.contains(&id));
+    }
+
+    /// C7 discriminating test (CR 704.5f + CR 614.6): a zero-toughness death is a
+    /// "leaves the battlefield" event, so a `Moved` graveyard→exile redirect
+    /// (Rest in Peace / Leyline of the Void) must apply — the creature is exiled,
+    /// not put into the graveyard. The old bare `zones::move_to_zone` skipped the
+    /// consult and the creature landed in the graveyard.
+    #[test]
+    fn sba_zero_toughness_death_consults_rest_in_peace_and_exiles() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Weakling", 1, 0);
+
+        // Rest in Peace permanent hosting a graveyard→exile Moved redirect.
+        let rip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ))
+            .description("Rest in Peace".to_string());
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(redirect);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 614.6: redirected to exile, never reaching the graveyard.
+        assert!(
+            state.exile.contains(&creature),
+            "zero-toughness death must be redirected to exile by RIP"
+        );
+        assert!(!state.players[0].graveyard.contains(&creature));
+        assert!(!state.battlefield.contains(&creature));
+    }
+
+    /// Fix-1 discriminating test (CR 614.1c): a self-scoped as-enters
+    /// replacement ("~ enters with a +1/+1 counter on it") is definitionally
+    /// battlefield-ENTRY-scoped — it must NOT match the permanent's own
+    /// battlefield DEPARTURE. Pre-fix the parsed def carried no
+    /// `destination_zone`, so an SBA death folded the counter into the
+    /// ZoneChange and `deliver_replaced_zone_change`'s non-battlefield arm
+    /// applied phantom counters (+ CounterAdded events) to the corpse in the
+    /// graveyard.
+    #[test]
+    fn sba_death_does_not_apply_own_enters_with_counter_replacement() {
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Giada", 1, 0);
+        let def = crate::parser::oracle_replacement::parse_replacement_line(
+            "Giada, Font of Hope enters with a +1/+1 counter on it.",
+            "Giada, Font of Hope",
+        )
+        .expect("enters-with-counter must parse to a replacement");
+        assert_eq!(
+            def.event,
+            crate::types::replacements::ReplacementEvent::Moved
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.players[0].graveyard.contains(&creature),
+            "zero-toughness creature dies normally"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "an as-enters replacement must not prompt on the permanent's own death"
+        );
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no phantom +1/+1 counters on the corpse — the as-enters def must not match a departure"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterAdded { object_id, .. } if *object_id == creature
+            )),
+            "no CounterAdded event for the departed card"
+        );
+    }
+
+    /// Fix-1 discriminating test (CR 614.1c + CR 616.1): under a SINGLE Rest in
+    /// Peace, an SBA death must apply exactly one replacement (the
+    /// graveyard→exile redirect) with NO CR 616.1 ordering prompt — pre-fix the
+    /// dying creature's own as-enters def was a second spurious candidate on its
+    /// own departure (prompt and/or phantom counters on the exiled card).
+    #[test]
+    fn sba_death_under_single_rip_exiles_directly_no_prompt_no_counters() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Giada", 1, 0);
+        let own_def = crate::parser::oracle_replacement::parse_replacement_line(
+            "Giada, Font of Hope enters with a +1/+1 counter on it.",
+            "Giada, Font of Hope",
+        )
+        .expect("enters-with-counter must parse to a replacement");
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .replacement_definitions
+            .push(own_def);
+
+        let rip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ))
+            .description("Rest in Peace".to_string());
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(redirect);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "single applicable replacement (RIP) — no CR 616.1 ordering prompt"
+        );
+        assert!(
+            state.exile.contains(&creature),
+            "RIP redirects the death to exile in one pass"
+        );
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no phantom +1/+1 counters on the exiled card"
+        );
     }
 
     #[test]
@@ -3436,5 +3767,109 @@ mod tests {
 
         assert!(state.battlefield.contains(&role));
         assert!(state.players[0].graveyard.is_empty());
+    }
+
+    /// Phase B discriminating test for the SBA lethal-damage-destruction loop
+    /// (`check_lethal_damage`, sba.rs ~:531). Before Phase B the inner ZoneChange
+    /// was delivered with a bare `zones::move_to_zone`, so a lethal-damage death
+    /// redirected to the battlefield (CR 614.6) dropped the CR 614.1c
+    /// `EntersWithAdditionalCounters` static (Kalain class). Routing the inner
+    /// delivery through `zone_pipeline::deliver` restores the full delivery tail.
+    ///
+    /// Drives the real lethal-damage SBA (`check_lethal_damage` ->
+    /// `replace_event` -> `deliver`) for a single check and asserts the
+    /// re-entered creature receives the additional +1/+1 counter. The private
+    /// `check_lethal_damage` is driven directly (rather than the repeating
+    /// `check_state_based_actions`) so exactly one redirected entry is delivered
+    /// — repeated SBA passes would re-deliver the entry and stack the counter,
+    /// obscuring the discriminating signal. FAILS on the old raw move (0
+    /// counters), passes through the tail (exactly 1).
+    #[test]
+    fn sba_lethal_damage_redirected_to_battlefield_applies_enters_with_counters_tail() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
+            ReplacementDefinition, StaticDefinition, TypedFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+        use std::sync::Arc;
+
+        let mut state = setup();
+        // A 2/2 with lethal damage marked and a "would die -> return to the
+        // battlefield" self-redirect.
+        let victim = create_creature(&mut state, CardId(1), PlayerId(0), "Resilient Bear", 2, 2);
+        {
+            let obj = state.objects.get_mut(&victim).unwrap();
+            obj.damage_marked = 2; // CR 704.5g: lethal damage.
+            let def = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .destination_zone(Zone::Graveyard)
+                .valid_card(TargetFilter::SelfRef)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        origin: None,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                ))
+                .description("Return to the battlefield instead of dying".to_string());
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        // CR 614.1c: a separate P0 enchantment grants "other creatures you
+        // control enter with an additional +1/+1 counter".
+        let lord = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Lord".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&lord).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            let def = StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ));
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        let mut any_performed = false;
+        check_lethal_damage(&mut state, &mut events, &mut any_performed);
+
+        assert!(
+            any_performed,
+            "the lethal-damage SBA must have acted on the creature"
+        );
+        assert_eq!(
+            state.objects[&victim].zone,
+            Zone::Battlefield,
+            "the Moved redirect returns the lethally-damaged creature to the battlefield"
+        );
+        assert_eq!(
+            state.objects[&victim]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "a lethal-damage death redirected to the battlefield must receive the CR 614.1c \
+             enters-with-additional-counter via the full delivery tail"
+        );
     }
 }

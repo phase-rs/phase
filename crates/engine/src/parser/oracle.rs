@@ -17,7 +17,7 @@ use crate::types::ability::{
     TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
-use crate::types::keywords::{ActivationCadence, FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -778,11 +778,6 @@ fn is_persisted_as_enters_choice(def: &AbilityDefinition) -> bool {
 fn is_chosen_dependent_self_etb_counter(def: &AbilityDefinition) -> bool {
     match &*def.effect {
         Effect::PutCounter {
-            target: TargetFilter::SelfRef,
-            count,
-            ..
-        }
-        | Effect::AddCounter {
             target: TargetFilter::SelfRef,
             count,
             ..
@@ -1886,9 +1881,6 @@ pub(crate) fn parse_oracle_ir(
             }
             def.cost = Some(cost);
             def.description = Some(ability_text.to_string());
-            if constraints.sorcery_speed() {
-                def.sorcery_speed = true;
-            }
             let mut restrictions = constraints.restrictions;
             restrictions.push(ActivationRestriction::LevelCounterRange { minimum, maximum });
             def.activation_restrictions = restrictions;
@@ -2297,9 +2289,6 @@ pub(crate) fn parse_oracle_ir(
                 // CR 719.3c: Solved abilities only activate while Case is solved.
                 def.activation_restrictions
                     .push(ActivationRestriction::IsSolved);
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 // CR 602.5d: `constraints.restrictions` already contains
                 // `AsSorcery` when the source text said "Activate only as a
                 // sorcery"; extend preserves it so the legality gate fires.
@@ -2329,9 +2318,6 @@ pub(crate) fn parse_oracle_ir(
                 // CR 207.2c: Channel is an ability word; the underlying ability activates from hand.
                 def.activation_zone = Some(Zone::Hand);
                 def.description = Some(line.to_string());
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 if !constraints.restrictions.is_empty() {
                     def.activation_restrictions = constraints.restrictions;
                 }
@@ -2362,9 +2348,6 @@ pub(crate) fn parse_oracle_ir(
                     parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
                 def.cost = Some(cost);
                 def.description = Some(line.to_string());
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 def.activation_restrictions.extend(constraints.restrictions);
                 // CR 702.142a: "Activate only if this creature attacked this turn
                 // and only once each turn."
@@ -2401,9 +2384,6 @@ pub(crate) fn parse_oracle_ir(
                     parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
                 def.cost = Some(cost);
                 def.description = Some(line.to_string());
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 def.activation_restrictions.extend(constraints.restrictions);
                 def.activation_restrictions
                     .push(ActivationRestriction::OnlyOnce);
@@ -2439,9 +2419,6 @@ pub(crate) fn parse_oracle_ir(
                 def.description = Some(line.to_string());
                 // CR 702.57a: a forecast ability is activated only from hand.
                 def.activation_zone = Some(Zone::Hand);
-                if constraints.sorcery_speed() {
-                    def.sorcery_speed = true;
-                }
                 def.activation_restrictions.extend(constraints.restrictions);
                 // CR 702.57b: only during the owner's upkeep, only once each turn.
                 def.activation_restrictions
@@ -3687,9 +3664,6 @@ fn parse_activated_ability_definition(
     }
     def.cost = Some(cost);
     def.description = Some(description.to_string());
-    if constraints.sorcery_speed() {
-        def.sorcery_speed = true;
-    }
     if !constraints.restrictions.is_empty() {
         def.activation_restrictions = constraints.restrictions;
     }
@@ -4027,7 +4001,6 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
 /// cap-raise from ever taking effect.
 fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
     // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
-    def.sorcery_speed = true;
     if !def
         .activation_restrictions
         .contains(&ActivationRestriction::AsSorcery)
@@ -4555,13 +4528,14 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 /// grammatical shape with its own slicing requirement, handled by
 /// `strip_once_per_turn_suffix`; the strictly-once-ever `" and only once"`
 /// form is likewise that function's concern (it maps to
-/// `ActivationRestriction::OnlyOnce`, which `ActivationCadence` does not model).
-fn recognize_once_each_turn_cadence(text: &str) -> Option<ActivationCadence> {
+/// `ActivationRestriction::OnlyOnce`, which the once-each-turn cadence does not
+/// model).
+fn recognize_once_each_turn_cadence(text: &str) -> bool {
     let lower = text.trim().trim_end_matches('.').to_lowercase();
     let matched = all_consuming(tag::<_, _, OracleError<'_>>("activate only once each turn"))
         .parse(lower.as_str())
         .is_ok();
-    matched.then_some(ActivationCadence::OncePerTurn)
+    matched
 }
 
 /// CR 702.122 + CR 602.5b: Parse a Crew keyword line, capturing an optional
@@ -4578,10 +4552,11 @@ fn parse_crew_keyword(lower: &str) -> Option<Keyword> {
     // Activate only once each turn." A bare "Crew N" (no tail) yields None so the
     // MTGJSON keyword is kept as-is.
     let tail = after_power.trim_start_matches(|c: char| c == '.' || c.is_whitespace());
-    if recognize_once_each_turn_cadence(tail) == Some(ActivationCadence::OncePerTurn) {
+    if recognize_once_each_turn_cadence(tail) {
         Some(Keyword::Crew {
             power,
-            once_per_turn: ActivationCadence::OncePerTurn,
+            // CR 602.5b: "Activate only once each turn."
+            once_per_turn: Some(Box::new(ActivationRestriction::OnlyOnceEachTurn)),
         })
     } else {
         None
@@ -7731,7 +7706,7 @@ mod tests {
         );
 
         assert_eq!(r.abilities.len(), 1);
-        assert!(r.abilities[0].sorcery_speed);
+        assert!(r.abilities[0].is_sorcery_speed());
         assert!(r.abilities[0]
             .activation_restrictions
             .contains(&crate::types::ability::ActivationRestriction::AsSorcery));
@@ -7773,7 +7748,7 @@ mod tests {
 
         // Tap cost + sorcery-speed activation restriction.
         assert_eq!(ability.cost, Some(crate::types::ability::AbilityCost::Tap));
-        assert!(ability.sorcery_speed);
+        assert!(ability.is_sorcery_speed());
         assert!(ability
             .activation_restrictions
             .contains(&crate::types::ability::ActivationRestriction::AsSorcery));
@@ -8855,17 +8830,17 @@ mod tests {
         assert!(
             r.extracted_keywords.contains(&Keyword::Crew {
                 power: 1,
-                once_per_turn: ActivationCadence::OncePerTurn,
+                once_per_turn: Some(Box::new(ActivationRestriction::OnlyOnceEachTurn)),
             }),
-            "expected Crew {{ power: 1, once_per_turn: OncePerTurn }}, got {:?}",
+            "expected Crew {{ power: 1, once_per_turn: OnlyOnceEachTurn }}, got {:?}",
             r.extracted_keywords
         );
     }
 
     #[test]
     fn plain_crew_line_extracts_unlimited_cadence() {
-        // A bare "Crew N" line (no cadence sentence) parses as the default
-        // `Unlimited` cadence — no once-per-turn restriction is invented.
+        // A bare "Crew N" line (no cadence sentence) parses with no cadence
+        // restriction (`None`) — no once-per-turn restriction is invented.
         let r = parse_with_keyword_names(
             "Crew 3 (Tap any number of creatures you control with total power 3 or more: This Vehicle becomes an artifact creature until end of turn.)",
             "Smuggler's Copter",
@@ -8876,9 +8851,9 @@ mod tests {
         assert!(
             r.extracted_keywords.contains(&Keyword::Crew {
                 power: 3,
-                once_per_turn: ActivationCadence::Unlimited,
+                once_per_turn: None,
             }),
-            "a plain Crew line keeps the default Unlimited cadence; got {:?}",
+            "a plain Crew line keeps the default (no) cadence restriction; got {:?}",
             r.extracted_keywords
         );
     }
@@ -14849,7 +14824,7 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert!(matches!(*r.abilities[0].effect, Effect::TimeTravel));
-        assert!(r.abilities[0].sorcery_speed);
+        assert!(r.abilities[0].is_sorcery_speed());
     }
 
     // ── Exert (CR 701.43d) ──

@@ -173,6 +173,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
                     },
                 ))
                 .valid_card(TargetFilter::SelfRef)
+                // CR 614.1c: as-enters defs are battlefield-ENTRY-scoped — the
+                // destination gate stops them matching this permanent's own
+                // battlefield DEPARTURE (SBA death / bounce / destroy).
+                .destination_zone(Zone::Battlefield)
                 .description(text.to_string()),
         );
     }
@@ -644,6 +648,8 @@ fn parse_self_enters_pay_cost_replacement(
                 decline: Some(Box::new(decline)),
             })
             .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
 }
@@ -721,6 +727,8 @@ fn parse_enters_prepared(norm_lower: &str, text: &str) -> Option<ReplacementDefi
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
             .description(text.to_string()),
     )
 }
@@ -826,6 +834,8 @@ fn parse_reveal_land(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(reveal)
             .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
 }
@@ -1031,6 +1041,8 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
             decline: Some(Box::new(decline)),
         })
         .valid_card(TargetFilter::SelfRef)
+        // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+        .destination_zone(Zone::Battlefield)
         .description(original_text.to_string()),
     )
 }
@@ -1101,6 +1113,8 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(execute)
             .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
 }
@@ -1224,6 +1238,10 @@ fn parse_clone_replacement(
             .execute(execute_effect)
             .mode(ReplacementMode::Optional { decline: None })
             .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped — without the gate this
+            // Optional clone def would force an "enter as a copy?" prompt on the
+            // permanent's own DEATH.
+            .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
 }
@@ -1497,6 +1515,8 @@ fn parse_enters_tapped_unless(
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
             .description(original_text.to_string())
             .condition(condition),
     )
@@ -1535,6 +1555,8 @@ fn parse_enters_tapped_if_controls(
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
             .description(original_text.to_string())
             .condition(condition),
     )
@@ -1896,10 +1918,12 @@ fn parse_enters_with_counters(
                 choice
             };
 
-            // CR 614.1c: "enters with" is a replacement effect on the Moved event.
+            // CR 614.1c: "enters with" is a replacement effect on the Moved event,
+            // battlefield-entry-scoped (see destination-gate note above).
             let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
                 .execute(execute)
                 .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
                 .description(original_text.to_string());
 
             // Reuse the existing condition tail (escape / kicker / cast-from-zone
@@ -2068,12 +2092,14 @@ fn parse_enters_with_counters(
     };
     let mut def = ReplacementDefinition::new(event)
         .execute(execute)
-        .description(original_text.to_string());
+        .description(original_text.to_string())
+        // CR 614.1c: "enters with" defs are battlefield-entry-scoped for BOTH
+        // branches — the external ChangeZone variant always needed the gate, and
+        // the self-ETB Moved variant needs it so the def does not match this
+        // permanent's own battlefield DEPARTURE (SBA death / bounce / destroy).
+        .destination_zone(Zone::Battlefield);
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
-    }
-    if is_external {
-        def = def.destination_zone(Zone::Battlefield);
     }
 
     // Apply condition: escape, kicker, or cast-from-zone suffix.

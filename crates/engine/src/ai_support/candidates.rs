@@ -2938,9 +2938,12 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                         if let crate::types::keywords::Keyword::Crew { once_per_turn, .. } = kw {
                             // CR 602.5b: "Activate only once each turn" — don't offer a
                             // second crew candidate for a Vehicle already crewed this turn.
-                            if *once_per_turn
-                                == crate::types::keywords::ActivationCadence::OncePerTurn
-                                && state.crew_activated_this_turn.contains(&obj_id)
+                            if matches!(
+                                once_per_turn.as_deref(),
+                                Some(
+                                    crate::types::ability::ActivationRestriction::OnlyOnceEachTurn
+                                )
+                            ) && state.crew_activated_this_turn.contains(&obj_id)
                             {
                                 break;
                             }
