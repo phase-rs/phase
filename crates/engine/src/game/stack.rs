@@ -825,7 +825,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // inside `zone_pipeline::deliver` via `CastLinkSnapshot`,
                     // captured from the values normalized onto the stack object
                     // before `replace_event`. Only the exile-link push and the
-                    // CR 715-class room-door unlock remain caller-side here.
+                    // CR 709.5c room-door unlock remain caller-side here.
                     if spell_in_zone(state, entry.id, Zone::Battlefield) {
                         if let Some(exiled_id) = ability
                             .as_ref()
