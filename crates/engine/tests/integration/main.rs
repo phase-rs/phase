@@ -112,6 +112,7 @@ mod issue_2360_the_rack;
 mod issue_2361_unless_pay_choice;
 mod issue_2371_triskaidekaphile;
 mod issue_2372_nourishing_shoal_alt_cost;
+mod issue_2373_phasing_aura_continuous;
 mod issue_2374_fblthp_library_origin;
 mod issue_2376_pyromancers_ascension;
 mod issue_2414_semblance_anvil;

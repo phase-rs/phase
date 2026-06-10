@@ -31,6 +31,7 @@ use engine::types::phase::Phase;
 use engine::types::{PayCostKind, WaitingFor};
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
 
 const RITE_TEXT: &str = "As an additional cost to cast this spell, sacrifice a creature.\n\
@@ -98,6 +99,8 @@ fn rite_of_consumption_deals_sacrificed_power_and_gains_life() {
             object_id: rite_id,
             card_id: rite_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting Rite of Consumption must succeed");
 

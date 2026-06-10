@@ -2823,7 +2823,7 @@ fn build_next_order_triggers_prompt(
 
 /// CR 603.3b: Validate `order` is a permutation of `0..len`. Returns true if
 /// `order` has the right length, no duplicates, and every index is in range.
-fn is_valid_permutation(order: &[usize], len: usize) -> bool {
+pub(crate) fn is_valid_permutation(order: &[usize], len: usize) -> bool {
     if order.len() != len {
         return false;
     }
@@ -16389,6 +16389,8 @@ pub mod tests {
                 object_id: spell_id,
                 card_id: spell_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("casting Sowing Mycospawn must be accepted");
 
@@ -16414,6 +16416,8 @@ pub mod tests {
                 object_id: spell_id,
                 card_id: spell_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("casting Sowing Mycospawn must be accepted");
 
@@ -16541,6 +16545,8 @@ pub mod tests {
                 object_id: spell_id,
                 card_id: spell_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("casting Goblin Bushwhacker must be accepted");
 
@@ -16580,6 +16586,8 @@ pub mod tests {
                 object_id: spell_id,
                 card_id: spell_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("casting Goblin Bushwhacker must be accepted");
 

@@ -6,6 +6,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{AbilityCost, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -114,6 +115,8 @@ fn wrench_mind_resolution_surfaces_unless_payment_before_discard() {
             object_id: wrench,
             card_id: runner.state().objects[&wrench].card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Wrench Mind");
 

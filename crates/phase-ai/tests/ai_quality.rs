@@ -13,6 +13,7 @@ use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExp
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{PlayerDeckPool, WaitingFor};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -360,6 +361,8 @@ fn casts_creature_when_mana_available() {
             object_id: harvester,
             card_id: runner.state().objects[&harvester].card_id,
             targets: Vec::new(),
+
+            payment_mode: CastPaymentMode::Auto,
         },
         "Should cast creature with strong ETB"
     );
