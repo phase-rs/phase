@@ -25,9 +25,7 @@ pub const STANDARD_BASIC_LANDS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum LimitedDeckError {
     #[error("deck has {actual} cards, minimum is {minimum}")]
-    TooFewCards { actual: usize, minimum: usize },
-    #[error("deck has {actual} cards, expected exactly {expected}")]
-    TooManyCards { actual: usize, expected: usize },
+    TooFewCards { actual: u32, minimum: u32 },
     #[error("card '{name}' is not in the drafted pool")]
     NotInPool { name: String },
     #[error("card '{name}' used {requested} times but only {available} in pool")]
@@ -55,20 +53,12 @@ pub fn validate_limited_deck(
 ) -> Result<(), Vec<LimitedDeckError>> {
     let mut errors = Vec::new();
 
-    // 1. Check exact deck size
+    // 1. Check minimum deck size floor
     let deck_size = main_deck.len();
-    if deck_size != min_deck_size {
-        match deck_size.cmp(&min_deck_size) {
-            std::cmp::Ordering::Less => errors.push(LimitedDeckError::TooFewCards {
-                actual: deck_size,
-                minimum: min_deck_size,
-            }),
-            std::cmp::Ordering::Greater => errors.push(LimitedDeckError::TooManyCards {
-                actual: deck_size,
-                expected: min_deck_size,
-            }),
-            std::cmp::Ordering::Equal => {}
-        }
+    if deck_size < min_deck_size {
+        let actual = u32::try_from(deck_size).unwrap_or(u32::MAX);
+        let minimum = u32::try_from(min_deck_size).unwrap_or(u32::MAX);
+        errors.push(LimitedDeckError::TooFewCards { actual, minimum });
     }
 
     // 2. Build pool multiset (card name -> available count)
@@ -153,18 +143,10 @@ mod tests {
     }
 
     #[test]
-    fn too_many_cards() {
+    fn above_minimum_cards_allowed() {
         let pool: Vec<String> = (0..45).map(|i| format!("Card {i}")).collect();
         let deck: Vec<String> = (0..41).map(|i| format!("Card {i}")).collect();
-        let result = validate_limited_deck(&deck, &pool, &addable(), 40);
-        let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(
-            e,
-            LimitedDeckError::TooManyCards {
-                actual: 41,
-                expected: 40
-            }
-        )));
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40).is_ok());
     }
 
     #[test]

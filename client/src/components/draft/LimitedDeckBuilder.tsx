@@ -242,7 +242,7 @@ export function LimitedDeckBuilder({
   const addableCards = view?.addable_cards?.length
     ? view.addable_cards
     : BASIC_LANDS.map((land) => land.name);
-  const deckValid = totalCards === deckSize;
+  const deckValid = totalCards >= deckSize;
 
   if (!view) return null;
 
@@ -384,10 +384,8 @@ export function LimitedDeckBuilder({
 function DeckStatus({ spells, lands, deckSize }: { spells: number; lands: number; deckSize: number }) {
   const { t } = useTranslation("draft");
   const total = spells + lands;
-  const valid = total === deckSize;
-  const tooMany = total > deckSize;
+  const valid = total >= deckSize;
   const remaining = Math.max(0, deckSize - total);
-  const extra = Math.max(0, total - deckSize);
   const pct = Math.min(100, (total / deckSize) * 100);
 
   return (
@@ -400,8 +398,6 @@ function DeckStatus({ spells, lands, deckSize }: { spells: number; lands: number
           {t("limitedDeck.spellCount", { count: spells })} · {t("limitedDeck.landCount", { count: lands })}
           {valid ? (
             <span className="ml-2 font-medium text-emerald-300">{t("limitedDeck.readyToSubmit")}</span>
-          ) : tooMany ? (
-            <span className="ml-2 font-medium text-red-300">{t("limitedDeck.tooManyCards", { count: extra })}</span>
           ) : (
             <span className="ml-2 text-white/55">{t("limitedDeck.moreNeeded", { count: remaining })}</span>
           )}
@@ -409,7 +405,7 @@ function DeckStatus({ spells, lands, deckSize }: { spells: number; lands: number
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/8">
         <div
-          className={`h-full rounded-full transition-all duration-300 ${valid ? "bg-emerald-400/80" : tooMany ? "bg-red-400/80" : "bg-white/30"}`}
+          className={`h-full rounded-full transition-all duration-300 ${valid ? "bg-emerald-400/80" : "bg-white/30"}`}
           style={{ width: `${pct}%` }}
         />
       </div>

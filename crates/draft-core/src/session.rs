@@ -745,6 +745,35 @@ mod tests {
     }
 
     #[test]
+    fn submit_deck_above_minimum_size_is_valid() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+        session.pools[0] = (0..45)
+            .map(|i| DraftCardInstance {
+                instance_id: format!("card-{i}"),
+                name: format!("Card {i}"),
+                set_code: "TST".to_string(),
+                collector_number: format!("{i}"),
+                rarity: "common".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
+            })
+            .collect();
+
+        let main_deck: Vec<String> = (0..41).map(|i| format!("Card {i}")).collect();
+        let deltas = apply(
+            &mut session,
+            DraftAction::SubmitDeck { seat: 0, main_deck },
+            None,
+        )
+        .unwrap();
+
+        assert!(deltas.contains(&DraftDelta::DeckSubmitted { seat: 0 }));
+        assert!(session.submitted_decks.contains_key(&PlayerId(0)));
+    }
+
+    #[test]
     fn submit_deck_invalid_too_few_cards() {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;

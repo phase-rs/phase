@@ -92,7 +92,7 @@ describe("LimitedDeckBuilder", () => {
     expect(threeDropBucket).toHaveAttribute("aria-valuenow", "1");
   });
 
-  it("enables submit only at exact minimum deck size", () => {
+  it("enables submit at minimum deck size", () => {
     render(
       <LimitedDeckBuilder
         view={TEST_VIEW}
@@ -110,7 +110,7 @@ describe("LimitedDeckBuilder", () => {
     expect(submit).toBeEnabled();
   });
 
-  it("disables submit when deck is above minimum size", () => {
+  it("keeps submit enabled when deck is above minimum size", () => {
     render(
       <LimitedDeckBuilder
         view={TEST_VIEW}
@@ -125,7 +125,7 @@ describe("LimitedDeckBuilder", () => {
     );
 
     const submit = screen.getByRole("button", { name: /submit deck/i });
-    expect(submit).toBeDisabled();
-    expect(screen.getByText(/over limit/i)).toBeInTheDocument();
+    expect(submit).toBeEnabled();
+    expect(screen.queryByText(/over limit/i)).not.toBeInTheDocument();
   });
 });
