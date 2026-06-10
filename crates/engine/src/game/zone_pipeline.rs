@@ -492,6 +492,26 @@ pub(crate) fn move_object(
     // seeding (CR 614.1c) is part of the "would" layer and is deliberately NOT
     // applied — matching the raw `move_to_zone` behavior these callers replace.
     if req.cause.is_exempt() {
+        // DebugCommand is FULLY inert: operator intent is "force the state" for
+        // scenario setup, so the delivery tail's battlefield arms must not fire
+        // either — CR 614.1c "enters with an additional counter" statics
+        // (Kalain class) must not mint counters onto a debug-staged creature,
+        // `pending_etb_counters` from delayed triggers must not be consumed,
+        // and the CR 614.12a devour snapshot must not be captured. Route
+        // through the no-tail primitive, which keeps every unconditional guard
+        // (CR 111.8 token, CR 614.1d ETB block, CR 400.7 cleanup, ZoneChanged
+        // emission) because those live in `zones::move_to_zone` itself. This
+        // also makes DebugCommand non-pausing by construction: no
+        // `apply_etb_counters` call means no counter-replacement pause can
+        // park a prompt mid-debug-action, so debug callers may discard the
+        // (always-`Done`) result. The other exempt causes keep the tail: it is
+        // inert for their destinations (pregame exile/hand have no tail arms,
+        // pregame library goes through the placement arm, elimination's
+        // battlefield departure wants the `mark_layers_full`).
+        if matches!(req.cause, ZoneChangeCause::DebugCommand) {
+            zones::move_to_zone(state, req.object_id, req.to, events);
+            return ZoneMoveResult::Done;
+        }
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
         if let ProposedEvent::ZoneChange {
             enter_transformed,
