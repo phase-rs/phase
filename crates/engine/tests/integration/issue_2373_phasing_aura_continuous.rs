@@ -208,6 +208,22 @@ fn aura_continuous_effect_reapplies_after_phase_in() {
         Some(1),
         "CR 613.4: Aura's base-toughness=1 re-applies after phase-in"
     );
+    // The discriminating assertion: toughness alone is 1 under BOTH the Aura
+    // (0/1) and the expired animation (1/1), so it can't prove which effect is
+    // live. Power distinguishes them — the Aura sets power 0, the animation set
+    // power 1. Asserting power==0 proves the Aura re-applied and the stale
+    // until-EOT animation did NOT linger (CR 702.26f).
+    assert_eq!(
+        state.objects[&land].power,
+        Some(0),
+        "CR 613.4 + CR 702.26f: Aura's base-power=0 re-applies, not the expired animation's 1"
+    );
+    // The animation also granted Flying; once it expired while phased out, the
+    // re-phased-in permanent must not have it (the Aura grants no keywords).
+    assert!(
+        !engine::game::keywords::has_flying(&state.objects[&land]),
+        "CR 702.26f: the until-EOT animation's Flying is gone after expiry + phase-in"
+    );
 }
 
 /// Build-for-class sibling: an Equipment buff (a +N/+N "anthem on the equipped
