@@ -2107,7 +2107,7 @@ fn try_pay_with_hybrid_plan(pool: &ManaPool, cost: &ManaCost, plan: &[ManaType])
 /// CR 107.4e + CR 601.2h: Debit `cost` from `pool` using `plan` for hybrid
 /// shards. Non-hybrid shards (single, Phyrexian, snow, colorless-hybrid,
 /// hybrid-Phyrexian, two-generic-hybrid, X) are routed through the same
-/// auto-pay rules the casting flow uses via `mana_payment::pay_cost`, but
+/// auto-pay rules the casting flow uses via `mana_payment::pay_from_pool`, but
 /// with the hybrid shards already resolved, the plan is unambiguous.
 ///
 /// Implementation: build a scratch cost with hybrid shards rewritten to
