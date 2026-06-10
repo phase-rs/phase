@@ -8600,6 +8600,23 @@ impl fmt::Debug for Effect {
 }
 
 impl Effect {
+    /// Single authority for constructing the "parser couldn't handle this"
+    /// effect. Parser code must use this instead of a literal
+    /// `Effect::Unimplemented { .. }` (enforced for new code by
+    /// `scripts/check-parser-combinators.sh`).
+    ///
+    /// `name` is a stable snake_case *category* key — the coverage report
+    /// groups parse gaps by it, so it must describe the pattern class
+    /// (e.g. `"dig_continuation"`, `"modal_mode_unsupported_qualifier"`),
+    /// never the raw Oracle text fragment. The unparsed text itself goes in
+    /// `fragment`, which lands in `description` for diagnostics.
+    pub fn unimplemented(name: impl Into<String>, fragment: impl Into<String>) -> Effect {
+        Effect::Unimplemented {
+            name: name.into(),
+            description: Some(fragment.into()),
+        }
+    }
+
     /// CR 115.1: Returns the target filter for effects that have a player-selectable
     /// `target` field. Returns `None` for effects with no target field, or whose
     /// targeting is handled through different mechanisms (filters, zones, etc.).
