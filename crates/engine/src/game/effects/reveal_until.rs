@@ -261,14 +261,18 @@ pub(crate) fn move_rest(
 /// Put cards on the bottom of the player's library in random order.
 //
 // Zone-pipeline bucketing: `move_to_library_position` is a library-placement
-// SIBLING raw mover (PLAN §0 / §5 "library-placement sibling treatment"),
-// deferred to Phase D. `move_object`'s `placement: Some(LibraryPosition)` arm
-// today still delegates straight to `move_to_library_at_index` and skips the
-// replacement consult (zone_pipeline.rs Phase-A stub), so routing through it
-// would gain nothing now — these are library→bottom reposition moves with no
-// Moved-redirect class to consult (a card going to the bottom of the library is
-// not "put into a graveyard/exile/hand"). Migrate alongside the other library-
-// placement sibling call sites when Phase D wires cross-zone placement.
+// SIBLING raw mover (PLAN §0 / §5 "library-placement sibling treatment").
+// Migrating it onto `move_object`'s placement arm is gated on completing that
+// arm's consult (it is a Phase-A stub that delegates straight to
+// `move_to_library_at_index`, skipping the replacement consult). That completion
+// is DEFERRED: no `Moved` replacement in the card pool targets
+// `destination_zone(Library)` (verified: 25 Battlefield / 17 Graveyard / 2 Exile
+// destinations, zero Library), so the consult is a guaranteed no-op today, and
+// completing it correctly requires gating the CR 701.24a delivery-tail
+// auto-shuffle on placement-absence across the shared delivery signatures — a
+// cross-cutting change with a silent-randomization landmine for zero current
+// correctness gain. A library→bottom reposition is not "put into a
+// graveyard/exile/hand", so nothing is skipped by staying on the raw sibling.
 fn shuffle_to_bottom(state: &mut GameState, cards: &[ObjectId], events: &mut Vec<GameEvent>) {
     let mut shuffled = cards.to_vec();
     shuffled.shuffle(&mut state.rng);

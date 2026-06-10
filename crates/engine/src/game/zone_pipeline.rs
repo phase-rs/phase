@@ -442,13 +442,26 @@ pub(crate) fn move_object(
         }
     }
 
-    // Phase A: `placement` integration (folding the raw
-    // `move_to_library_position` / `move_to_library_at_index` siblings in) is
-    // Phase D. Until then a `Some` placement preserves today's behavior of those
-    // siblings — a direct, replacement-bypassing library reposition — so there
-    // is zero behavior change for the (currently nonexistent) Phase A callers
-    // that would pass one. Cross-zone replacement-respecting library placement
-    // is wired when the sibling call sites migrate.
+    // Library-placement arm. A `Some(placement)` request delivers directly to the
+    // requested library index via the `move_to_library_at_index` primitive,
+    // skipping the replacement consult. Phase D wires the exempt pregame/debug
+    // library-bottom and debug top/Nth callers through here; the mulligan and
+    // debug call sites pass a placement and rely on this direct delivery.
+    //
+    // DEFERRED (W3 / PLAN §3.5): running the consult on a library placement —
+    // "the consult should still run for future-proofing per the single-entry
+    // principle". It is a guaranteed no-op today: no `Moved` replacement in the
+    // card pool targets `destination_zone(Library)` (verified: 25 Battlefield /
+    // 17 Graveyard / 2 Exile destinations, zero Library). Completing it correctly
+    // also requires gating the CR 701.24a delivery-tail auto-shuffle on
+    // placement-absence across the shared `deliver` / `deliver_replaced_zone_change`
+    // signatures (a library *placement* must NOT shuffle, but a plain
+    // library-destination ZoneChange MUST) — a cross-cutting change with a
+    // silent-randomization landmine for zero current correctness gain. The raw
+    // `move_to_library_position` / `_at_index` sibling production callers
+    // (put_on_top, cascade, discover, reveal_until, drawn_this_turn_choice,
+    // engine_resolution_choices) stay on the raw movers until that completion;
+    // they are library repositions with no Moved-redirect class to consult.
     if let Some(position) = &req.placement {
         if req.to == Zone::Library {
             let index = match position {
