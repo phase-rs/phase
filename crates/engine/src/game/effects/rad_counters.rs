@@ -58,8 +58,18 @@ pub fn resolve(
                 ProposedEvent::Mill { count, .. } => (*count as usize).min(library_before.len()),
                 _ => 0,
             };
+            // CR 728.1: `milled_ids` is fixed by the post-replacement count
+            // against the pre-mill library snapshot (`library_before`), so it
+            // identifies the correct top-N cards regardless of where delivery
+            // ultimately routes them. The life-loss loop below reads each card's
+            // type from `state.objects` (zone-independent). Both reads therefore
+            // remain correct even if `apply_mill_after_replacement` parks
+            // mid-batch on a per-card CR 616.1 ordering choice (the parked tail
+            // is delivered by the resume path; the snapshot is already taken).
             let ids: Vec<_> = library_before.into_iter().take(final_count).collect();
-            crate::game::effects::mill::apply_mill_after_replacement(state, event, events)?;
+            // `bool` return (pause signal) is irrelevant here: the rad life-loss
+            // is assessed from the snapshot above, not from the parked tail.
+            let _ = crate::game::effects::mill::apply_mill_after_replacement(state, event, events)?;
             ids
         }
         ReplacementResult::Prevented => {
