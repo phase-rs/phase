@@ -1,10 +1,11 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::{DisplaySource, GameObject};
 use crate::game::layers::compute_current_copiable_values;
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef,
+    TargetRef, TriggerCondition, TriggerDefinition,
 };
 use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
@@ -14,7 +15,10 @@ use crate::types::game_state::{
     GameState, PendingCopyTokenBatch, PendingCopyTokenResolution, PendingCounterPostAction,
 };
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::proposed_event::{CopyTokenSpec, EtbTapState, ProposedEvent};
+use crate::types::proposed_event::{
+    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+};
+use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -304,6 +308,73 @@ fn drain_copy_token_resolution(
     });
 }
 
+/// CR 601.2f + CR 603.4: Cast-time triggers copied onto a token permanent are
+/// inert — the token was created, not cast.
+fn is_spell_casting_only_trigger(trig: &TriggerDefinition) -> bool {
+    matches!(
+        trig.mode,
+        TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy
+    ) || matches!(
+        trig.condition,
+        Some(TriggerCondition::AdditionalCostPaid { .. })
+    )
+}
+
+/// CR 601.2f + CR 707.2: Remove spell-casting-only copiable characteristics
+/// from a freshly created copy token (Offspring/Kicker keywords, "if it was
+/// kicked" / "if offspring was paid" ETB triggers, etc.).
+fn strip_spell_casting_copiable_characteristics(obj: &mut GameObject) {
+    obj.keywords.retain(|kw| !kw.is_spell_casting_only());
+    obj.base_keywords.retain(|kw| !kw.is_spell_casting_only());
+    obj.trigger_definitions
+        .retain(|trig| !is_spell_casting_only_trigger(trig));
+    Arc::make_mut(&mut obj.base_trigger_definitions)
+        .retain(|trig| !is_spell_casting_only_trigger(trig));
+}
+
+/// CR 111.10 + CR 702.175a: When a card-related token preset exists (Offspring,
+/// set-specific copy tokens), route the copy through the token art database
+/// instead of rendering as a card-copy with a "Copy" badge.
+fn resolve_predefined_token_display(
+    state: &mut GameState,
+    copy_source_id: ObjectId,
+    token_id: ObjectId,
+) {
+    let body = {
+        let token = match state.objects.get(&token_id) {
+            Some(token) if token.display_source == DisplaySource::Card => token,
+            _ => return,
+        };
+        TokenCharacteristics {
+            display_name: token.name.clone(),
+            power: token.power,
+            toughness: token.toughness,
+            core_types: token.card_types.core_types.clone(),
+            subtypes: token.card_types.subtypes.clone(),
+            supertypes: token.card_types.supertypes.clone(),
+            colors: token.color.clone(),
+            keywords: token.keywords.clone(),
+        }
+    };
+    let Some(image_ref) =
+        crate::game::token_presets::find_card_linked_copy_token_ref(state, copy_source_id, &body)
+    else {
+        return;
+    };
+    if let Some(token) = state.objects.get_mut(&token_id) {
+        token.display_source = DisplaySource::Token;
+        token.token_image_ref = Some(image_ref);
+    }
+}
+
+/// CR 707.2: Finalize a copy token after P/T exceptions and cast-only stripping.
+fn finalize_copied_token(state: &mut GameState, copy_source_id: ObjectId, token_id: ObjectId) {
+    if let Some(token) = state.objects.get_mut(&token_id) {
+        strip_spell_casting_copiable_characteristics(token);
+    }
+    resolve_predefined_token_display(state, copy_source_id, token_id);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_copy_token_after_replacement(
     state: &mut GameState,
@@ -452,6 +523,8 @@ pub(crate) fn apply_copy_token_after_replacement(
                 completion: CopyTokenApplyCompletion::Paused,
             };
         }
+
+        finalize_copied_token(state, source_id, token_id);
 
         // CR 614.1c + CR 122.6a: ETB-counter replacement mutations are carried
         // on the accepted CreateToken spec, even for copy tokens whose full
@@ -608,6 +681,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     ) {
         return false;
     }
+    finalize_copied_token(state, source_id, token_id);
     if enters_attacking {
         crate::game::combat::enter_attacking(state, token_id, source_id, controller);
     }
@@ -3094,6 +3168,20 @@ mod tests {
         assert_eq!(token.name, "Coruscation Mage");
         assert!(token.card_types.subtypes.contains(&"Wizard".to_string()));
         assert!(token.is_token);
+        assert!(
+            !token
+                .keywords
+                .iter()
+                .any(|kw| matches!(kw, crate::types::keywords::Keyword::Offspring(_))),
+            "offspring token must not retain the cast-only Offspring keyword"
+        );
+        assert!(
+            !token.trigger_definitions.iter_all().any(|trig| matches!(
+                trig.condition,
+                Some(TriggerCondition::AdditionalCostPaid { .. })
+            )),
+            "offspring token must not retain AdditionalCostPaid ETB triggers"
+        );
     }
 
     /// CR 707.9b: dynamic copy exceptions are resolved after the copied values
