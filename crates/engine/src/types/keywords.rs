@@ -1206,6 +1206,15 @@ impl Keyword {
     /// casting a spell. A token created by `CopyTokenOf` was not cast, so these
     /// keywords are inert on the copy and are stripped at creation time so the
     /// token does not display cast-only reminders (Offspring, Kicker, etc.).
+    ///
+    /// Maintenance note: every new alternative-cost or additional-cost casting
+    /// keyword added to `Keyword` must also be added here, or token copies of
+    /// permanents carrying it re-introduce the inert-reminder display bug.
+    ///
+    /// Deliberately excluded: `Prototype` — CR 718.2a makes the alternative
+    /// characteristics part of the object's copiable values and CR 718.3d
+    /// treats a copy of a prototyped permanent as itself prototyped, so the
+    /// keyword must survive copying.
     pub fn is_spell_casting_only(&self) -> bool {
         matches!(
             self,
@@ -1241,7 +1250,13 @@ impl Keyword {
                 | Keyword::Suspend { .. }
                 | Keyword::Morph(_)
                 | Keyword::Megamorph(_)
-                | Keyword::Prototype { .. }
+                | Keyword::Disguise(_)
+                | Keyword::Spectacle(_)
+                | Keyword::Surge(_)
+                | Keyword::Overload(_)
+                | Keyword::Splice { .. }
+                | Keyword::Escalate(_)
+                | Keyword::Prowl(_)
                 | Keyword::Impending { .. }
                 | Keyword::MoreThanMeetsTheEye(_)
                 | Keyword::Freerunning(_)
