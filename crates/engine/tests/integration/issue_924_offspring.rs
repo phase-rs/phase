@@ -173,6 +173,8 @@ fn offspring_cast_creates_token_without_labeling_original_as_copy() {
         "offspring token keeps copied landfall trigger"
     );
 
-    // Token should not inherit cast-time payment metadata (would re-fire offspring).
+    // Sanity invariant (not new behavior in this fix): `reset_for_battlefield_entry`
+    // already zeroes cast-time payment metadata at token creation; the
+    // discriminating assertion for this fix is the trigger strip above.
     assert_eq!(token.additional_cost_payment_count, 0);
 }

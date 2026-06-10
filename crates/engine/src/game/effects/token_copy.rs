@@ -18,7 +18,6 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::proposed_event::{
     CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
 };
-use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -308,13 +307,15 @@ fn drain_copy_token_resolution(
     });
 }
 
-/// CR 601.2f + CR 603.4: Cast-time triggers copied onto a token permanent are
-/// inert — the token was created, not cast.
-fn is_spell_casting_only_trigger(trig: &TriggerDefinition) -> bool {
+/// CR 601.2f + CR 603.4: Triggers gated on a cast-time additional-cost payment
+/// ("if its offspring cost was paid", "if it was kicked") are inert on a token
+/// copy — the token was created, not cast, so the payment condition can never
+/// hold. Only the payment-gated condition is stripped: persistent battlefield
+/// abilities that *observe* spell casts (Magecraft's `SpellCastOrCopy`,
+/// "whenever you cast a [type] spell" `SpellCast`) are copiable text per
+/// CR 707.2 and must survive on the copy.
+fn is_cast_payment_gated_trigger(trig: &TriggerDefinition) -> bool {
     matches!(
-        trig.mode,
-        TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy
-    ) || matches!(
         trig.condition,
         Some(TriggerCondition::AdditionalCostPaid { .. })
     )
@@ -327,9 +328,9 @@ fn strip_spell_casting_copiable_characteristics(obj: &mut GameObject) {
     obj.keywords.retain(|kw| !kw.is_spell_casting_only());
     obj.base_keywords.retain(|kw| !kw.is_spell_casting_only());
     obj.trigger_definitions
-        .retain(|trig| !is_spell_casting_only_trigger(trig));
+        .retain(|trig| !is_cast_payment_gated_trigger(trig));
     Arc::make_mut(&mut obj.base_trigger_definitions)
-        .retain(|trig| !is_spell_casting_only_trigger(trig));
+        .retain(|trig| !is_cast_payment_gated_trigger(trig));
 }
 
 /// CR 111.10 + CR 702.175a: When a card-related token preset exists (Offspring,
@@ -1077,10 +1078,10 @@ mod tests {
     use crate::game::game_object::DisplaySource;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef,
-        CostPaidObjectSnapshot, Effect, FilterProp, ObjectScope, PtValue, QuantityExpr,
-        QuantityModification, QuantityRef, ReplacementDefinition, RoundingMode, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, AdditionalCostPaymentSource, ContinuousModification,
+        ControllerRef, CostPaidObjectSnapshot, Effect, FilterProp, ObjectScope, PtValue,
+        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, RoundingMode,
+        TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::PrintedCardRef;
@@ -1091,6 +1092,7 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::triggers::TriggerMode;
 
     /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
     /// color, and replaces creature subtypes (The Scarab God shape) stamps each
@@ -3181,6 +3183,101 @@ mod tests {
                 Some(TriggerCondition::AdditionalCostPaid { .. })
             )),
             "offspring token must not retain AdditionalCostPaid ETB triggers"
+        );
+    }
+
+    /// CR 707.2 vs CR 601.2f + CR 603.4: copy-token finalization strips only
+    /// cast-payment-gated triggers ("if its offspring cost was paid" / "if it
+    /// was kicked"). Persistent spell-cast observers — Magecraft's
+    /// `SpellCastOrCopy`, generic "whenever you cast a [type] spell"
+    /// `SpellCast` — are copiable battlefield text and must survive on the
+    /// token copy.
+    #[test]
+    fn copy_token_keeps_spell_cast_triggers_strips_payment_gated_triggers() {
+        let mut state = GameState::new_two_player(42);
+
+        let parent_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Archmage Emeritus".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let parent = state.objects.get_mut(&parent_id).unwrap();
+            parent.base_power = Some(2);
+            parent.base_toughness = Some(2);
+            parent.power = Some(2);
+            parent.toughness = Some(2);
+            parent.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string(), "Wizard".to_string()],
+            };
+            parent.card_types = parent.base_card_types.clone();
+
+            // Magecraft-style persistent battlefield trigger (CR 707.10 note:
+            // observes casts/copies; it is not itself cast-time bookkeeping).
+            let magecraft = TriggerDefinition::new(TriggerMode::SpellCastOrCopy).description(
+                "Magecraft — Whenever you cast or copy an instant or sorcery spell, draw a card."
+                    .to_string(),
+            );
+            // Offspring-style ETB trigger gated on a cast-time payment.
+            let offspring_etb = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::SelfRef)
+                .condition(TriggerCondition::AdditionalCostPaid {
+                    source: AdditionalCostPaymentSource::Any,
+                    variant: None,
+                    kicker_cost: None,
+                    min_count: 1,
+                })
+                .description("offspring etb".to_string());
+            parent.base_trigger_definitions = Arc::new(vec![magecraft, offspring_etb]);
+            parent.trigger_definitions = Arc::clone(&parent.base_trigger_definitions).into();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            parent_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert!(
+            token
+                .trigger_definitions
+                .iter_all()
+                .any(|trig| matches!(trig.mode, TriggerMode::SpellCastOrCopy)),
+            "token copy must keep the persistent Magecraft SpellCastOrCopy trigger (CR 707.2)"
+        );
+        assert!(
+            token
+                .base_trigger_definitions
+                .iter()
+                .any(|trig| matches!(trig.mode, TriggerMode::SpellCastOrCopy)),
+            "copiable base triggers must also keep the SpellCastOrCopy trigger (CR 707.2)"
+        );
+        assert!(
+            !token.trigger_definitions.iter_all().any(|trig| matches!(
+                trig.condition,
+                Some(TriggerCondition::AdditionalCostPaid { .. })
+            )),
+            "token copy must strip cast-payment-gated triggers (CR 601.2f + CR 603.4)"
         );
     }
 
