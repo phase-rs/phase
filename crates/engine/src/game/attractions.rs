@@ -14,7 +14,6 @@ use crate::types::zones::Zone;
 
 use super::effects::roll_die;
 use super::game_object::GameObject;
-use super::zones;
 use crate::types::ability::EffectError;
 
 /// CR 717.1: Default lit numbers when card data omits variant lights (1 and 6 are always lit).
@@ -54,7 +53,29 @@ pub fn open_attractions(
             // as many as possible and ignore the impossible remainder.
             break;
         };
-        zones::move_to_zone(state, object_id, Zone::Battlefield, events);
+        // CR 614.1c: route the Attraction's battlefield entry through the
+        // zone-change pipeline so the delivery tail applies enters-with-counters
+        // statics (e.g. an artifact-scoped "enters with an additional counter"
+        // static) — the raw `move_to_zone` skipped that tail, so an opened
+        // Attraction never received them. CR 400.7 attributes the entry to the
+        // opened object itself (the pre-pipeline raw move recorded no source).
+        //
+        // CR 616.1 / CR 303.4f: a battlefield-entry pause is not reachable for
+        // an Attraction — it is a non-Aura artifact (no aura-host choice), and
+        // no `Moved` redirect or counter-replacement that targets an Attraction
+        // entry surfaces a CR 616.1 ordering choice in the supported pool. The
+        // bail keeps the loop safe by construction: on a pause the prompt is
+        // parked centrally by `move_object`, so stop opening rather than
+        // emitting `AttractionOpened` over a parked state.
+        match super::zone_pipeline::move_object(
+            state,
+            super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id),
+            events,
+        ) {
+            super::zone_pipeline::ZoneMoveResult::Done => {}
+            super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+            | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => break,
+        }
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.in_attraction_deck = false;
         }

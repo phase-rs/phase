@@ -528,8 +528,36 @@ pub fn activate_ninjutsu(
         combat.blocker_assignments.remove(&creature_to_return);
     }
 
-    // 2. Move Ninjutsu-family card from hand/command zone to battlefield
-    zones::move_to_zone(state, ninjutsu_obj_id, Zone::Battlefield, events);
+    // 2. Move Ninjutsu-family card from hand/command zone to battlefield.
+    //
+    // CR 614.1c: route the entry through the zone-change pipeline so the
+    // delivery tail applies enters-with-counters statics ("creatures you
+    // control enter with an additional +1/+1 counter" — Hardened Scales /
+    // Conclave Mentor class) to the entering ninja; the raw `move_to_zone`
+    // skipped that tail, so the ninja entered without them. CR 400.7 attributes
+    // the entry to the ninja itself (the pre-pipeline raw move recorded no
+    // source; the cast-variant tag below records the ninjutsu provenance).
+    //
+    // CR 616.1 / CR 303.4f: a battlefield-entry pause is not reachable here —
+    // the ninja is a creature (not an Aura, so no host choice), and no
+    // supported ninja entry surfaces a counter-replacement pause or a CR 616.1
+    // multi-redirect ordering choice. The bail is a safety guard, not a resume
+    // path: the combat placement (CR 702.49c) below cannot resume across a
+    // pause, so on the (unreachable) pause we stop with the prompt parked rather
+    // than place the ninja attacking over a parked state.
+    match super::zone_pipeline::move_object(
+        state,
+        super::zone_pipeline::ZoneMoveRequest::effect(
+            ninjutsu_obj_id,
+            Zone::Battlefield,
+            ninjutsu_obj_id,
+        ),
+        events,
+    ) {
+        super::zone_pipeline::ZoneMoveResult::Done => {}
+        super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+        | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
+    }
 
     // CR 702.49: Track which alt-cost variant was paid this turn on the
     // cast-variant-paid tag (placement + tapped + summoning sickness is
