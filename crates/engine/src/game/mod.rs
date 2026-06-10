@@ -134,7 +134,6 @@ pub use engine::{
 pub use engine_debug::route_debug_create_to_battlefield;
 pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;
-pub use layers::evaluate_layers;
 pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};
 pub use printed_cards::rehydrate_game_from_card_db;
 pub use public_state::finalize_public_state;

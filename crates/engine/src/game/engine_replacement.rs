@@ -608,7 +608,10 @@ pub(super) fn handle_copy_target_choice(
             )
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
-    crate::game::layers::evaluate_layers(state);
+    // Force a full layer pass after the copy chain so the realized
+    // characteristics below (enter-tapped, ETB counters) read post-copy state.
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
     let enter_modifiers =
         super::replacement::current_self_enter_replacement_modifiers(state, source_id);
     if let Some(tapped) = enter_modifiers.enter_tapped {
