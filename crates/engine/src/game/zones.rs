@@ -116,8 +116,8 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     }
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
-        // CR 712.8a + CR 400.7: Transformed permanents revert to front face when
-        // moving to any zone other than the battlefield or stack.
+        // CR 712.8a + CR 400.7: Transformed permanents revert to front face on any
+        // zone exit (transform DFCs are only valid in transformed state on the battlefield).
         if obj_mut.transformed {
             if let Some(back_face) = obj_mut.back_face.clone() {
                 let current_back = snapshot_object_face(obj_mut);
