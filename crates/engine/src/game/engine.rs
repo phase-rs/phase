@@ -5755,8 +5755,8 @@ fn handle_crew_activation(
         ));
     }
 
-    // Extract crew power and activation cadence from keywords
-    let (crew_power, crew_cadence) = obj
+    // Extract crew power and once-each-turn cadence from keywords.
+    let (crew_power, crew_once_per_turn) = obj
         .keywords
         .iter()
         .find_map(|kw| {
@@ -5765,7 +5765,13 @@ fn handle_crew_activation(
                 once_per_turn,
             } = kw
             {
-                Some((*power, *once_per_turn))
+                // CR 602.5b: once_per_turn is `Some(OnlyOnceEachTurn)` when the
+                // Vehicle's crew ability is limited to once each turn.
+                let limited = matches!(
+                    once_per_turn.as_deref(),
+                    Some(crate::types::ability::ActivationRestriction::OnlyOnceEachTurn)
+                );
+                Some((*power, limited))
             } else {
                 None
             }
@@ -5774,9 +5780,7 @@ fn handle_crew_activation(
 
     // CR 602.5b: "Activate only once each turn" — reject a second crew activation
     // of this Vehicle in the same turn.
-    if crew_cadence == crate::types::keywords::ActivationCadence::OncePerTurn
-        && state.crew_activated_this_turn.contains(&vehicle_id)
-    {
+    if crew_once_per_turn && state.crew_activated_this_turn.contains(&vehicle_id) {
         return Err(EngineError::ActionNotAllowed(
             "This Vehicle's crew ability can be activated only once each turn".to_string(),
         ));
@@ -20453,7 +20457,7 @@ mod crew_tests {
             obj.card_types.subtypes.push("Vehicle".to_string());
             obj.keywords.push(crate::types::keywords::Keyword::Crew {
                 power: 3,
-                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+                once_per_turn: None,
             });
             obj.base_power = Some(6);
             obj.base_toughness = Some(5);
@@ -20812,7 +20816,7 @@ mod crew_tests {
                 .push(crate::types::card_type::CoreType::Artifact);
             obj.keywords.push(crate::types::keywords::Keyword::Crew {
                 power: 1,
-                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+                once_per_turn: None,
             });
         }
 
@@ -20879,7 +20883,7 @@ mod crew_tests {
             obj.card_types.subtypes.push("Vehicle".to_string());
             obj.keywords.push(crate::types::keywords::Keyword::Crew {
                 power: 3,
-                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+                once_per_turn: None,
             });
             obj.power = Some(6);
             obj.toughness = Some(5);
@@ -21431,7 +21435,7 @@ mod keyword_action_stack_tests {
         obj.card_types.subtypes.push("Vehicle".to_string());
         obj.keywords.push(crate::types::keywords::Keyword::Crew {
             power: crew_n,
-            once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+            once_per_turn: None,
         });
         obj.base_power = Some(6);
         obj.base_toughness = Some(5);
@@ -21588,7 +21592,9 @@ mod keyword_action_stack_tests {
         obj.card_types.subtypes = vec!["Vehicle".to_string()];
         obj.keywords.push(crate::types::keywords::Keyword::Crew {
             power: crew_n,
-            once_per_turn: crate::types::keywords::ActivationCadence::OncePerTurn,
+            once_per_turn: Some(Box::new(
+                crate::types::ability::ActivationRestriction::OnlyOnceEachTurn,
+            )),
         });
         id
     }

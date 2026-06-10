@@ -12,8 +12,8 @@
 
 use engine::types::ability::{AbilityCost, CostObjectCount, QuantityExpr};
 use engine::types::keywords::{
-    ActivationCadence, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
-    ProtectionTarget, WardCost,
+    BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter, ProtectionTarget,
+    WardCost,
 };
 use engine::types::mana::ManaColor;
 use engine::types::Keyword;
@@ -114,7 +114,8 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Afflict(n) => Keyword::Afflict(non_negative(*n)?),
         Rule::Crew(n) => Keyword::Crew {
             power: non_negative(*n)?,
-            once_per_turn: ActivationCadence::Unlimited,
+            // mtgish encodes only plain Crew N; no once-each-turn cadence.
+            once_per_turn: None,
         },
         Rule::Fabricate(n) => Keyword::Fabricate(non_negative(*n)?),
         Rule::Fading(n) => Keyword::Fading(non_negative(*n)?),

@@ -99,9 +99,7 @@ expression: "&lowered"
     {
       "Crew": {
         "power": 1,
-        "once_per_turn": {
-          "type": "Unlimited"
-        }
+        "once_per_turn": null
       }
     }
   ]

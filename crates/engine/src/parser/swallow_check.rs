@@ -24,11 +24,12 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ContinuousModification, CopyRetargetPermission, Effect,
-    FilterProp, ModalSelectionConstraint, OpponentMayScope, PlayerFilter, QuantityExpr,
-    ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, ContinuousModification,
+    CopyRetargetPermission, Effect, FilterProp, ModalSelectionConstraint, OpponentMayScope,
+    PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
+    TargetFilter, TriggerDefinition,
 };
-use crate::types::keywords::{ActivationCadence, Keyword};
+use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -1193,10 +1194,11 @@ fn def_has_activation_restriction(def: &AbilityDefinition) -> bool {
 fn keyword_has_activation_limit(keyword: &Keyword) -> bool {
     matches!(
         keyword,
-        Keyword::Crew {
-            once_per_turn: ActivationCadence::OncePerTurn,
-            ..
-        }
+        Keyword::Crew { once_per_turn, .. }
+            if matches!(
+                once_per_turn.as_deref(),
+                Some(ActivationRestriction::OnlyOnceEachTurn)
+            )
     )
 }
 
