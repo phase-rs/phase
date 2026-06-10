@@ -554,6 +554,7 @@ fn apply_pending_counter_post_action(
             source_id,
             duration,
             exile_tracking,
+            drain,
         } => {
             // CR 614.12a: the delivery tail may surface a Devour as-enters
             // sacrifice `EffectZoneChoice`. On that pause, return `false` so the
@@ -569,6 +570,7 @@ fn apply_pending_counter_post_action(
                 source_id,
                 duration.as_ref(),
                 exile_tracking,
+                drain,
                 events,
             ) {
                 super::change_zone::ZoneDeliveryResult::Done => true,

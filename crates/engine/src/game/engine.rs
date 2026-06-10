@@ -1739,7 +1739,10 @@ fn apply_action(
                     let front_snapshot = super::printed_cards::snapshot_object_face(obj);
                     super::printed_cards::apply_back_face_to_object(obj, back);
                     obj.back_face = Some(front_snapshot);
+                    // CR 712.8a: Mark MDFC back-face so apply_zone_exit_cleanup
+                    // reverts to front face on any zone exit to a non-battlefield zone.
                     // Do NOT set obj.transformed — MDFC face choice ≠ transform
+                    obj.modal_back_face = true;
                 } else {
                     // Front face chosen — clear layout_kind so the MDFC intercept
                     // won't re-fire on re-entry into handle_play_land / handle_cast_spell.
@@ -5195,8 +5198,10 @@ fn handle_play_land(
             let front_snapshot = super::printed_cards::snapshot_object_face(obj);
             super::printed_cards::apply_back_face_to_object(obj, back);
             obj.back_face = Some(front_snapshot);
-            // Do NOT set obj.transformed — MDFC face selection is not transformation.
-            // zones.rs:38-46 reverts transformed permanents on zone exit; MDFCs must not trigger this.
+            // CR 712.8a: Mark back-face so apply_zone_exit_cleanup reverts to front face
+            // when this land leaves the battlefield. Do NOT set obj.transformed — MDFC
+            // face selection is not transformation.
+            obj.modal_back_face = true;
         }
     }
 
@@ -5238,52 +5243,63 @@ fn handle_play_land(
 
     match super::replacement::replace_event(state, proposed, events) {
         super::replacement::ReplacementResult::Execute(event) => {
-            if let crate::types::proposed_event::ProposedEvent::ZoneChange {
-                object_id,
-                to,
-                enter_tapped,
-                enter_with_counters,
-                controller_override,
-                ..
-            } = event
+            if let crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } = event
             {
-                zones::move_to_zone(state, object_id, to, events);
-                mark_land_played_from_zone(state, object_id, origin_zone);
-                // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
-                // defaults. Override only when the replacement pipeline changed them.
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    if enter_tapped.resolve(false) {
-                        obj.tapped = true;
-                    }
-                    if let Some(new_controller) = controller_override {
-                        obj.controller = new_controller;
-                    }
-                }
-                // CR 614.1c: Apply counters from replacement pipeline.
-                if !engine_replacement::apply_etb_counters(
+                // Phase B (PLAN §6.2 / §7): the divergent partial copy of
+                // `deliver_replaced_zone_change` that used to live here is
+                // dissolved — the post-`replace_event` event is a
+                // `ReplacementResult::Execute` payload, sealed through the third
+                // mint path (`approve_post_replacement`) and delivered by the
+                // shared `zone_pipeline::deliver`. The land entry now gets the
+                // FULL delivery tail the copy skipped (CR 614.1c
+                // `EntersWithAdditionalCounters` statics snapshot, the CR 303.4f
+                // `attach_to` host, `entered_via_ability_source` provenance, the
+                // CR 701.24a library-shuffle arm). `drain = CallerEpilogue`: the
+                // land-play epilogue below owns the `post_replacement_continuation`
+                // drain (it clears `post_replacement_source` and runs the
+                // land-specific accounting), so the tail must not also drain it.
+                let Ok(approved) =
+                    crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(event)
+                else {
+                    unreachable!("`if let ZoneChange` guarantees a ZoneChange payload");
+                };
+                match crate::game::zone_pipeline::deliver(
                     state,
-                    object_id,
-                    &enter_with_counters,
+                    approved,
+                    crate::game::zone_pipeline::DeliveryCtx {
+                        source_id: None,
+                        exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+                        // `played_from_zone` is set FRESH after the move via
+                        // `mark_land_played_from_zone` (this site stamps the play
+                        // origin; it is not preserving a pre-move value), so the
+                        // ctx re-stamp knob stays `None`.
+                        played_from_zone: None,
+                        drain: crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                    },
                     events,
                 ) {
-                    return Ok(state.waiting_for.clone());
-                }
-                // CR 614.1c: Apply pending ETB counters from delayed triggers
-                // (e.g., "that creature enters with an additional +1/+1 counter").
-                let pending: Vec<_> = state
-                    .pending_etb_counters
-                    .iter()
-                    .filter(|(oid, _, _)| *oid == object_id)
-                    .map(|(_, ct, n)| (ct.clone(), *n))
-                    .collect();
-                if !pending.is_empty() {
-                    if !engine_replacement::apply_etb_counters(state, object_id, &pending, events) {
+                    crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
+                    // CR 614.1c / CR 614.12a: the delivery tail parked a
+                    // counter-replacement prompt and stashed the remaining tail
+                    // (carrying `CallerEpilogue`). The land has already entered
+                    // the battlefield (the move precedes the counter pause in the
+                    // tail), so stamp the play origin now — matching the pre-token
+                    // arm, which stamped before the `apply_etb_counters`
+                    // early-return — then surface the parked prompt; the land
+                    // epilogue must not run yet.
+                    crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                        // CR 305.1 + CR 400.7i: stamp land-play provenance so
+                        // effects can find the permanent the played land became.
+                        mark_land_played_from_zone(state, object_id, origin_zone);
                         return Ok(state.waiting_for.clone());
                     }
-                    state
-                        .pending_etb_counters
-                        .retain(|(oid, _, _)| *oid != object_id);
                 }
+                // CR 305.1 + CR 400.7i: stamp land-play provenance ("where it
+                // was played from") so effects can find the permanent the
+                // played land became. Set fresh AFTER delivery — the ctx
+                // re-stamp knob is for preserving a pre-move value, which this
+                // site does not have (it is recording a brand-new origin).
+                mark_land_played_from_zone(state, object_id, origin_zone);
             }
 
             // CR 614.12a: Drain post-replacement side effects (e.g., "As this land
@@ -8061,6 +8077,85 @@ mod tests {
             "result.waiting_for={:?}, stack={:?}",
             result.waiting_for,
             state.stack
+        );
+    }
+
+    /// CR 614.1c discriminating test (fail-first): a land played through the
+    /// real `PlayLand` action must receive the `EntersWithAdditionalCounters`
+    /// static snapshot ("permanents you control enter with an additional +1/+1
+    /// counter" class) that an active permanent contributes. Before Phase B,
+    /// the land-play `Execute` arm was a divergent partial copy of
+    /// `deliver_replaced_zone_change`: it applied only the event's own
+    /// `enter_with_counters` and SKIPPED the statics snapshot, so a played land
+    /// silently missed the static's counter while every other battlefield entry
+    /// (creatures via the shared tail) received it. Routing the land entry
+    /// through `zone_pipeline::deliver` runs the full tail.
+    #[test]
+    fn played_land_receives_enters_with_additional_counters_static() {
+        use std::sync::Arc;
+
+        use crate::types::ability::{ControllerRef, FilterProp, StaticDefinition, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+
+        // CR 614.1c: a P0 permanent granting "other permanents you control enter
+        // with an additional +1/+1 counter" — must be functioning BEFORE the
+        // land enters.
+        let source = create_object(
+            &mut state,
+            CardId(7000),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            let def = StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ));
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        let land = create_object(
+            &mut state,
+            CardId(7001),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land,
+                card_id: CardId(7001),
+            },
+        )
+        .unwrap();
+
+        let obj = &state.objects[&land];
+        assert_eq!(obj.zone, Zone::Battlefield, "land entered the battlefield");
+        assert_eq!(
+            *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0),
+            1,
+            "played land must receive the EntersWithAdditionalCounters static \
+             (CR 614.1c) — the divergent land-play Execute arm dropped the \
+             statics snapshot the shared delivery tail applies"
         );
     }
 

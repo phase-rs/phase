@@ -323,6 +323,13 @@ pub struct GameObject {
     pub face_down: bool,
     pub flipped: bool,
     pub transformed: bool,
+    /// CR 712.8a + CR 400.7: True when this object is showing its MDFC back face
+    /// (set via ChooseModalFace back_face=true). Reverted to front face on any
+    /// zone exit that is not to the battlefield (CR 712.8a: front face only in
+    /// zones other than battlefield/stack), unlike transform DFCs which use the
+    /// `transformed` flag.
+    #[serde(default)]
+    pub modal_back_face: bool,
 
     // Combat
     pub damage_marked: u32,
@@ -1010,6 +1017,7 @@ impl GameObject {
             face_down: false,
             flipped: false,
             transformed: false,
+            modal_back_face: false,
             damage_marked: 0,
             dealt_deathtouch_damage: false,
             attached_to: None,
