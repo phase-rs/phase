@@ -5785,14 +5785,44 @@ pub enum DamageSource {
     TriggeringSource,
 }
 
-/// A single conjured card entry: card name + quantity.
+/// A single conjured card entry: card source + quantity.
 /// Used by `Effect::Conjure` to support multi-card conjure patterns
-/// (e.g., "conjure a card named X and a card named Y into your hand").
+/// (e.g., "conjure a card named X and a card named Y into your hand")
+/// and duplicate-conjure ("conjure a duplicate of that card").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConjureCard {
-    pub name: String,
+    /// Where the conjured card's identity comes from. `#[serde(flatten)]` keeps
+    /// the wire shape backward-compatible: the legacy `{"name": "X"}` form still
+    /// deserializes to `ConjureSource::Named` (and re-serializes identically).
+    #[serde(flatten)]
+    pub source: ConjureSource,
     #[serde(default = "default_quantity_one")]
     pub count: QuantityExpr,
+}
+
+/// CR 707.2: Where a conjured card's identity is taken from. Untagged so the
+/// legacy named form (`{"name": "X"}`) and the duplicate form
+/// (`{"duplicate_of": <filter>}`) are distinguished by their disjoint keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ConjureSource {
+    /// "conjure a card named X" — a specific card looked up by name.
+    Named { name: String },
+    /// "conjure a duplicate of <reference>" — a real card copying the
+    /// referenced card's copiable characteristics (CR 707.2), resolved at
+    /// resolution time from the ability's target / anaphoric reference.
+    Duplicate { duplicate_of: TargetFilter },
+}
+
+impl ConjureCard {
+    /// The literal card name when this entry is a `Named` source; `None` for a
+    /// `Duplicate` source (whose name is resolved at resolution time).
+    pub fn named_name(&self) -> Option<&str> {
+        match &self.source {
+            ConjureSource::Named { name } => Some(name.as_str()),
+            ConjureSource::Duplicate { .. } => None,
+        }
+    }
 }
 
 /// Digital-only Alchemy: which cards an `Effect::Intensify` applies to. Every

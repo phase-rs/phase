@@ -4113,14 +4113,42 @@ fn apply_action(
             GameAction::DecideOptionalEffect { accept: false },
         ) => {
             let p = *player;
-            super::zones::move_to_zone(state, *object_id, Zone::Graveyard, &mut events);
-            state.waiting_for = WaitingFor::Priority { player: p };
-            super::engine_priority::run_post_action_pipeline(
+            let obj = *object_id;
+            // CR 702.35a + CR 614.6: a declined madness card is put into its
+            // owner's graveyard from exile — route it through the zone-change
+            // pipeline so a `Moved` graveyard→exile redirect (Rest in Peace /
+            // Leyline of the Void) fires on it. The raw `move_to_zone` never
+            // proposed the inner ZoneChange, silently dropping those redirects.
+            // The card moves itself (no external source), so it anchors its own
+            // attribution. A CR 616.1 ordering choice (two simultaneous
+            // redirects) is parked centrally by `move_object`; bail before
+            // overwriting `waiting_for` / running the post-action pipeline so the
+            // parked prompt is not clobbered (its resume runs the pipeline).
+            match super::zone_pipeline::move_object(
                 state,
+                super::zone_pipeline::ZoneMoveRequest::effect(obj, Zone::Graveyard, obj),
                 &mut events,
-                &WaitingFor::Priority { player: p },
-                true,
-            )?
+            ) {
+                super::zone_pipeline::ZoneMoveResult::Done => {
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    super::engine_priority::run_post_action_pipeline(
+                        state,
+                        &mut events,
+                        &WaitingFor::Priority { player: p },
+                        true,
+                    )?
+                }
+                // The graveyard move paused on a CR 616.1 ordering choice; the
+                // parked prompt is already in `state.waiting_for`. Evaluate the
+                // arm to it (non-`Priority`), so the post-match block skips the
+                // post-action pipeline and the prompt is surfaced intact — its
+                // replacement-choice resume finishes the move and re-runs the
+                // pipeline.
+                super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    state.waiting_for.clone()
+                }
+            }
         }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             match engine_resolution_choices::handle_resolution_choice(
@@ -6585,29 +6613,80 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         return;
     }
 
-    // CR 610.3a: Return exiled cards to their previous zone
+    // CR 610.3 + CR 614.6: Return each exiled card to its previous zone through
+    // the zone-change pipeline so a battlefield return seeds enters-with-counters
+    // statics (Hardened Scales class) and so a `Moved` redirect fires on any
+    // non-battlefield return — the raw `move_to_zone` skipped the delivery tail.
+    // Group by destination zone (CR 603.10a: cards returning to the same zone do
+    // so simultaneously); within a group each card self-anchors its attribution
+    // (CR 400.7 — the pre-pipeline raw move recorded no source).
+    //
+    // The spent `UntilSourceLeaves` links are dropped via a per-group
+    // `RemoveExileLinks` completion so the cleanup runs exactly once after the
+    // group's pile lands, even when a returned creature pauses on an as-enters /
+    // aura-host choice (CR 303.4f / 616.1): the parked batch tail + completion
+    // are drained by the replacement-choice / aura-attachment resume.
+    // First-seen insertion order (not a HashMap) so group processing is
+    // deterministic for the engine's reproducibility guarantee.
+    let mut groups: Vec<(Zone, Vec<ObjectId>)> = Vec::new();
     for link in &to_return {
-        // Only return if the card is still in exile
         let still_in_exile = state
             .objects
             .get(&link.exiled_id)
             .map(|obj| obj.zone == Zone::Exile)
             .unwrap_or(false);
-        if still_in_exile {
-            let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } =
-                &link.kind
-            else {
-                continue;
-            };
-            zones::move_to_zone(state, link.exiled_id, *return_zone, events);
+        if !still_in_exile {
+            continue;
+        }
+        let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } = &link.kind
+        else {
+            continue;
+        };
+        match groups.iter_mut().find(|(zone, _)| *zone == *return_zone) {
+            Some((_, ids)) => ids.push(link.exiled_id),
+            None => groups.push((*return_zone, vec![link.exiled_id])),
         }
     }
 
-    // Remove processed links
-    let returned_ids: Vec<_> = to_return.iter().map(|l| l.exiled_id).collect();
-    state
-        .exile_links
-        .retain(|link| !returned_ids.contains(&link.exiled_id));
+    // Links for cards that already left exile (not returned by us) are still spent
+    // and must be dropped now — only the IN-FLIGHT group ids ride their batch
+    // completion. (The common case is a single battlefield group; a mid-group
+    // pause defers only that group's cleanup, while any remaining groups process
+    // after — `move_objects_simultaneously_then` parks the tail per group.)
+    let returning_ids: std::collections::HashSet<ObjectId> = groups
+        .iter()
+        .flat_map(|(_, ids)| ids.iter().copied())
+        .collect();
+    let returned_all: Vec<ObjectId> = to_return.iter().map(|l| l.exiled_id).collect();
+    state.exile_links.retain(|link| {
+        !returned_all.contains(&link.exiled_id) || returning_ids.contains(&link.exiled_id)
+    });
+
+    for (return_zone, ids) in groups {
+        let reqs: Vec<_> = ids
+            .iter()
+            .map(|&id| super::zone_pipeline::ZoneMoveRequest::effect(id, return_zone, id))
+            .collect();
+        let completion =
+            crate::types::game_state::BatchCompletion::RemoveExileLinks { returned_ids: ids };
+        if matches!(
+            super::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                reqs,
+                Some(completion),
+                events,
+            ),
+            super::zone_pipeline::BatchMoveResult::NeedsChoice
+        ) {
+            // CR 616.1 / CR 303.4f: this group paused; its tail + cleanup are
+            // parked and drained on resume. Stop processing further groups so a
+            // later group's moves do not run over the parked prompt; the spent
+            // links of any unprocessed group remain in `exile_links` until their
+            // (now-gone) source re-checks — acceptable, as multi-destination
+            // returns from one source-leaves event do not occur in the pool.
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
