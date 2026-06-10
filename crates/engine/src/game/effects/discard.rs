@@ -63,7 +63,15 @@ pub(crate) fn complete_discard_to_graveyard(
     };
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            change_zone::deliver_replaced_zone_change(state, event, source_id, None, false, events);
+            change_zone::deliver_replaced_zone_change(
+                state,
+                event,
+                source_id,
+                None,
+                false,
+                crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                events,
+            );
         }
         ReplacementResult::Prevented => {
             // CR 614.6: a prevented event never happens — the card never left
@@ -215,7 +223,13 @@ pub fn resolve(
                             // The lowered ZoneChange already re-looped through the
                             // pipeline (CR 616.1f), so `Moved` redirects were consulted.
                             change_zone::deliver_replaced_zone_change(
-                                state, zone_event, None, None, false, events,
+                                state,
+                                zone_event,
+                                None,
+                                None,
+                                false,
+                                crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                                events,
                             );
                             // CR 702.35: The card was still discarded — record and emit event
                             // so "whenever you discard" triggers fire.
@@ -379,7 +393,13 @@ pub(crate) fn discard_as_cost_with_source(
                 // CR 702.35: The card was still discarded — record and emit event
                 // so "whenever you discard" triggers fire.
                 change_zone::deliver_replaced_zone_change(
-                    state, zone_event, None, None, false, events,
+                    state,
+                    zone_event,
+                    None,
+                    None,
+                    false,
+                    crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                    events,
                 );
                 crate::game::restrictions::record_discard(state, player);
                 events.push(GameEvent::Discarded {

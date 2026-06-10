@@ -23,7 +23,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BatchCompletion, ExileLink, ExileLinkKind, GameState, PendingBatchDeliveries,
-    PendingCounterPostAction, WaitingFor, ZoneDeliveryExileTracking,
+    PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -384,12 +384,25 @@ impl ApprovedZoneChange {
     }
 }
 
-/// Context threaded into `deliver`: the attributed source and exile-link spec.
-/// Consumed by the Phase B bucket-A `deliver(approved, ctx)` migrations.
-#[allow(dead_code)]
+/// Context threaded into `deliver`: the attributed source, exile-link spec,
+/// and the Phase-B resume-path reconciliation knobs. Consumed by the bucket-A
+/// `deliver(approved, ctx)` migrations.
 pub(crate) struct DeliveryCtx {
     pub source_id: Option<ObjectId>,
     pub exile_links: ExileLinkSpec,
+    /// CR 400.7 + PLAN Open Question #3 (UNDECIDED — current behavior
+    /// preserved exactly): `Some(zone)` re-stamps `played_from_zone` onto the
+    /// object after a battlefield delivery, because `reset_for_battlefield_entry`
+    /// (inside the raw mover) clears it. The replacement-choice resume path
+    /// captures the pre-move value and rides it here instead of re-deriving it
+    /// post-move; when OQ#3 is decided, either this field becomes universal
+    /// delivery-tail behavior or stays a resume/stack-only ctx knob — both
+    /// resolutions slot into this one site. `None` = no re-stamp (every
+    /// non-resume caller today).
+    pub played_from_zone: Option<Zone>,
+    /// CR 614.12a: who drains `post_replacement_continuation` after this
+    /// delivery (see [`PostReplacementDrainOwner`]).
+    pub drain: PostReplacementDrainOwner,
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -555,6 +568,8 @@ pub(crate) fn move_object(
             DeliveryCtx {
                 source_id,
                 exile_links,
+                played_from_zone: None,
+                drain: PostReplacementDrainOwner::DeliveryTail,
             },
             events,
         ) {
@@ -851,10 +866,9 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
 }
 
 /// Deliver an event that already passed the replacement consult. Only callable
-/// with the `ApprovedZoneChange` proof token. This is the renamed
-/// `deliver_replaced_zone_change`; Phase A exposes it for the Phase B bucket-A
-/// migration (it is not yet called through the token by any production site).
-#[allow(dead_code)]
+/// with the `ApprovedZoneChange` proof token — the consult-once/deliver-once
+/// contract for every bucket-A post-replacement site (destroy/sacrifice/SBA
+/// lowering, the replacement-choice resume path, land play).
 pub(crate) fn deliver(
     state: &mut GameState,
     approved: ApprovedZoneChange,
@@ -865,14 +879,33 @@ pub(crate) fn deliver(
         ctx.exile_links.tracking,
         ZoneDeliveryExileTracking::TrackBySource
     );
-    deliver_replaced_zone_change(
+    let (object_id, to) = match &approved.event {
+        ProposedEvent::ZoneChange { object_id, to, .. } => (Some(*object_id), Some(*to)),
+        _ => (None, None),
+    };
+    let result = deliver_replaced_zone_change(
         state,
         approved.event,
         ctx.source_id,
         ctx.exile_links.duration.as_ref(),
         track_exiled_by_source,
+        ctx.drain,
         events,
-    )
+    );
+    // CR 400.7 + PLAN OQ#3 (undecided — behavior preserved): re-stamp the
+    // captured `played_from_zone` after a battlefield delivery, because
+    // `reset_for_battlefield_entry` cleared it. Runs on the counter-pause
+    // outcome too — the pre-token resume arm restored the field BEFORE the
+    // counter application, so the field must be live even when the delivery
+    // parks on a counter-replacement prompt.
+    if let (Some(zone), Some(object_id), Some(Zone::Battlefield)) =
+        (ctx.played_from_zone, object_id, to)
+    {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.played_from_zone = Some(zone);
+        }
+    }
+    result
 }
 
 /// CR 614.1c + CR 122.1: Collect the additional ETB counters that active
@@ -929,6 +962,7 @@ fn append_zone_delivery_tail_after_counter_pause(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     exile_tracking: ZoneDeliveryExileTracking,
+    drain: PostReplacementDrainOwner,
     clear_pending_etb_counters: Option<ObjectId>,
 ) -> ZoneDeliveryResult {
     let mut actions = Vec::new();
@@ -943,6 +977,7 @@ fn append_zone_delivery_tail_after_counter_pause(
         source_id,
         duration: duration.cloned(),
         exile_tracking,
+        drain,
     });
     crate::game::effects::counters::append_pending_counter_post_actions(state, actions);
     replacement_pause_delivery_result(state)
@@ -958,6 +993,7 @@ pub(crate) fn apply_zone_delivery_tail(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     exile_tracking: ZoneDeliveryExileTracking,
+    drain: PostReplacementDrainOwner,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     // CR 701.24a: To shuffle a library, randomize the cards within it so that
@@ -999,7 +1035,15 @@ pub(crate) fn apply_zone_delivery_tail(
     // `NeedsChoice` so the mass/single zone-change loop stashes the remaining
     // co-entering members and resumes after the choice (instead of dropping
     // them, issue #535 class).
-    if state.post_replacement_continuation.is_some() {
+    //
+    // `CallerEpilogue` (the replacement-choice resume path) skips this drain:
+    // its epilogue drains the continuation itself, WITH the spell-resolution
+    // ctx and with `post_replacement_source` cleared for zone changes, and
+    // only after `apply_pending_spell_resolution` (Phase-B divergence
+    // reconciliation — the tail is parameterized instead of copied).
+    if matches!(drain, PostReplacementDrainOwner::DeliveryTail)
+        && state.post_replacement_continuation.is_some()
+    {
         let waiting_for = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state,
             Some(object_id),
@@ -1110,6 +1154,7 @@ pub(crate) fn deliver_replaced_zone_change(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     track_exiled_by_source: bool,
+    drain: PostReplacementDrainOwner,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     if let ProposedEvent::ZoneChange {
@@ -1283,6 +1328,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     source_id,
                     duration,
                     exile_tracking,
+                    drain,
                     pending_etb_cleanup,
                 );
             }
@@ -1313,6 +1359,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     source_id,
                     duration,
                     exile_tracking,
+                    drain,
                     None,
                 );
             }
@@ -1326,6 +1373,7 @@ pub(crate) fn deliver_replaced_zone_change(
             source_id,
             duration,
             exile_tracking,
+            drain,
             events,
         );
     }
@@ -1543,6 +1591,7 @@ pub(crate) fn execute_zone_move(
                     Some(source_id),
                     duration,
                     track_exiled_by_source,
+                    PostReplacementDrainOwner::DeliveryTail,
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {}
@@ -1573,6 +1622,7 @@ pub(crate) fn execute_zone_move(
                 Some(source_id),
                 duration,
                 track_exiled_by_source,
+                PostReplacementDrainOwner::DeliveryTail,
                 events,
             ) {
                 ZoneDeliveryResult::Done => {}

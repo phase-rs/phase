@@ -24,7 +24,6 @@ use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
-use super::zones;
 
 /// CR 614.13a + CR 702.82a/c: matches the broad as-enters shape of a Devour
 /// sacrifice replacement — a `Moved` (ETB-style) event whose post-effect is a
@@ -77,106 +76,75 @@ pub(super) fn handle_replacement_choice(
             let mut zone_change_object_id = None;
             let mut enters_battlefield = false;
             match event {
-                // TODO(zone-pipeline Phase B): this arm is a divergent partial
-                // copy of `zone_pipeline::deliver_replaced_zone_change` — it has
-                // now dropped two fields (`played_from_zone`, patched below;
-                // `face_down_profile`, patched via the shared CR 708.3 helper)
-                // and still skips the tail's devour snapshot,
-                // EntersWithAdditionalCounters statics, `attach_to`,
-                // `entered_via_ability_source`, exile-link tracking, and the
-                // CR 701.24a library-shuffle arms. Route it through
-                // `ApprovedZoneChange::approve_post_replacement` +
-                // `zone_pipeline::deliver` when the Phase-B token migration
-                // reconciles the divergences that block it this round: (1) the
-                // post-`Execute` epilogue below drains
-                // `post_replacement_continuation` with the spell-resolution ctx
-                // and clears `post_replacement_source` for zone changes, while
-                // the tail drains it ctx-less and without the clear; (2)
-                // `pending_spell_resolution` ordering (the tail's drain would run
-                // before `apply_pending_spell_resolution`); (3) the bespoke
-                // `played_from_zone` preservation (PLAN Open Question #3).
-                ProposedEvent::ZoneChange {
-                    object_id,
-                    to,
-                    from,
-                    enter_tapped,
-                    enter_with_counters,
-                    controller_override,
-                    enter_transformed,
-                    face_down_profile,
-                    ..
-                } => {
+                // Phase B (PLAN §6.2 / §7): the divergent partial copy of
+                // `deliver_replaced_zone_change` that used to live here is
+                // dissolved — the post-choice event is a
+                // `ReplacementResult::Execute` payload, so it is sealed through
+                // the third mint path (`approve_post_replacement`) and
+                // delivered by the shared `zone_pipeline::deliver` machinery.
+                // The resumed entry now gets the FULL delivery tail the copy
+                // skipped: the CR 614.12a devour snapshot, the CR 614.1c
+                // `EntersWithAdditionalCounters` statics snapshot, the
+                // CR 303.4f `attach_to` host, `entered_via_ability_source`
+                // provenance (CR 603.6a, from the event's `cause`), and the
+                // CR 701.24a library-shuffle arm.
+                //
+                // Divergence reconciliation (the three blockers, resolved by
+                // parameterizing the shared tail instead of keeping a copy):
+                // (1) `DeliveryCtx.drain = CallerEpilogue` — the tail skips the
+                //     `post_replacement_continuation` drain; the epilogue below
+                //     keeps draining WITH the spell-resolution ctx and with
+                //     `post_replacement_source` cleared for zone changes.
+                // (2) `pending_spell_resolution` ordering is therefore
+                //     untouched: `apply_pending_spell_resolution` still runs in
+                //     the epilogue before that drain.
+                // (3) `played_from_zone` (PLAN OQ#3, UNDECIDED): captured
+                //     pre-move and ridden on `DeliveryCtx` so the shared
+                //     machinery re-stamps it after `reset_for_battlefield_entry`
+                //     — behavior preserved exactly, no OQ#3 adjudication.
+                event @ ProposedEvent::ZoneChange { .. } => {
+                    let (object_id, to, cause) = match &event {
+                        ProposedEvent::ZoneChange {
+                            object_id,
+                            to,
+                            cause,
+                            ..
+                        } => (*object_id, *to, *cause),
+                        _ => unreachable!("arm pattern guarantees ZoneChange"),
+                    };
                     let played_from_zone = state
                         .objects
                         .get(&object_id)
                         .and_then(|obj| obj.played_from_zone);
-                    zones::move_to_zone(state, object_id, to, events);
-                    // CR 708.3 + CR 708.2a: a face-down entry (morph / manifest /
-                    // "put it onto the battlefield face down") that parked on a
-                    // CR 616.1 ordering prompt must still enter FACE DOWN —
-                    // shared single authority with the delivery tail. Applied
-                    // immediately after the move and before the tap-state /
-                    // controller-override / ETB-counter blocks, mirroring the
-                    // tail's ordering so any later-applied triggers see the
-                    // face-down state. Discarding this field delivered the
-                    // resumed morph face-up, leaking the hidden card.
-                    if to == Zone::Battlefield {
-                        if let Some(profile) = &face_down_profile {
-                            crate::game::zone_pipeline::apply_face_down_entry_profile(
-                                state, object_id, profile,
-                            );
-                        }
-                    }
-                    // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
-                    // defaults. Override only when the replacement pipeline changed them.
-                    if to == Zone::Battlefield {
-                        if let Some(obj) = state.objects.get_mut(&object_id) {
-                            obj.played_from_zone = played_from_zone;
-                            if enter_tapped.resolve(false) {
-                                obj.tapped = true;
-                            }
-                        }
-                        if let Some(new_controller) = controller_override {
-                            zones::apply_battlefield_entry_controller_override(
-                                state,
-                                events,
-                                object_id,
-                                new_controller,
-                            );
-                        }
-                        // CR 614.1c: Apply counters from replacement pipeline.
-                        if !apply_etb_counters(state, object_id, &enter_with_counters, events) {
+                    let Ok(approved) =
+                        crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(
+                            event,
+                        )
+                    else {
+                        unreachable!("arm pattern guarantees a ZoneChange payload");
+                    };
+                    match crate::game::zone_pipeline::deliver(
+                        state,
+                        approved,
+                        crate::game::zone_pipeline::DeliveryCtx {
+                            source_id: cause,
+                            exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+                            played_from_zone,
+                            drain:
+                                crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                        },
+                        events,
+                    ) {
+                        crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
+                        // CR 614.1c / CR 614.12a: the delivery tail parked a
+                        // counter-replacement or devour prompt and stashed the
+                        // remaining tail as a `ContinueZoneDeliveryTail` record
+                        // (carrying `CallerEpilogue`, so the NEXT resume's
+                        // epilogue still owns the continuation drain). Surface
+                        // the parked prompt; the epilogue must not run yet.
+                        crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
                             return Ok(state.waiting_for.clone());
                         }
-                        // CR 614.1c: Apply pending ETB counters from delayed triggers
-                        // (e.g., "that creature enters with an additional +1/+1 counter").
-                        let pending: Vec<_> = state
-                            .pending_etb_counters
-                            .iter()
-                            .filter(|(oid, _, _)| *oid == object_id)
-                            .map(|(_, ct, n)| (ct.clone(), *n))
-                            .collect();
-                        if !pending.is_empty() {
-                            if !apply_etb_counters(state, object_id, &pending, events) {
-                                return Ok(state.waiting_for.clone());
-                            }
-                            state
-                                .pending_etb_counters
-                                .retain(|(oid, _, _)| *oid != object_id);
-                        }
-                    }
-                    // CR 712.14a: Apply transformation if entering the battlefield transformed.
-                    if enter_transformed && to == Zone::Battlefield {
-                        if let Some(obj) = state.objects.get(&object_id) {
-                            if obj.back_face.is_some() && !obj.transformed {
-                                let _ = crate::game::transform::transform_permanent(
-                                    state, object_id, events,
-                                );
-                            }
-                        }
-                    }
-                    if to == Zone::Battlefield || from == Zone::Battlefield {
-                        crate::game::layers::mark_layers_full(state);
                     }
                     enters_battlefield = to == Zone::Battlefield;
                     zone_change_object_id = Some(object_id);
@@ -1353,6 +1321,128 @@ mod tests {
         assert!(
             state.objects[&target].tapped,
             "Tap accepted after replacement choice must tap the target"
+        );
+    }
+
+    /// CR 614.1c + CR 616.1 discriminating test (fail-first): a battlefield
+    /// entry that parks on a replacement-ordering prompt (two external
+    /// enter-tapped `Moved` defs — Authority of the Consuls + Imposing
+    /// Sovereign class) must, on resume, run the FULL shared delivery tail.
+    /// Here the missing piece is the `EntersWithAdditionalCounters` static
+    /// snapshot (Kalain / Counter Lord class — "other creatures you control
+    /// enter with an additional +1/+1 counter"): the divergent resume copy
+    /// applied only the event's own `enter_with_counters`, so a resumed entry
+    /// silently missed the static's counter while the never-paused path
+    /// granted it.
+    #[test]
+    fn resumed_entry_receives_enters_with_additional_counters_static() {
+        use std::sync::Arc;
+
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::ability::{
+            AbilityDefinition, ControllerRef, Effect, FilterProp, StaticDefinition, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::statics::StaticMode;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        // CR 614.1c: P0 permanent granting "other creatures you control enter
+        // with an additional +1/+1 counter" — must be functioning BEFORE the
+        // entrant enters.
+        let lord = make_creature(&mut state, PlayerId(0), "Counter Lord");
+        {
+            let obj = state.objects.get_mut(&lord).unwrap();
+            let def = StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ));
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        // Two external enter-tapped Moved replacements on the opponent's board
+        // — the same-field collision surfaces the CR 616.1 ordering prompt.
+        for (offset, name) in [
+            (0u64, "Authority of the Consuls"),
+            (1, "Imposing Sovereign"),
+        ] {
+            let oid = ObjectId(9000 + offset);
+            let mut src = GameObject::new(
+                oid,
+                CardId(900 + offset),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            src.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Tap {
+                        target: TargetFilter::SelfRef,
+                    },
+                ))
+                .destination_zone(Zone::Battlefield)
+                .description(name.to_string())]
+            .into();
+            state.objects.insert(oid, src);
+            state.battlefield.push_back(oid);
+        }
+
+        // P0 creature entering from hand through the pipeline.
+        let entrant = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&entrant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(entrant, Zone::Battlefield, entrant),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ZoneMoveResult::NeedsChoice(_)),
+            "the enter-tapped collision must park the entry"
+        );
+        let WaitingFor::ReplacementChoice {
+            player: chooser, ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected parked ReplacementChoice, got {:?}",
+                state.waiting_for
+            );
+        };
+        state.priority_player = chooser;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume replacement choice");
+
+        let obj = &state.objects[&entrant];
+        assert_eq!(obj.zone, Zone::Battlefield, "entry delivered after resume");
+        assert!(obj.tapped, "both enter-tapped replacements applied");
+        assert_eq!(
+            *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0),
+            1,
+            "resumed entry must receive the EntersWithAdditionalCounters static \
+             (CR 614.1c) — the divergent resume copy dropped the statics snapshot"
         );
     }
 

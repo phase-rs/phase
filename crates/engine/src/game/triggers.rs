@@ -18078,7 +18078,13 @@ pub mod tests {
         match crate::game::replacement::replace_event(state, proposed, events) {
             crate::game::replacement::ReplacementResult::Execute(event) => {
                 crate::game::effects::change_zone::deliver_replaced_zone_change(
-                    state, event, None, None, false, events,
+                    state,
+                    event,
+                    None,
+                    None,
+                    false,
+                    crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                    events,
                 );
             }
             crate::game::replacement::ReplacementResult::Prevented => {}
