@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AdditionalCost,
-    BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot, CounterCostSelection, Effect,
-    KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility, SpellCastingOptionKind,
-    StaticCondition, TargetFilter, TypedFilter,
+    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AdditionalCost, BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot,
+    CounterCostSelection, Effect, KickerVariant, QuantityExpr, QuantityRef, ReplacementDefinition,
+    ResolvedAbility, SpellCastingOptionKind, StaticCondition, TargetFilter, TypedFilter,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -16,6 +16,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
+use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -4989,18 +4990,60 @@ fn handle_resolution_cast_success(
     }
 }
 
-/// CR 614.1a + CR 608.2n: Stamp the "if this spell would be put into your
-/// graveyard, exile it instead" rider on a spell cast during resolution via
-/// `Effect::FreeCastFromZones` (Invoke Calamity). Sets a per-object marker on
-/// the spell rather than mutating its casting variant — the during-resolution
-/// cast has not yet pushed its resolvable `StackEntry::Spell` (that happens at
-/// finalize, after this cascade-check point), and the rider must apply
-/// regardless of the spell's origin zone or casting variant. The stack-
-/// resolution router reads the marker when the spell leaves the stack.
+/// CR 614.1a + CR 608.2n + CR 614.6: Install the "if this spell would be put
+/// into your graveyard, exile it instead" rider on a spell cast during
+/// resolution via `Effect::FreeCastFromZones` (Invoke Calamity) as a synthetic
+/// per-object `Moved` replacement on the cast spell rather than a bespoke
+/// boolean marker. The rider is exactly a self-scoped graveyard→exile redirect
+/// — the same class as Rest in Peace / Leyline of the Void, just scoped to this
+/// one spell (`valid_card: SelfRef`) — so it routes through the standard
+/// replacement pipeline when the spell leaves the stack (the stack-self-move
+/// scan exception discovers it). `destination_zone: Graveyard` gates it to the
+/// CR 608.2n default destination, so a flashback/aftermath/harmonize spell that
+/// already resolves to Exile (a static destination rule, not a replacement)
+/// never double-applies: its proposed move is stack→Exile, which the
+/// Graveyard-scoped def does not match.
+///
+/// Applied here (not by mutating the casting variant) because the
+/// during-resolution cast has not yet pushed its resolvable `StackEntry::Spell`
+/// (that happens at finalize, after this cascade-check point), and the rider
+/// must apply regardless of the spell's origin zone or casting variant.
 fn apply_exile_instead_of_graveyard_rider(state: &mut GameState, cast_object: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&cast_object) {
-        obj.exile_from_stack_instead_of_graveyard = true;
+        obj.replacement_definitions
+            .push(exile_instead_of_graveyard_replacement());
     }
+}
+
+/// CR 614.1a + CR 608.2n: The synthetic self-scoped graveyard→exile redirect
+/// installed by the Invoke Calamity free-cast rider. Mirrors the Rest in Peace
+/// redirect shape (`ReplacementEvent::Moved`, `destination_zone: Graveyard`,
+/// `execute: ChangeZone { destination: Exile, target: SelfRef }`) but scoped to
+/// the cast spell via `valid_card: SelfRef`.
+fn exile_instead_of_graveyard_replacement() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Graveyard)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        ))
+        .description(
+            "CR 614.1a: if this spell would be put into its owner's graveyard, exile it instead."
+                .to_string(),
+        )
 }
 
 /// CR 608.2g: Unwind a cast-during-resolution-rejected cast — remove the
@@ -6783,6 +6826,77 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
+
+    /// CR 614.1a + CR 608.2n (PLAN §8 Risk #2): the Invoke Calamity free-cast
+    /// "if this spell would be put into your graveyard, exile it instead" rider
+    /// is installed by `apply_exile_instead_of_graveyard_rider` as a synthetic
+    /// self-scoped `Moved` replacement (the boolean flag is deleted). Driving a
+    /// real resolution of a spell carrying the rider must redirect its
+    /// stack→graveyard default move to exile through the replacement pipeline.
+    #[test]
+    fn invoke_calamity_rider_exiles_free_cast_spell_on_resolution() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Free-Cast Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        // Install the rider exactly as the FreeCastFromZones resolution path does.
+        super::apply_exile_instead_of_graveyard_rider(&mut state, spell);
+        assert!(
+            state.objects[&spell]
+                .replacement_definitions
+                .iter_all()
+                .any(|d| d.event == ReplacementEvent::Moved
+                    && d.destination_zone == Some(Zone::Graveyard)),
+            "rider installs a self-scoped graveyard→exile Moved replacement"
+        );
+
+        let resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            spell,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        super::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "the rider's synthetic Moved redirect must send the resolved spell to exile"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the redirected spell must not also reach the graveyard"
+        );
+    }
 
     /// Reference implementation of the X-cap search: the pre-refactor linear
     /// ascent. Returns the largest `x` with `predicate(x)` true, clamped at 0.

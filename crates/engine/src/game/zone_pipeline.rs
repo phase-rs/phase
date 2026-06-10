@@ -160,6 +160,22 @@ impl ZoneMoveRequest {
         }
     }
 
+    /// CR 608.2n / CR 608.3e: post-resolution default move of the spell object
+    /// itself (instant/sorcery → graveyard, fizzled/countered-on-resolution
+    /// spell, prevented permanent spell → graveyard). The spell moves itself,
+    /// so there is no external source — `move_object` anchors attribution on the
+    /// object for the (inert, non-battlefield) entry bookkeeping.
+    pub fn spell_resolution_default(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::SpellResolutionDefault,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
     /// CR 614.1: enters tapped.
     pub fn tapped(mut self) -> Self {
         self.mods.enter_tapped = EtbTapState::Tapped;
