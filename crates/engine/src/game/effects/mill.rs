@@ -46,7 +46,13 @@ pub fn resolve(
 
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
-                apply_mill_after_replacement(state, event, events)?;
+                // CR 616.1: a per-card pause leaves `state.waiting_for` set and
+                // the tail parked; bail before emitting `EffectResolved` so the
+                // surfaced prompt is not clobbered. The resume path
+                // (`drain_pending_mill_deliveries`) finishes the batch.
+                if !apply_mill_after_replacement(state, event, events)? {
+                    return Ok(());
+                }
             }
             ReplacementResult::Prevented => {}
             ReplacementResult::NeedsChoice(player) => {
@@ -55,17 +61,18 @@ pub fn resolve(
                 return Ok(());
             }
         }
-    } else {
-        apply_mill_after_replacement(
-            state,
-            ProposedEvent::Mill {
-                player_id: target_player,
-                count: num_cards as u32,
-                destination,
-                applied: Default::default(),
-            },
-            events,
-        )?;
+    } else if !apply_mill_after_replacement(
+        state,
+        ProposedEvent::Mill {
+            player_id: target_player,
+            count: num_cards as u32,
+            destination,
+            applied: Default::default(),
+        },
+        events,
+    )? {
+        // CR 616.1: per-card pause (see above) — bail before `EffectResolved`.
+        return Ok(());
     }
 
     events.push(GameEvent::EffectResolved {
@@ -78,11 +85,19 @@ pub fn resolve(
 
 /// CR 701.17a-b: Apply an accepted mill event after replacement effects have
 /// had a chance to modify the count.
+///
+/// Returns `true` when every milled card was delivered, `false` when a per-card
+/// `Moved` replacement surfaced a CR 616.1 ordering choice that parked the batch
+/// (`state.waiting_for` is left set, the undelivered tail in
+/// `state.pending_mill_deliveries`). Callers that reset `state.waiting_for` after
+/// applying an accepted event MUST early-return on `false` so they don't clobber
+/// the parked prompt (mirrors the `apply_etb_counters` early-return precedent in
+/// `handle_replacement_choice`).
 pub fn apply_mill_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<bool, EffectError> {
     let ProposedEvent::Mill {
         player_id,
         count,
@@ -90,7 +105,7 @@ pub fn apply_mill_after_replacement(
         ..
     } = event
     else {
-        return Ok(());
+        return Ok(true);
     };
 
     let player = state
@@ -117,8 +132,12 @@ pub fn apply_mill_after_replacement(
     // graveyard creates no exile-link, and a `Moved` replacement's `valid_card`
     // is evaluated against the moved card, so this matches the pre-pipeline raw
     // behavior while enabling the replacement consult).
-    let _ = deliver_mill_cards(state, cards_to_mill, destination, events);
-    Ok(())
+    Ok(deliver_mill_cards(
+        state,
+        cards_to_mill,
+        destination,
+        events,
+    ))
 }
 
 /// CR 701.17a + CR 616.1: Deliver milled cards through the zone pipeline one at
@@ -226,6 +245,108 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 614.6: a graveyard→exile `Moved` redirect (Rest in Peace / Leyline of
+    /// the Void class). Two of these are simultaneously applicable to each milled
+    /// card, so the CR 616.1 materiality classifier prompts for ordering per card.
+    fn graveyard_exile_redirect(description: &str) -> ReplacementDefinition {
+        use crate::types::zones::EtbTapState;
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ))
+            .description(description.to_string())
+    }
+
+    /// P1 regression (round-2 review): `apply_mill_after_replacement` MUST report
+    /// a per-card pause to its caller (return `false`) rather than swallow it.
+    ///
+    /// The nested Mill-event resume path (`handle_replacement_choice`'s Mill arm)
+    /// applies an accepted Mill event and then unconditionally resets
+    /// `waiting_for` to Priority. If `apply_mill_after_replacement` swallowed a
+    /// per-card CR 616.1 pause (the old `let _ =`), that reset would clobber the
+    /// parked prompt and strand the first paused milled card. This test drives the
+    /// shared seam directly: with two simultaneously-applicable graveyard→exile
+    /// redirects, the first milled card surfaces a CR 616.1 ordering prompt, so
+    /// the helper must return `false`, leave `state.waiting_for` set to that
+    /// prompt, and park the undelivered tail.
+    #[test]
+    fn apply_mill_after_replacement_reports_per_card_pause_to_caller() {
+        let mut state = GameState::new_two_player(42);
+
+        for (description, source_card) in [
+            ("Rest in Peace redirect", CardId(1000)),
+            ("Leyline of the Void redirect", CardId(1001)),
+        ] {
+            let source = create_object(
+                &mut state,
+                source_card,
+                PlayerId(0),
+                "Redirect Source".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .replacement_definitions = vec![graveyard_exile_redirect(description)].into();
+        }
+
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(1),
+                format!("Milled {i}"),
+                Zone::Library,
+            );
+        }
+
+        let mut events = Vec::new();
+        let delivered = apply_mill_after_replacement(
+            &mut state,
+            ProposedEvent::Mill {
+                player_id: PlayerId(1),
+                count: 3,
+                destination: Zone::Graveyard,
+                applied: Default::default(),
+            },
+            &mut events,
+        )
+        .expect("mill applies");
+
+        // The pause signal must reach the caller so it can early-return before
+        // resetting `waiting_for`.
+        assert!(
+            !delivered,
+            "a per-card CR 616.1 pause must be reported as a non-delivery (false)"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+            ),
+            "the per-card ordering prompt must be parked in waiting_for"
+        );
+        assert!(
+            state.pending_mill_deliveries.is_some(),
+            "the undelivered tail must be stashed for the resume path"
+        );
     }
 
     #[test]

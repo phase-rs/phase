@@ -255,8 +255,24 @@ pub(super) fn handle_replacement_choice(
                 // CR 701.17a: Mill accepted after replacement choice — delegate
                 // to the shared helper so count clamping and library movement
                 // match the non-choice delivery.
+                //
+                // CR 616.1: a milled card's own `Moved` replacements (Rest in
+                // Peace + Leyline of the Void class) can surface a per-card
+                // ordering choice mid-delivery. The helper parks that prompt
+                // (`state.waiting_for` set, tail in `pending_mill_deliveries`)
+                // and returns `false`. Early-return so the unconditional
+                // `waiting_for = Priority` reset below does NOT clobber the
+                // parked prompt — mirroring the `apply_etb_counters`
+                // early-return in the ZoneChange arm. The resume path drains the
+                // tail via `drain_pending_mill_deliveries`.
                 mill @ ProposedEvent::Mill { .. } => {
-                    let _ = apply_mill_after_replacement(state, mill, events);
+                    // `EffectError` has no `EngineError` conversion here, so the
+                    // prior `let _ =` swallowed it; preserve that by mapping an
+                    // error to "delivered" (no pause) and only reacting to the
+                    // pause signal.
+                    if !apply_mill_after_replacement(state, mill, events).unwrap_or(true) {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 119.1: Life gain accepted after replacement choice.
                 gain @ ProposedEvent::LifeGain { .. } => {
