@@ -4557,6 +4557,8 @@ mod tests {
                 object_id: spell,
                 card_id: CardId(903),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();

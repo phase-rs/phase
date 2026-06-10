@@ -189,21 +189,88 @@ pub fn resolve(
                     crate::game::combat::enter_attacking(state, hit, ability.source_id, controller);
                 }
             }
+            Zone::Library => {
+                // CR 701.20a: a kept card sent to the library (2 cards) is a
+                // placement, not a redirect-eligible move — keep the raw mover
+                // (no `Moved` class targets the library; routing through the
+                // pipeline's placement arm would gain nothing).
+                zones::move_to_zone(state, hit, Zone::Library, events);
+            }
             other => {
-                zones::move_to_zone(state, hit, other, events);
+                // CR 614.6: a kept card sent to the graveyard (4 cards) or exile
+                // routes through the pipeline so a `Moved` graveyard→exile
+                // redirect (Rest in Peace / Leyline of the Void) fires on it. On a
+                // CR 616.1 ordering pause, defer the rest-pile move + marker clear
+                // + `EffectResolved` onto a `RevealRestPile` completion (the same
+                // deferral the battlefield branch uses) so the misses don't strand
+                // and `EffectResolved` doesn't land over the parked prompt.
+                match zone_pipeline::move_object(
+                    state,
+                    ZoneMoveRequest::effect(hit, other, ability.source_id),
+                    events,
+                ) {
+                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        let mut clear_markers = revealed_misses.clone();
+                        clear_markers.push(hit);
+                        zone_pipeline::defer_completion_on_pause(
+                            state,
+                            BatchCompletion::RevealRestPile {
+                                player: revealing_player,
+                                rest_cards: revealed_misses,
+                                rest_destination,
+                                clear_markers,
+                                publish_tracked_set: None,
+                                emit_reveal_until_resolved: Some(ability.source_id),
+                            },
+                        );
+                        return Ok(());
+                    }
+                }
             }
         }
     }
 
-    // Move remaining revealed cards to rest_destination.
-    move_rest(state, &revealed_misses, rest_destination, events);
+    // CR 701.20a + CR 614.6: move the rest pile to its destination through the
+    // zone-change pipeline so a per-card `Moved` graveyard→exile redirect (Rest
+    // in Peace / Leyline of the Void) fires on each rest card — the 12
+    // `rest_destination: Graveyard` reveal-until cards (Mind Funeral class)
+    // previously dropped that redirect.
+    //
+    // On synchronous completion (the realistic single-redirect path) this
+    // resolver runs its own reveal-marker clear + `EffectResolved` inline below,
+    // matching the historical tail exactly (the chain processor that dispatched
+    // this effect still owns priority/continuation). On a mid-pile CR 616.1
+    // ordering pause, the prompt is parked and the undelivered tail stashed;
+    // defer the marker-clear + `EffectResolved` onto a cleanup-only completion
+    // (`rest_cards` empty — the pile IS this batch) so the drain runs it once the
+    // pile lands, and bail before the inline tail so `EffectResolved` never lands
+    // over the parked prompt.
+    let mut clear_markers = revealed_misses.clone();
+    if let Some(hit) = hit_card {
+        clear_markers.push(hit);
+    }
+    match move_rest_then(state, &revealed_misses, rest_destination, None, events) {
+        zone_pipeline::BatchMoveResult::Done => {}
+        zone_pipeline::BatchMoveResult::NeedsChoice => {
+            zone_pipeline::defer_completion_on_pause(
+                state,
+                BatchCompletion::RevealRestPile {
+                    player: revealing_player,
+                    rest_cards: Vec::new(),
+                    rest_destination,
+                    clear_markers,
+                    publish_tracked_set: None,
+                    emit_reveal_until_resolved: Some(ability.source_id),
+                },
+            );
+            return Ok(());
+        }
+    }
 
     // Clear reveal markers — cards have moved zones.
-    for &card_id in &revealed_misses {
+    for &card_id in &clear_markers {
         state.revealed_cards.remove(&card_id);
-    }
-    if let Some(hit) = hit_card {
-        state.revealed_cards.remove(&hit);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -254,20 +321,56 @@ pub(crate) fn move_rest(
     rest_destination: Zone,
     events: &mut Vec<GameEvent>,
 ) {
+    move_rest_then(state, cards, rest_destination, None, events);
+}
+
+/// CR 701.20a + CR 614.6 + CR 603.10a: Move the rest pile to `rest_destination`,
+/// running `completion` (the reveal-marker clear / tracked-set publish /
+/// `RevealUntil`-resolved cleanup) exactly once after the pile lands — whether
+/// the pile moves synchronously or a per-card `Moved` redirect pauses on a
+/// CR 616.1 ordering choice.
+///
+/// Single authority for rest-pile placement. A `Zone::Graveyard` (or any other
+/// non-library) rest pile routes through the zone-change pipeline so a `Moved`
+/// graveyard→exile redirect (Rest in Peace / Leyline of the Void) fires on each
+/// rest card — the 12 `rest_destination: Graveyard` reveal-until cards (Mind
+/// Funeral class) previously dropped that redirect via the raw `move_to_zone`.
+/// The pipeline batch co-stamps the departures (CR 603.10a) and, on a mid-pile
+/// pause, parks the prompt and re-runs `completion` from the drain path; the
+/// completion is carried with an empty `rest_cards` so it does NOT re-move the
+/// pile (the pile IS this batch — the completion is cleanup-only here).
+///
+/// A `Zone::Library` rest pile keeps the random-order shuffle-to-bottom
+/// (`shuffle_to_bottom`, CR 701.20a "in a random order") and runs the completion
+/// inline: a library reposition has no `Moved`-redirect class to consult (zero
+/// `destination_zone(Library)` defs in the pool) and cannot pause, so routing it
+/// through the pipeline's placement arm would gain nothing and lose the shuffle.
+pub(crate) fn move_rest_then(
+    state: &mut GameState,
+    cards: &[ObjectId],
+    rest_destination: Zone,
+    completion: Option<BatchCompletion>,
+    events: &mut Vec<GameEvent>,
+) -> zone_pipeline::BatchMoveResult {
     match rest_destination {
         Zone::Library => {
             // "on the bottom of your library in a random order"
             shuffle_to_bottom(state, cards, events);
-        }
-        Zone::Graveyard => {
-            for &card_id in cards {
-                zones::move_to_zone(state, card_id, Zone::Graveyard, events);
+            if let Some(completion) = completion {
+                crate::game::engine_resolution_choices::run_batch_completion(
+                    state, completion, events,
+                );
             }
+            zone_pipeline::BatchMoveResult::Done
         }
-        other => {
-            for &card_id in cards {
-                zones::move_to_zone(state, card_id, other, events);
-            }
+        dest => {
+            // CR 400.7: the rest cards move themselves to `dest`; each anchors
+            // its own attribution (the pre-pipeline raw move recorded no source).
+            let reqs: Vec<ZoneMoveRequest> = cards
+                .iter()
+                .map(|&card_id| ZoneMoveRequest::effect(card_id, dest, card_id))
+                .collect();
+            zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
         }
     }
 }
@@ -556,6 +659,104 @@ mod tests {
         // Creature in hand, land in graveyard
         assert!(state.players[0].hand.contains(&creature));
         assert!(state.players[0].graveyard.contains(&land));
+    }
+
+    /// Discriminating test (CR 614.6 + CR 701.20a): a `rest_destination:
+    /// Graveyard` reveal-until (Mind Funeral class, 12 cards) whose rest pile is
+    /// caught by a Rest in Peace–style `Moved` graveyard→exile redirect must
+    /// have its rest cards EXILED, not graveyard'd. The old raw `move_to_zone`
+    /// rest-pile delivery never proposed the inner ZoneChange, so the redirect
+    /// silently dropped and the land landed in the graveyard. Routing the rest
+    /// pile through `move_objects_simultaneously` consults the redirect.
+    #[test]
+    fn reveal_until_graveyard_rest_redirected_to_exile_by_rest_in_peace() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Rest in Peace: "If a card would be put into a graveyard from anywhere,
+        // exile it instead." (graveyard→exile Moved redirect on the battlefield)
+        let rip = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ));
+        state.objects.get_mut(&rip).unwrap().replacement_definitions = vec![redirect].into();
+
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = make_reveal_until_ability(
+            PlayerId(0),
+            TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            Zone::Hand,
+            Zone::Graveyard,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The matching creature still goes to hand; the rest pile (the land) is
+        // redirected from graveyard → exile by Rest in Peace, NOT graveyard'd.
+        assert!(state.players[0].hand.contains(&creature));
+        assert!(
+            !state.players[0].graveyard.contains(&land),
+            "rest card must NOT reach the graveyard — RIP redirects it"
+        );
+        assert_eq!(
+            state.objects.get(&land).map(|o| o.zone),
+            Some(Zone::Exile),
+            "rest card must be exiled by the graveyard→exile redirect"
+        );
     }
 
     #[test]

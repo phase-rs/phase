@@ -579,6 +579,24 @@ pub(crate) fn parse_attached_subject_target_filter(input: &str) -> OracleResult<
     ))
 }
 
+/// Parse a positive attached-subject characteristic predicate
+/// ("enchanted creature is white", "equipped creature is an artifact",
+/// "enchanted creature is legendary") into the merged attached-subject
+/// `TargetFilter` (e.g. `creature + EnchantedBy + HasColor{White}`).
+///
+/// This is the positive, filter-only counterpart of
+/// `parse_attached_object_is_filter_condition`, which wraps the same merged
+/// filter in an `IsPresent`/`Not` `StaticCondition`. The inverted
+/// attached-subject grant path ("As long as enchanted creature is X, it gets
+/// …") uses it to bind the grant's `affected` filter to the enchanted/equipped
+/// permanent, so the buff lands on the host for the whole characteristic class
+/// (color, type, subtype, supertype) — not just `legendary`.
+pub(crate) fn parse_attached_subject_is_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, subject) = parse_attached_condition_subject(input)?;
+    let (rest, _) = tag("is ").parse(rest)?;
+    parse_attached_predicate_filter(rest, &subject)
+}
+
 fn merge_attached_predicate_filter(
     subject: &AttachedConditionSubject,
     predicate: TargetFilter,

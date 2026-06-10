@@ -320,13 +320,20 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                             // indication; a decline-less Optional (Unleash) keeps a
                             // plain "Decline".
                             ReplacementMode::Optional { decline } => {
-                                let accept = repl
-                                    .description
-                                    .clone()
-                                    .or_else(|| {
-                                        repl.execute.as_ref().and_then(|e| e.description.clone())
-                                    })
-                                    .unwrap_or_else(|| "Accept".to_string());
+                                let accept = if repl.event
+                                    == crate::types::replacements::ReplacementEvent::Draw
+                                {
+                                    "Accept".to_string()
+                                } else {
+                                    repl.description
+                                        .clone()
+                                        .or_else(|| {
+                                            repl.execute
+                                                .as_ref()
+                                                .and_then(|e| e.description.clone())
+                                        })
+                                        .unwrap_or_else(|| "Accept".to_string())
+                                };
                                 let decline_label = decline
                                     .as_ref()
                                     .and_then(|d| d.description.clone())

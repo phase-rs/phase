@@ -152,6 +152,10 @@
   }
 }
 
+html {
+  color-scheme: dark;
+}
+
 body {
   background:
     radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),
@@ -187,6 +191,55 @@ body {
   -webkit-user-select: text;
   user-select: text;
   -webkit-touch-callout: default;
+}
+
+/* Number input steppers — deliberately global (unlike class-scoped .thin-scrollbar)
+   so every number field app-wide gets consistent chrome without per-component classes.
+   Replaces default light-grey Chrome/Edge spin buttons with hairline-dark styling.
+   Custom hover-reveal steppers are pointer-fine only: the 16px control is below
+   the 44pt touch-target rule and :hover is unreliable on coarse pointers. Touch
+   devices keep native steppers tinted via html { color-scheme: dark }.
+   Firefox: appearance:textfield removes native spinners (no ::-webkit-* equivalent);
+   keyboard arrows and direct typing still work — intentional tradeoff. */
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+@media (pointer: fine) {
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    opacity: 0;
+    width: 0;
+    height: 1.25rem;
+    margin-left: 0;
+    pointer-events: none;
+    cursor: pointer;
+    background-color: rgba(255, 255, 255, 0.08);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 10'%3E%3Cpath fill='rgba(255,255,255,0.55)' d='M4 0 8 4H0zM0 6h8l-4 4z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 0.5rem 0.625rem;
+    border-radius: 4px;
+    transition:
+      opacity 150ms ease,
+      width 150ms ease,
+      margin-left 150ms ease,
+      background-color 150ms ease;
+  }
+
+  input[type="number"]:hover::-webkit-inner-spin-button,
+  input[type="number"]:focus::-webkit-inner-spin-button {
+    opacity: 1;
+    width: 1rem;
+    margin-left: 0.125rem;
+    pointer-events: auto;
+  }
+
+  input[type="number"]:hover::-webkit-inner-spin-button:hover,
+  input[type="number"]:focus::-webkit-inner-spin-button:hover {
+    background-color: rgba(255, 255, 255, 0.14);
+  }
 }
 
 .menu-display {

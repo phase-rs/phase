@@ -647,7 +647,7 @@ fn effective_controller(
     obj.controller
 }
 
-fn controller_ref_player(
+pub(crate) fn controller_ref_player(
     state: &GameState,
     source_id: ObjectId,
     source_controller: Option<PlayerId>,

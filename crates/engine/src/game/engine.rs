@@ -1519,18 +1519,12 @@ fn apply_action(
         GameAction::PassPriority
         | GameAction::PlayLand { .. }
         | GameAction::CastSpell { .. }
-        | GameAction::CastSpellWithPaymentMode { .. }
         | GameAction::Foretell { .. }
         | GameAction::CastSpellAsSneak { .. }
-        | GameAction::CastSpellAsSneakWithPaymentMode { .. }
         | GameAction::CastSpellAsWebSlinging { .. }
-        | GameAction::CastSpellAsWebSlingingWithPaymentMode { .. }
         | GameAction::CastSpellForFree { .. }
-        | GameAction::CastSpellForFreeWithPaymentMode { .. }
         | GameAction::CastSpellAsMiracle { .. }
-        | GameAction::CastSpellAsMiracleWithPaymentMode { .. }
         | GameAction::CastSpellAsMadness { .. }
-        | GameAction::CastSpellAsMadnessWithPaymentMode { .. }
         | GameAction::CancelCast
         | GameAction::UnlockRoomDoor { .. }
         | GameAction::PayUnlessCost { .. }
@@ -1586,19 +1580,6 @@ fn apply_action(
         (
             WaitingFor::Priority { player },
             GameAction::CastSpell {
-                object_id, card_id, ..
-            },
-        ) => {
-            if state.priority_player
-                != turn_control::authorized_submitter_for_player(state, *player)
-            {
-                return Err(EngineError::NotYourPriority);
-            }
-            casting::handle_cast_spell(state, *player, object_id, card_id, &mut events)?
-        }
-        (
-            WaitingFor::Priority { player },
-            GameAction::CastSpellWithPaymentMode {
                 object_id,
                 card_id,
                 payment_mode,
@@ -3791,24 +3772,6 @@ fn apply_action(
                 hand_object,
                 card_id,
                 creature_to_return,
-            },
-        ) => {
-            let p = *player;
-            super::casting::handle_cast_spell_as_sneak(
-                state,
-                p,
-                hand_object,
-                card_id,
-                creature_to_return,
-                &mut events,
-            )?
-        }
-        (
-            WaitingFor::Priority { player },
-            GameAction::CastSpellAsSneakWithPaymentMode {
-                hand_object,
-                card_id,
-                creature_to_return,
                 payment_mode,
             },
         ) => super::casting::handle_cast_spell_as_sneak_with_payment_mode(
@@ -3828,24 +3791,6 @@ fn apply_action(
                 hand_object,
                 card_id,
                 creature_to_return,
-            },
-        ) => {
-            let p = *player;
-            super::casting::handle_cast_spell_as_web_slinging(
-                state,
-                p,
-                hand_object,
-                card_id,
-                creature_to_return,
-                &mut events,
-            )?
-        }
-        (
-            WaitingFor::Priority { player },
-            GameAction::CastSpellAsWebSlingingWithPaymentMode {
-                hand_object,
-                card_id,
-                creature_to_return,
                 payment_mode,
             },
         ) => super::casting::handle_cast_spell_as_web_slinging_with_payment_mode(
@@ -3862,24 +3807,6 @@ fn apply_action(
         (
             WaitingFor::Priority { player },
             GameAction::CastSpellForFree {
-                object_id,
-                card_id,
-                source_id,
-            },
-        ) => {
-            let p = *player;
-            super::casting::handle_cast_spell_for_free(
-                state,
-                p,
-                object_id,
-                card_id,
-                source_id,
-                &mut events,
-            )?
-        }
-        (
-            WaitingFor::Priority { player },
-            GameAction::CastSpellForFreeWithPaymentMode {
                 object_id,
                 card_id,
                 source_id,
@@ -3905,10 +3832,6 @@ fn apply_action(
                 cost,
             },
             GameAction::CastSpellAsMiracle {
-                object_id: action_obj,
-                ..
-            }
-            | GameAction::CastSpellAsMiracleWithPaymentMode {
                 object_id: action_obj,
                 ..
             },
@@ -4003,25 +3926,6 @@ fn apply_action(
             GameAction::CastSpellAsMiracle {
                 object_id: action_obj,
                 card_id,
-            },
-        ) => {
-            if *object_id != action_obj {
-                return Err(EngineError::InvalidAction(
-                    "CastSpellAsMiracle object_id does not match miracle cast offer".to_string(),
-                ));
-            }
-            let p = *player;
-            let obj = action_obj;
-            super::casting::handle_cast_spell_as_miracle(state, p, obj, card_id, &mut events)?
-        }
-        (
-            WaitingFor::CastOffer {
-                player,
-                kind: CastOfferKind::Miracle { object_id, .. },
-            },
-            GameAction::CastSpellAsMiracleWithPaymentMode {
-                object_id: action_obj,
-                card_id,
                 payment_mode,
             },
         ) => {
@@ -4068,25 +3972,6 @@ fn apply_action(
             GameAction::CastSpellAsMadness {
                 object_id: action_obj,
                 card_id,
-            },
-        ) => {
-            if *object_id != action_obj {
-                return Err(EngineError::InvalidAction(
-                    "CastSpellAsMadness object_id does not match madness cast offer".to_string(),
-                ));
-            }
-            let p = *player;
-            let obj = action_obj;
-            super::casting::handle_cast_spell_as_madness(state, p, obj, card_id, &mut events)?
-        }
-        (
-            WaitingFor::CastOffer {
-                player,
-                kind: CastOfferKind::Madness { object_id, .. },
-            },
-            GameAction::CastSpellAsMadnessWithPaymentMode {
-                object_id: action_obj,
-                card_id,
                 payment_mode,
             },
         ) => {
@@ -4115,14 +4000,42 @@ fn apply_action(
             GameAction::DecideOptionalEffect { accept: false },
         ) => {
             let p = *player;
-            super::zones::move_to_zone(state, *object_id, Zone::Graveyard, &mut events);
-            state.waiting_for = WaitingFor::Priority { player: p };
-            super::engine_priority::run_post_action_pipeline(
+            let obj = *object_id;
+            // CR 702.35a + CR 614.6: a declined madness card is put into its
+            // owner's graveyard from exile — route it through the zone-change
+            // pipeline so a `Moved` graveyard→exile redirect (Rest in Peace /
+            // Leyline of the Void) fires on it. The raw `move_to_zone` never
+            // proposed the inner ZoneChange, silently dropping those redirects.
+            // The card moves itself (no external source), so it anchors its own
+            // attribution. A CR 616.1 ordering choice (two simultaneous
+            // redirects) is parked centrally by `move_object`; bail before
+            // overwriting `waiting_for` / running the post-action pipeline so the
+            // parked prompt is not clobbered (its resume runs the pipeline).
+            match super::zone_pipeline::move_object(
                 state,
+                super::zone_pipeline::ZoneMoveRequest::effect(obj, Zone::Graveyard, obj),
                 &mut events,
-                &WaitingFor::Priority { player: p },
-                true,
-            )?
+            ) {
+                super::zone_pipeline::ZoneMoveResult::Done => {
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    super::engine_priority::run_post_action_pipeline(
+                        state,
+                        &mut events,
+                        &WaitingFor::Priority { player: p },
+                        true,
+                    )?
+                }
+                // The graveyard move paused on a CR 616.1 ordering choice; the
+                // parked prompt is already in `state.waiting_for`. Evaluate the
+                // arm to it (non-`Priority`), so the post-match block skips the
+                // post-action pipeline and the prompt is surfaced intact — its
+                // replacement-choice resume finishes the move and re-runs the
+                // pipeline.
+                super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+                | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    state.waiting_for.clone()
+                }
+            }
         }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             match engine_resolution_choices::handle_resolution_choice(
@@ -6587,29 +6500,80 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         return;
     }
 
-    // CR 610.3a: Return exiled cards to their previous zone
+    // CR 610.3 + CR 614.6: Return each exiled card to its previous zone through
+    // the zone-change pipeline so a battlefield return seeds enters-with-counters
+    // statics (Hardened Scales class) and so a `Moved` redirect fires on any
+    // non-battlefield return — the raw `move_to_zone` skipped the delivery tail.
+    // Group by destination zone (CR 603.10a: cards returning to the same zone do
+    // so simultaneously); within a group each card self-anchors its attribution
+    // (CR 400.7 — the pre-pipeline raw move recorded no source).
+    //
+    // The spent `UntilSourceLeaves` links are dropped via a per-group
+    // `RemoveExileLinks` completion so the cleanup runs exactly once after the
+    // group's pile lands, even when a returned creature pauses on an as-enters /
+    // aura-host choice (CR 303.4f / 616.1): the parked batch tail + completion
+    // are drained by the replacement-choice / aura-attachment resume.
+    // First-seen insertion order (not a HashMap) so group processing is
+    // deterministic for the engine's reproducibility guarantee.
+    let mut groups: Vec<(Zone, Vec<ObjectId>)> = Vec::new();
     for link in &to_return {
-        // Only return if the card is still in exile
         let still_in_exile = state
             .objects
             .get(&link.exiled_id)
             .map(|obj| obj.zone == Zone::Exile)
             .unwrap_or(false);
-        if still_in_exile {
-            let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } =
-                &link.kind
-            else {
-                continue;
-            };
-            zones::move_to_zone(state, link.exiled_id, *return_zone, events);
+        if !still_in_exile {
+            continue;
+        }
+        let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } = &link.kind
+        else {
+            continue;
+        };
+        match groups.iter_mut().find(|(zone, _)| *zone == *return_zone) {
+            Some((_, ids)) => ids.push(link.exiled_id),
+            None => groups.push((*return_zone, vec![link.exiled_id])),
         }
     }
 
-    // Remove processed links
-    let returned_ids: Vec<_> = to_return.iter().map(|l| l.exiled_id).collect();
-    state
-        .exile_links
-        .retain(|link| !returned_ids.contains(&link.exiled_id));
+    // Links for cards that already left exile (not returned by us) are still spent
+    // and must be dropped now — only the IN-FLIGHT group ids ride their batch
+    // completion. (The common case is a single battlefield group; a mid-group
+    // pause defers only that group's cleanup, while any remaining groups process
+    // after — `move_objects_simultaneously_then` parks the tail per group.)
+    let returning_ids: std::collections::HashSet<ObjectId> = groups
+        .iter()
+        .flat_map(|(_, ids)| ids.iter().copied())
+        .collect();
+    let returned_all: Vec<ObjectId> = to_return.iter().map(|l| l.exiled_id).collect();
+    state.exile_links.retain(|link| {
+        !returned_all.contains(&link.exiled_id) || returning_ids.contains(&link.exiled_id)
+    });
+
+    for (return_zone, ids) in groups {
+        let reqs: Vec<_> = ids
+            .iter()
+            .map(|&id| super::zone_pipeline::ZoneMoveRequest::effect(id, return_zone, id))
+            .collect();
+        let completion =
+            crate::types::game_state::BatchCompletion::RemoveExileLinks { returned_ids: ids };
+        if matches!(
+            super::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                reqs,
+                Some(completion),
+                events,
+            ),
+            super::zone_pipeline::BatchMoveResult::NeedsChoice
+        ) {
+            // CR 616.1 / CR 303.4f: this group paused; its tail + cleanup are
+            // parked and drained on resume. Stop processing further groups so a
+            // later group's moves do not run over the parked prompt; the spent
+            // links of any unprocessed group remain in `exile_links` until their
+            // (now-gone) source re-checks — acceptable, as multi-destination
+            // returns from one source-leaves event do not occur in the pool.
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6916,6 +6880,8 @@ mod tests {
                 object_id: command,
                 card_id: CardId(9101),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -6997,6 +6963,8 @@ mod tests {
                     object_id: construct,
                     card_id: CardId(9111),
                     targets: vec![],
+
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 },
             )
             .is_err(),
@@ -7048,6 +7016,8 @@ mod tests {
                 object_id: chalice,
                 card_id: CardId(9120),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7106,6 +7076,8 @@ mod tests {
                 object_id: spell,
                 card_id: CardId(9121),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7178,6 +7150,8 @@ mod tests {
                 object_id: ballista,
                 card_id: CardId(9130),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7264,6 +7238,8 @@ mod tests {
                 object_id: ballista,
                 card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7364,6 +7340,8 @@ mod tests {
                 object_id: token_spell,
                 card_id: CardId(9171),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7480,6 +7458,8 @@ mod tests {
                 object_id: entering,
                 card_id: CardId(9153),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7598,6 +7578,8 @@ mod tests {
                 object_id: entering,
                 card_id: CardId(9162),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -9755,6 +9737,8 @@ mod tests {
                 object_id: obj_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -9828,6 +9812,8 @@ mod tests {
                 object_id: obj_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -9922,6 +9908,8 @@ mod tests {
                 object_id: brainstorm,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10005,6 +9993,8 @@ mod tests {
                 object_id: gamble,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10126,6 +10116,8 @@ mod tests {
                 object_id: disciple,
                 card_id: disciple_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10747,6 +10739,8 @@ mod tests {
                 object_id: bolt_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10844,6 +10838,8 @@ mod tests {
                 object_id: bolt_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10908,6 +10904,8 @@ mod tests {
                 object_id: bolt_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10969,6 +10967,8 @@ mod tests {
                 object_id: creature_id,
                 card_id: CardId(30),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -11012,6 +11012,8 @@ mod tests {
                 object_id: counter_id,
                 card_id: CardId(40),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -11098,6 +11100,8 @@ mod tests {
                 object_id: growth_id,
                 card_id: CardId(60),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -11159,6 +11163,8 @@ mod tests {
                 object_id: bolt_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -12745,6 +12751,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         );
 
@@ -15680,6 +15688,8 @@ mod phase_trigger_regression_tests {
                 object_id: searing_spear,
                 card_id: CardId(302),
                 targets: Vec::new(),
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -15804,6 +15814,8 @@ mod phase_trigger_regression_tests {
                 object_id: spell,
                 card_id: CardId(502),
                 targets: Vec::new(),
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -22578,6 +22590,8 @@ mod mdfc_land_tests {
                 object_id: obj_id,
                 card_id: CardId(100),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -22756,6 +22770,8 @@ mod mdfc_land_tests {
                 object_id: obj_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();

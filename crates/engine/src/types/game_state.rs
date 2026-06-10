@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost, AttackSubject,
-    BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
-    CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, GameRestriction,
-    KeywordAction, KickerVariant, ModalChoice, QuantityExpr, ResolvedAbility,
+    BeholdCostAction, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
+    ChooseFromZoneConstraint, ChosenAttribute, Comparator, ContinuousModification,
+    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
+    GameRestriction, KeywordAction, KickerVariant, ModalChoice, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
     TriggerCondition,
 };
@@ -1150,6 +1150,47 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
+    },
+    /// CR 610.3 + CR 614.1c: An "exile until ~ leaves" return (Banisher Priest /
+    /// Fiend Hunter / Oblivion Ring class) routed its exiled cards back to the
+    /// battlefield through the simultaneous-move batch so the delivery tail seeds
+    /// enters-with-counters statics. A returned creature can pause on an
+    /// as-enters / aura-host choice; defer the exile-link bookkeeping cleanup
+    /// (`UntilSourceLeaves` links are spent once their card returns) onto the
+    /// parked batch tail so the links are dropped exactly once after the whole
+    /// return pile lands — not before a paused card finishes returning.
+    RemoveExileLinks {
+        /// The exiled-card ids whose `UntilSourceLeaves` links are consumed by
+        /// this return and must be retained out of `state.exile_links`.
+        returned_ids: Vec<ObjectId>,
+    },
+    /// CR 702.49 + CR 616.1: A ninja entering via ninjutsu paused on a
+    /// battlefield-entry replacement-ordering choice (two co-played external
+    /// enter-tapped effects — Authority of the Consuls + Imposing Sovereign
+    /// class collide on the entry's tap field). The post-entry ninjutsu work —
+    /// the CR 702.49 cast-variant provenance tag, the CR 702.49c
+    /// tapped-and-attacking combat placement (no `AttackersDeclared`), and the
+    /// CR 702.49a `NinjutsuActivated` trigger event — cannot run before the
+    /// entry delivers; defer it onto the parked batch tail so the drain runs
+    /// it exactly once after the entry resolves.
+    NinjutsuPlacement {
+        player: PlayerId,
+        ninjutsu_obj_id: ObjectId,
+        cast_variant: CastVariantPaid,
+        defending_player: PlayerId,
+        attack_target: AttackTarget,
+    },
+    /// CR 701.51 + CR 616.1: An Attraction being opened paused on a
+    /// battlefield-entry replacement-ordering choice (Kismet / Frozen Aether
+    /// class enter-tapped effects). Defer the paused Attraction's open
+    /// bookkeeping (`in_attraction_deck` clear + `AttractionOpened`) and the
+    /// remaining opens of the same instruction onto the parked batch tail —
+    /// the remaining opens may themselves pause and re-defer through this same
+    /// completion.
+    AttractionOpenRemainder {
+        player: PlayerId,
+        object_id: ObjectId,
+        remaining: u32,
     },
 }
 

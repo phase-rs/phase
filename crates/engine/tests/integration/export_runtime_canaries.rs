@@ -8,6 +8,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -55,6 +56,8 @@ fn export_backed_lightning_bolt_canary() {
             object_id: bolt_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("export-backed bolt cast should succeed");
     assert_matches!(result.waiting_for, WaitingFor::TargetSelection { .. });

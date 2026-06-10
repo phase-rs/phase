@@ -59,20 +59,34 @@ fn tracked_set_member_zones(state: &GameState, filter: &TargetFilter) -> Option<
 }
 
 fn resolve_enters_under_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
     effect_name: &str,
     enters_under: Option<&ControllerRef>,
-    controller: PlayerId,
 ) -> Result<Option<PlayerId>, EffectError> {
-    // CR 110.2a: Resolve controller-override references exactly once at the
-    // resolver boundary, then carry a concrete PlayerId through zone movement.
+    // CR 110.2a: Resolve the controller-override reference to a concrete
+    // `PlayerId` exactly once at the resolver boundary, then carry it through
+    // zone movement. Delegates to the canonical `ControllerRef` resolver so
+    // every player reference resolves consistently: `You` (and the per-iteration
+    // controller under `player_scope`), `ScopedPlayer` ("each player … under
+    // their control"), `TargetPlayer` ("under target player's control"),
+    // `ParentTargetController`, etc. `None` keeps the default (owner's control).
     match enters_under {
         None => Ok(None),
-        Some(ControllerRef::You) => Ok(Some(controller)),
-        Some(other) => Err(EffectError::InvalidParam(format!(
-            "CR 110.2a: {effect_name}.enters_under = {other:?} is not yet \
-             supported by the resolver; only ControllerRef::You maps to a \
-             concrete PlayerId today"
-        ))),
+        Some(cref) => crate::game::filter::controller_ref_player(
+            state,
+            ability.source_id,
+            Some(ability.controller),
+            Some(ability),
+            cref,
+        )
+        .map(Some)
+        .ok_or_else(|| {
+            EffectError::InvalidParam(format!(
+                "CR 110.2a: {effect_name}.enters_under = {cref:?} could not be \
+                 resolved to a concrete controller in this context"
+            ))
+        }),
     }
 }
 
@@ -171,13 +185,11 @@ pub fn resolve(
             // the `EffectZoneChoice` round-trip. This keeps the runtime
             // carrier immune to re-evaluation across an interactive pause
             // and concentrates the `ControllerRef` semantics in one place.
-            // Only `ControllerRef::You` is supported today — any other
-            // variant is a parser bug or an unimplemented engine extension.
-            let enters_under_player = resolve_enters_under_player(
-                "ChangeZone",
-                enters_under.as_ref(),
-                ability.controller,
-            )?;
+            // Resolved via the canonical `ControllerRef` resolver, so any
+            // player reference ("under their/that/target player's control")
+            // maps to a concrete controller (CR 110.2a).
+            let enters_under_player =
+                resolve_enters_under_player(state, ability, "ChangeZone", enters_under.as_ref())?;
             (
                 *origin,
                 *destination,
@@ -819,7 +831,7 @@ pub fn resolve_all(
 
     let enters_under_player: Option<PlayerId> = match &ability.effect {
         Effect::ChangeZoneAll { enters_under, .. } => {
-            resolve_enters_under_player("ChangeZoneAll", enters_under.as_ref(), ability.controller)?
+            resolve_enters_under_player(state, ability, "ChangeZoneAll", enters_under.as_ref())?
         }
         _ => None,
     };
@@ -1179,6 +1191,92 @@ mod tests {
 
         assert!(state.battlefield.contains(&obj_id));
         assert!(!state.players[0].hand.contains(&obj_id));
+    }
+
+    /// CR 110.2a + CR 109.4: "put ... onto the battlefield under target player's
+    /// control" enters the card under the chosen player, not the ability
+    /// controller. Before, any `enters_under` other than `You` errored at the
+    /// resolver; now it routes through the canonical `ControllerRef` resolver.
+    #[test]
+    fn enters_under_target_player_puts_card_under_chosen_player() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::TargetPlayer),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(obj_id), TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&obj_id));
+        assert_eq!(
+            state.objects[&obj_id].controller,
+            PlayerId(1),
+            "card must enter under target player's control (CR 110.2a), not the ability controller"
+        );
+    }
+
+    /// CR 110.2a + CR 115.10: "each player puts ... onto the battlefield under
+    /// their control" — under `player_scope` the entering card's controller is
+    /// the scoped (iterating) player, resolved via `ControllerRef::ScopedPlayer`.
+    #[test]
+    fn enters_under_scoped_player_uses_iterating_player() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Card".to_string(),
+            Zone::Hand,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::ScopedPlayer),
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.set_scoped_player_recursive(PlayerId(1));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&obj_id));
+        assert_eq!(
+            state.objects[&obj_id].controller,
+            PlayerId(1),
+            "card must enter under the scoped (iterating) player's control"
+        );
     }
 
     /// CR 614.1c + CR 122.1: A creature entering under a controller who has an
@@ -5579,6 +5677,75 @@ mod tests {
             state.pending_change_zone_iteration.is_none(),
             "resume slot must be cleared once the loop completes"
         );
+    }
+
+    /// Issue #567: `ChangeZoneAll::resolve_all` must stash remaining matches on
+    /// `NeedsChoice` and resume via `drain_pending_change_zone_iteration` — the
+    /// same contract as the targeted `ChangeZone` loop (issue #535).
+    #[test]
+    fn issue_567_change_zone_all_with_replacement_choice_processes_all_matches() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let shock_a = add_shock_in_library_for_test(&mut state, 601, PlayerId(0));
+        let shock_b = add_shock_in_library_for_test(&mut state, 602, PlayerId(0));
+        for id in [shock_a, shock_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let life_before = state.players[0].life;
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "expected first ReplacementChoice, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_change_zone_iteration.is_some(),
+            "resolve_all must stash remaining library matches on NeedsChoice"
+        );
+
+        let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline first replacement");
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "expected a SECOND ReplacementChoice for shock_b, got {:?} — remaining matches were abandoned",
+            state.waiting_for
+        );
+
+        let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("decline second replacement");
+
+        assert_eq!(state.objects[&shock_a].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&shock_b].zone, Zone::Battlefield);
+        assert!(state.objects[&shock_a].tapped);
+        assert!(state.objects[&shock_b].tapped);
+        assert_eq!(state.players[0].life, life_before);
+        assert!(state.pending_change_zone_iteration.is_none());
     }
 
     /// Helper: replicates the shock-land-in-library scaffolding used across

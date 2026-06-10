@@ -24,7 +24,7 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{ActionResult, WaitingFor};
+use engine::types::game_state::{ActionResult, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -61,6 +61,8 @@ fn cast_tome_scour(
             object_id: tome_scour,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Tome Scour cast should be accepted");
 

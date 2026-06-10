@@ -1,9 +1,10 @@
 use std::str::FromStr;
 
+use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
 use crate::game::zones;
 use crate::parser::oracle_util::parse_subtype;
-use crate::types::ability::{AbilityCost, NinjutsuVariant};
+use crate::types::ability::{AbilityCost, CastVariantPaid, NinjutsuVariant};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -528,35 +529,121 @@ pub fn activate_ninjutsu(
         combat.blocker_assignments.remove(&creature_to_return);
     }
 
-    // 2. Move Ninjutsu-family card from hand/command zone to battlefield
-    zones::move_to_zone(state, ninjutsu_obj_id, Zone::Battlefield, events);
-
-    // CR 702.49: Track which alt-cost variant was paid this turn on the
-    // cast-variant-paid tag (placement + tapped + summoning sickness is
-    // delegated to the shared helper).
-    if let Some(obj) = state.objects.get_mut(&ninjutsu_obj_id) {
-        obj.cast_variant_paid = Some((variant.into(), state.turn_number));
+    // 2. Move Ninjutsu-family card from hand/command zone to battlefield.
+    //
+    // CR 614.1c: route the entry through the zone-change pipeline so the
+    // delivery tail applies enters-with-counters statics ("creatures you
+    // control enter with an additional +1/+1 counter" — Hardened Scales /
+    // Conclave Mentor class) to the entering ninja; the raw `move_to_zone`
+    // skipped that tail, so the ninja entered without them. CR 400.7 attributes
+    // the entry to the ninja itself (the pre-pipeline raw move recorded no
+    // source; the cast-variant tag below records the ninjutsu provenance).
+    //
+    // CR 616.1: a battlefield-entry pause IS reachable here — two co-played
+    // external enter-tapped `Moved` effects (Authority of the Consuls +
+    // Imposing Sovereign class) both write the entry event's tap field, a
+    // material same-field collision that surfaces an ordering prompt (see
+    // `paused_ninjutsu_entry_resumes_with_combat_placement_and_tag`). On the
+    // pause, the post-entry ninjutsu work (cast-variant tag + CR 702.49c combat
+    // placement + CR 702.49a trigger event) is deferred onto a
+    // `BatchCompletion::NinjutsuPlacement` so the replacement-choice resume
+    // runs it exactly once after the entry delivers — the old bail skipped it,
+    // leaving the resumed ninja untagged and non-attacking.
+    match super::zone_pipeline::move_object(
+        state,
+        super::zone_pipeline::ZoneMoveRequest::effect(
+            ninjutsu_obj_id,
+            Zone::Battlefield,
+            ninjutsu_obj_id,
+        ),
+        events,
+    ) {
+        super::zone_pipeline::ZoneMoveResult::Done => {}
+        super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+        | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            super::zone_pipeline::defer_completion_on_pause(
+                state,
+                crate::types::game_state::BatchCompletion::NinjutsuPlacement {
+                    player,
+                    ninjutsu_obj_id,
+                    cast_variant: variant.into(),
+                    defending_player,
+                    attack_target,
+                },
+            );
+            return Ok(());
+        }
     }
 
-    // CR 702.49c: Place onto combat.attackers alongside the returned creature's
-    // defender WITHOUT firing AttackersDeclared (no "whenever ~ attacks" triggers).
-    super::combat::place_attacking_alongside(
+    finish_ninjutsu_entry(
         state,
+        player,
         ninjutsu_obj_id,
+        variant.into(),
         defending_player,
         attack_target,
         events,
     );
 
-    // CR 702.49a: Emit event for "whenever you activate a ninjutsu ability" triggers.
+    Ok(())
+}
+
+/// CR 702.49 + CR 702.49a + CR 702.49c: Post-entry ninjutsu work, run exactly
+/// once after the ninja's battlefield entry delivers — inline on the
+/// synchronous path, or from `BatchCompletion::NinjutsuPlacement` when the
+/// entry parked on a CR 616.1 replacement-ordering choice and resumed.
+pub(crate) fn finish_ninjutsu_entry(
+    state: &mut GameState,
+    player: PlayerId,
+    ninjutsu_obj_id: ObjectId,
+    cast_variant: CastVariantPaid,
+    defending_player: PlayerId,
+    attack_target: AttackTarget,
+    events: &mut Vec<GameEvent>,
+) {
+    // Arrival gate (twin of `finish_attraction_open`'s CR 701.51c gate): the
+    // cast-variant tag and the CR 702.49c combat placement are battlefield
+    // semantics — `ZoneMoveResult::Done` also covers prevented/redirected
+    // deliveries, so running them unconditionally would tag a non-battlefield
+    // object and place it into `combat.attackers`. Unreachable today (no
+    // supported `Moved` redirect targets a battlefield entry's destination
+    // away from the battlefield), but the gate keeps the helper correct by
+    // construction rather than by census.
+    if state
+        .objects
+        .get(&ninjutsu_obj_id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+    {
+        // CR 702.49: Track which alt-cost variant was paid this turn on the
+        // cast-variant-paid tag (placement + tapped + summoning sickness is
+        // delegated to the shared helper).
+        if let Some(obj) = state.objects.get_mut(&ninjutsu_obj_id) {
+            obj.cast_variant_paid = Some((cast_variant, state.turn_number));
+        }
+
+        // CR 702.49c: Place onto combat.attackers alongside the returned creature's
+        // defender WITHOUT firing AttackersDeclared (no "whenever ~ attacks" triggers).
+        super::combat::place_attacking_alongside(
+            state,
+            ninjutsu_obj_id,
+            defending_player,
+            attack_target,
+            events,
+        );
+    }
+
+    // CR 702.49a: Emit event for "whenever you activate a ninjutsu ability"
+    // triggers. Deliberately OUTSIDE the arrival gate, unlike the Attraction
+    // twin's `AttractionOpened`: CR 701.51c explicitly suppresses the "opens an
+    // Attraction" trigger when the entry is prevented/replaced, but ninjutsu's
+    // activation event occurred when the ability was activated (cost paid,
+    // attacker returned) — a redirected entry does not un-activate it.
     events.push(GameEvent::NinjutsuActivated {
         player_id: player,
         source_id: ninjutsu_obj_id,
     });
 
     crate::game::layers::mark_layers_full(state);
-
-    Ok(())
 }
 
 /// Detect which activated-family `NinjutsuVariant` a game object has, if any.
@@ -1278,6 +1365,92 @@ mod tests {
         }
 
         (state, attacker_id, ninja_id)
+    }
+
+    /// CR 702.49c + CR 616.1 discriminating test (fail-first): a ninja whose
+    /// battlefield entry parks on a replacement-ordering prompt (two co-played
+    /// external enter-tapped `Moved` effects — Authority of the Consuls +
+    /// Imposing Sovereign class collide on the entry's tap field) must, after
+    /// the prompt is answered, still receive the FULL post-entry ninjutsu work:
+    /// the CR 702.49c tapped-and-attacking combat placement and the CR 702.49
+    /// cast-variant provenance tag. The old bail skipped both — the resumed
+    /// ninja entered untagged and non-attacking.
+    #[test]
+    fn paused_ninjutsu_entry_resumes_with_combat_placement_and_tag() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{ReplacementDefinition, TargetFilter};
+        use crate::types::replacements::ReplacementEvent;
+
+        let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
+
+        // Two external enter-tapped Moved replacements on the opponent's board.
+        for (offset, name) in [
+            (0u64, "Authority of the Consuls"),
+            (1, "Imposing Sovereign"),
+        ] {
+            let oid = ObjectId(9000 + offset);
+            let mut src = GameObject::new(
+                oid,
+                CardId(900 + offset),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            src.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Tap {
+                        target: TargetFilter::SelfRef,
+                    },
+                ))
+                .destination_zone(Zone::Battlefield)
+                .description(name.to_string())]
+            .into();
+            state.objects.insert(oid, src);
+            state.battlefield.push_back(oid);
+        }
+
+        let mut events = Vec::new();
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
+
+        // CR 616.1: the colliding enter-tapped writes parked the ninja's entry.
+        let WaitingFor::ReplacementChoice {
+            player: chooser, ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected parked ReplacementChoice for the enter-tapped collision, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            state.objects[&ninja_id].zone,
+            Zone::Hand,
+            "ninja entry must be parked, not delivered, while the prompt is live"
+        );
+        state.priority_player = chooser;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("resume replacement choice");
+
+        let ninja = &state.objects[&ninja_id];
+        assert_eq!(
+            ninja.zone,
+            Zone::Battlefield,
+            "entry delivered after resume"
+        );
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == ninja_id)),
+            "resumed ninja must be placed attacking (CR 702.49c) — the old bail skipped combat placement"
+        );
+        assert!(
+            ninja.cast_variant_paid.is_some(),
+            "resumed ninja must carry the ninjutsu cast-variant tag (CR 702.49)"
+        );
     }
 
     #[test]

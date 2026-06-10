@@ -297,6 +297,15 @@ impl ZoneMoveRequest {
         self
     }
 
+    /// CR 708.2a + CR 708.3: enters the battlefield face down showing the given
+    /// profile (morph / manifest vanilla 2/2). The delivery tail snapshots the
+    /// real face into `back_face` and applies the profile before the entry, so
+    /// callers no longer override characteristics manually after the move.
+    pub fn face_down(mut self, profile: FaceDownProfile) -> Self {
+        self.mods.face_down_profile = Some(profile);
+        self
+    }
+
     /// Library placement override (`LibraryPosition::Top` / `Bottom` /
     /// `NthFromTop`). Only meaningful when `to == Zone::Library`.
     pub fn at_library_position(mut self, position: LibraryPosition) -> Self {
@@ -725,21 +734,22 @@ fn deliver_batch(
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f: an aura-host choice flows through
                 // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
-                // resume path, so `drain_pending_batch_deliveries` (which only
-                // runs from `handle_replacement_choice`) would not fire here.
-                // No batch flow targets a battlefield aura entry today (mill
-                // destinations are graveyard/exile/hand; mass bounce returns to
-                // hand/library), so this is unreachable; stop and stash the
-                // tail so a future battlefield-entry batch does not silently
-                // drop the rest of the batch.
+                // resume path. No batch flow targets a battlefield aura entry
+                // today (mill destinations are graveyard/exile/hand; mass bounce
+                // returns to hand/library), so this arm is unreachable for the
+                // current batch callers; stop and stash the tail so a future
+                // battlefield-entry batch does not silently drop its remainder.
                 //
-                // NOTE: this is NOT a loud failure. The engine_replacement
-                // drain gate keys on `pending_batch_deliveries.is_some()`, not
-                // on provenance, so a stale tail stashed here would be silently
-                // drained by the NEXT unrelated replacement-choice resume.
-                // Reaching this arm for a batch flow is a bug to be surfaced if
-                // a battlefield-entry batch is ever added; today it is dead
-                // code for every batch caller.
+                // The stashed tail IS drained correctly on resume: the
+                // `ReturnAsAuraTarget` handler (engine.rs:3608-3611) and its
+                // chain-resume sibling (engine.rs:3572) both call
+                // `drain_pending_batch_deliveries` when
+                // `pending_batch_deliveries.is_some()`, so the aura-attachment
+                // pause finishes the parked batch the same way the replacement-
+                // choice resume does. (Updated for d5a12b8c6, which added the
+                // aura-resume drain; the prior note here that the tail would be
+                // "silently drained by the NEXT unrelated resume" is no longer
+                // accurate.)
                 stash_batch_tail(state, queue.collect(), destination);
                 return BatchMoveResult::NeedsChoice;
             }
@@ -1068,6 +1078,31 @@ fn legal_aura_attachment_targets(
     targets
 }
 
+/// CR 708.3 + CR 708.2a: Turn an object face down as part of its battlefield
+/// entry — snapshot the real face into `back_face`, then overwrite the live
+/// characteristics with the face-down profile (the morph/manifest vanilla 2/2
+/// plus any effect-specified extra types/subtypes) so the original is
+/// restorable by `turn_face_up`. Mirrors `manifest_card`'s historical sequence.
+///
+/// Single authority shared by the normal delivery tail
+/// (`deliver_replaced_zone_change`) and the replacement-choice resume arm
+/// (`engine_replacement::handle_replacement_choice`). The resume arm previously
+/// discarded the event's `face_down_profile`, so a face-down entry that parked
+/// on a CR 616.1 ordering prompt (two external enter-tapped effects — Authority
+/// of the Consuls + Imposing Sovereign class) resumed FACE UP, leaking the
+/// morpher's hidden card.
+pub(crate) fn apply_face_down_entry_profile(
+    state: &mut GameState,
+    object_id: ObjectId,
+    profile: &FaceDownProfile,
+) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        let original = crate::game::printed_cards::snapshot_object_face(obj);
+        crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
+        obj.back_face = Some(original);
+    }
+}
+
 /// Deliver a zone-change event that has already passed through replacement.
 pub(crate) fn deliver_replaced_zone_change(
     state: &mut GameState,
@@ -1132,18 +1167,14 @@ pub(crate) fn deliver_replaced_zone_change(
         // CR 708.3: An object put onto the battlefield face down is turned face
         // down BEFORE it enters, so its ETB abilities don't trigger and its
         // characteristics are the face-down profile (CR 708.2a), not the real
-        // card's. Mirror `manifest_card`'s sequence: snapshot the real face into
-        // `back_face`, overwrite with the face-down 2/2 (+ any specified extra
-        // types/subtypes), then store the snapshot so the original is restorable.
-        // Done before the controller-override and ETB-counter/trigger blocks
-        // below so triggers (if any later applied) see the face-down state.
+        // card's. Done before the controller-override and ETB-counter/trigger
+        // blocks below so triggers (if any later applied) see the face-down
+        // state. Shared single authority with the replacement-choice resume arm
+        // (`engine_replacement::handle_replacement_choice`), so a paused
+        // face-down entry cannot resume face-up.
         if to == Zone::Battlefield {
             if let Some(profile) = &face_down_profile {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    let original = crate::game::printed_cards::snapshot_object_face(obj);
-                    crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
-                    obj.back_face = Some(original);
-                }
+                apply_face_down_entry_profile(state, object_id, profile);
             }
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
@@ -1452,6 +1483,20 @@ pub(crate) fn execute_zone_move(
         }
     }
 
+    // KNOWN GAP (CR 614.12, documented deferral): for a FACE-DOWN battlefield
+    // entry (the proposal carries `face_down_profile`), this consult runs the
+    // replacement matchers against the object's PRINTED characteristics, but
+    // CR 614.12 requires checking "the characteristics of the permanent as it
+    // would exist on the battlefield" — for a morph/manifest entry that is the
+    // face-down 2/2 with no name, types, or subtypes (CR 708.2a). A type- or
+    // name-keyed entry replacement (e.g. a Wizard-scoped "Wizards you control
+    // enter with a +1/+1 counter") therefore wrongly matches a face-down
+    // printed Wizard, and a name/type-scoped redirect wrongly applies to an
+    // entry that should look like a blank 2/2. Narrow class today (the common
+    // enter-tapped/counter statics are type-agnostic or creature-scoped, which
+    // the face-down 2/2 still satisfies); fixing it requires the matcher pass
+    // to evaluate filters against the profile-projected characteristics when
+    // `face_down_profile` is present.
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(mut event) => {
             let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;

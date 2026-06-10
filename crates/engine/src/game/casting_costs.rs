@@ -5923,7 +5923,7 @@ pub(super) fn max_x_value_excluding(
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::feasible_mana_capacity(state, id, player);
+            let mana = mana_sources::feasible_mana_capacity(state, id, player, None);
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);
@@ -11941,6 +11941,8 @@ battlefield, then shuffle.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting Whir of Invention must be accepted");
 
@@ -12186,6 +12188,8 @@ battlefield, then shuffle.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Convoke X-spell must be accepted");
 
@@ -12340,6 +12344,8 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting Everflowing Chalice must be accepted");
 
@@ -12434,6 +12440,8 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting Everflowing Chalice must be accepted");
 
@@ -12500,6 +12508,8 @@ many tokens that are copies of it.)";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting squad spell must be accepted");
 
@@ -12659,6 +12669,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the replicate spell must be accepted");
 
@@ -12723,6 +12735,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the granted-replicate spell must be accepted");
 
@@ -12797,6 +12811,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting targeted granted-Replicate spell must start");
 
@@ -12824,6 +12840,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the replicate spell must be accepted");
 
@@ -12866,6 +12884,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting Everflowing Chalice must be accepted");
 
@@ -12979,6 +12999,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 2 sorcery must be accepted");
 
@@ -13036,6 +13058,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect_err("casting Blight 2 with no creatures must be rejected");
 
@@ -13074,6 +13098,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 1 sorcery must be accepted");
         runner
@@ -13102,6 +13128,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 2 sorcery must be accepted");
 
@@ -13135,6 +13163,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 2 sorcery must be accepted");
         runner
@@ -13166,6 +13196,8 @@ its replicate cost was paid.)\nDraw a card.";
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("casting the Blight 0 sorcery must be accepted");
         runner
