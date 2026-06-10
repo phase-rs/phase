@@ -111,6 +111,7 @@ mod issue_2371_triskaidekaphile;
 mod issue_2372_nourishing_shoal_alt_cost;
 mod issue_2374_fblthp_library_origin;
 mod issue_2376_pyromancers_ascension;
+mod issue_2377_mdfc_commander_zone_revert;
 mod issue_2414_semblance_anvil;
 mod issue_2415_rottenmouth_viper_sacrifice_cost;
 mod issue_2417_satoru_intervening_if;

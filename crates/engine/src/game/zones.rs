@@ -128,9 +128,9 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         }
 
         // CR 712.8a + CR 400.7: MDFC objects showing their back face revert to
-        // front face in any zone other than the battlefield (the back face is only
-        // valid on the stack while the spell is being cast or on the battlefield).
-        if obj_mut.modal_back_face && to != Zone::Battlefield {
+        // front face in any zone other than the stack or battlefield (back face is
+        // valid on the stack while the spell is being cast, and on the battlefield).
+        if obj_mut.modal_back_face && to != Zone::Stack && to != Zone::Battlefield {
             if let Some(back_face) = obj_mut.back_face.clone() {
                 let current_back = snapshot_object_face(obj_mut);
                 apply_back_face_to_object(obj_mut, back_face);
