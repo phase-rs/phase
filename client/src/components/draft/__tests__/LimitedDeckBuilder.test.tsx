@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
+
+afterEach(cleanup);
 
 vi.mock("../../../stores/draftStore", () => ({
   useDraftStore: (selector: (state: Record<string, unknown>) => unknown) =>
@@ -91,16 +93,15 @@ describe("LimitedDeckBuilder", () => {
   });
 
   it("enables submit only at exact minimum deck size", () => {
-    const onSubmitDeck = vi.fn();
     render(
       <LimitedDeckBuilder
         view={TEST_VIEW}
-        mainDeck={Array.from({ length: 40 }, (_, i) => `Card ${i}`)}
-        landCounts={{}}
+        mainDeck={[]}
+        landCounts={{ Plains: 40 }}
         onAddToDeck={() => {}}
         onRemoveFromDeck={() => {}}
         onSetLandCount={() => {}}
-        onSubmitDeck={onSubmitDeck}
+        onSubmitDeck={vi.fn()}
         showSuggestions={false}
       />,
     );
@@ -110,16 +111,15 @@ describe("LimitedDeckBuilder", () => {
   });
 
   it("disables submit when deck is above minimum size", () => {
-    const onSubmitDeck = vi.fn();
     render(
       <LimitedDeckBuilder
         view={TEST_VIEW}
-        mainDeck={Array.from({ length: 41 }, (_, i) => `Card ${i}`)}
-        landCounts={{}}
+        mainDeck={[]}
+        landCounts={{ Plains: 41 }}
         onAddToDeck={() => {}}
         onRemoveFromDeck={() => {}}
         onSetLandCount={() => {}}
-        onSubmitDeck={onSubmitDeck}
+        onSubmitDeck={vi.fn()}
         showSuggestions={false}
       />,
     );

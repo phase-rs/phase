@@ -108,7 +108,8 @@
     "landCount_one": "{{count}} terra",
     "landCount_other": "{{count}} terre",
     "readyToSubmit": "pronto per l'invio",
-    "moreNeeded": "{{count}} altre necessarie"
+    "moreNeeded": "{{count}} altre necessarie",
+    "tooManyCards": "{{count}} over limit"
   },
   "landing": {
     "title": "Draft",

@@ -108,7 +108,8 @@
     "landCount_one": "{{count}} Land",
     "landCount_other": "{{count}} Länder",
     "readyToSubmit": "bereit zum Einreichen",
-    "moreNeeded": "{{count}} weitere benötigt"
+    "moreNeeded": "{{count}} weitere benötigt",
+    "tooManyCards": "{{count}} over limit"
   },
   "landing": {
     "title": "Draft",
