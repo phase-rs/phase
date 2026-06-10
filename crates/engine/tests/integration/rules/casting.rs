@@ -71,6 +71,8 @@ fn optional_cost_paid_sets_flag() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -161,6 +163,8 @@ fn optional_cost_skipped_clears_flag() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -245,6 +249,8 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("cast should succeed at base cost");
         assert!(
@@ -274,6 +280,8 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
                 object_id: spell_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("cast should succeed at base cost");
         runner
@@ -304,6 +312,8 @@ fn no_additional_cost_skips_choice() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -346,6 +356,8 @@ fn cancel_cast_at_optional_cost_choice() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -467,6 +479,8 @@ fn escape_full_casting_flow() {
             object_id: escape_id,
             card_id: escape_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell should succeed");
 
@@ -597,6 +611,8 @@ fn escape_variant_preserved_through_mana_payment() {
             object_id: escape_id,
             card_id: escape_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell should succeed");
 
@@ -679,6 +695,8 @@ fn escape_cancel_returns_to_priority() {
             object_id: escape_id,
             card_id: escape_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell should succeed");
 
@@ -786,6 +804,8 @@ fn pitch_full_casting_flow() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell should succeed");
 
@@ -872,6 +892,8 @@ fn pitch_cancel_returns_to_priority() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell should succeed");
 
@@ -968,6 +990,8 @@ fn raise_cost_from_exile_does_not_tax_hand_cast() {
         object_id: spell_id,
         card_id,
         targets: vec![],
+
+        payment_mode: CastPaymentMode::Auto,
     });
 
     assert!(
@@ -1278,6 +1302,8 @@ fn optional_blight_with_no_creatures_skips_prompt() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -1327,6 +1353,8 @@ fn required_blight_with_no_creatures_rejects_cast() {
         object_id: spell_id,
         card_id,
         targets: vec![],
+
+        payment_mode: CastPaymentMode::Auto,
     });
 
     // CastSpell may enter TargetSelection first. The gate fires once the
@@ -1383,6 +1411,8 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 
@@ -1455,6 +1485,8 @@ fn zaffai_once_per_turn_hand_free_casts_with_no_mana() {
             object_id: bolt_id,
             card_id,
             source_id,
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpellForFree should succeed");
 
@@ -1599,6 +1631,8 @@ fn cast_spell_for_free_uses_the_named_permission_source() {
             object_id: bolt_id,
             card_id,
             source_id: second_source,
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("selected second source should authorize the free cast");
     handle_target_selection(&mut runner, &result);
@@ -1680,6 +1714,8 @@ fn tamiyo_emblem_allows_free_cast_from_hand() {
             object_id: bolt_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Tamiyo emblem should allow casting a hand spell");
     handle_target_selection(&mut runner, &result);
@@ -1724,6 +1760,8 @@ fn hand_only_free_cast_source_does_not_apply_to_command_zone_commander() {
                 object_id: commander_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .is_err(),
         "hand-only free-cast source must not waive a command-zone commander's mana cost"
@@ -1771,6 +1809,8 @@ fn unqualified_free_cast_source_applies_to_dragon_commander_after_hand_only_sour
             object_id: commander_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Dragon commander should cast without mana through Dracogenesis-class source");
 
@@ -1965,6 +2005,8 @@ fn miracle_accept_casts_for_miracle_cost() {
         .act(GameAction::CastSpellAsMiracle {
             object_id: miracle_obj,
             card_id,
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Reveal should succeed");
 
@@ -2008,6 +2050,8 @@ fn miracle_accept_casts_for_miracle_cost() {
         .act(GameAction::CastSpellAsMiracle {
             object_id: miracle_obj,
             card_id,
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Miracle cast should succeed");
 
@@ -2089,6 +2133,8 @@ fn miracle_sorcery_casts_during_draw_step() {
         .act(GameAction::CastSpellAsMiracle {
             object_id: miracle_obj,
             card_id,
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Reveal should succeed during draw step");
 
@@ -2112,6 +2158,8 @@ fn miracle_sorcery_casts_during_draw_step() {
         .act(GameAction::CastSpellAsMiracle {
             object_id: miracle_obj,
             card_id,
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Sorcery miracle cast should succeed during draw step (CR 608.2g)");
 
@@ -2200,6 +2248,8 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
             object_id: zombie_id,
             card_id: zombie_card,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting a Zombie should succeed");
     handle_target_selection(&mut runner, &result);
@@ -2255,6 +2305,8 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
         object_id: elf_id,
         card_id: elf_card,
         targets: vec![],
+
+        payment_mode: CastPaymentMode::Auto,
     });
     // The Elf has a {2} cost and no mana available, so the cast may fail at
     // payment — but it must NEVER enter the OptionalCostChoice grant prompt.

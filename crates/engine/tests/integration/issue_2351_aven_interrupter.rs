@@ -3,6 +3,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -75,6 +76,8 @@ fn issue_2351_aven_interrupter_exiles_target_spell_not_itself() {
             object_id: opponent_spell,
             card_id: bolt_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P1 casts Lightning Bolt");
     if matches!(
@@ -112,6 +115,8 @@ fn issue_2351_aven_interrupter_exiles_target_spell_not_itself() {
             object_id: aven_hand,
             card_id: aven_card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P0 casts Aven Interrupter with Flash");
 

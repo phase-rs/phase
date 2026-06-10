@@ -25,6 +25,7 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 fn add_mana(runner: &mut GameRunner, player: PlayerId, mana: &[ManaType]) {
     let dummy = engine::types::identifiers::ObjectId(0);
@@ -203,6 +204,8 @@ fn council_of_four_spell_counter_resets_each_turn() {
                 object_id: obj,
                 card_id,
                 targets: vec![],
+
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("cast should be accepted");
         runner.advance_until_stack_empty();

@@ -11,7 +11,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::StaticDefinition;
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{AlternativeCastKeyword, WaitingFor};
+use engine::types::game_state::{AlternativeCastKeyword, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -68,6 +68,7 @@ fn ragavan_cast_offers_dash_when_both_costs_affordable() {
             object_id: ragavan,
             card_id,
             targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Ragavan");
 
@@ -94,6 +95,7 @@ fn ragavan_dash_choice_casts_creature_onto_battlefield() {
             object_id: ragavan,
             card_id,
             targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Ragavan");
     runner
@@ -169,6 +171,7 @@ fn granted_dash_from_static_offers_dash_choice() {
             object_id: bear,
             card_id,
             targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast creature with granted dash");
 

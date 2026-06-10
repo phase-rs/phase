@@ -34,6 +34,8 @@ use super::effect_classify::{
 };
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -977,6 +979,8 @@ mod tests {
                 object_id,
                 card_id: state.objects[&object_id].card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1610,6 +1614,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(201),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1670,6 +1676,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(202),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1766,6 +1774,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(201),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1827,6 +1837,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(300),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1887,6 +1899,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(301),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -1947,6 +1961,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(302),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2009,6 +2025,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(300),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2070,6 +2088,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(400),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2130,6 +2150,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(500),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2341,6 +2363,8 @@ mod tests {
                 object_id: aura_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2469,6 +2493,8 @@ mod tests {
                 object_id: aura_id,
                 card_id,
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2625,6 +2651,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(500),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -2726,6 +2754,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(502),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),

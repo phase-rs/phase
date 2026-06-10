@@ -11,6 +11,7 @@ use engine::game::casting::{
 };
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -207,6 +208,8 @@ fn bolas_citadel_library_top_cast_enters_targeting_not_mana_payment() {
             object_id: bolt_id,
             card_id,
             targets: vec![target],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell from library top should start");
 

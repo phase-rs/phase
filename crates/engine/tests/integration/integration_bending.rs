@@ -9,7 +9,9 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::{BendingType, GameEvent};
-use engine::types::game_state::{CastingVariant, ConvokeMode, GameState, PendingCast, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, CastingVariant, ConvokeMode, GameState, PendingCast, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{
@@ -2353,6 +2355,8 @@ fn earthbending_lesson_returned_tapped_after_dies_e2e() {
             object_id: lesson_id,
             card_id,
             targets: vec![mountain_id],
+
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("cast Earthbending Lesson");

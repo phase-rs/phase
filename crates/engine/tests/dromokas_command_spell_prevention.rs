@@ -32,6 +32,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::TargetFilter;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -79,6 +80,8 @@ fn dromokas_command_mode_one_source_scoped_prevent_puts_counter_once_no_loop() {
             object_id: bolt,
             card_id: bolt_card,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting the damage instant must succeed");
     // Answer the bolt's single player-target slot, then leave it on the stack.

@@ -22,7 +22,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::CastingPermission;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastingVariant, StackEntryKind};
+use engine::types::game_state::{CastPaymentMode, CastingVariant, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -221,6 +221,8 @@ fn tergrids_shadow_cast_from_foretell_exile_on_later_turn() {
             object_id: shadow,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting from foretell exile on a later turn must succeed");
 

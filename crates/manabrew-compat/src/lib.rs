@@ -1233,21 +1233,13 @@ fn playable_objects(actions: &[GameAction]) -> HashSet<ObjectId> {
         .filter_map(|action| match action {
             GameAction::PlayLand { object_id, .. }
             | GameAction::CastSpell { object_id, .. }
-            | GameAction::CastSpellWithPaymentMode { object_id, .. }
             | GameAction::CastSpellForFree { object_id, .. }
-            | GameAction::CastSpellForFreeWithPaymentMode { object_id, .. }
             | GameAction::CastSpellAsMiracle { object_id, .. }
-            | GameAction::CastSpellAsMiracleWithPaymentMode { object_id, .. }
             | GameAction::CastSpellAsMadness { object_id, .. }
-            | GameAction::CastSpellAsMadnessWithPaymentMode { object_id, .. }
             | GameAction::PlayFaceDown { object_id, .. }
             | GameAction::Foretell { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsSneak { hand_object, .. }
-            | GameAction::CastSpellAsSneakWithPaymentMode { hand_object, .. }
-            | GameAction::CastSpellAsWebSlinging { hand_object, .. }
-            | GameAction::CastSpellAsWebSlingingWithPaymentMode { hand_object, .. } => {
-                Some(*hand_object)
-            }
+            | GameAction::CastSpellAsWebSlinging { hand_object, .. } => Some(*hand_object),
             GameAction::CastPreparedCopy { source } | GameAction::CastParadigmCopy { source } => {
                 Some(*source)
             }

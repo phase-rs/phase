@@ -240,8 +240,7 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
 /// listed explicitly so newly added variants must be classified at compile time.
 pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
     match action {
-        GameAction::CastSpell { targets, .. }
-        | GameAction::CastSpellWithPaymentMode { targets, .. } => {
+        GameAction::CastSpell { targets, .. } => {
             bound_list("CastSpell.targets", targets.len())?;
         }
         GameAction::SelectTargets { targets } => {
@@ -393,15 +392,10 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChoosePermanentTypeSlot { .. }
         | GameAction::ActivateNinjutsu { .. }
         | GameAction::CastSpellAsSneak { .. }
-        | GameAction::CastSpellAsSneakWithPaymentMode { .. }
         | GameAction::CastSpellAsWebSlinging { .. }
-        | GameAction::CastSpellAsWebSlingingWithPaymentMode { .. }
         | GameAction::CastSpellForFree { .. }
-        | GameAction::CastSpellForFreeWithPaymentMode { .. }
         | GameAction::CastSpellAsMiracle { .. }
-        | GameAction::CastSpellAsMiracleWithPaymentMode { .. }
         | GameAction::CastSpellAsMadness { .. }
-        | GameAction::CastSpellAsMadnessWithPaymentMode { .. }
         | GameAction::DecideOptionalEffect { .. }
         | GameAction::DecideOptionalEffectAndRemember { .. }
         | GameAction::PayUnlessCost { .. }

@@ -11,6 +11,8 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 
 use crate::policies::registry::DecisionKind;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 /// Classify a decision into the bucket the policy registry uses for routing.
 pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
@@ -184,6 +186,8 @@ mod tests {
             object_id: ObjectId(0),
             card_id: CardId(0),
             targets: Vec::new(),
+
+            payment_mode: CastPaymentMode::Auto,
         };
 
         // Mulligan routing.

@@ -6,7 +6,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::TriggerCondition;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -73,6 +73,7 @@ fn offspring_cast_creates_token_without_labeling_original_as_copy() {
             object_id: spell_id,
             card_id,
             targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should start");
 

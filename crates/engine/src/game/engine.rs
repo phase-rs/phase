@@ -1517,18 +1517,12 @@ fn apply_action(
         GameAction::PassPriority
         | GameAction::PlayLand { .. }
         | GameAction::CastSpell { .. }
-        | GameAction::CastSpellWithPaymentMode { .. }
         | GameAction::Foretell { .. }
         | GameAction::CastSpellAsSneak { .. }
-        | GameAction::CastSpellAsSneakWithPaymentMode { .. }
         | GameAction::CastSpellAsWebSlinging { .. }
-        | GameAction::CastSpellAsWebSlingingWithPaymentMode { .. }
         | GameAction::CastSpellForFree { .. }
-        | GameAction::CastSpellForFreeWithPaymentMode { .. }
         | GameAction::CastSpellAsMiracle { .. }
-        | GameAction::CastSpellAsMiracleWithPaymentMode { .. }
         | GameAction::CastSpellAsMadness { .. }
-        | GameAction::CastSpellAsMadnessWithPaymentMode { .. }
         | GameAction::CancelCast
         | GameAction::UnlockRoomDoor { .. }
         | GameAction::PayUnlessCost { .. }
@@ -1584,19 +1578,6 @@ fn apply_action(
         (
             WaitingFor::Priority { player },
             GameAction::CastSpell {
-                object_id, card_id, ..
-            },
-        ) => {
-            if state.priority_player
-                != turn_control::authorized_submitter_for_player(state, *player)
-            {
-                return Err(EngineError::NotYourPriority);
-            }
-            casting::handle_cast_spell(state, *player, object_id, card_id, &mut events)?
-        }
-        (
-            WaitingFor::Priority { player },
-            GameAction::CastSpellWithPaymentMode {
                 object_id,
                 card_id,
                 payment_mode,
@@ -3792,24 +3773,6 @@ fn apply_action(
                 hand_object,
                 card_id,
                 creature_to_return,
-            },
-        ) => {
-            let p = *player;
-            super::casting::handle_cast_spell_as_sneak(
-                state,
-                p,
-                hand_object,
-                card_id,
-                creature_to_return,
-                &mut events,
-            )?
-        }
-        (
-            WaitingFor::Priority { player },
-            GameAction::CastSpellAsSneakWithPaymentMode {
-                hand_object,
-                card_id,
-                creature_to_return,
                 payment_mode,
             },
         ) => super::casting::handle_cast_spell_as_sneak_with_payment_mode(
@@ -3829,24 +3792,6 @@ fn apply_action(
                 hand_object,
                 card_id,
                 creature_to_return,
-            },
-        ) => {
-            let p = *player;
-            super::casting::handle_cast_spell_as_web_slinging(
-                state,
-                p,
-                hand_object,
-                card_id,
-                creature_to_return,
-                &mut events,
-            )?
-        }
-        (
-            WaitingFor::Priority { player },
-            GameAction::CastSpellAsWebSlingingWithPaymentMode {
-                hand_object,
-                card_id,
-                creature_to_return,
                 payment_mode,
             },
         ) => super::casting::handle_cast_spell_as_web_slinging_with_payment_mode(
@@ -3863,24 +3808,6 @@ fn apply_action(
         (
             WaitingFor::Priority { player },
             GameAction::CastSpellForFree {
-                object_id,
-                card_id,
-                source_id,
-            },
-        ) => {
-            let p = *player;
-            super::casting::handle_cast_spell_for_free(
-                state,
-                p,
-                object_id,
-                card_id,
-                source_id,
-                &mut events,
-            )?
-        }
-        (
-            WaitingFor::Priority { player },
-            GameAction::CastSpellForFreeWithPaymentMode {
                 object_id,
                 card_id,
                 source_id,
@@ -3906,10 +3833,6 @@ fn apply_action(
                 cost,
             },
             GameAction::CastSpellAsMiracle {
-                object_id: action_obj,
-                ..
-            }
-            | GameAction::CastSpellAsMiracleWithPaymentMode {
                 object_id: action_obj,
                 ..
             },
@@ -4004,25 +3927,6 @@ fn apply_action(
             GameAction::CastSpellAsMiracle {
                 object_id: action_obj,
                 card_id,
-            },
-        ) => {
-            if *object_id != action_obj {
-                return Err(EngineError::InvalidAction(
-                    "CastSpellAsMiracle object_id does not match miracle cast offer".to_string(),
-                ));
-            }
-            let p = *player;
-            let obj = action_obj;
-            super::casting::handle_cast_spell_as_miracle(state, p, obj, card_id, &mut events)?
-        }
-        (
-            WaitingFor::CastOffer {
-                player,
-                kind: CastOfferKind::Miracle { object_id, .. },
-            },
-            GameAction::CastSpellAsMiracleWithPaymentMode {
-                object_id: action_obj,
-                card_id,
                 payment_mode,
             },
         ) => {
@@ -4067,25 +3971,6 @@ fn apply_action(
                 kind: CastOfferKind::Madness { object_id, .. },
             },
             GameAction::CastSpellAsMadness {
-                object_id: action_obj,
-                card_id,
-            },
-        ) => {
-            if *object_id != action_obj {
-                return Err(EngineError::InvalidAction(
-                    "CastSpellAsMadness object_id does not match madness cast offer".to_string(),
-                ));
-            }
-            let p = *player;
-            let obj = action_obj;
-            super::casting::handle_cast_spell_as_madness(state, p, obj, card_id, &mut events)?
-        }
-        (
-            WaitingFor::CastOffer {
-                player,
-                kind: CastOfferKind::Madness { object_id, .. },
-            },
-            GameAction::CastSpellAsMadnessWithPaymentMode {
                 object_id: action_obj,
                 card_id,
                 payment_mode,
@@ -6998,6 +6883,8 @@ mod tests {
                 object_id: command,
                 card_id: CardId(9101),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7079,6 +6966,8 @@ mod tests {
                     object_id: construct,
                     card_id: CardId(9111),
                     targets: vec![],
+
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 },
             )
             .is_err(),
@@ -7130,6 +7019,8 @@ mod tests {
                 object_id: chalice,
                 card_id: CardId(9120),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7188,6 +7079,8 @@ mod tests {
                 object_id: spell,
                 card_id: CardId(9121),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7260,6 +7153,8 @@ mod tests {
                 object_id: ballista,
                 card_id: CardId(9130),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7346,6 +7241,8 @@ mod tests {
                 object_id: ballista,
                 card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7446,6 +7343,8 @@ mod tests {
                 object_id: token_spell,
                 card_id: CardId(9171),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7562,6 +7461,8 @@ mod tests {
                 object_id: entering,
                 card_id: CardId(9153),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -7680,6 +7581,8 @@ mod tests {
                 object_id: entering,
                 card_id: CardId(9162),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -9837,6 +9740,8 @@ mod tests {
                 object_id: obj_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -9910,6 +9815,8 @@ mod tests {
                 object_id: obj_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10004,6 +9911,8 @@ mod tests {
                 object_id: brainstorm,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10087,6 +9996,8 @@ mod tests {
                 object_id: gamble,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10208,6 +10119,8 @@ mod tests {
                 object_id: disciple,
                 card_id: disciple_card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10829,6 +10742,8 @@ mod tests {
                 object_id: bolt_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10926,6 +10841,8 @@ mod tests {
                 object_id: bolt_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -10990,6 +10907,8 @@ mod tests {
                 object_id: bolt_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -11051,6 +10970,8 @@ mod tests {
                 object_id: creature_id,
                 card_id: CardId(30),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -11094,6 +11015,8 @@ mod tests {
                 object_id: counter_id,
                 card_id: CardId(40),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -11180,6 +11103,8 @@ mod tests {
                 object_id: growth_id,
                 card_id: CardId(60),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -11241,6 +11166,8 @@ mod tests {
                 object_id: bolt_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -12825,6 +12752,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(10),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         );
 
@@ -15759,6 +15688,8 @@ mod phase_trigger_regression_tests {
                 object_id: searing_spear,
                 card_id: CardId(302),
                 targets: Vec::new(),
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -15883,6 +15814,8 @@ mod phase_trigger_regression_tests {
                 object_id: spell,
                 card_id: CardId(502),
                 targets: Vec::new(),
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -22655,6 +22588,8 @@ mod mdfc_land_tests {
                 object_id: obj_id,
                 card_id: CardId(100),
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();
@@ -22833,6 +22768,8 @@ mod mdfc_land_tests {
                 object_id: obj_id,
                 card_id,
                 targets: vec![],
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         )
         .unwrap();

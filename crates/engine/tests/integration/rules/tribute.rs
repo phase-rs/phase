@@ -13,6 +13,7 @@ use super::*;
 
 use engine::types::ability::{ChoiceType, ChosenAttribute, TributeOutcome};
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 
 /// Fanatic of Xenagos-class Oracle: Tribute 1 + "When this creature enters, if
 /// tribute wasn't paid, it gets +1/+1 and gains haste until end of turn."
@@ -42,6 +43,8 @@ fn cast_tribute_creature(count: u32, paid: bool) -> GameRunner {
             object_id: card_obj_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 

@@ -1306,6 +1306,7 @@
     "eyebrow": "Elección",
     "title": "Elige una",
     "subtitle": "Selecciona la opción a resolver.",
+    "subtitleBinary": "Elige una de las dos opciones siguientes.",
     "optionFallback": "Opción {{number}}"
   },
   "combatTax": {

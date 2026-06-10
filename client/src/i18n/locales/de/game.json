@@ -1306,6 +1306,7 @@
     "eyebrow": "Wahl",
     "title": "Wähle eines",
     "subtitle": "Wähle die Option zum Auflösen.",
+    "subtitleBinary": "Wähle eine der beiden Optionen unten.",
     "optionFallback": "Option {{number}}"
   },
   "combatTax": {

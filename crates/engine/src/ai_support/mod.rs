@@ -114,21 +114,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         // validity check the engine handler enforces. Reject early so the
         // simulation filter never fires a known-rejected action.
         (WaitingFor::OrderTriggers { triggers, .. }, GameAction::OrderTriggers { order }) => {
-            let len = triggers.len();
-            if order.len() != len {
-                true
-            } else {
-                let mut seen = vec![false; len];
-                let mut bad = false;
-                for &i in order {
-                    if i >= len || seen[i] {
-                        bad = true;
-                        break;
-                    }
-                    seen[i] = true;
-                }
-                bad
-            }
+            !crate::game::triggers::is_valid_permutation(order, triggers.len())
         }
         (
             WaitingFor::CopyTargetChoice { valid_targets, .. },
@@ -2222,6 +2208,8 @@ mod tests {
                 object_id: ObjectId(10),
                 card_id: CardId(10),
                 targets: Vec::new(),
+
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
         ];
 
