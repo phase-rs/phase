@@ -7,9 +7,15 @@ expression: def
   "execute": {
     "kind": "Spell",
     "effect": {
-      "type": "Tap",
+      "type": "SetTapState",
       "target": {
         "type": "SelfRef"
+      },
+      "scope": {
+        "type": "Single"
+      },
+      "state": {
+        "type": "Tap"
       }
     },
     "cost": null,

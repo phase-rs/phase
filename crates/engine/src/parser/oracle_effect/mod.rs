@@ -90,14 +90,14 @@ use crate::types::ability::{
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
     ContinuousModification, ControllerRef, DamageModification, DamageSource,
-    DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GameRestriction,
-    IntensityScope, IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec,
-    ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerRelation, PlayerScope,
-    PreventionAmount, PreventionScope, ProhibitedActivity, QuantityExpr, QuantityRef,
+    DelayedTriggerCondition, DoubleTarget, Duration, Effect, EffectScope, FilterProp,
+    GameRestriction, IntensityScope, IterationKindBinding, ManaProduction, ManaSpendPermission,
+    MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, QuantityExpr, QuantityRef,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TargetFilter,
-    TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, UntilCondition, ZoneOwner,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -2308,15 +2308,19 @@ fn try_parse_tap_or_untap_choice(
 
     let mut tap_branch = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     );
     tap_branch.description = Some("tap".to_string());
     let mut untap_branch = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Untap {
+        Effect::SetTapState {
             target: TargetFilter::ParentTarget,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         },
     );
     untap_branch.description = Some("untap".to_string());
@@ -8402,14 +8406,14 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         return None;
     }
 
-    let primary = if untap {
-        Effect::Untap {
-            target: target.clone(),
-        }
-    } else {
-        Effect::Tap {
-            target: target.clone(),
-        }
+    let primary = Effect::SetTapState {
+        target: target.clone(),
+        scope: EffectScope::Single,
+        state: if untap {
+            TapStateChange::Untap
+        } else {
+            TapStateChange::Tap
+        },
     };
     let sub_ability = AbilityDefinition::new(AbilityKind::Spell, Effect::Goad { target });
 
@@ -9640,8 +9644,12 @@ fn replace_target_with_parent(effect: &mut Effect) {
         Effect::Sacrifice { target, .. } if matches!(target, TargetFilter::SelfRef) => {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::Tap { target }
-        | Effect::Untap { target }
+        // CR 701.26a/b: only single-target tap/untap carries a rewritable target.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::Destroy { target, .. }
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }
@@ -9833,10 +9841,9 @@ fn has_typed_target(effect: &Effect) -> bool {
         } | Effect::Destroy {
             target: TargetFilter::Typed(_),
             ..
-        } | Effect::Tap {
-            target: TargetFilter::Typed(_),
-            ..
-        } | Effect::Untap {
+        } | Effect::SetTapState {
+            // CR 701.26a/b: only single-target tap/untap exposes a typed target.
+            scope: EffectScope::Single,
             target: TargetFilter::Typed(_),
             ..
         } | Effect::Bounce {
@@ -9947,8 +9954,12 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         | Effect::Pump { target, .. }
         | Effect::DealDamage { target, .. }
         | Effect::Destroy { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
+        // CR 701.26a/b: only single-target tap/untap exposes a widenable target.
+        | Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::Bounce { target, .. }
         | Effect::GainControl { target, .. }
         | Effect::Attach { target, .. }
@@ -10927,8 +10938,13 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::Counter { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
+        // CR 701.26a/b: only single-target tap/untap carries an `Any` target to
+        // rewrite into the subject filter.
+        | Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::Sacrifice { target, .. }
@@ -13184,8 +13200,12 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
 
 fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
     match effect {
-        Effect::Tap { target }
-        | Effect::Untap { target }
+        // CR 701.26a/b: only single-target tap/untap carries a rewritable target.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::Destroy { target, .. }
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }
@@ -13407,8 +13427,15 @@ pub(crate) fn each_quantity_expr_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
 /// hold a player ref like `ParentTargetController`.
 pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut TargetFilter)) {
     match effect {
-        Effect::Tap { target }
-        | Effect::Untap { target }
+        // CR 701.26a/b: only single-target tap/untap exposes a per-event target
+        // filter; the mass (`All`) scope is a population filter and was never
+        // visited here (it falls through to the no-op arm), matching the legacy
+        // `TapAll`/`UntapAll`.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::Sacrifice { target, .. }
@@ -17932,8 +17959,16 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
         } => Some("return"),
         Effect::Bounce { .. } | Effect::BounceAll { .. } => Some("return"),
         Effect::Sacrifice { .. } => Some("sacrifice"),
-        Effect::Tap { .. } | Effect::TapAll { .. } => Some("tap"),
-        Effect::Untap { .. } | Effect::UntapAll { .. } => Some("untap"),
+        // CR 701.26a: the carry-forward verb depends on tap/untap polarity only;
+        // both scopes share the same verb.
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            ..
+        } => Some("tap"),
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            ..
+        } => Some("untap"),
         // CR 608.2c: distributive "put" carries forward to a verbless trailing
         // counter conjunct ("...and a loyalty counter on each planeswalker...").
         Effect::PutCounter { .. } | Effect::PutCounterAll { .. } => Some("put"),
@@ -18664,20 +18699,31 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert!(
-            matches!(clause.effect, Effect::Untap { .. }),
-            "primary clause must be Untap, got {:?}",
+            matches!(
+                clause.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            ),
+            "primary clause must be single Untap, got {:?}",
             clause.effect
         );
         let sub = clause
             .sub_ability
             .expect("must have sub_ability for mass continuation");
         match sub.effect.as_ref() {
-            Effect::UntapAll { target } => {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::All,
+                state: TapStateChange::Untap,
+            } => {
                 let tf = typed_leg(target).expect("mass untap target should be typed");
                 assert!(has_type(tf, TypeFilter::Subtype("Samurai".to_string())));
                 assert_eq!(tf.controller, Some(ControllerRef::You));
             }
-            other => panic!("sub-clause must be UntapAll, got {:?}", other),
+            other => panic!("sub-clause must be mass Untap, got {:?}", other),
         }
     }
 
@@ -21159,7 +21205,14 @@ mod tests {
             AbilityKind::Activated,
         );
 
-        assert!(matches!(*def.effect, Effect::Tap { .. }));
+        assert!(matches!(
+            *def.effect,
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+                ..
+            }
+        ));
         let unless_pay = def.unless_pay.expect("should attach unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
         assert_eq!(
@@ -21180,7 +21233,14 @@ mod tests {
             AbilityKind::Activated,
         );
 
-        assert!(matches!(*def.effect, Effect::Tap { .. }));
+        assert!(matches!(
+            *def.effect,
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+                ..
+            }
+        ));
         let unless_pay = def.unless_pay.expect("should attach unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
         assert_eq!(
@@ -22965,8 +23025,10 @@ mod tests {
             .expect("targeted creatures should be tapped");
         assert!(matches!(
             &*tap.effect,
-            Effect::Tap {
-                target: TargetFilter::TrackedSet { .. }
+            Effect::SetTapState {
+                target: TargetFilter::TrackedSet { .. },
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
 
@@ -22992,7 +23054,14 @@ mod tests {
             "Untap target creature. It gets +2/+2 until end of turn and can block an additional creature this turn.",
             AbilityKind::Spell,
         );
-        assert!(matches!(*def.effect, Effect::Untap { .. }));
+        assert!(matches!(
+            *def.effect,
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+                ..
+            }
+        ));
 
         let pump = def.sub_ability.expect("target creature should get pumped");
         assert!(matches!(
@@ -24658,14 +24727,18 @@ mod tests {
         assert_eq!(branches.len(), 2);
         assert!(matches!(
             &*branches[0].effect,
-            Effect::Tap {
-                target: TargetFilter::ParentTarget
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         assert!(matches!(
             &*branches[1].effect,
-            Effect::Untap {
-                target: TargetFilter::ParentTarget
+            Effect::SetTapState {
+                target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             }
         ));
     }
@@ -25343,7 +25416,14 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert!(
-            matches!(clause.effect, Effect::Tap { .. }),
+            matches!(
+                clause.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                    ..
+                }
+            ),
             "primary should be Tap, got {:?}",
             clause.effect
         );
@@ -26946,7 +27026,14 @@ mod tests {
                 DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
             );
             assert!(
-                matches!(*effect.effect, Effect::Untap { .. }),
+                matches!(
+                    *effect.effect,
+                    Effect::SetTapState {
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Untap,
+                        ..
+                    }
+                ),
                 "Inner effect should be Untap, got {:?}",
                 effect.effect
             );
@@ -26965,7 +27052,14 @@ mod tests {
             .as_ref()
             .and_then(|discard| discard.sub_ability.as_ref())
             .expect("Frantic Search should chain to an untap instruction");
-        assert!(matches!(&*untap.effect, Effect::Untap { .. }));
+        assert!(matches!(
+            &*untap.effect,
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+                ..
+            }
+        ));
         assert_eq!(untap.target_choice_timing, TargetChoiceTiming::Resolution);
         assert_eq!(
             untap.multi_target,
@@ -31155,7 +31249,14 @@ mod tests {
             .as_deref()
             .expect("else-branch must attach when the subtype condition parses");
         assert!(
-            matches!(*else_ab.effect, Effect::Tap { .. }),
+            matches!(
+                *else_ab.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                    ..
+                }
+            ),
             "expected Tap else-branch, got {:?}",
             else_ab.effect
         );
@@ -31194,7 +31295,14 @@ mod tests {
             .else_ability
             .as_deref()
             .expect("else-branch must attach when the keyword condition parses");
-        assert!(matches!(*else_ab.effect, Effect::Tap { .. }));
+        assert!(matches!(
+            *else_ab.effect,
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -33176,8 +33284,10 @@ mod tests {
         assert!(
             matches!(
                 *def.effect,
-                Effect::Tap {
-                    target: TargetFilter::ParentTarget
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ),
             "Expected Tap ParentTarget, got {:?}",
@@ -33203,8 +33313,10 @@ mod tests {
         assert!(
             matches!(
                 *def.effect,
-                Effect::Untap {
-                    target: TargetFilter::ParentTarget
+                Effect::SetTapState {
+                    target: TargetFilter::ParentTarget,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 }
             ),
             "Expected Untap ParentTarget, got {:?}",
@@ -34163,7 +34275,14 @@ mod tests {
             "sub condition should be IfAPlayerDoes"
         );
         assert!(
-            matches!(*sub.effect, Effect::Tap { .. }),
+            matches!(
+                *sub.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                    ..
+                }
+            ),
             "sub effect should be Tap, got {:?}",
             sub.effect
         );
@@ -37549,8 +37668,10 @@ mod tests {
         assert!(
             matches!(
                 def.effect.as_ref(),
-                Effect::Tap {
-                    target: TargetFilter::Typed(_)
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(_),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ),
             "expected Tap with typed target, got: {:?}",

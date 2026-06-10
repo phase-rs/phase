@@ -42,7 +42,7 @@ use crate::types::ability::{
     UnlessPayModifier, ZoneChangeClause,
 };
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject};
+use crate::types::ability::{AttackScope, AttackSubject, EffectScope, TapStateChange};
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -14310,7 +14310,11 @@ mod tests {
             ),
         }
         match &*untap_sub.effect {
-            Effect::Untap { target } => {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
+            } => {
                 assert_eq!(
                     *target,
                     TargetFilter::SelfRef,
@@ -14594,7 +14598,10 @@ mod tests {
         assert!(
             matches!(
                 *untap_sub.effect,
-                Effect::UntapAll { .. } | Effect::Untap { .. }
+                Effect::SetTapState {
+                    state: TapStateChange::Untap,
+                    ..
+                }
             ),
             "second tier effect must be UntapAll/Untap, got {:?}",
             untap_sub.effect,
@@ -25967,7 +25974,11 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::YouAttack);
         let execute = def.execute.as_deref().expect("execute ability");
         match execute.effect.as_ref() {
-            Effect::Tap { target } => match target {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            } => match target {
                 TargetFilter::Typed(t) => assert_eq!(
                     t.controller,
                     Some(ControllerRef::DefendingPlayer),
@@ -26022,7 +26033,11 @@ mod tests {
         );
         let execute = def.execute.as_deref().expect("execute ability");
         match execute.effect.as_ref() {
-            Effect::Tap { target } => match target {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            } => match target {
                 TargetFilter::Typed(t) => assert_eq!(
                     t.controller,
                     Some(ControllerRef::DefendingPlayer),
@@ -26044,7 +26059,11 @@ mod tests {
         );
         let execute = def.execute.as_deref().expect("execute ability");
         match execute.effect.as_ref() {
-            Effect::Tap { target } => match target {
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            } => match target {
                 TargetFilter::Typed(t) => assert_eq!(
                     t.controller,
                     Some(ControllerRef::DefendingPlayer),
@@ -26126,8 +26145,10 @@ mod tests {
         // If the parser doesn't classify the synthetic effect, the negative
         // assertion is vacuously satisfied — the karazikar test covers the
         // positive case. If it DOES classify, the controller must remain `You`.
-        if let Effect::Tap {
+        if let Effect::SetTapState {
             target: TargetFilter::Typed(t),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         } = execute.effect.as_ref()
         {
             assert_eq!(
@@ -27901,7 +27922,9 @@ mod snapshot_tests {
 #[cfg(test)]
 mod slicer_control_handoff_tests {
     use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::{AbilityDefinition, ControllerRef, Effect, TargetFilter};
+    use crate::types::ability::{
+        AbilityDefinition, ControllerRef, Effect, EffectScope, TapStateChange, TargetFilter,
+    };
     use crate::types::TriggerMode;
 
     /// Walk a chained `AbilityDefinition` collecting one effect per node (parent
@@ -27944,7 +27967,14 @@ mod slicer_control_handoff_tests {
 
         // PayCost → Untap → Goad → GiveControl, all present.
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::Untap { .. })),
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            )),
             "untap sub-effect must be present, got {effects:#?}",
         );
         assert!(
@@ -27995,7 +28025,14 @@ mod slicer_control_handoff_tests {
         let effects = flatten_effects(trigger.execute.as_ref().expect("execute"));
         // The untap clause must survive…
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::Untap { .. })),
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            )),
             "untap sub-effect must be present, got {effects:#?}",
         );
         // …and the control handoff must be present in some valid lowered form,

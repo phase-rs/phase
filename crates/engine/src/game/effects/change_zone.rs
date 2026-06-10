@@ -5,6 +5,8 @@ use crate::types::ability::{
     ControllerRef, Duration, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
     TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypedFilter,
 };
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterPostAction, WaitingFor};
@@ -4071,8 +4073,10 @@ mod tests {
         trigger.condition = Some(TriggerCondition::ZoneChangeObjectIsTapped);
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::TriggeringSource,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
         )));
         trigger
@@ -4310,8 +4314,10 @@ mod tests {
             });
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::TriggeringSource,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             )));
             let obj = state.objects.get_mut(&conqueror).unwrap();
@@ -5473,8 +5479,10 @@ mod tests {
                     },
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
-                        Effect::Tap {
+                        Effect::SetTapState {
                             target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
                         },
                     ))),
                 })
@@ -5598,8 +5606,10 @@ mod tests {
                 },
                 decline: Some(Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))),
             })
@@ -5773,8 +5783,10 @@ mod tests {
                     },
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
-                        Effect::Tap {
+                        Effect::SetTapState {
                             target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
                         },
                     ))),
                 })
@@ -5805,8 +5817,10 @@ mod tests {
                     },
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
-                        Effect::Tap {
+                        Effect::SetTapState {
                             target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
                         },
                     ))),
                 })

@@ -24,10 +24,10 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttackScope, AttackSubject, Comparator,
-    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
-    MultiTargetSpec, ObjectScope, PaymentCost, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    FilterProp, MultiTargetSpec, ObjectScope, PaymentCost, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -832,9 +832,14 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
             return TargetChoiceTiming::Resolution;
         }
     }
+    // CR 701.26a/b: only single-target tap/untap (legacy `Tap`/`Untap`) takes
+    // the resolution-timing branch; the mass scope never declares multi-target.
     if matches!(
         clause_ir.parsed.effect,
-        Effect::Tap { .. } | Effect::Untap { .. }
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            ..
+        }
     ) && clause_ir.multi_target.is_some()
     {
         let lower = clause_ir.source_text.to_ascii_lowercase();
@@ -1253,8 +1258,12 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
+        // CR 701.26a/b: only single-target tap/untap carries a rewritable target.
+        | Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::Pump { target, .. }
         | Effect::ChangeZone { target, .. } => {
             if matches!(target, TargetFilter::ParentTarget) {

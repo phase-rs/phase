@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    ControllerRef, Effect, ManaProduction, PtValue, QuantityExpr, TargetFilter, TypedFilter,
+    ControllerRef, Effect, EffectScope, ManaProduction, PtValue, QuantityExpr, TapStateChange,
+    TargetFilter, TypedFilter,
 };
 use crate::types::mana::ManaColor;
 use crate::types::Zone;
@@ -341,13 +342,21 @@ fn translate_destroy_all(params: &ForgeParams) -> Result<Effect, ForgeTranslateE
 // CR 701.26a: Tap target permanent.
 fn translate_tap(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
-    Ok(Effect::Tap { target })
+    Ok(Effect::SetTapState {
+        target,
+        scope: EffectScope::Single,
+        state: TapStateChange::Tap,
+    })
 }
 
-// CR 701.26a: Untap target permanent.
+// CR 701.26b: Untap target permanent.
 fn translate_untap(params: &ForgeParams) -> Result<Effect, ForgeTranslateError> {
     let target = resolve_target(params, "ValidTgts");
-    Ok(Effect::Untap { target })
+    Ok(Effect::SetTapState {
+        target,
+        scope: EffectScope::Single,
+        state: TapStateChange::Untap,
+    })
 }
 
 // CR 400.7: Move objects between zones.

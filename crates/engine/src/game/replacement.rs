@@ -3,9 +3,9 @@ use std::collections::HashMap;
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, PostReplacementContinuation,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectScope, PostReplacementContinuation,
     PreventionAmount, QuantityExpr, QuantityModification, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
+    ReplacementDefinition, ReplacementMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -453,11 +453,17 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
             // enters-tapped modifier class. The `target: TargetFilter::SelfRef`
             // constraint is load-bearing — a non-SelfRef tap is not an
             // enters-tapped modifier and must fall through to raw text.
-            Effect::Tap {
+            // CR 701.26a: SelfRef single tap → enters tapped.
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             } => "Enters tapped".to_string(),
-            Effect::Untap {
+            // CR 701.26b: SelfRef single untap → enters untapped.
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             } => "Enters untapped".to_string(),
             _ => fallback(),
         },
@@ -3886,10 +3892,12 @@ impl EventModifiers {
     fn is_event_modifier_effect(effect: &Effect) -> bool {
         matches!(
             effect,
-            Effect::Tap {
+            // CR 701.26a/b: a SelfRef single tap/untap is purely an enters-tapped
+            // event modifier (either polarity).
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
-            } | Effect::Untap {
-                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                ..
             } | Effect::PutCounter {
                 target: TargetFilter::SelfRef,
                 ..
@@ -3952,11 +3960,17 @@ fn event_modifiers_for_ability(
     while let Some(def) = current {
         if etb_tap_state == EtbTapState::Unspecified {
             etb_tap_state = match &*def.effect {
-                Effect::Tap {
+                // CR 701.26a: SelfRef single tap → enters tapped.
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 } => EtbTapState::Tapped,
-                Effect::Untap {
+                // CR 701.26b: SelfRef single untap → enters untapped.
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 } => EtbTapState::Untapped,
                 _ => EtbTapState::Unspecified,
             };
@@ -4622,10 +4636,14 @@ fn candidate_materiality(
             }
             // CR 616.1c: copy-as-it-enters strips another replacement's source.
             Effect::BecomeCopy { .. } => return CandidateMateriality::Unconditional,
-            // CR 614.1c: `Tap`/`Untap` both overwrite the `enter_tapped` field —
-            // two such candidates conflict (tapland + Spelunking / Archelos),
-            // last-applied wins.
-            Effect::Tap { .. } | Effect::Untap { .. } => {
+            // CR 614.1c: single-target `Tap`/`Untap` (legacy `Tap`/`Untap`) both
+            // overwrite the `enter_tapped` field — two such candidates conflict
+            // (tapland + Spelunking / Archelos), last-applied wins. The mass
+            // scope is not an ETB modifier and is not matched here.
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                ..
+            } => {
                 field = Some(EventField::EnterTapped);
             }
             // ETB-counter replacements (`PutCounter`) only *append* to
@@ -5124,8 +5142,10 @@ mod tests {
     fn chained_etb_modifiers_do_not_stash_post_replacement_continuation() {
         let mut enter_tapped = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         );
         enter_tapped.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -5196,8 +5216,10 @@ mod tests {
                 },
                 decline: Some(Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))),
             })
@@ -5517,8 +5539,10 @@ mod tests {
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -5526,8 +5550,10 @@ mod tests {
         let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -5923,8 +5949,10 @@ mod tests {
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -5969,8 +5997,10 @@ mod tests {
         let tap =
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ));
         assert_eq!(replacement_choice_label(&tap), "Enters tapped");
@@ -5978,8 +6008,10 @@ mod tests {
         let untap =
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ));
         assert_eq!(replacement_choice_label(&untap), "Enters untapped");
@@ -5989,8 +6021,10 @@ mod tests {
         let non_self_tap = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::Any,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .description("X".to_string());
@@ -6025,8 +6059,10 @@ mod tests {
         let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -6035,8 +6071,10 @@ mod tests {
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -6100,8 +6138,10 @@ mod tests {
         .description("This permanent enters with an additional +1/+1 counter on it".to_string());
         let haste_branch = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .description("It gains haste".to_string());
@@ -7005,8 +7045,10 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::Typed(
@@ -7020,8 +7062,10 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ))
             .valid_card(TargetFilter::Typed(
@@ -10349,8 +10393,10 @@ mod tests {
         let tap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
             AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ),
         );
@@ -10358,8 +10404,10 @@ mod tests {
         let untap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
             AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ),
         );

@@ -1,7 +1,8 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, Effect, EffectKind, EffectScope, ResolvedAbility,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -115,8 +116,23 @@ pub(super) fn handle_opponent_may_choice(
             ability.context.accepting_player = Some(promptee);
 
             let target_selection = match &ability.effect {
-                Effect::Sacrifice { target, .. } | Effect::Tap { target } => {
-                    let require_untapped = matches!(ability.effect, Effect::Tap { .. });
+                // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
+                // sacrifice or single-target tap cost. Tap requires an untapped
+                // permanent (CR 701.26a); sacrifice has no such restriction.
+                Effect::Sacrifice { target, .. }
+                | Effect::SetTapState {
+                    target,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                } => {
+                    let require_untapped = matches!(
+                        ability.effect,
+                        Effect::SetTapState {
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                            ..
+                        }
+                    );
                     let legal: Vec<ObjectId> = state
                         .objects
                         .iter()

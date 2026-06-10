@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use thiserror::Error;
 
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
@@ -12452,8 +12454,10 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))
                 .valid_card(TargetFilter::SelfRef)
@@ -15025,9 +15029,10 @@ mod phase_trigger_regression_tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
-        FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
-        ReplacementMode, ResolvedAbility, TargetFilter, TargetRef, TriggerConstraint,
-        TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+        EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange, TargetFilter,
+        TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::card::CardFace;
     use crate::types::card_type::CoreType;
@@ -17259,8 +17264,10 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
         );
 
         let mut pending_ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             source_id,

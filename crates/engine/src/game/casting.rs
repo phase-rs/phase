@@ -12647,13 +12647,13 @@ mod tests {
         AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
         BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
-        CostCategory, CountScope, FilterProp, GameRestriction, KickerVariant, ManaContribution,
-        ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalChoice,
+        CostCategory, CountScope, EffectScope, FilterProp, GameRestriction, KickerVariant,
+        ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalChoice,
         ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
         ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         ReplacementDefinition, ReplacementMode, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-        TypeFilter, TypedFilter,
+        SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -24517,8 +24517,10 @@ mod tests {
             Arc::make_mut(&mut obj.abilities).push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
-                    Effect::Untap {
+                    Effect::SetTapState {
                         target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Untap,
                     },
                 )
                 .cost(AbilityCost::ReturnToHand {
