@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use crate::game::layers;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zone_pipeline::{
-    self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
+    self, ApprovedZoneChange, DeliveryCtx, EntryMods, ExileLinkSpec, ZoneChangeCause,
+    ZoneDeliveryResult, ZoneMoveRequest, ZoneMoveResult,
 };
 use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
@@ -441,6 +442,45 @@ fn collect_commander_damage_losers(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
+/// CR 704.5 + CR 614.6: Move an SBA-departing permanent (zero toughness / zero
+/// loyalty / zero defense / legend-rule loser / unattached aura) from the
+/// battlefield to its owner's graveyard THROUGH the zone-change pipeline so
+/// `Moved` redirects ("if a card would be put into a graveyard from anywhere,
+/// exile it instead" — Rest in Peace / Leyline of the Void class) are consulted.
+/// These are "leaves the battlefield" / "dies" events (CR 603.6c + CR 700.4),
+/// so the redirect must apply — a bare `zones::move_to_zone` skipped that
+/// consult.
+///
+/// Returns `true` when a CR 616.1 ordering choice (or, defensively, an
+/// as-enters choice) surfaced and parked `state.waiting_for`; the caller MUST
+/// bail (return) before stamping co-departure so the parked prompt is not
+/// clobbered — mirroring the `check_lethal_damage` regeneration-pause arm. The
+/// CR 704.3 fixpoint re-runs after the choice resolves and re-derives any
+/// undelivered SBA deaths, so bailing strands nothing.
+///
+/// `StateBasedAction` is a full-pipeline (non-exempt) cause and carries no
+/// source, so the departing object anchors its own CR 400.7 attribution
+/// (matching the pre-pipeline raw move, which recorded no source).
+#[must_use]
+fn move_to_graveyard_via_pipeline(
+    state: &mut GameState,
+    id: crate::types::identifiers::ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let req = ZoneMoveRequest {
+        object_id: id,
+        to: Zone::Graveyard,
+        cause: ZoneChangeCause::StateBasedAction,
+        mods: EntryMods::default(),
+        placement: None,
+        exile_links: ExileLinkSpec::default(),
+    };
+    matches!(
+        zone_pipeline::move_object(state, req, events),
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice
+    )
+}
+
 /// CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
 /// CR 702.26b: Phased-out permanents are treated as though they don't exist —
 /// state-based actions scan only phased-in permanents.
@@ -465,7 +505,11 @@ fn check_zero_toughness(
         .collect();
 
     for &id in &to_destroy {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        // CR 614.6: zero-toughness death is a "leaves the battlefield" event —
+        // consult Moved redirects via the pipeline; bail on a CR 616.1 pause.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return;
+        }
         *any_performed = true;
     }
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
@@ -788,7 +832,12 @@ fn check_unattached_auras(
     for (id, action) in actions {
         match action {
             UnattachedAuraAction::ToGraveyard => {
-                zones::move_to_zone(state, id, Zone::Graveyard, events);
+                // CR 704.5m + CR 614.6: an Aura attached to nothing is put into
+                // its owner's graveyard — a "leaves the battlefield" event that
+                // must consult Moved redirects. Bail on a CR 616.1 pause.
+                if move_to_graveyard_via_pipeline(state, id, events) {
+                    return;
+                }
             }
             UnattachedAuraAction::BestowRevert => {
                 // CR 702.103f: revert in place — restore Creature form, drop
@@ -951,7 +1000,12 @@ fn check_role_uniqueness(
         // Tie-break by ObjectId so behavior is deterministic when timestamps collide.
         roles.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0 .0.cmp(&a.0 .0)));
         for (id, _) in roles.into_iter().skip(1) {
-            zones::move_to_zone(state, id, Zone::Graveyard, events);
+            // CR 704.5j + CR 614.6: the legend-rule loser is put into the
+            // graveyard — a "dies" event that must consult Moved redirects. Bail
+            // on a CR 616.1 pause (the fixpoint re-derives the rest).
+            if move_to_graveyard_via_pipeline(state, id, events) {
+                return;
+            }
             *any_performed = true;
         }
     }
@@ -980,7 +1034,10 @@ fn check_zero_loyalty(
         .collect();
 
     for &id in &to_destroy {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        // CR 704.5i + CR 614.6: zero-loyalty death must consult Moved redirects.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return;
+        }
         *any_performed = true;
     }
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
@@ -1027,7 +1084,10 @@ fn check_zero_defense(
         .collect();
 
     for &id in &to_destroy {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        // CR 704.5v + CR 614.6: zero-defense battle death must consult redirects.
+        if move_to_graveyard_via_pipeline(state, id, events) {
+            return;
+        }
         *any_performed = true;
     }
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
@@ -1155,8 +1215,13 @@ fn check_battle_protector(
 
         match legal_choices.len() {
             0 => {
-                // CR 310.10 / CR 704.5w: No legal protector exists — graveyard.
-                zones::move_to_zone(state, battle_id, Zone::Graveyard, events);
+                // CR 310.10 / CR 704.5w + CR 614.6: No legal protector exists —
+                // the battle is put into the graveyard, a "leaves the
+                // battlefield" event that must consult Moved redirects. Bail on a
+                // CR 616.1 pause (the SBA fixpoint re-runs and finds the rest).
+                if move_to_graveyard_via_pipeline(state, battle_id, events) {
+                    return;
+                }
                 *any_performed = true;
             }
             1 => {
@@ -1257,7 +1322,13 @@ fn check_saga_sacrifice(
             object_id: saga_id,
             player_id: owner,
         });
-        zones::move_to_zone(state, saga_id, Zone::Graveyard, events);
+        // CR 704.5s + CR 614.6: the final-chapter Saga is sacrificed (put into
+        // its owner's graveyard) — a "leaves the battlefield" event that must
+        // consult Moved redirects. Bail on a CR 616.1 pause (the SBA fixpoint
+        // re-runs and finds any remaining Sagas).
+        if move_to_graveyard_via_pipeline(state, saga_id, events) {
+            return;
+        }
         *any_performed = true;
     }
 }
@@ -1532,6 +1603,67 @@ mod tests {
 
         assert!(!state.battlefield.contains(&id));
         assert!(state.players[0].graveyard.contains(&id));
+    }
+
+    /// C7 discriminating test (CR 704.5f + CR 614.6): a zero-toughness death is a
+    /// "leaves the battlefield" event, so a `Moved` graveyard→exile redirect
+    /// (Rest in Peace / Leyline of the Void) must apply — the creature is exiled,
+    /// not put into the graveyard. The old bare `zones::move_to_zone` skipped the
+    /// consult and the creature landed in the graveyard.
+    #[test]
+    fn sba_zero_toughness_death_consults_rest_in_peace_and_exiles() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Weakling", 1, 0);
+
+        // Rest in Peace permanent hosting a graveyard→exile Moved redirect.
+        let rip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ))
+            .description("Rest in Peace".to_string());
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(redirect);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 614.6: redirected to exile, never reaching the graveyard.
+        assert!(
+            state.exile.contains(&creature),
+            "zero-toughness death must be redirected to exile by RIP"
+        );
+        assert!(!state.players[0].graveyard.contains(&creature));
+        assert!(!state.battlefield.contains(&creature));
     }
 
     #[test]
