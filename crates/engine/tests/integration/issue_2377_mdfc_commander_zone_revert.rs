@@ -4,7 +4,7 @@
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -44,6 +44,8 @@ fn issue_2377_mdfc_commander_reverts_to_front_face_on_return_to_command_zone() {
             object_id: card,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CastSpell on Peter Parker accepted");
     assert!(
