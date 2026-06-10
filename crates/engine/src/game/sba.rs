@@ -551,6 +551,26 @@ fn check_lethal_damage(
                                 {
                                     return;
                                 }
+                                // CR 614.5 + CR 400.7: A replacement gets only one
+                                // opportunity to affect a lethal-damage destruction.
+                                // When the redirect keeps (or returns) the creature
+                                // on the battlefield, `zones::move_to_zone`'s CR
+                                // 603.2g Battlefield->Battlefield no-op guard skips
+                                // `reset_for_battlefield_entry`, so `damage_marked`
+                                // survives. Without clearing it the next SBA fixpoint
+                                // pass re-derives lethal damage and re-fires the
+                                // destruction-replacement every iteration (counter /
+                                // event stacking, capped at MAX_SBA_ITERATIONS). The
+                                // creature is a new object after the death is replaced
+                                // (CR 400.7) and the replacement already had its one
+                                // opportunity for this damage, so clear the marked
+                                // damage that the no-op delivery left behind.
+                                if let Some(obj) = state.objects.get_mut(&object_id) {
+                                    if obj.zone == Zone::Battlefield {
+                                        obj.damage_marked = 0;
+                                        obj.dealt_deathtouch_damage = false;
+                                    }
+                                }
                             }
                         }
                         ReplacementResult::Prevented => {}
