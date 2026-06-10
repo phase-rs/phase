@@ -81,7 +81,7 @@ pub fn resolve(
                     ability.source_id,
                     None,
                     false,
-                    enter_tapped.is_tapped(),
+                    enter_tapped,
                     None,
                     &[],
                     None,

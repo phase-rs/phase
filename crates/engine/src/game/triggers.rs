@@ -11574,8 +11574,8 @@ pub mod tests {
             Zone::Battlefield,
             ObjectId(0xA1A1), // self-sourced
             None,
-            true,  // enter_transformed
-            false, // effect_enter_tapped
+            true, // enter_transformed
+            crate::types::zones::EtbTapState::Unspecified,
             None,  // controller_override
             &[],   // effect_enter_with_counters
             None,  // face_down_profile

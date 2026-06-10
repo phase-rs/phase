@@ -354,7 +354,7 @@ pub(crate) fn move_object(
         source_id.unwrap_or(req.object_id),
         exile_links.duration.as_ref(),
         req.mods.enter_transformed,
-        req.mods.enter_tapped.is_tapped(),
+        req.mods.enter_tapped,
         req.mods.controller_override,
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
@@ -849,7 +849,7 @@ pub(crate) fn execute_zone_move(
     source_id: ObjectId,
     duration: Option<&Duration>,
     enter_transformed: bool,
-    effect_enter_tapped: bool,
+    enter_tapped: EtbTapState,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -870,14 +870,19 @@ pub(crate) fn execute_zone_move(
         }
     }
 
-    // CR 614.1: Set enter_tapped on the proposed event so replacement effects preserve it.
-    if effect_enter_tapped {
+    // CR 614.1: Seed the three-state ETB tap-state directly onto the proposed
+    // event so the replacement pipeline preserves it. `Unspecified` leaves the
+    // event's default untouched (the originating effect set no explicit state);
+    // an explicit `Tapped`/`Untapped` overrides it. Seeding the enum directly
+    // (rather than collapsing through a bool) keeps the `Unspecified`-vs-
+    // `Untapped` distinction the pipeline carrier `EtbTapState` exists to hold.
+    if !enter_tapped.is_unspecified() {
         if let ProposedEvent::ZoneChange {
             enter_tapped: ref mut et,
             ..
         } = proposed
         {
-            *et = crate::types::proposed_event::EtbTapState::Tapped;
+            *et = enter_tapped;
         }
     }
 
