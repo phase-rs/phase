@@ -13,6 +13,9 @@ permissions:
 jobs:
   refresh-feeds:
     name: Scrape & Commit Feeds
+    # Forks inherit the schedule but not CI_PAT, so a fork run only fails and
+    # spams the owner. Keep the daily scrape on the canonical repository.
+    if: github.repository == 'phase-rs/phase'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
