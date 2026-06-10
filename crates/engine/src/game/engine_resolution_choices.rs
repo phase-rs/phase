@@ -1314,6 +1314,26 @@ pub(super) fn handle_resolution_choice(
                             // unkept cards strand in the library (they were not yet
                             // moved). The drain fires on both the replacement-choice
                             // resume and the aura-attachment resume.
+                            //
+                            // SCOPING (multi-kept limitation, pre-existing,
+                            // strictly no-worse-than-before): this `return` exits
+                            // the `for &obj_id in &kept` loop, so if kept card #1
+                            // pauses, kept #2+ are NOT moved to the battlefield —
+                            // they remain in the library. The deferred completion
+                            // only finishes the rest-pile (unkept) move and the
+                            // tracked-set publish; it does not resume the kept
+                            // loop. The old raw-`move_to_zone` path had the same
+                            // ceiling (it could not pause and resume a kept tail
+                            // either), so this is no regression. WRINKLE:
+                            // `publish_tracked_set: Some(kept.clone())` publishes
+                            // ALL kept cards, including the unmoved #2+, so a
+                            // downstream sub-ability keyed off the tracked set can
+                            // be wired to cards still in the library on this paused
+                            // path. Acceptable today because no supported dig card
+                            // both keeps 2+ cards to the battlefield AND surfaces an
+                            // as-enters pause on the first; revisit if such a card
+                            // is added (the fix is a kept-loop continuation, not a
+                            // single completion).
                             crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
                             | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                                 crate::game::zone_pipeline::defer_completion_on_pause(

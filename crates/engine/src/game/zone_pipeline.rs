@@ -725,21 +725,22 @@ fn deliver_batch(
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f: an aura-host choice flows through
                 // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
-                // resume path, so `drain_pending_batch_deliveries` (which only
-                // runs from `handle_replacement_choice`) would not fire here.
-                // No batch flow targets a battlefield aura entry today (mill
-                // destinations are graveyard/exile/hand; mass bounce returns to
-                // hand/library), so this is unreachable; stop and stash the
-                // tail so a future battlefield-entry batch does not silently
-                // drop the rest of the batch.
+                // resume path. No batch flow targets a battlefield aura entry
+                // today (mill destinations are graveyard/exile/hand; mass bounce
+                // returns to hand/library), so this arm is unreachable for the
+                // current batch callers; stop and stash the tail so a future
+                // battlefield-entry batch does not silently drop its remainder.
                 //
-                // NOTE: this is NOT a loud failure. The engine_replacement
-                // drain gate keys on `pending_batch_deliveries.is_some()`, not
-                // on provenance, so a stale tail stashed here would be silently
-                // drained by the NEXT unrelated replacement-choice resume.
-                // Reaching this arm for a batch flow is a bug to be surfaced if
-                // a battlefield-entry batch is ever added; today it is dead
-                // code for every batch caller.
+                // The stashed tail IS drained correctly on resume: the
+                // `ReturnAsAuraTarget` handler (engine.rs:3608-3611) and its
+                // chain-resume sibling (engine.rs:3572) both call
+                // `drain_pending_batch_deliveries` when
+                // `pending_batch_deliveries.is_some()`, so the aura-attachment
+                // pause finishes the parked batch the same way the replacement-
+                // choice resume does. (Updated for d5a12b8c6, which added the
+                // aura-resume drain; the prior note here that the tail would be
+                // "silently drained by the NEXT unrelated resume" is no longer
+                // accurate.)
                 stash_batch_tail(state, queue.collect(), destination);
                 return BatchMoveResult::NeedsChoice;
             }
