@@ -581,9 +581,20 @@ fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &m
         .collect();
 
     // CR 103.5: pregame mulligan — return the hand to the library through the
-    // pipeline under the `PregameProcedure` exempt cause, then shuffle.
+    // pipeline under the `PregameProcedure` exempt cause, then shuffle once.
+    //
+    // The requests MUST go through the library-placement arm
+    // (`.at_library_position(Bottom)` — insertion order is irrelevant because
+    // the explicit single shuffle immediately follows): a placement-less
+    // Library-destination request runs the delivery tail, whose CR 701.24a
+    // auto-shuffle arm fires PER CARD — a 7-card mulligan would emit seven
+    // `ShuffledLibrary` player-action events (pre-pipeline count: zero) and
+    // consume seven extra full-library shuffles from the seeded RNG stream,
+    // diverging same-seed games. Pinned by
+    // `mulligan_shuffle_back_emits_no_shuffled_library_events`.
     for card_id in hand_ids {
-        let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(card_id, Zone::Library);
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(card_id, Zone::Library)
+            .at_library_position(crate::types::ability::LibraryPosition::Bottom);
         crate::game::zone_pipeline::move_object(state, req, events);
     }
 
@@ -790,6 +801,42 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::MulliganStarted)));
+    }
+
+    /// CR 103.5: a mulligan shuffles the hand back as ONE shuffle, and that
+    /// shuffle is the mulligan's own event-less `shuffle_vector` — the
+    /// pre-pipeline behavior emitted ZERO `ShuffledLibrary` player-action
+    /// events. Pins that count so the zone-pipeline migration cannot leak the
+    /// CR 701.24a per-card auto-shuffle from the delivery tail (which would
+    /// emit one event per returned card and consume extra RNG, diverging
+    /// same-seed games across versions).
+    #[test]
+    fn mulligan_shuffle_back_emits_no_shuffled_library_events() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        let wf = start_mulligan(&mut state, &mut events);
+        state.waiting_for = wf;
+
+        events.clear();
+        decide(&mut state, PlayerId(0), false, &mut events);
+
+        let shuffle_events = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            shuffle_events, 0,
+            "mulligan shuffle-back must not emit per-card ShuffledLibrary events \
+             (pre-pipeline count: 0 — the single real shuffle is event-less shuffle_vector)"
+        );
     }
 
     #[test]
