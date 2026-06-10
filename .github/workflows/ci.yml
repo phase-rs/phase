@@ -171,6 +171,11 @@ jobs:
         # the engine now lacks a handler (non-ParseWarning gap). Parser-honesty
         # flips (new ParseWarning:*) and genuinely-gained cards are informational.
         # Baseline is main's last-good coverage-data.json published to R2.
+        # On push-to-main the check is informational only: the merge has already
+        # happened, and failing here blocks the R2 baseline republish below,
+        # wedging main red until a manual baseline upload (the PR #2339 /
+        # PR #2802 ratchet deadlock). PR and merge_group runs remain blocking.
+        continue-on-error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           ./scripts/coverage-regression-check.sh \
             "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-data.json" \
