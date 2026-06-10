@@ -7265,7 +7265,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
         ));
 
         // Chain ability granting if needed, gated on "if that's another creature"
-        let counter_ability = if let Some(grant_effect) = grant_effect.clone() {
+        let mut counter_ability = if let Some(grant_effect) = grant_effect.clone() {
             let grant_sub = AbilityDefinition::new(AbilityKind::Spell, grant_effect)
                 .condition(AbilityCondition::Not {
                     condition: Box::new(AbilityCondition::TargetMatchesFilter {
@@ -7281,6 +7281,12 @@ pub fn synthesize_backup(face: &mut CardFace) {
         } else {
             counter_ability
         };
+
+        // CR 702.165a: mark the synthesized backup ability so "becomes the target
+        // of a backup ability" triggers can identify it on the stack. Stamped on
+        // the final body that reaches `.execute(...)` so the tag survives the
+        // chained sub-ability rebuild above.
+        counter_ability.ability_tag = Some(AbilityTag::Backup);
 
         // Build the ETB trigger
         // CR 702.165a: "when this creature enters"

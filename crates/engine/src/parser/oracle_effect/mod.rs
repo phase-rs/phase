@@ -17854,13 +17854,19 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         TargetFilter::Or {
             filters: vec![
                 TargetFilter::StackSpell,
-                TargetFilter::StackAbility { controller: None },
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
             ],
         }
     } else if scan_contains_phrase(spell_phrase_clean, "activated or triggered ability")
         || scan_contains_phrase(spell_phrase_clean, "activated ability")
     {
-        TargetFilter::StackAbility { controller: None }
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+        }
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
         // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
         let (parsed, _) = parse_target(spell_phrase_clean);
@@ -22572,7 +22578,8 @@ mod tests {
                 e,
                 Effect::CounterAll {
                     target: TargetFilter::StackAbility {
-                        controller: Some(ControllerRef::Opponent)
+                        controller: Some(ControllerRef::Opponent),
+                        tag: None,
                     },
                 }
             ),
@@ -22611,7 +22618,10 @@ mod tests {
             matches!(
                 e,
                 Effect::Counter {
-                    target: TargetFilter::StackAbility { controller: None },
+                    target: TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None
+                    },
                     ..
                 }
             ),
@@ -23430,7 +23440,8 @@ mod tests {
         assert!(matches!(
             target,
             TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
+                controller: Some(ControllerRef::You),
+                tag: None,
             }
         ));
     }

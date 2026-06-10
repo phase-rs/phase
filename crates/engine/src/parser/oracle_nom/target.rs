@@ -351,7 +351,10 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
             TargetFilter::Or {
                 filters: vec![
                     TargetFilter::StackSpell,
-                    TargetFilter::StackAbility { controller: None },
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None,
+                    },
                 ],
             },
             alt((
@@ -398,7 +401,10 @@ fn parse_ability_kind_with_optional_spell(input: &str) -> OracleResult<'_, Targe
     ))
     .parse(rest)?;
 
-    let ability = TargetFilter::StackAbility { controller: None };
+    let ability = TargetFilter::StackAbility {
+        controller: None,
+        tag: None,
+    };
     let filter = match spell_leg {
         Some(spell) => TargetFilter::Or {
             filters: vec![ability, spell],
@@ -790,7 +796,10 @@ mod tests {
             filter,
             TargetFilter::Or {
                 filters: vec![
-                    TargetFilter::StackAbility { controller: None },
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None
+                    },
                     noncreature_spell_leg(),
                 ],
             }
@@ -828,14 +837,26 @@ mod tests {
         // Ability-only counter (e.g. Stifle / Disallow's ability disjunct).
         let (rest, filter) = parse_stack_object_target("activated or triggered ability").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        );
     }
 
     #[test]
     fn test_stack_object_activated_ability_only() {
         let (rest, filter) = parse_stack_object_target("activated ability").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        );
     }
 
     #[test]
@@ -850,7 +871,10 @@ mod tests {
             TargetFilter::Or {
                 filters: vec![
                     TargetFilter::StackSpell,
-                    TargetFilter::StackAbility { controller: None },
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None
+                    },
                 ],
             }
         );

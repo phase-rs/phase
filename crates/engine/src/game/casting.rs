@@ -16761,6 +16761,7 @@ mod tests {
                 Effect::CopySpell {
                     target: TargetFilter::StackAbility {
                         controller: Some(ControllerRef::You),
+                        tag: None,
                     },
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
                     copier: None,
@@ -19221,7 +19222,10 @@ mod tests {
                     TargetFilter::Or {
                         filters: vec![
                             TargetFilter::StackSpell,
-                            TargetFilter::StackAbility { controller: None },
+                            TargetFilter::StackAbility {
+                                controller: None,
+                                tag: None,
+                            },
                         ],
                     },
                     TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -19363,7 +19367,10 @@ mod tests {
         });
         let not_of_this_world_targeting_ability = ResolvedAbility::new(
             Effect::Counter {
-                target: TargetFilter::StackAbility { controller: None },
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
                 source_rider: None,
             },
             vec![TargetRef::Object(stack_ability_id)],

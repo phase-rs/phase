@@ -14,6 +14,7 @@ mod auntie_ool_minus_one_counter_trigger;
 mod aura_graft_enchant_restriction;
 mod aura_on_player;
 mod awaken_runtime;
+mod backup_becomes_target_trigger;
 mod balance_equalization;
 mod baleful_mastery_regression;
 mod banding_combat;

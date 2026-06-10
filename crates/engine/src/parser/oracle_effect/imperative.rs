@@ -3221,6 +3221,7 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
         return Some((
             TargetFilter::StackAbility {
                 controller: Some(ControllerRef::You),
+                tag: None,
             },
             rem,
         ));
@@ -3230,7 +3231,13 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
             .parse(input)
             .is_ok()
     {
-        return Some((TargetFilter::StackAbility { controller: None }, input));
+        return Some((
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+            },
+            input,
+        ));
     }
     None
 }
@@ -3246,7 +3253,10 @@ pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
     } else {
         None
     };
-    TargetFilter::StackAbility { controller }
+    TargetFilter::StackAbility {
+        controller,
+        tag: None,
+    }
 }
 
 fn parse_explicit_targeted_attach(
@@ -7787,9 +7797,13 @@ mod tests {
             panic!("expected Or {{ ability, noncreature-spell }}, got {target:?}");
         };
         assert!(
-            filters
-                .iter()
-                .any(|f| matches!(f, TargetFilter::StackAbility { controller: None })),
+            filters.iter().any(|f| matches!(
+                f,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None
+                }
+            )),
             "missing the activated/triggered ability disjunct: {target:?}"
         );
         let spell_leg = filters
@@ -10962,7 +10976,8 @@ mod tests {
         assert!(matches!(
             controlled.0,
             TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
+                controller: Some(ControllerRef::You),
+                tag: None,
             }
         ));
 
@@ -10971,7 +10986,10 @@ mod tests {
         assert_eq!(unscoped.1, "");
         assert!(matches!(
             unscoped.0,
-            TargetFilter::StackAbility { controller: None }
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
         ));
 
         assert!(
