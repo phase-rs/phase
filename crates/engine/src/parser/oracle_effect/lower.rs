@@ -1,12 +1,12 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map, not, opt, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::super::oracle_nom::condition as nom_condition;
+use super::super::oracle_nom::duration::{parse_duration, parse_for_as_long_as_condition};
 use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -25,9 +25,9 @@ use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialCla
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttackScope, AttackSubject, Comparator,
     ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
-    MultiTargetSpec, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    MultiTargetSpec, ObjectScope, PaymentCost, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -2299,45 +2299,25 @@ pub(crate) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter>
 
 pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
     let lower = text.to_lowercase();
+    // Leading "<duration>, <effect>" — the phrase→`Duration` mapping is owned
+    // by the single duration grammar (`oracle_nom::duration::parse_duration`);
+    // this wrapper owns only the leading position and the ", " clause split.
     if let Some((duration, rest)) = nom_on_lower(text, &lower, |i| {
-        alt((
-            value(Duration::UntilEndOfTurn, tag("until end of turn, ")),
-            // CR 514.2: "until the end of your next turn" persists through
-            // that turn's cleanup step.
-            value(
-                Duration::UntilEndOfNextTurnOf {
-                    player: PlayerScope::Controller,
-                },
-                tag("until the end of your next turn, "),
-            ),
-            value(
-                Duration::UntilNextTurnOf {
-                    player: PlayerScope::Controller,
-                },
-                tag("until your next turn, "),
-            ),
-            // CR 513.1 + CR 611.2a: Rocco, Street Chef and the floating
-            // play-permission class — "Until your next end step, ...".
-            value(
-                Duration::UntilNextStepOf {
-                    step: Phase::End,
-                    player: PlayerScope::Controller,
-                },
-                tag("until your next end step, "),
-            ),
-        ))
-        .parse(i)
+        terminated(parse_duration, tag(", ")).parse(i)
     }) {
         return Some((duration, rest.trim()));
     }
 
-    // CR 611.2b: "For as long as [condition], [effect]" — leading duration prefix.
+    // CR 611.2b: "For as long as [condition], [effect]" — leading duration
+    // prefix. The condition is bounded by the first ", " (the generic branch
+    // above can't split it because the condition grammar is clause-final);
+    // its mapping is delegated to the duration grammar's condition table.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("for as long as ").parse(lower.as_str()) {
         // Split "condition, effect_body" on the first ", " delimiter.
         if let Ok((effect_body, condition_text)) =
             terminated(take_until(", "), tag::<_, _, OracleError<'_>>(", ")).parse(rest)
         {
-            if let Some(dur) = parse_for_as_long_as_condition(condition_text) {
+            if let Ok((_, dur)) = parse_for_as_long_as_condition(condition_text) {
                 let prefix_len = "for as long as ".len() + condition_text.len() + ", ".len();
                 return Some((dur, text[prefix_len..].trim()));
             }
@@ -2357,130 +2337,53 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     if target_relative_clause_owns_suffix(lower.as_str()) {
         return (text, None);
     }
-    // Per-turn quantity clauses can own "this turn" themselves (for example,
-    // "where X is the number of tokens you created this turn"). In that shape the
-    // suffix belongs to the quantity grammar, not to the outer effect duration.
-    for (suffix, duration) in [
-        (" this turn", Duration::UntilEndOfTurn),
-        (" until end of turn", Duration::UntilEndOfTurn),
-        // CR 611.2a: "A continuous effect generated by the resolution of a
-        // spell or ability lasts as long as stated by the spell or ability
-        // creating it ... If no duration is stated, it lasts until the end of
-        // the game." A one-shot effect that creates a continuous restriction
-        // worded "... for the rest of the game" (Screaming Nemesis: "can't gain
-        // life for the rest of the game") therefore has no expiry - modeled as
-        // `Duration::Permanent`. CR 119.7 governs the restriction's semantics
-        // for the "can't gain life" case specifically.
-        (" for the rest of the game", Duration::Permanent),
-        (
-            // CR 514.2: cleanup-pruned next-turn duration.
-            " until the end of your next turn",
-            Duration::UntilEndOfNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-        ),
-        (" until end of combat", Duration::UntilEndOfCombat),
-        // CR 514.2 + CR 611.2a + CR 108.3: Third-person "their next turn"
-        // appears in grants whose grantee is not the ability's controller
-        // (Suspend Aggression: "its owner may play it"; Expedited Inheritance:
-        // "its controller may ... They may play those cards"). Theme D's
-        // `granted_to` binds to the grantee, so `UntilNextTurnOf { Controller }`
-        // is semantically "until the end of the grantee's next turn" at prune time.
-        (
-            " until the end of their next turn",
-            Duration::UntilEndOfNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-        ),
-        (
-            " until their next turn",
-            Duration::UntilNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-        ),
-        (
-            " until your next turn",
-            Duration::UntilNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-        ),
-        (
-            " until ~ leaves the battlefield",
-            Duration::UntilHostLeavesPlay,
-        ),
-        (
-            " until this creature leaves the battlefield",
-            Duration::UntilHostLeavesPlay,
-        ),
-    ] {
-        if lower.ends_with(suffix) {
-            if suffix == " this turn" && quantity_clause_owns_this_turn_suffix(&lower) {
-                continue;
-            }
-            let end = duration_text.len() - suffix.len();
+    // CR 611.2 + CR 611.2b: trailing duration clause. The phrase→`Duration`
+    // mapping is owned by the single duration grammar
+    // (`oracle_nom::duration::parse_duration`); this wrapper owns only WHERE
+    // the clause sits — a word-boundary scan for the position whose remainder
+    // is entirely a duration phrase — plus two disambiguation guards: a bare
+    // duration phrase with no preceding clause is not a suffix, and a
+    // "this turn" suffix can be owned by a per-turn quantity clause instead
+    // (for example, "where X is the number of tokens you created this turn"),
+    // in which case it belongs to the quantity grammar, not to the outer
+    // effect duration.
+    if let Some((before, duration, _)) =
+        nom_primitives::scan_preceded(&lower, |i| terminated(parse_duration, eof).parse(i))
+    {
+        let quantity_owns_suffix = all_consuming(tag::<_, _, OracleError<'_>>("this turn"))
+            .parse(&lower[before.len()..])
+            .is_ok()
+            && quantity_clause_owns_this_turn_suffix(&lower);
+        if !before.is_empty() && !quantity_owns_suffix {
             return (
-                duration_text[..end].trim_end_matches(',').trim(),
+                duration_text[..before.len()]
+                    .trim_end()
+                    .trim_end_matches(',')
+                    .trim(),
                 Some(duration),
             );
         }
     }
 
     // CR 611.2a: Duration mid-clause before a trailing conjunct, variable
-    // definition, or alternative expiry. End-of-string durations are handled
-    // above. Do NOT treat " unless " as a boundary here — unless-pay parsers
+    // definition, or alternative expiry (", or " / ", where " boundaries).
+    // End-of-string durations are handled above; the text after the duration
+    // phrase is intentionally dropped, preserving the legacy table behavior.
+    // Do NOT treat " unless " as a boundary here — unless-pay parsers
     // (`try_parse_unless_player_have_deal_damage`, `extract_resolution_unless_pay_modifier`)
     // own that tail and must see the full phrase.
-    for (phrase, duration) in [
-        (" until end of turn", Duration::UntilEndOfTurn),
-        (" this turn", Duration::UntilEndOfTurn),
-        (" until end of combat", Duration::UntilEndOfCombat),
-        (
-            " until the end of your next turn",
-            Duration::UntilEndOfNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-        ),
-        (
-            " until the end of their next turn",
-            Duration::UntilEndOfNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-        ),
-        (
-            " until their next turn",
-            Duration::UntilNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-        ),
-        (
-            " until your next turn",
-            Duration::UntilNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-        ),
-        (
-            " until ~ leaves the battlefield",
-            Duration::UntilHostLeavesPlay,
-        ),
-        (
-            " until this creature leaves the battlefield",
-            Duration::UntilHostLeavesPlay,
-        ),
-    ] {
-        for delimiter in [", or ", ", where "] {
-            let pattern = format!("{phrase}{delimiter}");
-            if let Some(pos) = lower.find(&pattern) {
-                return (duration_text[..pos].trim_end(), Some(duration));
-            }
-        }
-    }
-
-    // CR 611.2b: "for as long as [condition]" — extract condition from trailing phrase.
-    if let Some(pos) = lower.rfind(" for as long as ") {
-        let condition_text = &lower[pos + " for as long as ".len()..];
-        if let Some(dur) = parse_for_as_long_as_condition(condition_text) {
-            let stripped = duration_text[..pos].trim_end_matches(',').trim();
-            return (stripped, Some(dur));
+    if let Some((before, duration, _)) = nom_primitives::scan_preceded(&lower, |i| {
+        terminated(
+            parse_duration,
+            peek(alt((
+                tag::<_, _, OracleError<'_>>(", or "),
+                tag(", where "),
+            ))),
+        )
+        .parse(i)
+    }) {
+        if !before.is_empty() {
+            return (duration_text[..before.len()].trim_end(), Some(duration));
         }
     }
 
@@ -2549,82 +2452,6 @@ fn target_relative_clause_owns_suffix(input: &str) -> bool {
     )
         .parse(remaining)
         .is_ok()
-}
-
-/// CR 611.2b: Parse the condition text after "for as long as" into a Duration variant.
-/// Maps known condition phrases to typed Duration/StaticCondition variants:
-/// - "~ remains tapped" / "it remains tapped" → ForAsLongAs { SourceIsTapped }
-/// - "you control ~" → UntilHostLeavesPlay (existing variant)
-/// - "~ remains on the battlefield" → UntilHostLeavesPlay
-/// - "it has a {type} counter on it" → ForAsLongAs { HasCounters }
-/// - Compound: "you control ~ and it remains tapped" → ForAsLongAs { And [...] }
-/// - Unknown → ForAsLongAs { Unrecognized }
-fn parse_for_as_long_as_condition(condition: &str) -> Option<Duration> {
-    let condition = condition.trim().trim_end_matches('.');
-
-    // Compound: "you control ~ and it remains tapped"
-    if let Ok((right, left)) =
-        terminated(take_until(" and "), tag::<_, _, OracleError<'_>>(" and ")).parse(condition)
-    {
-        let left = left.trim();
-        let right = right.trim();
-        let left_dur = parse_for_as_long_as_condition(left)?;
-        let right_dur = parse_for_as_long_as_condition(right)?;
-        let left_cond = duration_to_condition(left_dur);
-        let right_cond = duration_to_condition(right_dur);
-        return Some(Duration::ForAsLongAs {
-            condition: StaticCondition::And {
-                conditions: vec![left_cond, right_cond],
-            },
-        });
-    }
-
-    // "~ remains tapped" / "it remains tapped" / "this creature remains tapped"
-    if scan_contains_phrase(condition, "remains tapped") {
-        return Some(Duration::ForAsLongAs {
-            condition: StaticCondition::SourceIsTapped,
-        });
-    }
-
-    // "you control ~" / "you control this creature"
-    if tag::<_, _, OracleError<'_>>("you control ")
-        .parse(condition)
-        .is_ok()
-    {
-        return Some(Duration::UntilHostLeavesPlay);
-    }
-
-    // "~ remains on the battlefield" / "it remains on the battlefield"
-    if scan_contains_phrase(condition, "remains on the battlefield") {
-        return Some(Duration::UntilHostLeavesPlay);
-    }
-
-    // CR 122.1: "<subject> has <quantity> [type] counter[s] on it" — delegate to
-    // the shared nom combinator so the typed/bare/quantity grammar lives in a
-    // single authority (`parse_inner_condition` family) rather than being
-    // duplicated here as bespoke string matching.
-    if let Ok((rest, condition)) = nom_condition::parse_source_has_counters(condition) {
-        if rest.trim().is_empty() {
-            return Some(Duration::ForAsLongAs { condition });
-        }
-    }
-
-    // Fallback: unrecognized condition text
-    Some(Duration::ForAsLongAs {
-        condition: StaticCondition::Unrecognized {
-            text: condition.to_string(),
-        },
-    })
-}
-
-/// Convert a Duration back into a StaticCondition for compound "and" clauses.
-/// UntilHostLeavesPlay maps to IsPresent { filter: None } (source must be on battlefield).
-fn duration_to_condition(dur: Duration) -> StaticCondition {
-    match dur {
-        Duration::ForAsLongAs { condition } => condition,
-        Duration::UntilHostLeavesPlay => StaticCondition::IsPresent { filter: None },
-        _ => StaticCondition::None,
-    }
 }
 
 /// CR 603.7a: Strip temporal suffix indicating a delayed trigger condition.
