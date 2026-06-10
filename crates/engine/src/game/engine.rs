@@ -6613,7 +6613,7 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         return;
     }
 
-    // CR 610.3a + CR 614.6: Return each exiled card to its previous zone through
+    // CR 610.3 + CR 614.6: Return each exiled card to its previous zone through
     // the zone-change pipeline so a battlefield return seeds enters-with-counters
     // statics (Hardened Scales class) and so a `Moved` redirect fires on any
     // non-battlefield return — the raw `move_to_zone` skipped the delivery tail.

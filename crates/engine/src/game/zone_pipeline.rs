@@ -1483,6 +1483,20 @@ pub(crate) fn execute_zone_move(
         }
     }
 
+    // KNOWN GAP (CR 614.12, documented deferral): for a FACE-DOWN battlefield
+    // entry (the proposal carries `face_down_profile`), this consult runs the
+    // replacement matchers against the object's PRINTED characteristics, but
+    // CR 614.12 requires checking "the characteristics of the permanent as it
+    // would exist on the battlefield" — for a morph/manifest entry that is the
+    // face-down 2/2 with no name, types, or subtypes (CR 708.2a). A type- or
+    // name-keyed entry replacement (e.g. a Wizard-scoped "Wizards you control
+    // enter with a +1/+1 counter") therefore wrongly matches a face-down
+    // printed Wizard, and a name/type-scoped redirect wrongly applies to an
+    // entry that should look like a blank 2/2. Narrow class today (the common
+    // enter-tapped/counter statics are type-agnostic or creature-scoped, which
+    // the face-down 2/2 still satisfies); fixing it requires the matcher pass
+    // to evaluate filters against the profile-projected characteristics when
+    // `face_down_profile` is present.
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(mut event) => {
             let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;
