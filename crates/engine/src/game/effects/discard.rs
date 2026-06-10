@@ -65,8 +65,32 @@ pub(crate) fn complete_discard_to_graveyard(
         ReplacementResult::Execute(event) => {
             change_zone::deliver_replaced_zone_change(state, event, source_id, None, false, events);
         }
-        ReplacementResult::Prevented => {}
+        ReplacementResult::Prevented => {
+            // CR 614.6: a prevented event never happens — the card never left
+            // the hand, so per CR 701.9a (to discard = move hand → graveyard)
+            // NO discard occurred. Skip record_discard / the Mayhem stamp / the
+            // `Discarded` event. This is distinct from a REDIRECTED discard
+            // (CR 701.9c: a card put elsewhere instead is still discarded —
+            // the Execute arm above and the madness path both record + emit).
+            return DiscardOutcome::Complete;
+        }
         ReplacementResult::NeedsChoice(player) => {
+            // KNOWN GAP (documented, counter.rs resolve_all style): a CR 616.1
+            // ordering choice on the inner ZoneChange (TWO materially-different
+            // Moved redirects simultaneously applicable to one discard — e.g.
+            // Rest in Peace + Wheel of Sun and Moon) parks here BEFORE the
+            // discard bookkeeping. The paused card delivers via the generic
+            // replacement-choice resume (`handle_replacement_choice`'s
+            // ZoneChange arm), which has no discard context — so for that card
+            // `record_discard` / the Mayhem stamp / the `Discarded` event
+            // ("whenever you discard" triggers, Megrim class) are skipped, and
+            // a multi-card discard's remaining cards are abandoned by the
+            // caller's early return (same systemic shape as the forced-discard
+            // EffectResolved limitation noted in `resolve`). A resume-side
+            // discard-bookkeeping continuation needs a new serialized state
+            // slot + resume wiring; not built for a two-material-redirect board
+            // no parsed deck assembles. Single-redirect boards (RIP alone)
+            // never prompt and are fully correct.
             return DiscardOutcome::NeedsReplacementChoice(player);
         }
     }
