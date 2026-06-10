@@ -2365,6 +2365,9 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
 /// Parallel to `static_condition_to_ability_condition` in `oracle_effect/mod.rs`.
 /// Returns `None` for variants that have no `TriggerCondition` equivalent —
 /// the caller falls through to the next strategy.
+///
+/// Exhaustive on purpose — when you add a `StaticCondition` variant, decide
+/// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
 fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<TriggerCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringPlayersTurn {
