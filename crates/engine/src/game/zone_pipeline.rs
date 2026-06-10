@@ -96,15 +96,22 @@ impl ZoneChangeCause {
     /// CR 400.7 cleanup) still run in `zones.rs` delivery for every cause — the
     /// exemption is only of the replacement consult, never of the rules that
     /// must hold for any move (PLAN §2 / §3).
+    // Exhaustive match, no wildcard: adding a `ZoneChangeCause` variant must
+    // force an explicit consult/exempt decision here (with its CR citation
+    // above), not silently inherit a default.
     fn is_exempt(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            ZoneChangeCause::Effect { .. }
+            | ZoneChangeCause::Cost { .. }
+            | ZoneChangeCause::SpellResolutionDefault
+            | ZoneChangeCause::StateBasedAction
+            | ZoneChangeCause::CommanderRuleReturn => false,
             ZoneChangeCause::CastingToStack { .. }
-                | ZoneChangeCause::PregameProcedure
-                | ZoneChangeCause::PlayerLeftGame
-                | ZoneChangeCause::MergedComponentRouting
-                | ZoneChangeCause::DebugCommand
-        )
+            | ZoneChangeCause::PregameProcedure
+            | ZoneChangeCause::PlayerLeftGame
+            | ZoneChangeCause::MergedComponentRouting
+            | ZoneChangeCause::DebugCommand => true,
+        }
     }
 }
 
@@ -452,7 +459,9 @@ pub(crate) fn move_object(
     // "the consult should still run for future-proofing per the single-entry
     // principle". It is a guaranteed no-op today: no `Moved` replacement in the
     // card pool targets `destination_zone(Library)` (verified: 25 Battlefield /
-    // 17 Graveyard / 2 Exile destinations, zero Library). Completing it correctly
+    // 17 Graveyard / 2 Exile destinations, zero Library; reproduce with
+    //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
+    // — re-run before lifting this deferral). Completing it correctly
     // also requires gating the CR 701.24a delivery-tail auto-shuffle on
     // placement-absence across the shared `deliver` / `deliver_replaced_zone_change`
     // signatures (a library *placement* must NOT shuffle, but a plain

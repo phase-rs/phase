@@ -267,7 +267,9 @@ pub(crate) fn move_rest(
 // `move_to_library_at_index`, skipping the replacement consult). That completion
 // is DEFERRED: no `Moved` replacement in the card pool targets
 // `destination_zone(Library)` (verified: 25 Battlefield / 17 Graveyard / 2 Exile
-// destinations, zero Library), so the consult is a guaranteed no-op today, and
+// destinations, zero Library; reproduce with
+//   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
+// — re-run before lifting this deferral), so the consult is a guaranteed no-op today, and
 // completing it correctly requires gating the CR 701.24a delivery-tail
 // auto-shuffle on placement-absence across the shared delivery signatures — a
 // cross-cutting change with a silent-randomization landmine for zero current
