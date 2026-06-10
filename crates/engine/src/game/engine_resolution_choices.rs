@@ -3306,6 +3306,17 @@ pub(crate) fn run_batch_completion(
             }
             finish_with_continuation(state, player, events);
         }
+        // CR 610.3a: the exile-until-leaves return pile has fully landed (after a
+        // returned creature's as-enters / aura-host pause resolved). Drop the
+        // spent `UntilSourceLeaves` links now — deferred so it runs exactly once
+        // after the paused card finished returning, not before. No priority /
+        // continuation drain here: this completion rides an SBA-time return
+        // (`check_exile_returns`), whose surrounding pipeline owns priority.
+        BatchCompletion::RemoveExileLinks { returned_ids } => {
+            state
+                .exile_links
+                .retain(|link| !returned_ids.contains(&link.exiled_id));
+        }
     }
 }
 

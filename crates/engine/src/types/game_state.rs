@@ -1151,6 +1151,19 @@ pub enum BatchCompletion {
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
     },
+    /// CR 610.3a + CR 614.1c: An "exile until ~ leaves" return (Banisher Priest /
+    /// Fiend Hunter / Oblivion Ring class) routed its exiled cards back to the
+    /// battlefield through the simultaneous-move batch so the delivery tail seeds
+    /// enters-with-counters statics. A returned creature can pause on an
+    /// as-enters / aura-host choice; defer the exile-link bookkeeping cleanup
+    /// (`UntilSourceLeaves` links are spent once their card returns) onto the
+    /// parked batch tail so the links are dropped exactly once after the whole
+    /// return pile lands — not before a paused card finishes returning.
+    RemoveExileLinks {
+        /// The exiled-card ids whose `UntilSourceLeaves` links are consumed by
+        /// this return and must be retained out of `state.exile_links`.
+        returned_ids: Vec<ObjectId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
