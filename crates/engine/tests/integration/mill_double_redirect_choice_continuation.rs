@@ -11,7 +11,7 @@
 //!
 //! Pre-fix, mill bailed with `return Ok(())` on that pause: cards 2..N were
 //! silently stranded in the library with an orphaned pause. The fix parks the
-//! undelivered tail in `state.pending_mill_deliveries` and the
+//! undelivered tail in `state.pending_batch_deliveries` and the
 //! replacement-choice resume path (`handle_replacement_choice`) drains it after
 //! each choice, re-parking when the next card surfaces its own prompt.
 //!
@@ -141,7 +141,7 @@ fn mill_under_two_graveyard_redirects_delivers_every_card_through_ordering_choic
         "no milled card may reach the graveyard under the redirects"
     );
     assert!(
-        state.pending_mill_deliveries.is_none(),
+        state.pending_batch_deliveries.is_none(),
         "the parked mill tail must be fully drained"
     );
 }

@@ -22,8 +22,8 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ExileLink, ExileLinkKind, GameState, PendingCounterPostAction, WaitingFor,
-    ZoneDeliveryExileTracking,
+    ExileLink, ExileLinkKind, GameState, PendingBatchDeliveries, PendingCounterPostAction,
+    WaitingFor, ZoneDeliveryExileTracking,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -388,6 +388,121 @@ pub(crate) fn move_object(
         track_exiled_by_source,
         events,
     )
+}
+
+/// Result of a batch zone-move (`move_objects_simultaneously`).
+pub(crate) enum BatchMoveResult {
+    /// Every requested object was delivered.
+    Done,
+    /// A per-object `Moved` replacement surfaced a CR 616.1 choice mid-batch.
+    /// `state.waiting_for` is already parked (with the choosing player) and the
+    /// undelivered tail is stashed in `state.pending_batch_deliveries`, so the
+    /// caller only needs to know that it paused — the resume path
+    /// (`drain_pending_batch_deliveries`) finishes the batch.
+    NeedsChoice,
+}
+
+/// CR 603.10a batch entry: move many objects to one destination through the
+/// pipeline as a single simultaneous departure batch (the mill / mass-bounce /
+/// SBA pattern). Each object runs through `move_object`, so per-object `Moved`
+/// redirects (Rest in Peace / Leyline of the Void class) fire on every one;
+/// after the batch completes, CR 603.10a co-departure is stamped over the
+/// subset that actually left the battlefield (`departed_subset` — a no-op for
+/// non-battlefield origins such as a mill, so this is universally safe).
+///
+/// On a mid-batch CR 616.1 ordering choice the surfaced prompt is parked and the
+/// undelivered tail is stashed in `state.pending_batch_deliveries`; the resume
+/// path drains it (`drain_pending_batch_deliveries`). The simultaneous-departure
+/// stamp is applied per delivered segment (the realistic single-redirect path
+/// never pauses, so the full batch is stamped together; only two simultaneous
+/// `Moved` redirects on one object can split a batch — no parsed card does, so
+/// the per-segment co-departure grouping in that doubly-rare case is acceptable
+/// and documented rather than threaded across the pause boundary).
+pub(crate) fn move_objects_simultaneously(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
+    deliver_batch(state, reqs, &ids, events)
+}
+
+/// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
+/// `move_object`; on a pause, parks the prompt and stashes the undelivered tail
+/// (rebuilt as `Effect`-cause requests to the same destination — the mill /
+/// mass-bounce attribution). `attempted` is the full id set whose departed
+/// subset is stamped on completion of this segment.
+fn deliver_batch(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    attempted: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let mut queue = reqs.into_iter();
+    while let Some(req) = queue.next() {
+        let destination = req.to;
+        match move_object(state, req, events) {
+            ZoneMoveResult::Done => {}
+            ZoneMoveResult::NeedsChoice(player) => {
+                // CR 616.1: park the surfaced prompt (the pipeline sets only
+                // `pending_replacement`; the wait-state is the caller's to set)
+                // and stash the rest of the batch so no object strands. The
+                // paused object rides in `state.pending_replacement` and is
+                // delivered by the resume path.
+                replacement::park_waiting_for(state, player);
+                let remaining: Vec<ObjectId> = queue.map(|r| r.object_id).collect();
+                if !remaining.is_empty() {
+                    state.pending_batch_deliveries = Some(PendingBatchDeliveries {
+                        remaining,
+                        destination,
+                    });
+                }
+                return BatchMoveResult::NeedsChoice;
+            }
+            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                // CR 303.4f: an aura-host choice flows through
+                // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
+                // resume path, so a parked tail here would not be drained by
+                // `drain_pending_batch_deliveries`. No batch flow targets a
+                // battlefield aura entry today (mill destinations are
+                // graveyard/exile/hand; mass bounce returns to hand/library), so
+                // this is unreachable; stop and stash the tail so a future
+                // battlefield-entry batch surfaces a bug (undrained tail) rather
+                // than silently dropping the rest.
+                let remaining: Vec<ObjectId> = queue.map(|r| r.object_id).collect();
+                if !remaining.is_empty() {
+                    state.pending_batch_deliveries = Some(PendingBatchDeliveries {
+                        remaining,
+                        destination,
+                    });
+                }
+                return BatchMoveResult::NeedsChoice;
+            }
+        }
+    }
+    // CR 603.10a + CR 608.2f: every object that actually left the battlefield in
+    // this segment departed together — stamp co-departure so leaves-the-
+    // battlefield observers among the group see each other via last-known info.
+    // For non-battlefield origins (mill) `departed_subset` is empty and this is
+    // a no-op.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, attempted));
+    BatchMoveResult::Done
+}
+
+/// CR 603.10a + CR 616.1: Resume a parked batch-delivery tail after the
+/// per-object replacement choice that paused it resolved (and its object's
+/// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
+/// the next object surfaces its own prompt.
+pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if let Some(pending) = state.pending_batch_deliveries.take() {
+        let ids = pending.remaining.clone();
+        let reqs: Vec<ZoneMoveRequest> = pending
+            .remaining
+            .into_iter()
+            .map(|obj_id| ZoneMoveRequest::effect(obj_id, pending.destination, obj_id))
+            .collect();
+        let _ = deliver_batch(state, reqs, &ids, events);
+    }
 }
 
 /// Deliver an event that already passed the replacement consult. Only callable

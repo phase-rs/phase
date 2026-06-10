@@ -1048,19 +1048,26 @@ pub struct PendingCounterMoveQueue {
     pub source_id: ObjectId,
 }
 
-/// CR 701.17a + CR 616.1: The not-yet-delivered tail of a mill batch, parked
-/// when a per-card `Moved` replacement on a milled card surfaces a replacement
-/// choice (e.g. two simultaneously-applicable graveyard→exile redirects — Rest
-/// in Peace + Leyline of the Void — racing on the same milled card). Drained by
-/// `mill::drain_pending_mill_deliveries` from the replacement-choice resume
-/// path after the chosen event delivers; the drain re-parks when the next card
-/// surfaces its own choice.
+/// CR 603.10a + CR 616.1: The not-yet-delivered tail of a simultaneous
+/// zone-move batch, parked when a per-object `Moved` replacement surfaces a
+/// replacement choice mid-batch (e.g. two simultaneously-applicable
+/// graveyard→exile redirects — Rest in Peace + Leyline of the Void — racing on
+/// the same object). Drained by `zone_pipeline::drain_pending_batch_deliveries`
+/// from the replacement-choice resume path after the chosen event delivers; the
+/// drain re-parks when the next object surfaces its own choice.
+///
+/// Shared by every batch flow that delivers many objects to one destination
+/// through the pipeline (mill: library→graveyard/exile/hand; mass bounce:
+/// battlefield→hand/library). Serializes as a plain `{ remaining, destination }`
+/// struct (the type name never appears on the wire), so the rename from the
+/// original mill-only `PendingMillDeliveries` is wire-transparent; the field-name
+/// alias on the holding `GameState` field carries the only readable name change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingMillDeliveries {
-    /// Milled cards whose per-card zone move has not yet been delivered.
+pub struct PendingBatchDeliveries {
+    /// Objects whose per-object zone move has not yet been delivered.
     pub remaining: Vec<ObjectId>,
-    /// The mill destination zone (graveyard by default; exile/hand for
-    /// top-of-library move variants).
+    /// The batch destination zone (graveyard for mill by default; hand for mass
+    /// bounce; exile/library for variants).
     pub destination: Zone,
 }
 
@@ -5726,13 +5733,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_counter_moves: Option<PendingCounterMoveQueue>,
 
-    /// CR 701.17a + CR 616.1: Pending mill-delivery tail paused by a per-card
-    /// replacement choice (see [`PendingMillDeliveries`]). Drained by the
-    /// replacement-choice resume path after the chosen event delivers so the
-    /// remaining milled cards complete their moves instead of stranding in the
-    /// library.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_mill_deliveries: Option<PendingMillDeliveries>,
+    /// CR 603.10a + CR 616.1: Pending simultaneous zone-move batch tail paused
+    /// by a per-object replacement choice (see [`PendingBatchDeliveries`]).
+    /// Drained by the replacement-choice resume path after the chosen event
+    /// delivers so the remaining objects complete their moves instead of
+    /// stranding. Serde alias keeps the old `pending_mill_deliveries` field name
+    /// readable from existing saves.
+    #[serde(
+        default,
+        alias = "pending_mill_deliveries",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pending_batch_deliveries: Option<PendingBatchDeliveries>,
 
     /// CR 122.1 + CR 616.1e: Pending counter-addition batch paused by a
     /// replacement choice. Drained before normal pending continuations so
@@ -6514,7 +6526,7 @@ impl GameState {
             pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_counter_moves: None,
-            pending_mill_deliveries: None,
+            pending_batch_deliveries: None,
             pending_counter_additions: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
@@ -6949,7 +6961,7 @@ impl PartialEq for GameState {
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_counter_moves == other.pending_counter_moves
-            && self.pending_mill_deliveries == other.pending_mill_deliveries
+            && self.pending_batch_deliveries == other.pending_batch_deliveries
             && self.pending_counter_additions == other.pending_counter_additions
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities

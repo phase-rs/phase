@@ -1,10 +1,9 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
-use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingMillDeliveries};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
@@ -49,7 +48,8 @@ pub fn resolve(
                 // CR 616.1: a per-card pause leaves `state.waiting_for` set and
                 // the tail parked; bail before emitting `EffectResolved` so the
                 // surfaced prompt is not clobbered. The resume path
-                // (`drain_pending_mill_deliveries`) finishes the batch.
+                // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the
+                // batch.
                 if !apply_mill_after_replacement(state, event, events)? {
                     return Ok(());
                 }
@@ -89,10 +89,10 @@ pub fn resolve(
 /// Returns `true` when every milled card was delivered, `false` when a per-card
 /// `Moved` replacement surfaced a CR 616.1 ordering choice that parked the batch
 /// (`state.waiting_for` is left set, the undelivered tail in
-/// `state.pending_mill_deliveries`). Callers that reset `state.waiting_for` after
-/// applying an accepted event MUST early-return on `false` so they don't clobber
-/// the parked prompt (mirrors the `apply_etb_counters` early-return precedent in
-/// `handle_replacement_choice`).
+/// `state.pending_batch_deliveries`). Callers that reset `state.waiting_for`
+/// after applying an accepted event MUST early-return on `false` so they don't
+/// clobber the parked prompt (mirrors the `apply_etb_counters` early-return
+/// precedent in `handle_replacement_choice`).
 pub fn apply_mill_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
@@ -121,101 +121,31 @@ pub fn apply_mill_after_replacement(
     state.last_effect_count = Some(cards_to_mill.len() as i32);
 
     // CR 701.17a + CR 614.6: Route each milled card through the zone-change
-    // pipeline (`zone_pipeline::move_object`) rather than the raw
-    // `zones::move_to_zone`. The raw move never proposed a per-card ZoneChange,
-    // so `Moved` redirects ("if a card would be put into a graveyard from
-    // anywhere, exile it instead" — Rest in Peace / Leyline of the Void class)
-    // never fired for milled cards. The pipeline proposes the inner ZoneChange
-    // and consults those replacements before delivery, fixing the known bug.
+    // pipeline (the shared `zone_pipeline::move_objects_simultaneously` batch
+    // entry) rather than a raw `zones::move_to_zone`. The raw move never
+    // proposed a per-card ZoneChange, so `Moved` redirects ("if a card would be
+    // put into a graveyard from anywhere, exile it instead" — Rest in Peace /
+    // Leyline of the Void class) never fired for milled cards. The batch entry
+    // proposes each inner ZoneChange and consults those replacements before
+    // delivery, fixing the known bug.
     //
     // Attribution: the milled card itself anchors the `Effect` cause (mill to a
     // graveyard creates no exile-link, and a `Moved` replacement's `valid_card`
     // is evaluated against the moved card, so this matches the pre-pipeline raw
     // behavior while enabling the replacement consult).
-    Ok(deliver_mill_cards(
-        state,
-        cards_to_mill,
-        destination,
-        events,
+    //
+    // CR 616.1: a per-card ordering choice (two simultaneous graveyard→exile
+    // redirects) parks `state.waiting_for` + the undelivered tail in
+    // `state.pending_batch_deliveries`; the replacement-choice resume path
+    // (`zone_pipeline::drain_pending_batch_deliveries`) finishes the batch.
+    let reqs: Vec<ZoneMoveRequest> = cards_to_mill
+        .iter()
+        .map(|&obj_id| ZoneMoveRequest::effect(obj_id, destination, obj_id))
+        .collect();
+    Ok(matches!(
+        zone_pipeline::move_objects_simultaneously(state, reqs, events),
+        BatchMoveResult::Done
     ))
-}
-
-/// CR 701.17a + CR 616.1: Deliver milled cards through the zone pipeline one at
-/// a time. A per-card `Moved` replacement can surface a replacement choice —
-/// two simultaneously-applicable graveyard→exile redirects (Rest in Peace +
-/// Leyline of the Void) make the engine prompt for CR 616.1 ordering on every
-/// milled card. On such a pause this parks the prompt (`park_waiting_for`) and
-/// stashes the undelivered tail in `state.pending_mill_deliveries`; the
-/// replacement-choice resume path (`handle_replacement_choice` →
-/// `drain_pending_mill_deliveries`) delivers the paused card's chosen event and
-/// continues the tail, re-parking when the next card prompts.
-///
-/// Returns `true` when every card was delivered, `false` on a pause.
-fn deliver_mill_cards(
-    state: &mut GameState,
-    cards: Vec<ObjectId>,
-    destination: Zone,
-    events: &mut Vec<GameEvent>,
-) -> bool {
-    let mut queue = cards.into_iter();
-    while let Some(obj_id) = queue.next() {
-        let req = ZoneMoveRequest::effect(obj_id, destination, obj_id);
-        match zone_pipeline::move_object(state, req, events) {
-            ZoneMoveResult::Done => {}
-            ZoneMoveResult::NeedsChoice(player) => {
-                // CR 616.1: park the surfaced prompt (the pipeline sets only
-                // `pending_replacement`; the wait-state is the caller's to set)
-                // and stash the rest of the batch so no milled card strands.
-                // The paused card itself rides in `state.pending_replacement`
-                // and is delivered by the resume path.
-                replacement::park_waiting_for(state, player);
-                let remaining: Vec<ObjectId> = queue.collect();
-                if !remaining.is_empty() {
-                    state.pending_mill_deliveries = Some(PendingMillDeliveries {
-                        remaining,
-                        destination,
-                    });
-                }
-                return false;
-            }
-            ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                // CR 303.4f: only battlefield entries can surface an aura-host
-                // choice, and Battlefield is not a Mill destination (graveyard /
-                // exile / hand top-of-library variants only) — unreachable for
-                // mill. Stash the tail and stop anyway so a future
-                // battlefield-mill variant does not silently drop the rest of
-                // the batch.
-                //
-                // NOTE: this is NOT a loud failure. The aura-host choice flows
-                // through `WaitingFor::ReturnAsAuraTarget`, not the
-                // replacement-choice path, so `drain_pending_mill_deliveries`
-                // (which only runs from `handle_replacement_choice`) would not
-                // fire here — the parked tail would instead be drained by the
-                // NEXT unrelated replacement-choice resume. Reaching this arm
-                // for mill is a bug to be surfaced if a battlefield-mill variant
-                // is ever added; today it is dead code for every parsed Mill.
-                let remaining: Vec<ObjectId> = queue.collect();
-                if !remaining.is_empty() {
-                    state.pending_mill_deliveries = Some(PendingMillDeliveries {
-                        remaining,
-                        destination,
-                    });
-                }
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// CR 701.17a + CR 616.1: Resume the parked mill-delivery tail after the
-/// per-card replacement choice that paused it has resolved (and its card's
-/// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
-/// the next card surfaces its own prompt.
-pub(crate) fn drain_pending_mill_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    if let Some(pending) = state.pending_mill_deliveries.take() {
-        let _ = deliver_mill_cards(state, pending.remaining, pending.destination, events);
-    }
 }
 
 #[cfg(test)]
@@ -344,7 +274,7 @@ mod tests {
             "the per-card ordering prompt must be parked in waiting_for"
         );
         assert!(
-            state.pending_mill_deliveries.is_some(),
+            state.pending_batch_deliveries.is_some(),
             "the undelivered tail must be stashed for the resume path"
         );
     }
