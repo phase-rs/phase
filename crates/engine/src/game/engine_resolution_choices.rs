@@ -154,6 +154,24 @@ fn route_rest_partition(
             }
         }
         zone => {
+            // ZONE-PIPELINE GAP (documented deferral): the dig/search "rest into
+            // your graveyard" partition (65 Dig cards + the `null`→Graveyard
+            // default) is delivered raw here, so a `Moved` graveyard→exile redirect
+            // (Rest in Peace / Leyline of the Void) does NOT yet fire on these
+            // rest cards. The sibling dig unkept-loop (handle_resolution_choice
+            // DigChoice) and the reveal-until rest pile (effects::reveal_until::
+            // move_rest_then) ARE migrated; this shared partition helper is not,
+            // because it has three callers — two synchronous (search-split at
+            // :279, dig at the kept block) and ONE inside `run_batch_completion`'s
+            // RevealRestPile arm. Routing it through `move_objects_simultaneously`
+            // makes a CR 616.1 pause possible from inside a completion, which
+            // requires a re-pause-from-completion contract (the completion returns
+            // `()` and cannot signal a fresh park to its caller) plus pause
+            // handling threaded through both synchronous callers. That is a
+            // cross-cutting state-machine change; tracked for a follow-up so it
+            // lands as one reviewable unit rather than a partial migration here.
+            // (Practical exposure: a graveyard-redirect on a dig REST pile — the
+            // non-kept cards — with RIP/Leyline on the battlefield.)
             for &obj_id in rest_ids {
                 zones::move_to_zone(state, obj_id, zone, events);
             }
@@ -560,20 +578,73 @@ pub(super) fn handle_resolution_choice(
                         );
                     }
                 } else {
-                    zones::move_to_zone(state, hit_card, accept_zone, events);
+                    // CR 614.6: a kept card accepted to a non-battlefield zone
+                    // (graveyard — Mind Funeral-style "put it into your graveyard"
+                    // kept cards, 4 cards — or exile) routes through the pipeline
+                    // so a `Moved` graveyard→exile redirect fires. On a CR 616.1
+                    // pause, defer the rest-pile move + marker clear onto a
+                    // `RevealRestPile` completion (EffectResolved already emitted
+                    // before this prompt) and surface the parked prompt.
+                    if let Some(outcome) = route_kept_card_or_defer(
+                        state,
+                        hit_card,
+                        accept_zone,
+                        source_id,
+                        &misses,
+                        rest_destination,
+                        events,
+                    ) {
+                        return Ok(outcome);
+                    }
                 }
             } else if decline_zone == rest_destination {
                 misses.push(hit_card);
             } else {
-                zones::move_to_zone(state, hit_card, decline_zone, events);
+                // CR 614.6: same redirect-consult for a declined kept card sent to
+                // a non-rest graveyard/exile destination.
+                if let Some(outcome) = route_kept_card_or_defer(
+                    state,
+                    hit_card,
+                    decline_zone,
+                    source_id,
+                    &misses,
+                    rest_destination,
+                    events,
+                ) {
+                    return Ok(outcome);
+                }
             }
-            effects::reveal_until::move_rest(state, &misses, rest_destination, events);
-            // CR 701.20b: revealed cards have now moved zones — clear markers.
-            for &card_id in &misses {
-                state.revealed_cards.remove(&card_id);
+            // CR 701.20a + CR 614.6: move the rest pile (RIP redirects fire) and
+            // run the marker clear + continuation drain as the completion. On a
+            // synchronous landing the completion runs inline; on a CR 616.1 pause
+            // it defers and the drain runs it once the pile lands. `clear_markers`
+            // is the misses plus the kept card (already placed above).
+            let mut clear_markers = misses.clone();
+            clear_markers.push(hit_card);
+            match effects::reveal_until::move_rest_then(
+                state,
+                &misses,
+                rest_destination,
+                Some(crate::types::game_state::BatchCompletion::RevealRestPile {
+                    player,
+                    rest_cards: Vec::new(),
+                    rest_destination,
+                    clear_markers,
+                    publish_tracked_set: None,
+                    emit_reveal_until_resolved: None,
+                }),
+                events,
+            ) {
+                crate::game::zone_pipeline::BatchMoveResult::Done => {
+                    // The completion ran inline (`finish_with_continuation`), so
+                    // `state.waiting_for` is the post-drain priority/continuation
+                    // state.
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
+                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                    ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+                }
             }
-            state.revealed_cards.remove(&hit_card);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         // CR 107.1c + CR 608.2c: "you may repeat this process any number of
         // times" — after one iteration resolved, the controller decides
@@ -3196,6 +3267,61 @@ fn action_result_outcome(
 fn set_priority(state: &mut GameState, player: crate::types::player::PlayerId) {
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+}
+
+/// CR 614.6 + CR 616.1: Move a reveal-until *kept* card to a non-battlefield
+/// destination (`accept_zone` / `decline_zone`) through the zone-change pipeline
+/// so a `Moved` graveyard→exile redirect (Rest in Peace / Leyline of the Void)
+/// fires on it — the 4 `kept_destination: Graveyard` reveal-until cards (Mind
+/// Funeral class) previously dropped that redirect via the raw mover.
+///
+/// Returns `Some(parked_outcome)` when the move pauses on a CR 616.1 ordering
+/// choice: the rest-pile move + reveal-marker clear are deferred onto a
+/// `RevealRestPile` completion (so the misses do not strand and the cleanup runs
+/// once on resume), and the caller must return that outcome. Returns `None` when
+/// the move completed synchronously and the caller should proceed to move the
+/// rest pile inline. `emit_reveal_until_resolved` is `None` — the kept-choice
+/// path already emitted `EffectResolved` before this prompt.
+fn route_kept_card_or_defer(
+    state: &mut GameState,
+    hit_card: ObjectId,
+    destination: Zone,
+    source_id: ObjectId,
+    misses: &[ObjectId],
+    rest_destination: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Option<ResolutionChoiceOutcome> {
+    let player = state
+        .objects
+        .get(&hit_card)
+        .map(|obj| obj.controller)
+        .unwrap_or(state.active_player);
+    match crate::game::zone_pipeline::move_object(
+        state,
+        crate::game::zone_pipeline::ZoneMoveRequest::effect(hit_card, destination, source_id),
+        events,
+    ) {
+        crate::game::zone_pipeline::ZoneMoveResult::Done => None,
+        crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+        | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            let mut clear_markers = misses.to_vec();
+            clear_markers.push(hit_card);
+            crate::game::zone_pipeline::defer_completion_on_pause(
+                state,
+                crate::types::game_state::BatchCompletion::RevealRestPile {
+                    player,
+                    rest_cards: misses.to_vec(),
+                    rest_destination,
+                    clear_markers,
+                    publish_tracked_set: None,
+                    emit_reveal_until_resolved: None,
+                },
+            );
+            Some(ResolutionChoiceOutcome::WaitingFor(
+                state.waiting_for.clone(),
+            ))
+        }
+    }
 }
 
 fn starts_with_pay_amount_prompt(ability: &ResolvedAbility) -> bool {

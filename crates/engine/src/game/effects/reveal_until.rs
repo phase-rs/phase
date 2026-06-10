@@ -189,8 +189,44 @@ pub fn resolve(
                     crate::game::combat::enter_attacking(state, hit, ability.source_id, controller);
                 }
             }
+            Zone::Library => {
+                // CR 701.20a: a kept card sent to the library (2 cards) is a
+                // placement, not a redirect-eligible move — keep the raw mover
+                // (no `Moved` class targets the library; routing through the
+                // pipeline's placement arm would gain nothing).
+                zones::move_to_zone(state, hit, Zone::Library, events);
+            }
             other => {
-                zones::move_to_zone(state, hit, other, events);
+                // CR 614.6: a kept card sent to the graveyard (4 cards) or exile
+                // routes through the pipeline so a `Moved` graveyard→exile
+                // redirect (Rest in Peace / Leyline of the Void) fires on it. On a
+                // CR 616.1 ordering pause, defer the rest-pile move + marker clear
+                // + `EffectResolved` onto a `RevealRestPile` completion (the same
+                // deferral the battlefield branch uses) so the misses don't strand
+                // and `EffectResolved` doesn't land over the parked prompt.
+                match zone_pipeline::move_object(
+                    state,
+                    ZoneMoveRequest::effect(hit, other, ability.source_id),
+                    events,
+                ) {
+                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        let mut clear_markers = revealed_misses.clone();
+                        clear_markers.push(hit);
+                        zone_pipeline::defer_completion_on_pause(
+                            state,
+                            BatchCompletion::RevealRestPile {
+                                player: revealing_player,
+                                rest_cards: revealed_misses,
+                                rest_destination,
+                                clear_markers,
+                                publish_tracked_set: None,
+                                emit_reveal_until_resolved: Some(ability.source_id),
+                            },
+                        );
+                        return Ok(());
+                    }
+                }
             }
         }
     }
