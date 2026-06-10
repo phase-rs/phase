@@ -13,11 +13,14 @@
 //! moved here via `pub(crate) use` shims so existing call sites compile
 //! unchanged.
 //!
-//! L1-primitives-only rule: code here pays costs exclusively through L1
-//! resource primitives (`life_costs`, `effects::counters`, `sacrifice`,
+//! L1-primitives-only rule (TARGET invariant): code here pays costs through
+//! L1 resource primitives (`life_costs`, `effects::counters`, `sacrifice`,
 //! `effects::discard`, `zones`, `effects::attach`, and the mana payment path
-//! in `casting.rs`). It must never re-implement resource math beyond a direct
-//! L1 call.
+//! in `casting.rs`) and must never re-implement resource math beyond a direct
+//! L1 call. Known exceptions carried over verbatim by the Phase-1 pure move,
+//! to be collapsed in Phase 2/5: the `PayEnergy` arm hand-rolls the energy
+//! decrement (pending a `players::pay_energy` L1 helper) and the `Tap` arm
+//! sets `tapped` directly.
 
 use std::collections::HashSet;
 
