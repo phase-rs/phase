@@ -5,34 +5,17 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
-type BranchWire = {
-  description?: string;
-  effect?: { type?: string; name?: string };
-};
-
-function tokenNameFromBranch(branch: unknown): string | null {
-  if (!branch || typeof branch !== "object") return null;
-  const wire = branch as BranchWire;
-  if (wire.effect?.type === "Token" && wire.effect.name) {
-    return wire.effect.name;
-  }
-  return null;
-}
-
 function branchLabel(
   index: number,
   descriptions: string[] | undefined,
-  branch: unknown,
   fallback: string,
 ): string {
   const raw = descriptions?.[index]?.trim();
   if (raw) {
-    // Engine descriptions are lower-case oracle fragments ("create a Food token").
+    // Display formatting only: parser-derived descriptions can be lower-case
+    // oracle fragments ("create a Food token"); engine fallbacks arrive
+    // already capitalized, for which this is a no-op.
     return raw.charAt(0).toUpperCase() + raw.slice(1);
-  }
-  const tokenName = tokenNameFromBranch(branch);
-  if (tokenName) {
-    return `Create a ${tokenName} token`;
   }
   return fallback;
 }
@@ -73,7 +56,7 @@ export function ChooseOneOfBranchModal() {
     >
       <div className="px-3 py-3 lg:px-5 lg:py-5">
         <div className="flex flex-col gap-2">
-          {waitingFor.data.branches.map((branch, index) => (
+          {waitingFor.data.branches.map((_, index) => (
             <button
               key={index}
               type="button"
@@ -84,7 +67,6 @@ export function ChooseOneOfBranchModal() {
                 {branchLabel(
                   index,
                   descriptions,
-                  branch,
                   t("chooseOneOfBranch.optionFallback", { number: index + 1 }),
                 )}
               </span>
