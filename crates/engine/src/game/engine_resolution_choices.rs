@@ -3432,7 +3432,7 @@ pub(crate) fn run_batch_completion(
             }
             finish_with_continuation(state, player, events);
         }
-        // CR 610.3a: the exile-until-leaves return pile has fully landed (after a
+        // CR 610.3: the exile-until-leaves return pile has fully landed (after a
         // returned creature's as-enters / aura-host pause resolved). Drop the
         // spent `UntilSourceLeaves` links now — deferred so it runs exactly once
         // after the paused card finished returning, not before. No priority /
@@ -3442,6 +3442,45 @@ pub(crate) fn run_batch_completion(
             state
                 .exile_links
                 .retain(|link| !returned_ids.contains(&link.exiled_id));
+        }
+        // CR 702.49 + CR 616.1: the ninja's parked battlefield entry resolved —
+        // run the deferred post-entry ninjutsu work (cast-variant tag,
+        // CR 702.49c combat placement, CR 702.49a trigger event) exactly once.
+        // No priority/continuation drain: ninjutsu is a keyword activation
+        // whose surrounding action pipeline owns priority.
+        BatchCompletion::NinjutsuPlacement {
+            player,
+            ninjutsu_obj_id,
+            cast_variant,
+            defending_player,
+            attack_target,
+        } => {
+            crate::game::keywords::finish_ninjutsu_entry(
+                state,
+                player,
+                ninjutsu_obj_id,
+                cast_variant,
+                defending_player,
+                attack_target,
+                events,
+            );
+        }
+        // CR 701.51 + CR 616.1: the paused Attraction's entry resolved — finish
+        // its open bookkeeping, then run the remaining opens of the same
+        // instruction (which may themselves pause and re-defer through this
+        // same completion; `drain_pending_batch_deliveries` took the old record
+        // before calling here, so a fresh park is preserved).
+        BatchCompletion::AttractionOpenRemainder {
+            player,
+            object_id,
+            remaining,
+        } => {
+            crate::game::attractions::finish_attraction_open(state, player, object_id, events);
+            if remaining > 0 {
+                // CR 609.3 inside: opens as many as possible; never errors.
+                let _ =
+                    crate::game::attractions::open_attractions(state, player, remaining, events);
+            }
         }
     }
 }
