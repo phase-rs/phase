@@ -2238,6 +2238,12 @@ pub(super) fn difference_expr(cond: &AbilityCondition) -> Option<QuantityExpr> {
     }
 }
 
+/// Bridge a `StaticCondition` (from the nom condition parser) to an
+/// `AbilityCondition`. Returns `None` for variants that have no
+/// effect-resolution equivalent — the caller falls through to the next strategy.
+///
+/// Exhaustive on purpose — when you add a `StaticCondition` variant, decide
+/// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
 pub(crate) fn static_condition_to_ability_condition(
     sc: &StaticCondition,
     ctx: &mut ParseContext,
@@ -2469,6 +2475,9 @@ pub(crate) fn static_condition_to_ability_condition(
 /// GE, 1 }` shape — the bridge target of `IsPresent` — is restored to
 /// `IsPresent` so the keyword-swap path (`rewrite_condition_keyword`) handles
 /// it uniformly.
+///
+/// Exhaustive on purpose — when you add an `AbilityCondition` variant, decide
+/// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
 pub(crate) fn ability_condition_to_static_condition(
     ac: &AbilityCondition,
 ) -> Option<StaticCondition> {
@@ -2501,7 +2510,61 @@ pub(crate) fn ability_condition_to_static_condition(
         AbilityCondition::Not { condition } => Some(StaticCondition::Not {
             condition: Box::new(ability_condition_to_static_condition(condition)?),
         }),
-        _ => None,
+
+        // Casting-context conditions — read `SpellContext` / cast history at
+        // resolution time; no continuous-evaluation (`StaticCondition`)
+        // equivalent.
+        AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::CastFromZone { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. } => None,
+
+        // Resolution-flow conditions — read in-resolution signals (effect
+        // outcomes, reveals, resolved targets, zone-change events, player-scope
+        // iteration); only meaningful inside `resolve_ability_chain`, never as
+        // a continuous-effect gate.
+        AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::ConditionInstead { .. }
+        | AbilityCondition::NthResolutionThisTurn { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => None,
+
+        // No `StaticCondition` counterpart exists for these game-state
+        // predicates.
+        AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::SourceLacksKeyword { .. } => None,
+
+        // A `StaticCondition` counterpart exists, but `strip_suffix_conditional`
+        // never emits these shapes for per-`StaticDefinition` keyword-grant
+        // gates, so the condition stays on `AbilityDefinition.condition` as
+        // before. Invert here if the lowering path ever needs them.
+        AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::And { .. }
+        | AbilityCondition::Or { .. } => None,
     }
 }
 
