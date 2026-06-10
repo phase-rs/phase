@@ -407,8 +407,12 @@ pub(crate) enum BatchMoveResult {
 /// SBA pattern). Each object runs through `move_object`, so per-object `Moved`
 /// redirects (Rest in Peace / Leyline of the Void class) fire on every one;
 /// after the batch completes, CR 603.10a co-departure is stamped over the
-/// subset that actually left the battlefield (`departed_subset` — a no-op for
-/// non-battlefield origins such as a mill, so this is universally safe).
+/// attempted set. This is universally safe for non-battlefield origins such as
+/// a mill: `departed_subset` DOES include the milled cards (it filters on
+/// current zone != Battlefield, and a card now in a graveyard passes), but
+/// `mark_simultaneous_departures` only stamps `ZoneChanged` events whose
+/// `from` is `Some(Zone::Battlefield)` (the zones.rs event gate) — a
+/// library-origin move produces no such event, so nothing is stamped.
 ///
 /// On a mid-batch CR 616.1 ordering choice the surfaced prompt is parked and the
 /// undelivered tail is stashed in `state.pending_batch_deliveries`; the resume
@@ -461,13 +465,21 @@ fn deliver_batch(
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f: an aura-host choice flows through
                 // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
-                // resume path, so a parked tail here would not be drained by
-                // `drain_pending_batch_deliveries`. No batch flow targets a
-                // battlefield aura entry today (mill destinations are
-                // graveyard/exile/hand; mass bounce returns to hand/library), so
-                // this is unreachable; stop and stash the tail so a future
-                // battlefield-entry batch surfaces a bug (undrained tail) rather
-                // than silently dropping the rest.
+                // resume path, so `drain_pending_batch_deliveries` (which only
+                // runs from `handle_replacement_choice`) would not fire here.
+                // No batch flow targets a battlefield aura entry today (mill
+                // destinations are graveyard/exile/hand; mass bounce returns to
+                // hand/library), so this is unreachable; stop and stash the
+                // tail so a future battlefield-entry batch does not silently
+                // drop the rest of the batch.
+                //
+                // NOTE: this is NOT a loud failure. The engine_replacement
+                // drain gate keys on `pending_batch_deliveries.is_some()`, not
+                // on provenance, so a stale tail stashed here would be silently
+                // drained by the NEXT unrelated replacement-choice resume.
+                // Reaching this arm for a batch flow is a bug to be surfaced if
+                // a battlefield-entry batch is ever added; today it is dead
+                // code for every batch caller.
                 let remaining: Vec<ObjectId> = queue.map(|r| r.object_id).collect();
                 if !remaining.is_empty() {
                     state.pending_batch_deliveries = Some(PendingBatchDeliveries {
@@ -482,8 +494,11 @@ fn deliver_batch(
     // CR 603.10a + CR 608.2f: every object that actually left the battlefield in
     // this segment departed together — stamp co-departure so leaves-the-
     // battlefield observers among the group see each other via last-known info.
-    // For non-battlefield origins (mill) `departed_subset` is empty and this is
-    // a no-op.
+    // For non-battlefield origins (mill) this is a no-op via the EVENT gate, not
+    // the subset filter: `departed_subset` includes milled cards (their current
+    // zone — graveyard — is not Battlefield), but `mark_simultaneous_departures`
+    // only stamps `ZoneChanged` events with `from: Some(Zone::Battlefield)`, and
+    // a library-origin move emits none.
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, attempted));
     BatchMoveResult::Done
 }

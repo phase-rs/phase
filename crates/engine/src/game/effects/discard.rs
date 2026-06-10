@@ -35,6 +35,28 @@ pub(crate) fn complete_discard_to_graveyard(
     player_id: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
+    // Zone-pipeline bucketing (PLAN §5, re-adjudicated in Phase C round 3):
+    // this raw move is a Bucket A post-replacement DELIVERY site, not a
+    // `move_object` site. It runs after the outer Discard event completed its
+    // replacement pass; re-proposing through `move_object` would discard the
+    // event's `applied` set and double-apply Discard-level definitions. Its
+    // eventual Phase E shape is `approve_post_replacement` + `deliver` on a
+    // lowered `ZoneChange { from: Hand, to: Graveyard, applied, .. }`
+    // (mirroring `discard_applier`); deferred because `deliver`'s tail drains
+    // `post_replacement_continuation` at delivery time with `Moved` context,
+    // and proving that timing-equivalent for the Discard-execute chain class
+    // (madness routes through the ZoneChange arm, Abundance through Draw)
+    // needs its own discriminating tests.
+    //
+    // KNOWN GAP (graveyard-redirect class, NOT fixed by the Bucket A flip):
+    // the `discard_applier` Discard→ZoneChange lowering runs only when a
+    // Discard-level definition (madness class) actually applies —
+    // `moved_matcher` accepts only `ZoneChange` proposals, so a PLAIN discard
+    // never consults `Moved` redirects and Rest in Peace does not exile it
+    // today. The proper fix is to lower the accepted Discard into an inner
+    // ZoneChange proposal carrying `applied` and run it through the pipeline
+    // (same bug-fix class as mill C1 / counter C3 / bounce C4), with its own
+    // discriminating RIP-on-discard test.
     zones::move_to_zone(state, object_id, Zone::Graveyard, events);
     crate::game::restrictions::record_discard(state, player_id);
     crate::game::restrictions::record_card_discarded(state, object_id);
