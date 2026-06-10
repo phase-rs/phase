@@ -12345,7 +12345,6 @@ fn evaluate_casting_prohibition_condition(
     source_controller: PlayerId,
     caster: PlayerId,
 ) -> bool {
-    use crate::types::phase::Phase;
     match when {
         // CR 109.5: "during your turn" — bound to the static's source controller.
         CastingProhibitionCondition::DuringYourTurn => state.active_player == source_controller,
@@ -12364,13 +12363,10 @@ fn evaluate_casting_prohibition_condition(
         // of "[every player] can [action] only during their own [time]".
         CastingProhibitionCondition::NotDuringAffectedPlayersTurn => state.active_player != caster,
         // CR 117.1a + CR 117.1b: "only any time they could cast a sorcery"
-        // — blocked when not at sorcery speed (active player's main phase
-        // + empty stack + caster is the active player).
+        // — blocked when not at sorcery speed. `restrictions` owns the
+        // sorcery-speed timing predicate (CR 307.1); never re-derive it.
         CastingProhibitionCondition::NotSorcerySpeed => {
-            let at_sorcery_speed = state.active_player == caster
-                && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-                && state.stack.is_empty();
-            !at_sorcery_speed
+            !super::restrictions::is_sorcery_speed_window(state, caster)
         }
     }
 }
@@ -16765,6 +16761,7 @@ mod tests {
                 Effect::CopySpell {
                     target: TargetFilter::StackAbility {
                         controller: Some(ControllerRef::You),
+                        tag: None,
                     },
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
                     copier: None,
@@ -19225,7 +19222,10 @@ mod tests {
                     TargetFilter::Or {
                         filters: vec![
                             TargetFilter::StackSpell,
-                            TargetFilter::StackAbility { controller: None },
+                            TargetFilter::StackAbility {
+                                controller: None,
+                                tag: None,
+                            },
                         ],
                     },
                     TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -19367,7 +19367,10 @@ mod tests {
         });
         let not_of_this_world_targeting_ability = ResolvedAbility::new(
             Effect::Counter {
-                target: TargetFilter::StackAbility { controller: None },
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
                 source_rider: None,
             },
             vec![TargetRef::Object(stack_ability_id)],
@@ -38099,7 +38102,6 @@ mod tests {
                 .push(ActivationRestriction::AsSorcery);
             def.activation_restrictions
                 .push(ActivationRestriction::OnlyOnceEachTurn);
-            def.sorcery_speed = true;
             def
         }
 

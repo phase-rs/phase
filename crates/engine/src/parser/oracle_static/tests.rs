@@ -2194,7 +2194,7 @@ fn static_this_spell_cost_less_if_it_targets_spell_or_ability_targeting_large_cr
             if filters.iter().any(|f| matches!(f, TargetFilter::StackSpell))
                 && filters
                     .iter()
-                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None }))
+                    .any(|f| matches!(f, TargetFilter::StackAbility { controller: None, tag: None }))
     )));
     let stack_targets_filter = filters
         .iter()
@@ -4596,8 +4596,8 @@ fn quoted_ability_preserves_activation_restrictions() {
     assert_eq!(definition.kind, AbilityKind::Activated);
     assert!(definition.cost.is_some(), "should retain the tap cost");
     assert!(
-        definition.sorcery_speed,
-        "AsSorcery must set sorcery_speed on the granted ability"
+        definition.is_sorcery_speed(),
+        "AsSorcery must mark the granted ability as sorcery-speed"
     );
     assert!(
         definition

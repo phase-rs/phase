@@ -27,7 +27,6 @@ expression: result
       "duration": null,
       "description": "Destroy all creatures that entered this turn.",
       "target_prompt": null,
-      "sorcery_speed": false,
       "condition": null,
       "optional_targeting": false,
       "optional": false,

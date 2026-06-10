@@ -364,15 +364,22 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
-        TargetFilter::StackAbility { controller: None } => "ability on stack".into(),
+        TargetFilter::StackAbility { tag: Some(tag), .. } => format!("{tag:?} ability on stack"),
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+        } => "ability on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(ControllerRef::You),
+            tag: None,
         } => "ability you control on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(ControllerRef::Opponent),
+            tag: None,
         } => "ability opponent controls on stack".into(),
         TargetFilter::StackAbility {
             controller: Some(controller),
+            tag: None,
         } => format!("ability scoped to {controller:?} on stack"),
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
@@ -1818,12 +1825,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             d.push(("token".into(), desc));
         }
-        Effect::AddCounter {
-            counter_type,
-            count,
-            target,
-        }
-        | Effect::PutCounter {
+        Effect::PutCounter {
             counter_type,
             count,
             target,
@@ -2581,7 +2583,7 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     if def.condition.is_some() {
         d.push(("conditional".into(), "yes".into()));
     }
-    if def.sorcery_speed {
+    if def.is_sorcery_speed() {
         d.push(("timing".into(), "sorcery speed".into()));
     }
     if let Some(modal) = &def.modal {

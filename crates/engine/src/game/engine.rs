@@ -3562,6 +3562,15 @@ fn apply_action(
                         player: active_player,
                     };
                     state.priority_player = active_player;
+                    // CR 603.10a + CR 616.1: an aura-attachment pause can carry a
+                    // deferred batch completion (a reveal-until / dig kept Aura
+                    // whose entry paused before the rest pile was moved). Drain it
+                    // here — the replacement-choice resume path drains it for the
+                    // CR 616.1 case, but the aura-host resume is the ONLY drain
+                    // site for an `NeedsAuraAttachmentChoice` pause.
+                    if state.pending_batch_deliveries.is_some() {
+                        super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
+                    }
                     effects::drain_pending_continuation(state, &mut events);
                     return Ok(ActionResult {
                         events,
@@ -3595,6 +3604,11 @@ fn apply_action(
                 player: active_player,
             };
             state.priority_player = active_player;
+            // CR 603.10a + CR 616.1: drain a deferred batch completion parked
+            // behind this aura-attachment pause (see the sibling path above).
+            if state.pending_batch_deliveries.is_some() {
+                super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
+            }
             effects::drain_pending_continuation(state, &mut events);
             state.waiting_for.clone()
         }
@@ -5755,8 +5769,8 @@ fn handle_crew_activation(
         ));
     }
 
-    // Extract crew power and activation cadence from keywords
-    let (crew_power, crew_cadence) = obj
+    // Extract crew power and once-each-turn cadence from keywords.
+    let (crew_power, crew_once_per_turn) = obj
         .keywords
         .iter()
         .find_map(|kw| {
@@ -5765,7 +5779,13 @@ fn handle_crew_activation(
                 once_per_turn,
             } = kw
             {
-                Some((*power, *once_per_turn))
+                // CR 602.5b: once_per_turn is `Some(OnlyOnceEachTurn)` when the
+                // Vehicle's crew ability is limited to once each turn.
+                let limited = matches!(
+                    once_per_turn.as_deref(),
+                    Some(crate::types::ability::ActivationRestriction::OnlyOnceEachTurn)
+                );
+                Some((*power, limited))
             } else {
                 None
             }
@@ -5774,9 +5794,7 @@ fn handle_crew_activation(
 
     // CR 602.5b: "Activate only once each turn" — reject a second crew activation
     // of this Vehicle in the same turn.
-    if crew_cadence == crate::types::keywords::ActivationCadence::OncePerTurn
-        && state.crew_activated_this_turn.contains(&vehicle_id)
-    {
+    if crew_once_per_turn && state.crew_activated_this_turn.contains(&vehicle_id) {
         return Err(EngineError::ActionNotAllowed(
             "This Vehicle's crew ability can be activated only once each turn".to_string(),
         ));
@@ -18999,7 +19017,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
     // "controller pays or sacrifices":
     //   1. Synthesized trigger (PayCumulativeUpkeep, Phase=Upkeep, valid_target
     //      Controller) fires when the controller's upkeep step begins.
-    //   2. Outer `Effect::AddCounter { CounterType::Age }` ticks the counter
+    //   2. Outer `Effect::PutCounter { CounterType::Age }` ticks the counter
     //      on the source before the sub-ability runs.
     //   3. Sub-ability `Effect::Sacrifice` carries `unless_pay` =
     //      `AbilityCost::PerCounter { Age, SelfRef, base }`, which expands at
@@ -19765,7 +19783,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
     /// `TriggerCondition::SourceInZone { Battlefield }` guard wired in
     /// `build_cumulative_upkeep_trigger`. Without that guard, the trigger
     /// would resolve against the (now-hand-zone) source object: the outer
-    /// `Effect::AddCounter` would still write an age counter onto the object
+    /// `Effect::PutCounter` would still write an age counter onto the object
     /// in hand, and the sub-ability would still prompt the controller with a
     /// `Mana{1}` unless-payment — a spurious prompt fundamentally inconsistent
     /// with CR 702.24a.
@@ -20453,7 +20471,7 @@ mod crew_tests {
             obj.card_types.subtypes.push("Vehicle".to_string());
             obj.keywords.push(crate::types::keywords::Keyword::Crew {
                 power: 3,
-                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+                once_per_turn: None,
             });
             obj.base_power = Some(6);
             obj.base_toughness = Some(5);
@@ -20812,7 +20830,7 @@ mod crew_tests {
                 .push(crate::types::card_type::CoreType::Artifact);
             obj.keywords.push(crate::types::keywords::Keyword::Crew {
                 power: 1,
-                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+                once_per_turn: None,
             });
         }
 
@@ -20879,7 +20897,7 @@ mod crew_tests {
             obj.card_types.subtypes.push("Vehicle".to_string());
             obj.keywords.push(crate::types::keywords::Keyword::Crew {
                 power: 3,
-                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+                once_per_turn: None,
             });
             obj.power = Some(6);
             obj.toughness = Some(5);
@@ -21431,7 +21449,7 @@ mod keyword_action_stack_tests {
         obj.card_types.subtypes.push("Vehicle".to_string());
         obj.keywords.push(crate::types::keywords::Keyword::Crew {
             power: crew_n,
-            once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+            once_per_turn: None,
         });
         obj.base_power = Some(6);
         obj.base_toughness = Some(5);
@@ -21588,7 +21606,9 @@ mod keyword_action_stack_tests {
         obj.card_types.subtypes = vec!["Vehicle".to_string()];
         obj.keywords.push(crate::types::keywords::Keyword::Crew {
             power: crew_n,
-            once_per_turn: crate::types::keywords::ActivationCadence::OncePerTurn,
+            once_per_turn: Some(Box::new(
+                crate::types::ability::ActivationRestriction::OnlyOnceEachTurn,
+            )),
         });
         id
     }

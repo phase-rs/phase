@@ -1453,7 +1453,7 @@ mod tests {
 
     #[test]
     fn plus_counter_is_beneficial() {
-        let effect = Effect::AddCounter {
+        let effect = Effect::PutCounter {
             counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
@@ -1463,7 +1463,7 @@ mod tests {
 
     #[test]
     fn minus_counter_is_harmful() {
-        let effect = Effect::AddCounter {
+        let effect = Effect::PutCounter {
             counter_type: CounterType::Minus1Minus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn generic_positive_pt_counter_is_beneficial() {
-        let effect = Effect::AddCounter {
+        let effect = Effect::PutCounter {
             counter_type: CounterType::Generic("+0/+1".to_string()),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
@@ -1483,7 +1483,7 @@ mod tests {
 
     #[test]
     fn generic_negative_pt_counter_is_harmful() {
-        let effect = Effect::AddCounter {
+        let effect = Effect::PutCounter {
             counter_type: CounterType::Generic("-0/-1".to_string()),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,

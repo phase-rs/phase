@@ -1575,6 +1575,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::StackAbility {
                     controller: Some(crate::types::ability::ControllerRef::You),
+                    tag: None,
                 },
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
@@ -1599,6 +1600,7 @@ mod tests {
             Effect::CopySpell {
                 target: TargetFilter::StackAbility {
                     controller: Some(crate::types::ability::ControllerRef::You),
+                    tag: None,
                 },
                 retarget: CopyRetargetPermission::KeepOriginalTargets,
                 copier: None,
@@ -1898,6 +1900,7 @@ mod tests {
         let gogo_entry = ObjectId(40);
         let gogo_target_filter = TargetFilter::StackAbility {
             controller: Some(crate::types::ability::ControllerRef::You),
+            tag: None,
         };
         assert_eq!(
             crate::game::targeting::find_legal_targets(

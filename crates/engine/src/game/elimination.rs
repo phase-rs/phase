@@ -269,8 +269,14 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
         })
         .collect();
 
+    // CR 800.4a: route the owner's objects to exile through the zone pipeline
+    // under the `PlayerLeftGame` exempt cause — "This is not a state-based
+    // action", and no replacement effect applies to a player leaving the game,
+    // so the consult is skipped while the unconditional primitive guards still
+    // run (PLAN §3).
     for id in to_exile {
-        super::zones::move_to_zone(state, id, Zone::Exile, events);
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::player_left_game(id, Zone::Exile);
+        crate::game::zone_pipeline::move_object(state, req, events);
     }
 
     state.auto_pass.remove(&player);

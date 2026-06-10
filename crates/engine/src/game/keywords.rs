@@ -16,13 +16,24 @@ use crate::types::zones::Zone;
 
 /// Check if a game object has a specific keyword, using discriminant-based matching
 /// for simple keywords (ignoring associated data for parameterized variants).
+///
+/// Object-scoped: reads the post-layer `obj.keywords` list, which is only
+/// authoritative for battlefield objects. For an object that can be in hand,
+/// graveyard, exile, or on the stack, use
+/// [`object_has_effective_keyword_kind`] — it consults off-zone keyword
+/// grants that this function cannot see.
 pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
+    // allow-raw-authority: this IS the object-scoped authority
     obj.keywords
         .iter()
         .any(|k| std::mem::discriminant(k) == std::mem::discriminant(keyword))
 }
 
+/// Object-scoped keyword-kind query — same battlefield-only caveat as
+/// [`has_keyword`]; prefer [`object_has_effective_keyword_kind`] for objects
+/// that can be off-battlefield.
 pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
+    // allow-raw-authority: this IS the object-scoped authority
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 

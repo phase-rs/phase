@@ -66,9 +66,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // same semantics — the effect puts counters of `counter_type` onto a target.
         // MultiplyCounter (e.g., Doubling Season) amplifies existing counters: its
         // polarity is context-dependent (doubling -1/-1 on a creature is harmful).
-        Effect::AddCounter { counter_type, .. }
-        | Effect::PutCounter { counter_type, .. }
-        | Effect::PutCounterAll { counter_type, .. } => counter_sign_polarity(counter_type),
+        Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. } => {
+            counter_sign_polarity(counter_type)
+        }
         // CR 122.1 + CR 121: Removing counters inverts the placement polarity —
         // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
         // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
@@ -186,7 +186,6 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
         // Beneficial effects
         Effect::Pump { target, .. }
-        | Effect::AddCounter { target, .. }
         | Effect::PutCounter { target, .. }
         | Effect::PutCounterAll { target, .. }
         | Effect::MultiplyCounter { target, .. }

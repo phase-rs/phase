@@ -1011,7 +1011,23 @@ pub(super) fn handle_ward_discard_choice(
         ));
     }
 
-    effects::discard::complete_discard_to_graveyard(state, chosen[0], player, events);
+    // CR 614.6: the discard's inner hand → graveyard move consults `Moved`
+    // redirects (RIP class) through the pipeline. A redirect that itself needs a
+    // CR 616.1 choice parks `state.waiting_for`; surface it and return.
+    if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
+        effects::discard::complete_discard_to_graveyard(
+            state,
+            chosen[0],
+            player,
+            Some(pending_effect.source_id),
+            std::collections::HashSet::new(),
+            events,
+        )
+    {
+        state.waiting_for =
+            crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
+        return Ok(state.waiting_for.clone());
+    }
 
     // CR 702.24a: more discards remain — re-derive hand eligibility (the
     // just-discarded card still keys `state.objects` in the graveyard, so

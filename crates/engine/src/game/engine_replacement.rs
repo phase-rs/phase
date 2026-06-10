@@ -255,8 +255,24 @@ pub(super) fn handle_replacement_choice(
                 // CR 701.17a: Mill accepted after replacement choice — delegate
                 // to the shared helper so count clamping and library movement
                 // match the non-choice delivery.
+                //
+                // CR 616.1: a milled card's own `Moved` replacements (Rest in
+                // Peace + Leyline of the Void class) can surface a per-card
+                // ordering choice mid-delivery. The helper parks that prompt
+                // (`state.waiting_for` set, tail in `pending_batch_deliveries`)
+                // and returns `false`. Early-return so the unconditional
+                // `waiting_for = Priority` reset below does NOT clobber the
+                // parked prompt — mirroring the `apply_etb_counters`
+                // early-return in the ZoneChange arm. The resume path drains the
+                // tail via `zone_pipeline::drain_pending_batch_deliveries`.
                 mill @ ProposedEvent::Mill { .. } => {
-                    let _ = apply_mill_after_replacement(state, mill, events);
+                    // `EffectError` has no `EngineError` conversion here, so the
+                    // prior `let _ =` swallowed it; preserve that by mapping an
+                    // error to "delivered" (no pause) and only reacting to the
+                    // pause signal.
+                    if !apply_mill_after_replacement(state, mill, events).unwrap_or(true) {
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 119.1: Life gain accepted after replacement choice.
                 gain @ ProposedEvent::LifeGain { .. } => {
@@ -271,14 +287,27 @@ pub(super) fn handle_replacement_choice(
                 // replacement pipeline may have modified `object_id`/`player_id`
                 // (e.g., Madness redirects surface as a ZoneChange variant handled
                 // by the ZoneChange arm above, not here).
+                //
+                // CR 614.6: the inner hand → graveyard move re-proposes a
+                // `ZoneChange` carrying `applied`, so `Moved` redirects (RIP
+                // class) are consulted here too. A redirect that itself needs a
+                // CR 616.1 choice parks `state.waiting_for`; early-return so the
+                // unconditional reset below does not clobber it.
                 ProposedEvent::Discard {
                     player_id,
                     object_id,
-                    ..
+                    source_id,
+                    applied,
                 } => {
-                    effects::discard::complete_discard_to_graveyard(
-                        state, object_id, player_id, events,
-                    );
+                    if let effects::discard::DiscardOutcome::NeedsReplacementChoice(player) =
+                        effects::discard::complete_discard_to_graveyard(
+                            state, object_id, player_id, source_id, applied, events,
+                        )
+                    {
+                        state.waiting_for =
+                            crate::game::replacement::replacement_choice_waiting_for(player, state);
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 106.3 + CR 106.4: Mana production accepted after replacement choice.
                 // In practice CR 614.5 mana-type replacements don't require a choice and
@@ -446,6 +475,22 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 603.10a + CR 616.1: A simultaneous zone-move batch (mill or
+            // mass bounce) paused mid-delivery because an object's Moved
+            // replacements needed an ordering choice (Rest in Peace + Leyline of
+            // the Void class). The chosen event was delivered by the ZoneChange
+            // arm above; drain the parked tail. The drain may re-park when the
+            // next object surfaces its own prompt — in that case it sets
+            // `state.waiting_for` for us to propagate.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_batch_deliveries.is_some()
+            {
+                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             if matches!(waiting_for, WaitingFor::Priority { .. })
                 && state.pending_copy_token_resolution.is_some()
             {
@@ -545,6 +590,15 @@ pub(super) fn handle_replacement_choice(
                 effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 return Ok(state.waiting_for.clone());
             }
+            // CR 603.10a + CR 616.1: the paused batch object's event was
+            // prevented outright — the remaining parked tail still delivers.
+            if state.pending_batch_deliveries.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                return Ok(state.waiting_for.clone());
+            }
             // CR 608.3e: If the ETB was prevented during spell resolution,
             // the permanent goes to the graveyard instead.
             if let Some(ctx) = state.pending_spell_resolution.take() {
@@ -608,7 +662,10 @@ pub(super) fn handle_copy_target_choice(
             )
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
-    crate::game::layers::evaluate_layers(state);
+    // Force a full layer pass after the copy chain so the realized
+    // characteristics below (enter-tapped, ETB counters) read post-copy state.
+    crate::game::layers::mark_layers_full(state);
+    crate::game::layers::flush_layers(state);
     let enter_modifiers =
         super::replacement::current_self_enter_replacement_modifiers(state, source_id);
     if let Some(tapped) = enter_modifiers.enter_tapped {
@@ -1845,6 +1902,120 @@ mod tests {
         }
         assert!(state.legacy_post_replacement_effect.is_none());
         assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// Issue #575: Non-Moved `Sacrifice { Typed }` post-replacements (Dralnu)
+    /// inject the source as a pre-selected sacrifice target. Re-broadening the
+    /// Devour guard to all events would route this through `EffectZoneChoice`.
+    #[test]
+    fn issue_575_dealt_damage_sacrifice_injects_source_target() {
+        let mut state = GameState::new_two_player(42);
+        let dralnu = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dralnu, Lich Lord".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::permanent()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &template,
+            Some(dralnu),
+            None,
+            Some(&ReplacementEvent::DealtDamage),
+            &mut events,
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "DealtDamage sacrifice must use injected source target, not a chooser; got {:?}",
+            state.waiting_for
+        );
+        assert!(waiting.is_none());
+        assert_eq!(state.objects[&dralnu].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&other].zone, Zone::Battlefield);
+    }
+
+    /// Issue #575: Moved (ETB) `Sacrifice { Typed }` post-replacements (Devour)
+    /// suppress source injection so the chooser prompt opens.
+    #[test]
+    fn issue_575_moved_sacrifice_typed_opens_chooser_not_source_injection() {
+        let mut state = GameState::new_two_player(42);
+        let devourer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Devourer".to_string(),
+            Zone::Battlefield,
+        );
+        let fodder_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sacrifice Fodder A".to_string(),
+            Zone::Battlefield,
+        );
+        let fodder_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Sacrifice Fodder B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [devourer, fodder_a, fodder_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+
+        let mut events = Vec::new();
+        let waiting = apply_post_replacement_effect(
+            &mut state,
+            &template,
+            Some(devourer),
+            None,
+            Some(&ReplacementEvent::Moved),
+            &mut events,
+        );
+
+        assert!(
+            matches!(waiting, Some(WaitingFor::EffectZoneChoice { .. }))
+                || matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "Moved Devour-shape sacrifice must prompt a chooser; waiting={waiting:?} state={:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.objects[&devourer].zone,
+            Zone::Battlefield,
+            "devourer must not be auto-sacrificed via source injection"
+        );
     }
 
     /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with

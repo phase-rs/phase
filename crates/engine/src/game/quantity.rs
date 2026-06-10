@@ -2721,9 +2721,7 @@ fn event_context_counter_count_from_lki(
     use crate::types::ability::Effect;
     let counter_type = match ability.map(|a| &a.effect) {
         Some(
-            Effect::AddCounter { counter_type, .. }
-            | Effect::PutCounter { counter_type, .. }
-            | Effect::PutCounterAll { counter_type, .. },
+            Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. },
         ) => counter_type,
         _ => return None,
     };
