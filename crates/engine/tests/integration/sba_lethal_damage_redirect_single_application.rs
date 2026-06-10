@@ -8,10 +8,14 @@
 //! same entry was re-delivered repeatedly within one SBA fixpoint even though
 //! `reset_for_battlefield_entry` clears `damage_marked`.
 //!
-//! CR 614.5: a replacement effect gets only one opportunity to affect an event;
-//! the single-application of the one-shot "would die -> return" redirect is
-//! rules-required. After the redirect fires once, the returned creature has its
-//! damage cleared (CR 400.7 new object) and must NOT be re-destroyed.
+//! Root cause: the redirected delivery is a Battlefield->Battlefield ZoneChange,
+//! which the CR 603.2g no-op guard rejects — `reset_for_battlefield_entry` never
+//! runs, lethal `damage_marked` survives, and every fixpoint pass re-derives the
+//! same destruction. The fix scrubs the marked damage after the redirect
+//! delivers: a "remains on the battlefield instead of dying" effect is
+//! regeneration-shaped (CR 701.19a/b — destruction is replaced by "remove all
+//! damage marked on it" while the permanent stays the same object), so the
+//! creature must NOT be re-destroyed for the already-replaced damage.
 //!
 //! This drives the real SBA pipeline (mark lethal damage -> repeated
 //! `check_state_based_actions` -> inner ZoneChange propose -> replace_event

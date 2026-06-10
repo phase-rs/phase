@@ -551,20 +551,39 @@ fn check_lethal_damage(
                                 {
                                     return;
                                 }
-                                // CR 614.5 + CR 400.7: A replacement gets only one
-                                // opportunity to affect a lethal-damage destruction.
-                                // When the redirect keeps (or returns) the creature
-                                // on the battlefield, `zones::move_to_zone`'s CR
-                                // 603.2g Battlefield->Battlefield no-op guard skips
-                                // `reset_for_battlefield_entry`, so `damage_marked`
-                                // survives. Without clearing it the next SBA fixpoint
-                                // pass re-derives lethal damage and re-fires the
-                                // destruction-replacement every iteration (counter /
-                                // event stacking, capped at MAX_SBA_ITERATIONS). The
-                                // creature is a new object after the death is replaced
-                                // (CR 400.7) and the replacement already had its one
-                                // opportunity for this damage, so clear the marked
-                                // damage that the no-op delivery left behind.
+                                // Degenerate-self-redirect guard: a Moved replacement
+                                // that lands the dying creature back on the
+                                // battlefield delivers a Battlefield->Battlefield
+                                // ZoneChange, which `zones::move_to_zone`'s CR 603.2g
+                                // no-op guard rejects — `reset_for_battlefield_entry`
+                                // never runs, so the lethal `damage_marked` survives
+                                // and the next SBA fixpoint pass re-derives the same
+                                // destruction and re-fires the one-shot replacement
+                                // every iteration (counter / event stacking, capped
+                                // at MAX_SBA_ITERATIONS). Scrub only the marked
+                                // damage so the fixpoint terminates: a "remains on
+                                // the battlefield instead of dying" effect is
+                                // regeneration-shaped — CR 701.19a/b replaces
+                                // destruction with "remove all damage marked on it"
+                                // while the permanent STAYS the same object — so the
+                                // damage scrub matches that semantics. This is NOT a
+                                // CR 400.7 new-object re-entry and deliberately does
+                                // not claim to be one.
+                                //
+                                // TODO(zone-pipeline C0b): no card currently parses
+                                // to a would-die->battlefield Moved redirect (the
+                                // parser builds die->exile / shuffle-back redirects;
+                                // Persist/Undying are dies-triggers), so the rest of
+                                // the entry state is knowingly left stale here:
+                                // incarnation epoch (CR 400.7), summoning sickness
+                                // (CR 302.6), counters, entered_battlefield_turn —
+                                // while the delivery tail above DOES re-apply
+                                // CR 614.1c entry counters. If a real battlefield-
+                                // redirect card class appears, decide whether it is
+                                // regeneration-shaped (stays the same object;
+                                // suppress the CR 614.1c tail re-application) or a
+                                // true leave-and-re-enter (run the full battlefield-
+                                // entry reset instead of this scrub).
                                 if let Some(obj) = state.objects.get_mut(&object_id) {
                                     if obj.zone == Zone::Battlefield {
                                         obj.damage_marked = 0;
