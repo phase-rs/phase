@@ -90,9 +90,10 @@ fn transform_effect_in_place(effect: &mut Effect) {
             player_filter: None,
             damage_source: None,
         },
-        // CR 702.96e + CR 701.26a/b: overload promotes single-target tap/untap to
-        // its mass scope, carrying the tap/untap polarity through. (Only the Tap
-        // polarity appears in the current overload corpus; Untap promotion is
+        // CR 702.96a + CR 701.26a/b: overload's text change (replace every
+        // "target" with "each") promotes single-target tap/untap to its mass
+        // scope, carrying the tap/untap polarity through. (Only the Tap polarity
+        // appears in the current overload corpus; Untap promotion is
         // type-supported for parity.)
         Effect::SetTapState {
             target,
