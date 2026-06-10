@@ -315,6 +315,34 @@ pub(crate) fn move_object(
         return ZoneMoveResult::Done;
     };
 
+    // CR 111.8 + CR 603.2g (PLAN §8 Risk #11): Hoist the cheap object-level guards that
+    // `zones::move_to_zone` enforces unconditionally to BEFORE the replacement
+    // consult. The pipeline now runs `replace_event` ahead of the primitive's
+    // delivery-time guards, so a replacement could otherwise be "consumed"
+    // (`last_effect_count`, CR 616.1 choices) on a move the primitive then
+    // rejects as a no-op. These two are pure object-level reads with no game
+    // effect, so testing them up front cannot change observable behavior — it
+    // only avoids spending a one-shot replacement on a move that never happens.
+    {
+        let obj = state
+            .objects
+            .get(&req.object_id)
+            .expect("object exists (zone read above)");
+        // CR 111.8: A token that has left the battlefield can't change zones; it
+        // remains in place and ceases to exist at the next SBA (CR 111.7).
+        if zones::token_is_outside_battlefield_and_stack(obj) {
+            return ZoneMoveResult::Done;
+        }
+        // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
+        // permanent onto the battlefield — no entry event occurs, so no
+        // would-style replacement should be consulted (and the primitive would
+        // reject it as a no-op regardless), mirroring the `zones::move_to_zone`
+        // no-op guard.
+        if from_zone == Zone::Battlefield && req.to == Zone::Battlefield {
+            return ZoneMoveResult::Done;
+        }
+    }
+
     // Phase A: `placement` integration (folding the raw
     // `move_to_library_position` / `move_to_library_at_index` siblings in) is
     // Phase D. Until then a `Some` placement preserves today's behavior of those
