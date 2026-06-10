@@ -519,12 +519,28 @@ pub(super) fn handle_resolution_choice(
                     req.mods.enter_tapped = enter_tapped;
                     match crate::game::zone_pipeline::move_object(state, req, events) {
                         crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                        // CR 616.1 / CR 303.4f: battlefield-entry choice parked
-                        // centrally; bail before the rest-pile move so the prompt
-                        // is not clobbered (realistically unreachable for the dig
-                        // classes).
+                        // CR 303.4f / CR 616.1: the accepted card's battlefield
+                        // entry paused on an as-enters choice. The pause is parked
+                        // centrally; defer the rest-pile move + reveal-marker
+                        // cleanup onto the batch tail so the drain runs it once the
+                        // entry resolves — otherwise the misses strand (the
+                        // early-`return` bug). `EffectResolved` was already emitted
+                        // before this prompt, so the completion does not re-emit it.
                         crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
                         | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            let mut clear_markers = misses.clone();
+                            clear_markers.push(hit_card);
+                            crate::game::zone_pipeline::defer_completion_on_pause(
+                                state,
+                                crate::types::game_state::BatchCompletion::RevealRestPile {
+                                    player,
+                                    rest_cards: misses,
+                                    rest_destination,
+                                    clear_markers,
+                                    publish_tracked_set: None,
+                                    emit_reveal_until_resolved: None,
+                                },
+                            );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
                                 state.waiting_for.clone(),
                             ));
@@ -1289,10 +1305,29 @@ pub(super) fn handle_resolution_choice(
                             crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped);
                         match crate::game::zone_pipeline::move_object(state, req, events) {
                             crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                            // CR 616.1 / CR 303.4f: battlefield-entry choice parked
-                            // centrally; bail (realistically unreachable for dig).
+                            // CR 303.4f / CR 616.1: the kept card's battlefield
+                            // entry paused on an as-enters choice (aura host pick /
+                            // replacement ordering). The pause is already parked;
+                            // defer the rest-pile move + tracked-set publish +
+                            // continuation wiring onto the batch tail so the drain
+                            // runs it once the entry resolves — otherwise the
+                            // unkept cards strand in the library (they were not yet
+                            // moved). The drain fires on both the replacement-choice
+                            // resume and the aura-attachment resume.
                             crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
                             | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                crate::game::zone_pipeline::defer_completion_on_pause(
+                                    state,
+                                    crate::types::game_state::BatchCompletion::RevealRestPile {
+                                        player,
+                                        rest_cards: unkept.clone(),
+                                        rest_destination: rest_destination
+                                            .unwrap_or(Zone::Graveyard),
+                                        clear_markers: Vec::new(),
+                                        publish_tracked_set: Some(kept.clone()),
+                                        emit_reveal_until_resolved: None,
+                                    },
+                                );
                                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                                     state.waiting_for.clone(),
                                 ));
@@ -3131,6 +3166,47 @@ pub(crate) fn run_batch_completion(
         BatchCompletion::ManifestDreadCleanup { player, revealed } => {
             for card_id in &revealed {
                 state.revealed_cards.remove(card_id);
+            }
+            finish_with_continuation(state, player, events);
+        }
+        // CR 701.20b: The kept card's battlefield entry paused (aura host pick /
+        // replacement ordering). Now that it has resolved, move the unkept rest
+        // pile, clear the reveal markers, run the dig tracked-set publish +
+        // continuation wiring (if any), then drain the continuation — exactly the
+        // tail the synchronous path runs inline.
+        BatchCompletion::RevealRestPile {
+            player,
+            rest_cards,
+            rest_destination,
+            clear_markers,
+            publish_tracked_set,
+            emit_reveal_until_resolved,
+        } => {
+            // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
+            // through `route_rest_partition` (ordered library bottom); the
+            // reveal-until path routes through `move_rest` (CR 701.20a — "on the
+            // bottom of your library in a random order" shuffles). Dispatch on the
+            // dig-only payload so each site keeps its synchronous semantics.
+            if publish_tracked_set.is_some() {
+                route_rest_partition(state, &rest_cards, rest_destination, events);
+            } else {
+                effects::reveal_until::move_rest(state, &rest_cards, rest_destination, events);
+            }
+            for card_id in &clear_markers {
+                state.revealed_cards.remove(card_id);
+            }
+            if let Some(kept) = publish_tracked_set {
+                effects::publish_fresh_tracked_set(state, kept.clone());
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
+                    cont.chain.context.optional_effect_performed = !kept.is_empty();
+                }
+            }
+            if let Some(source_id) = emit_reveal_until_resolved {
+                events.push(crate::types::events::GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::RevealUntil,
+                    source_id,
+                });
             }
             finish_with_continuation(state, player, events);
         }

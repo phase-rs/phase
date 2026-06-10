@@ -1123,6 +1123,34 @@ pub enum BatchCompletion {
         player: PlayerId,
         revealed: Vec<ObjectId>,
     },
+    /// CR 303.4f / CR 616.1 + CR 701.20b: A reveal-until / dig kept card routed
+    /// onto the battlefield paused on an as-enters choice (aura host pick or a
+    /// replacement-ordering prompt) before the unkept "rest pile" was moved.
+    /// Defer the rest-pile move + reveal-marker cleanup onto the parked batch
+    /// tail so it runs exactly once after the kept card's entry resolves —
+    /// otherwise the rest cards strand in the library (the early-`return` bug).
+    RevealRestPile {
+        /// The player whose continuation drains after the pile lands.
+        player: PlayerId,
+        /// Unkept cards to move once the kept card finishes entering.
+        rest_cards: Vec<ObjectId>,
+        /// Where the rest pile goes (`Library` => bottom in a reposition, else
+        /// the destination zone).
+        rest_destination: Zone,
+        /// CR 701.20b: reveal markers to clear once the cards have moved (the
+        /// kept card plus the misses).
+        clear_markers: Vec<ObjectId>,
+        /// Dig only: `Some(kept)` publishes the kept cards as a fresh tracked set
+        /// and wires them as the continuation's targets (Zimone's Experiment
+        /// class). `None` for reveal-until, which has no tracked-set sub-ability.
+        publish_tracked_set: Option<Vec<ObjectId>>,
+        /// `Some(source_id)` emits `EffectResolved { RevealUntil, source_id }`
+        /// before draining the continuation — the direct `reveal_until::resolve`
+        /// path (no kept-choice) emits it inline at the end, so the deferred path
+        /// must too. `None` for the kept-choice / dig paths, which emit their own
+        /// `EffectResolved` before the pause (or rely on the continuation).
+        emit_reveal_until_resolved: Option<ObjectId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

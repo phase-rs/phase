@@ -7,7 +7,7 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -151,15 +151,29 @@ pub fn resolve(
                 req.mods.enter_tapped = enter_tapped;
                 match zone_pipeline::move_object(state, req, events) {
                     ZoneMoveResult::Done => {}
-                    // CR 616.1 / CR 303.4f: a battlefield-entry replacement or
-                    // aura-host choice is parked centrally by `move_object`; bail
-                    // before the rest-pile move and `EffectResolved` so the prompt
-                    // is not clobbered. (Realistically unreachable for the dig
-                    // classes — no kept-to-battlefield card is an aura and no
-                    // Moved redirect targets the battlefield — but the bail keeps
-                    // the resolver safe by construction.)
+                    // CR 303.4f / CR 616.1: the kept card's battlefield entry
+                    // paused on an as-enters choice (aura host pick / replacement
+                    // ordering). The pause is parked centrally by `move_object`;
+                    // defer the rest-pile move + reveal-marker cleanup onto the
+                    // batch tail so the drain runs it once the entry resolves —
+                    // otherwise the misses strand in their zone (the early-`return`
+                    // bug). `EffectResolved` is emitted by the completion's
+                    // continuation drain, not here, so the prompt is not clobbered.
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        return Ok(())
+                        let mut clear_markers = revealed_misses.clone();
+                        clear_markers.push(hit);
+                        zone_pipeline::defer_completion_on_pause(
+                            state,
+                            BatchCompletion::RevealRestPile {
+                                player: revealing_player,
+                                rest_cards: revealed_misses,
+                                rest_destination,
+                                clear_markers,
+                                publish_tracked_set: None,
+                                emit_reveal_until_resolved: Some(ability.source_id),
+                            },
+                        );
+                        return Ok(());
                     }
                 }
                 // CR 508.4: "put that card onto the battlefield tapped and

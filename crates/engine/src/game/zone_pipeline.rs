@@ -669,6 +669,18 @@ fn run_batch_completion(
     crate::game::engine_resolution_choices::run_batch_completion(state, completion, events);
 }
 
+/// CR 303.4f / CR 616.1 + CR 603.10a: Hang a [`BatchCompletion`] off the current
+/// pause so the drain runs it once the paused move resolves. A single-object
+/// [`move_object`] pause (an as-enters aura host pick or a replacement-ordering
+/// prompt) does not stash a batch tail, so this creates an empty-`remaining`
+/// record carrying only the completion; the drain delivers nothing and runs the
+/// completion. Used by the reveal-until / dig kept-card sites to defer the
+/// rest-pile move when the kept card's battlefield entry pauses.
+pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: BatchCompletion) {
+    // The destination is irrelevant for an empty tail (no object re-delivers).
+    ensure_batch_record(state, Zone::Graveyard).completion = Some(completion);
+}
+
 /// Return the live parked-batch record, creating an empty-tail one (the
 /// paused-on-last-card case) if `deliver_batch` did not stash a tail. Used only
 /// to hang a [`BatchCompletion`] off a paused batch.

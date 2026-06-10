@@ -3562,6 +3562,15 @@ fn apply_action(
                         player: active_player,
                     };
                     state.priority_player = active_player;
+                    // CR 603.10a + CR 616.1: an aura-attachment pause can carry a
+                    // deferred batch completion (a reveal-until / dig kept Aura
+                    // whose entry paused before the rest pile was moved). Drain it
+                    // here — the replacement-choice resume path drains it for the
+                    // CR 616.1 case, but the aura-host resume is the ONLY drain
+                    // site for an `NeedsAuraAttachmentChoice` pause.
+                    if state.pending_batch_deliveries.is_some() {
+                        super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
+                    }
                     effects::drain_pending_continuation(state, &mut events);
                     return Ok(ActionResult {
                         events,
@@ -3595,6 +3604,11 @@ fn apply_action(
                 player: active_player,
             };
             state.priority_player = active_player;
+            // CR 603.10a + CR 616.1: drain a deferred batch completion parked
+            // behind this aura-attachment pause (see the sibling path above).
+            if state.pending_batch_deliveries.is_some() {
+                super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
+            }
             effects::drain_pending_continuation(state, &mut events);
             state.waiting_for.clone()
         }
