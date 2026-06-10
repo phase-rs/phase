@@ -108,7 +108,8 @@
     "landCount_one": "{{count}} land",
     "landCount_other": "{{count}} lands",
     "readyToSubmit": "ready to submit",
-    "moreNeeded": "{{count}} more needed"
+    "moreNeeded": "{{count}} more needed",
+    "tooManyCards": "{{count}} over limit"
   },
   "landing": {
     "title": "Draft",

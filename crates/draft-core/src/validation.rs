@@ -26,6 +26,8 @@ pub const STANDARD_BASIC_LANDS: &[&str] = &[
 pub enum LimitedDeckError {
     #[error("deck has {actual} cards, minimum is {minimum}")]
     TooFewCards { actual: usize, minimum: usize },
+    #[error("deck has {actual} cards, expected exactly {expected}")]
+    TooManyCards { actual: usize, expected: usize },
     #[error("card '{name}' is not in the drafted pool")]
     NotInPool { name: String },
     #[error("card '{name}' used {requested} times but only {available} in pool")]
@@ -53,12 +55,20 @@ pub fn validate_limited_deck(
 ) -> Result<(), Vec<LimitedDeckError>> {
     let mut errors = Vec::new();
 
-    // 1. Check minimum deck size
-    if main_deck.len() < min_deck_size {
-        errors.push(LimitedDeckError::TooFewCards {
-            actual: main_deck.len(),
-            minimum: min_deck_size,
-        });
+    // 1. Check exact deck size
+    let deck_size = main_deck.len();
+    if deck_size != min_deck_size {
+        match deck_size.cmp(&min_deck_size) {
+            std::cmp::Ordering::Less => errors.push(LimitedDeckError::TooFewCards {
+                actual: deck_size,
+                minimum: min_deck_size,
+            }),
+            std::cmp::Ordering::Greater => errors.push(LimitedDeckError::TooManyCards {
+                actual: deck_size,
+                expected: min_deck_size,
+            }),
+            std::cmp::Ordering::Equal => {}
+        }
     }
 
     // 2. Build pool multiset (card name -> available count)
@@ -138,6 +148,21 @@ mod tests {
             LimitedDeckError::TooFewCards {
                 actual: 3,
                 minimum: 40
+            }
+        )));
+    }
+
+    #[test]
+    fn too_many_cards() {
+        let pool: Vec<String> = (0..45).map(|i| format!("Card {i}")).collect();
+        let deck: Vec<String> = (0..41).map(|i| format!("Card {i}")).collect();
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40);
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            LimitedDeckError::TooManyCards {
+                actual: 41,
+                expected: 40
             }
         )));
     }

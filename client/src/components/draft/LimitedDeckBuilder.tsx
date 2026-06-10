@@ -238,11 +238,11 @@ export function LimitedDeckBuilder({
   );
 
   const totalCards = mainDeck.length + totalLands;
-  const minDeckSize = view?.min_deck_size ?? 40;
+  const deckSize = view?.min_deck_size ?? 40;
   const addableCards = view?.addable_cards?.length
     ? view.addable_cards
     : BASIC_LANDS.map((land) => land.name);
-  const deckValid = totalCards >= minDeckSize;
+  const deckValid = totalCards === deckSize;
 
   if (!view) return null;
 
@@ -254,7 +254,7 @@ export function LimitedDeckBuilder({
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />
-      <DeckStatus spells={mainDeck.length} lands={totalLands} min={minDeckSize} />
+      <DeckStatus spells={mainDeck.length} lands={totalLands} deckSize={deckSize} />
 
       <div className="flex min-h-0 flex-1 gap-6">
         {/* Left column: Pool + Main Deck */}
@@ -381,23 +381,27 @@ export function LimitedDeckBuilder({
 
 // ── Deck status bar ─────────────────────────────────────────────────────
 
-function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min: number }) {
+function DeckStatus({ spells, lands, deckSize }: { spells: number; lands: number; deckSize: number }) {
   const { t } = useTranslation("draft");
   const total = spells + lands;
-  const valid = total >= min;
-  const remaining = Math.max(0, min - total);
-  const pct = Math.min(100, (total / min) * 100);
+  const valid = total === deckSize;
+  const tooMany = total > deckSize;
+  const remaining = Math.max(0, deckSize - total);
+  const extra = Math.max(0, total - deckSize);
+  const pct = Math.min(100, (total / deckSize) * 100);
 
   return (
     <div className="rounded-[16px] border border-white/10 bg-black/18 px-4 py-3 backdrop-blur-md">
       <div className="flex items-baseline justify-between">
         <span className="text-sm font-medium text-white">
-          {total} <span className="text-white/40">{t("limitedDeck.cardCount", { min })}</span>
+          {total} <span className="text-white/40">{t("limitedDeck.cardCount", { min: deckSize })}</span>
         </span>
         <span className="text-xs text-white/45">
           {t("limitedDeck.spellCount", { count: spells })} · {t("limitedDeck.landCount", { count: lands })}
           {valid ? (
             <span className="ml-2 font-medium text-emerald-300">{t("limitedDeck.readyToSubmit")}</span>
+          ) : tooMany ? (
+            <span className="ml-2 font-medium text-red-300">{t("limitedDeck.tooManyCards", { count: extra })}</span>
           ) : (
             <span className="ml-2 text-white/55">{t("limitedDeck.moreNeeded", { count: remaining })}</span>
           )}
@@ -405,7 +409,7 @@ function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/8">
         <div
-          className={`h-full rounded-full transition-all duration-300 ${valid ? "bg-emerald-400/80" : "bg-white/30"}`}
+          className={`h-full rounded-full transition-all duration-300 ${valid ? "bg-emerald-400/80" : tooMany ? "bg-red-400/80" : "bg-white/30"}`}
           style={{ width: `${pct}%` }}
         />
       </div>

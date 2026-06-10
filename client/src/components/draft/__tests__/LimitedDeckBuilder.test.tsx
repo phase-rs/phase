@@ -89,4 +89,43 @@ describe("LimitedDeckBuilder", () => {
 
     expect(threeDropBucket).toHaveAttribute("aria-valuenow", "1");
   });
+
+  it("enables submit only at exact minimum deck size", () => {
+    const onSubmitDeck = vi.fn();
+    render(
+      <LimitedDeckBuilder
+        view={TEST_VIEW}
+        mainDeck={Array.from({ length: 40 }, (_, i) => `Card ${i}`)}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={onSubmitDeck}
+        showSuggestions={false}
+      />,
+    );
+
+    const submit = screen.getByRole("button", { name: /submit deck/i });
+    expect(submit).toBeEnabled();
+  });
+
+  it("disables submit when deck is above minimum size", () => {
+    const onSubmitDeck = vi.fn();
+    render(
+      <LimitedDeckBuilder
+        view={TEST_VIEW}
+        mainDeck={Array.from({ length: 41 }, (_, i) => `Card ${i}`)}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={onSubmitDeck}
+        showSuggestions={false}
+      />,
+    );
+
+    const submit = screen.getByRole("button", { name: /submit deck/i });
+    expect(submit).toBeDisabled();
+    expect(screen.getByText(/over limit/i)).toBeInTheDocument();
+  });
 });
