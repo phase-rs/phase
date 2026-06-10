@@ -59,6 +59,22 @@ jobs:
           fi
           ./scripts/check-parser-combinators.sh "$BASE"
 
+      - name: Skill doc gate (oracle-parser SKILL.md)
+        # Asserts .claude/skills/oracle-parser/SKILL.md still matches the
+        # parser source tree: documented paths/symbols exist and the §3
+        # priority table mirrors the `// Priority` slots in oracle.rs.
+        run: ./scripts/check-skill-doc.sh
+
+      - name: Engine authority gate
+        # Diff-based gate: new engine code must use single-authority helpers
+        # (keyword queries via game/keywords.rs) instead of raw state pokes.
+        run: |
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="origin/main"
+          fi
+          ./scripts/check-engine-authorities.sh "$BASE"
+
   rust-test:
     name: Rust tests
     runs-on: ubuntu-latest
