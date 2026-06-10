@@ -138,6 +138,7 @@ mod issue_709_regression;
 mod issue_860_luminarch_aspirant;
 mod issue_879_obsessive_pursuit;
 mod issue_924_offspring;
+mod issue_927_tireless_provisioner;
 mod jace_wielder_empty_library_win;
 mod json_smoke_test;
 mod kaito_integration;
