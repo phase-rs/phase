@@ -8,8 +8,6 @@ use crate::types::game_state::{GameState, PendingChooseOneOf, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
-use crate::game::turn_control;
-
 /// CR 701.55a-b + CR 608.2d: Prompt the instructed player to choose one
 /// branch at resolution. The branch itself is not pre-validated for
 /// possibility; the chosen instructions perform as much as possible.
@@ -81,9 +79,10 @@ pub(crate) fn prompt_next(
         context,
         remaining_players: players,
     };
-    // CR 117.3d: Route the authorized submitter to the chooser so the frontend
-    // and `WrongPlayer` guards agree on who may dispatch `ChooseBranch`.
-    state.priority_player = turn_control::authorized_submitter_for_player(state, player);
+    // `priority_player` routing to the chooser is owned by the centralized
+    // post-apply sync (`public_state::sync_priority_player_from_waiting_for`),
+    // which maps `WaitingFor::ChooseOneOfBranch { player, .. }` through
+    // `turn_control::authorized_submitter_for_player` (CR 608.2d).
 }
 
 pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>) {
