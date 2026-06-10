@@ -334,9 +334,11 @@ fn can_pay_resolution_ability_cost(
             .iter()
             .any(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost)),
         // Variants below are not yet supported as resolution-time costs.
-        // The matching arms in `resolve_ability_cost_payment` return
-        // `EffectError::InvalidParam`; refusing here is the conservative
-        // affordability answer (treat as "can't pay" → effect proceeds).
+        // Refusing here is the conservative affordability answer (treat as
+        // "can't pay" → `cost_payment_failed_flag` → the effect's didn't-pay
+        // branch, per CR 118.12). The authority's Resolution-scope guard on
+        // its interactive pass-through arm backs this up: a shape that slips
+        // past this pre-gate returns `Failed`, never a silent `Paid`.
         //
         // CR 702.24a: `PerCounter` is expanded into a concrete cost at the
         // unless-payment entry point (Task 6 wires resolution); the resolved
@@ -1000,6 +1002,53 @@ mod tests {
             }
             other => panic!("expected DiscardChoice, got {other:?}"),
         }
+    }
+
+    /// CR 118.3 + CR 601.2h: a resolution-time cost shape the authority cannot
+    /// execute (random discard is not auto-payable) must fail the payment —
+    /// never silently report `Paid` while discarding nothing. Discriminates the
+    /// Resolution-scope guard on the authority's interactive pass-through arm:
+    /// without it, this shape falls through to `Paid` with the hand untouched
+    /// and the flag unset.
+    #[test]
+    fn ability_cost_random_discard_fails_instead_of_silent_paid() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(&mut state, CardId(10), PlayerId(0), "A".into(), Zone::Hand);
+        let second = create_object(&mut state, CardId(11), PlayerId(0), "B".into(), Zone::Hand);
+        let ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: crate::types::ability::CardSelectionMode::Random,
+                        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.cost_payment_failed_flag,
+            "unexecutable resolution cost shape must set the failed flag, not fake Paid"
+        );
+        assert_eq!(
+            state.objects[&first].zone,
+            Zone::Hand,
+            "no card may be discarded by a failed payment"
+        );
+        assert_eq!(state.objects[&second].zone, Zone::Hand);
     }
 
     #[test]

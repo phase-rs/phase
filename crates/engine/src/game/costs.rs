@@ -5,9 +5,11 @@
 //! `match` over `AbilityCost` that mutates player/object state to pay a cost,
 //! plus the CR 616.1 replacement-pause bookkeeping. Both activation-time
 //! (CR 601.2g/h) and resolution-time (CR 118.12) payment flow through it; the
-//! caller selects the regime via [`PaymentScope`], which carries the two
-//! genuine differences (CR-confirmed in the unification plan §2): quantity
-//! resolution context and mana payment context.
+//! caller selects the regime via [`PaymentScope`], which carries the genuine
+//! scope differences (CR-confirmed in the unification plan §2): quantity
+//! resolution context, mana payment context, and PayLife helper selection
+//! (the activation helper additionally applies cast/activation life-payment
+//! prohibition statics; plan R4 keeps such forks explicit in the arm).
 //!
 //! Originally extracted from `casting.rs` as a pure code-motion seam (Phase 1);
 //! Phase 2 introduced [`PaymentScope`] and routed the resolution-time
@@ -726,7 +728,19 @@ fn pay_ability_cost_inner(
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
-        | AbilityCost::NinjutsuFamily { .. } => {}
+        | AbilityCost::NinjutsuFamily { .. } => {
+            // At Activation these shapes are intercepted by the interactive
+            // WaitingFor detours before payment is invoked, so passing through
+            // is sound. At Resolution there is no interceptor: falling through
+            // to `Paid` would report a cost as paid that was never paid
+            // (CR 118.3 / CR 601.2h). Fail loudly so the adapter's
+            // `cost_payment_failed_flag` branch fires instead.
+            if matches!(scope, PaymentScope::Resolution { .. }) {
+                return Ok(payment_failed(
+                    "unsupported resolution-time AbilityCost payment shape",
+                ));
+            }
+        }
         // CR 118.12a: `OneOf` (disjunctive unless-cost) is intercepted at
         // `surface_unless_payment` and never reaches an auto-payment site.
         AbilityCost::OneOf { .. } => {
