@@ -5696,10 +5696,14 @@ fn handle_crew_activation(
     }
 
     // Extract crew power and once-each-turn cadence from keywords.
-    let (crew_power, crew_once_per_turn) = obj
+    // If multiple Crew keywords exist (e.g., printed Crew 3 + granted Crew 2),
+    // use the lowest power value (granted crew cost should override printed).
+    // CR 702.122a: Each Crew N is a separate activated ability. Use most permissive
+    // cadence: Unlimited if any keyword is Unlimited, otherwise OncePerTurn.
+    let crew_keywords: Vec<(u32, bool)> = obj
         .keywords
         .iter()
-        .find_map(|kw| {
+        .filter_map(|kw| {
             if let crate::types::keywords::Keyword::Crew {
                 power,
                 once_per_turn,
@@ -5716,7 +5720,21 @@ fn handle_crew_activation(
                 None
             }
         })
-        .ok_or_else(|| EngineError::InvalidAction("Vehicle has no Crew keyword".to_string()))?;
+        .collect();
+
+    let (crew_power, crew_once_per_turn) = if crew_keywords.is_empty() {
+        return Err(EngineError::InvalidAction(
+            "Vehicle has no Crew keyword".to_string(),
+        ));
+    } else {
+        // Select the lowest power value (granted crew cost should override printed)
+        let min_power = crew_keywords.iter().map(|(p, _)| *p).min().unwrap();
+        // Use most permissive cadence: if any keyword is Unlimited (not once_per_turn),
+        // the activation is not restricted.
+        let has_unlimited = crew_keywords.iter().any(|(_, limited)| !*limited);
+        let once_per_turn = !has_unlimited;
+        (min_power, once_per_turn)
+    };
 
     // CR 602.5b: "Activate only once each turn" — reject a second crew activation
     // of this Vehicle in the same turn.
