@@ -287,14 +287,27 @@ pub(super) fn handle_replacement_choice(
                 // replacement pipeline may have modified `object_id`/`player_id`
                 // (e.g., Madness redirects surface as a ZoneChange variant handled
                 // by the ZoneChange arm above, not here).
+                //
+                // CR 614.6: the inner hand → graveyard move re-proposes a
+                // `ZoneChange` carrying `applied`, so `Moved` redirects (RIP
+                // class) are consulted here too. A redirect that itself needs a
+                // CR 616.1 choice parks `state.waiting_for`; early-return so the
+                // unconditional reset below does not clobber it.
                 ProposedEvent::Discard {
                     player_id,
                     object_id,
-                    ..
+                    source_id,
+                    applied,
                 } => {
-                    effects::discard::complete_discard_to_graveyard(
-                        state, object_id, player_id, events,
-                    );
+                    if let effects::discard::DiscardOutcome::NeedsReplacementChoice(player) =
+                        effects::discard::complete_discard_to_graveyard(
+                            state, object_id, player_id, source_id, applied, events,
+                        )
+                    {
+                        state.waiting_for =
+                            crate::game::replacement::replacement_choice_waiting_for(player, state);
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 106.3 + CR 106.4: Mana production accepted after replacement choice.
                 // In practice CR 614.5 mana-type replacements don't require a choice and
