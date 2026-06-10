@@ -11,7 +11,9 @@ import {
   type SeatKind,
 } from "../../stores/multiplayerStore";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck } from "../../services/deckParser";
+import { SelectField } from "../ui/SelectField";
 
 const AI_DIFFICULTIES = ["Easy", "Medium", "Hard", "VeryHard"] as const;
 const RANDOM_DECK: DeckChoice = { type: "Random" };
@@ -123,7 +125,8 @@ function SeatRow({
           )}
           {slot.kind.type === "Ai" && (
             <>
-              <select
+              <SelectField
+                chevronSize="sm"
                 value={slot.kind.data.difficulty}
                 onChange={(e) =>
                   mutate({
@@ -147,8 +150,9 @@ function SeatRow({
                     {t(`menu:aiDifficulty.levels.${difficulty}`)}
                   </option>
                 ))}
-              </select>
-              <select
+              </SelectField>
+              <SelectField
+                chevronSize="sm"
                 value={selectedDeckKey}
                 onChange={(e) =>
                   mutate({
@@ -176,7 +180,7 @@ function SeatRow({
                     {label}
                   </option>
                 ))}
-              </select>
+              </SelectField>
               <button
                 type="button"
                 onClick={() =>
@@ -274,9 +278,18 @@ export function HostControlTile() {
     (s) => s.startLobbyWithCurrentPlayers,
   );
   const showToast = useMultiplayerStore((s) => s.showToast);
+  const serverInfo = useMultiplayerStore((s) => s.serverInfo);
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
+
+  // The reachable `<code>@<host>` join string, available only when the server
+  // advertised a public URL (server-run hosting). P2P/broker hosts have no
+  // such URL and share the bare code instead (handled below).
+  const joinShare =
+    hostGameCode && serverInfo?.publicUrl
+      ? formatJoinShare(hostGameCode, serverInfo.publicUrl)
+      : null;
   const aiDeckCatalog = useAiDeckCatalog({
     selectedFormat: hostSession?.formatConfig.format,
     selectedMatchType: hostSession?.matchType,
@@ -418,12 +431,18 @@ export function HostControlTile() {
           <button
             type="button"
             onClick={() => {
-              if (location.pathname.startsWith("/game/") && hostGameCode) {
+              if (joinShare) {
+                // Server-run host: copy the reachable `<code>@<host>` join link.
+                void navigator.clipboard?.writeText(joinShare);
+                showToast(t("hostControl.joinLinkCopied"));
+              } else if (location.pathname.startsWith("/game/") && hostGameCode) {
+                // P2P host in-game: the bare code (friends join via direct code).
                 void navigator.clipboard?.writeText(hostGameCode);
               } else {
                 navigate("/multiplayer");
               }
             }}
+            title={joinShare ? t("hostControl.copyJoinLink", { joinShare }) : undefined}
             className="flex min-w-0 items-center gap-2 text-xs text-slate-300 transition-colors hover:text-white"
           >
             <StatusDot connecting={isConnecting} />

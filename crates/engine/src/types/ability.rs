@@ -2844,9 +2844,14 @@ pub enum TargetFilter {
     },
     /// Matches non-mana activated or triggered abilities on the stack.
     /// Used by "counter target activated or triggered ability" effects.
+    /// CR 113.7a: once activated or triggered, an ability exists on the stack
+    /// independently of its source — `tag` matches by keyword-origin marker
+    /// (e.g. `AbilityTag::Backup` for "becomes the target of a backup ability").
     StackAbility {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<AbilityTag>,
     },
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
@@ -4289,6 +4294,12 @@ pub enum SolveCondition {
         comparator: Comparator,
         threshold: u32,
     },
+    /// CR 719.3a: A general game-state solve condition decomposed via the single
+    /// condition authority (`parse_inner_condition` → `StaticCondition`) and
+    /// evaluated at end step through `layers::evaluate_condition`. Covers life
+    /// totals, hand size, control counts, event history, quantity comparisons —
+    /// every condition shape the engine already understands.
+    Condition { condition: StaticCondition },
     /// Fallback for conditions the parser cannot decompose.
     Text { description: String },
 }
@@ -8589,6 +8600,23 @@ impl fmt::Debug for Effect {
 }
 
 impl Effect {
+    /// Single authority for constructing the "parser couldn't handle this"
+    /// effect. Parser code must use this instead of a literal
+    /// `Effect::Unimplemented { .. }` (enforced for new code by
+    /// `scripts/check-parser-combinators.sh`).
+    ///
+    /// `name` is a stable snake_case *category* key — the coverage report
+    /// groups parse gaps by it, so it must describe the pattern class
+    /// (e.g. `"dig_continuation"`, `"modal_mode_unsupported_qualifier"`),
+    /// never the raw Oracle text fragment. The unparsed text itself goes in
+    /// `fragment`, which lands in `description` for diagnostics.
+    pub fn unimplemented(name: impl Into<String>, fragment: impl Into<String>) -> Effect {
+        Effect::Unimplemented {
+            name: name.into(),
+            description: Some(fragment.into()),
+        }
+    }
+
     /// CR 115.1: Returns the target filter for effects that have a player-selectable
     /// `target` field. Returns `None` for effects with no target field, or whose
     /// targeting is handled through different mechanisms (filters, zones, etc.).
@@ -10061,6 +10089,8 @@ pub enum AbilityTag {
     /// a `GameEvent::Cycled` (CR 702.29c) that "When you cycle this card"
     /// triggers match.
     Cycling,
+    /// CR 702.165a: ability originated from a Backup keyword definition.
+    Backup,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
@@ -11269,6 +11299,21 @@ pub(crate) fn additional_cost_payment_count_matches(
     }
 }
 
+/// CR 702.112: Which creature's renowned designation an `IsRenowned` condition reads.
+///
+/// Renowned (CR 702.112b) is a per-permanent designation other spells and abilities
+/// can identify, so a condition may reference either the ability's own permanent or a
+/// different (event-subject) creature.
+///   - `Source` — the ability's own permanent ("~"), as in Renown's own
+///     intervening-if (CR 702.112a, "if it isn't renowned" where "it" == this creature).
+///   - `EventSubject` — the creature named by the triggering event ("it"), a creature
+///     other than the source (CR 702.112b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenownSubject {
+    Source,
+    EventSubject,
+}
+
 /// Intervening-if condition for triggered abilities.
 /// Checked both when the trigger would fire and when it resolves on the stack.
 ///
@@ -11502,8 +11547,13 @@ pub enum TriggerCondition {
     /// CR 903.3d: "if you control a commander" — controller-only, any owner.
     /// The `ownership` field selects which CR condition this is.
     ControlsCommander { ownership: CommanderOwnership },
-    /// CR 702.112a: "if ~ is renowned" — true when the source has been made renowned.
-    SourceIsRenowned,
+    /// CR 702.112: True when the referenced creature has the renowned designation.
+    ///   - `RenownSubject::Source` — "if ~ is renowned" (CR 702.112a, the canonical
+    ///     Renown intervening-if; subject == the ability's own permanent).
+    ///   - `RenownSubject::EventSubject` — "if it's renowned" (CR 702.112b; the
+    ///     triggering/event creature, a creature OTHER than the source, whose
+    ///     renowned designation other spells and abilities can identify).
+    IsRenowned { subject: RenownSubject },
     /// CR 711.2a + CR 711.2b: Level-up creature trigger gating — true when the source has at least
     /// `minimum` counters (and at most `maximum` if specified) matching `counters`.
     /// `CounterMatch::Any` sums across every counter type on the source; `OfType(ct)`
@@ -13222,6 +13272,15 @@ pub struct ResolvedAbility {
     pub effect: Effect,
     pub targets: Vec<TargetRef>,
     pub source_id: ObjectId,
+    /// CR 400.7: The source object's `incarnation` captured when this ability was
+    /// created. Set only for triggered abilities (where the source can change
+    /// zones between firing and resolution); `None` for activated abilities,
+    /// casts, and engine-internal abilities, which then bypass the epoch guard.
+    /// At resolution a self-reference (`~`) resolves to the source only while its
+    /// incarnation still matches — once the source has left and re-entered the
+    /// battlefield it is a new object and the self-reference finds nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -13429,6 +13488,7 @@ impl ResolvedAbility {
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
+            source_incarnation: None,
         }
     }
 
@@ -13439,6 +13499,35 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_may_trigger_origin_recursive(origin);
+        }
+    }
+
+    /// CR 400.7: Propagate the source's captured incarnation to this ability and
+    /// every sub/else branch (chained "...then exile ~" effects share the source).
+    /// Stamped when a triggered ability fires; read by the self-reference epoch
+    /// guard at resolution.
+    pub fn set_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
+        self.source_incarnation = incarnation;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_source_incarnation_recursive(incarnation);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_source_incarnation_recursive(incarnation);
+        }
+    }
+
+    /// CR 400.7: True if the ability's source is still the same object instance it
+    /// was when the ability was created. A `None` capture (activated abilities,
+    /// casts, engine-internal abilities) is always current. Once the source has
+    /// left and re-entered the battlefield as a new object, its incarnation no
+    /// longer matches the captured value and this returns false.
+    pub fn source_is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        match self.source_incarnation {
+            None => true,
+            Some(captured) => state
+                .objects
+                .get(&self.source_id)
+                .is_some_and(|obj| obj.incarnation == captured),
         }
     }
 
@@ -14301,7 +14390,13 @@ mod tests {
     #[test]
     fn stack_ability_filter_accepts_legacy_unit_json() {
         let filter: TargetFilter = serde_json::from_str(r#"{"type":"StackAbility"}"#).unwrap();
-        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        );
         assert_eq!(
             serde_json::to_string(&filter).unwrap(),
             r#"{"type":"StackAbility"}"#
@@ -14315,7 +14410,8 @@ mod tests {
         assert_eq!(
             filter,
             TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
+                controller: Some(ControllerRef::You),
+                tag: None
             }
         );
         assert_eq!(

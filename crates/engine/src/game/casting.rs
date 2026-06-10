@@ -2276,6 +2276,18 @@ fn cast_free_origin_admits_object(
     }
 }
 
+/// CR 114.4: `CastFromHandFree` granting sources function on the battlefield
+/// (Omniscience, Zaffai, Dracogenesis) and from the command zone when they are
+/// emblems (Tamiyo, Field Researcher). `active_static_definitions` applies the
+/// CR 113.6b opt-in gate for non-emblem command-zone objects.
+fn iter_cast_free_permission_source_ids(state: &GameState) -> impl Iterator<Item = ObjectId> + '_ {
+    state
+        .battlefield
+        .iter()
+        .chain(state.command_zone.iter())
+        .copied()
+}
+
 fn cast_free_permission_from_source(
     state: &GameState,
     player: PlayerId,
@@ -2318,7 +2330,7 @@ pub(crate) fn hand_cast_free_permission_source(
     player: PlayerId,
     obj: &crate::game::game_object::GameObject,
 ) -> Option<(ObjectId, CastFrequency)> {
-    state.battlefield.iter().find_map(|&src_id| {
+    iter_cast_free_permission_source_ids(state).find_map(|src_id| {
         cast_free_permission_from_source(state, player, obj, src_id)
             .map(|frequency| (src_id, frequency))
     })
@@ -3871,7 +3883,7 @@ fn apply_non_floor_cost_modifiers(
     object_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
-    // CR 117.7 + CR 601.2f: collect self-spell statics ("This spell costs
+    // CR 601.2f: collect self-spell statics ("This spell costs
     // {N} less ...") and battlefield statics together so all increases apply
     // before any reductions across both passes.
     let mut collected = collect_self_spell_cost_modifiers(state, player, object_id, None, false);
@@ -4071,10 +4083,9 @@ pub(super) fn recompute_pending_cast_cost(
     apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
 }
 
-/// CR 117.7 + CR 601.2f: Apply self-spell cost modifications — `ReduceCost` / `RaiseCost`
+/// CR 601.2f: Apply self-spell cost modifications — `ReduceCost` / `RaiseCost`
 /// statics printed on the spell being cast, with `affected = SelfRef` and `active_zones`
-/// covering the card's current zone (Hand for normal casting, Stack for the cost-
-/// determination step). Handles cards like Tolarian Terror where the cost reduction is
+/// covering the card's current castable zone. Handles cards like Tolarian Terror where the cost reduction is
 /// inherent to the spell and must apply before the spell resolves.
 ///
 /// Test-only isolation helper: production cost calculation now collects self-spell
@@ -4136,7 +4147,7 @@ fn collect_self_spell_cost_modifiers(
         if !def.active_zones.contains(&spell_obj.zone) {
             continue;
         }
-        // CR 117.7: Only self-referential cost statics apply here. Any other
+        // CR 601.2f: Only self-referential cost statics apply here. Any other
         // `affected` scoping would indicate a battlefield-style static that
         // should be handled by the battlefield scanner.
         if !matches!(def.affected, Some(TargetFilter::SelfRef)) {
@@ -8671,32 +8682,31 @@ pub fn hand_cast_free_candidates(
 ) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
     // CR 601.2b + CR 400.7: Collect active (source_id, frequency, filter)
     // triples for OncePerTurn permissions that haven't been consumed this turn.
-    let sources: Vec<(ObjectId, TargetFilter, CastFrequency, CastFreeOrigin)> = state
-        .battlefield
-        .iter()
-        .filter_map(|&src_id| {
-            let src_obj = state.objects.get(&src_id)?;
-            if src_obj.controller != player {
-                return None;
-            }
-            active_static_definitions(state, src_obj).find_map(|s| match s.mode {
-                StaticMode::CastFromHandFree { frequency, origin } => {
-                    if frequency == CastFrequency::OncePerTurn
-                        && state.hand_cast_free_permissions_used.contains(&src_id)
-                    {
-                        None
-                    } else if frequency == CastFrequency::OncePerTurn {
-                        s.affected
-                            .as_ref()
-                            .map(|f| (src_id, f.clone(), frequency, origin))
-                    } else {
-                        None
-                    }
+    let sources: Vec<(ObjectId, TargetFilter, CastFrequency, CastFreeOrigin)> =
+        iter_cast_free_permission_source_ids(state)
+            .filter_map(|src_id| {
+                let src_obj = state.objects.get(&src_id)?;
+                if src_obj.controller != player {
+                    return None;
                 }
-                _ => None,
+                active_static_definitions(state, src_obj).find_map(|s| match s.mode {
+                    StaticMode::CastFromHandFree { frequency, origin } => {
+                        if frequency == CastFrequency::OncePerTurn
+                            && state.hand_cast_free_permissions_used.contains(&src_id)
+                        {
+                            None
+                        } else if frequency == CastFrequency::OncePerTurn {
+                            s.affected
+                                .as_ref()
+                                .map(|f| (src_id, f.clone(), frequency, origin))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
             })
-        })
-        .collect();
+            .collect();
 
     if sources.is_empty() {
         return Vec::new();
@@ -12335,7 +12345,6 @@ fn evaluate_casting_prohibition_condition(
     source_controller: PlayerId,
     caster: PlayerId,
 ) -> bool {
-    use crate::types::phase::Phase;
     match when {
         // CR 109.5: "during your turn" — bound to the static's source controller.
         CastingProhibitionCondition::DuringYourTurn => state.active_player == source_controller,
@@ -12354,13 +12363,10 @@ fn evaluate_casting_prohibition_condition(
         // of "[every player] can [action] only during their own [time]".
         CastingProhibitionCondition::NotDuringAffectedPlayersTurn => state.active_player != caster,
         // CR 117.1a + CR 117.1b: "only any time they could cast a sorcery"
-        // — blocked when not at sorcery speed (active player's main phase
-        // + empty stack + caster is the active player).
+        // — blocked when not at sorcery speed. `restrictions` owns the
+        // sorcery-speed timing predicate (CR 307.1); never re-derive it.
         CastingProhibitionCondition::NotSorcerySpeed => {
-            let at_sorcery_speed = state.active_player == caster
-                && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-                && state.stack.is_empty();
-            !at_sorcery_speed
+            !super::restrictions::is_sorcery_speed_window(state, caster)
         }
     }
 }
@@ -12641,12 +12647,13 @@ mod tests {
         AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
         BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
-        CostCategory, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
-        ManaSpendPermission, ManaSpendRestriction, ModalChoice, ModalSelectionCondition,
-        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtStat,
-        PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        CostCategory, CountScope, FilterProp, GameRestriction, KickerVariant, ManaContribution,
+        ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalChoice,
+        ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectProperty,
+        ProhibitedActivity, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -16754,6 +16761,7 @@ mod tests {
                 Effect::CopySpell {
                     target: TargetFilter::StackAbility {
                         controller: Some(ControllerRef::You),
+                        tag: None,
                     },
                     retarget: CopyRetargetPermission::MayChooseNewTargets,
                     copier: None,
@@ -18370,11 +18378,11 @@ mod tests {
         );
     }
 
-    /// CR 117.7 + CR 601.2f: A self-spell cost reduction printed on the card itself
+    /// CR 601.2f: A self-spell cost reduction printed on the card itself
     /// ("This spell costs {1} less to cast for each instant and sorcery card in your
     /// graveyard.") must fire while the card is in hand. Verifies the parser-emitted
-    /// static (affected = SelfRef, active_zones = [Hand, Stack, Command]) is picked up by the
-    /// casting-time scanner and reduces the spell's generic cost.
+    /// static (affected = SelfRef, active_zones = self_spell_cost_mod_active_zones()) is
+    /// picked up by the casting-time scanner and reduces the spell's generic cost.
     #[test]
     fn tolarian_terror_self_cost_reduction_applies_from_hand() {
         use crate::types::statics::StaticMode;
@@ -18409,7 +18417,7 @@ mod tests {
                 }),
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
             obj.static_definitions.push(def);
         }
 
@@ -18647,7 +18655,7 @@ mod tests {
                 }),
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
             obj.static_definitions.push(def);
         }
 
@@ -18677,6 +18685,107 @@ mod tests {
             ManaCost::Cost { generic, shards } => {
                 assert_eq!(generic, 5);
                 assert_eq!(shards, vec![ManaCostShard::Green, ManaCostShard::Green]);
+            }
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+    }
+
+    /// CR 601.2f + CR 702.138a: Demilich's self-spell cost reduction must apply
+    /// while the card is in the graveyard, before it is cast via its graveyard
+    /// permission.
+    #[test]
+    fn self_cost_reduction_applies_from_graveyard() {
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+        let demilich = create_object(
+            &mut state,
+            CardId(993),
+            PlayerId(0),
+            "Demilich".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&demilich).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                ],
+                generic: 0,
+            };
+            let instant_sorcery_filter = TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                ],
+            };
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::Blue],
+                },
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(instant_sorcery_filter),
+                }),
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
+            obj.static_definitions.push(def);
+        }
+
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                crate::types::SpellCastRecord {
+                    name: "Shock".to_string(),
+                    core_types: vec![CoreType::Instant],
+                    supertypes: vec![],
+                    subtypes: vec![],
+                    keywords: vec![],
+                    colors: vec![],
+                    mana_value: 1,
+                    has_x_in_cost: false,
+                    from_zone: Zone::Hand,
+                    cast_variant: CastingVariant::Normal,
+                },
+                crate::types::SpellCastRecord {
+                    name: "Opt".to_string(),
+                    core_types: vec![CoreType::Instant],
+                    supertypes: vec![],
+                    subtypes: vec![],
+                    keywords: vec![],
+                    colors: vec![],
+                    mana_value: 1,
+                    has_x_in_cost: false,
+                    from_zone: Zone::Hand,
+                    cast_variant: CastingVariant::Normal,
+                },
+            ]),
+        );
+
+        let mut mana_cost = state.objects.get(&demilich).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers(
+            &state,
+            PlayerId(0),
+            demilich,
+            &mut mana_cost,
+        );
+
+        match mana_cost {
+            ManaCost::Cost { shards, generic } => {
+                assert_eq!(generic, 0);
+                assert_eq!(
+                    shards,
+                    vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    "two instant/sorcery spells cast this turn should reduce UUUU by UU"
+                );
             }
             other => panic!("expected ManaCost::Cost, got {other:?}"),
         }
@@ -19007,7 +19116,7 @@ mod tests {
                 dynamic_count: None,
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
             obj.static_definitions.push(def);
         }
 
@@ -19113,7 +19222,10 @@ mod tests {
                     TargetFilter::Or {
                         filters: vec![
                             TargetFilter::StackSpell,
-                            TargetFilter::StackAbility { controller: None },
+                            TargetFilter::StackAbility {
+                                controller: None,
+                                tag: None,
+                            },
                         ],
                     },
                     TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -19134,7 +19246,7 @@ mod tests {
                 dynamic_count: None,
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
             obj.static_definitions.push(def);
         }
 
@@ -19255,7 +19367,10 @@ mod tests {
         });
         let not_of_this_world_targeting_ability = ResolvedAbility::new(
             Effect::Counter {
-                target: TargetFilter::StackAbility { controller: None },
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
                 source_rider: None,
             },
             vec![TargetRef::Object(stack_ability_id)],
@@ -21329,6 +21444,125 @@ mod tests {
         assert!(
             !matches!(cost, ManaCost::NoCost),
             "Omniscience must not apply to command-zone commanders, got {cost:?}"
+        );
+    }
+
+    /// CR 114.4 + CR 601.2b + CR 118.9a (issue #1355): Tamiyo, Field
+    /// Researcher's emblem grants `CastFromHandFree` from the command zone.
+    #[test]
+    fn tamiyo_emblem_free_casts_spells_from_hand() {
+        let mut state = setup_game_at_main_phase();
+
+        let emblem_id = create_object(
+            &mut state,
+            CardId(920),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem_id).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions.push(
+                parse_static_line(
+                    "You may cast spells from your hand without paying their mana costs.",
+                )
+                .expect("Tamiyo emblem static should parse"),
+            );
+        }
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(921),
+            PlayerId(0),
+            "Counterspell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Counterspell".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), spell_id)
+            .expect("hand spell cost should compute");
+        assert!(
+            matches!(cost, ManaCost::NoCost),
+            "Tamiyo emblem should zero the hand spell's mana cost, got {cost:?}"
+        );
+        assert!(can_cast_object_now(&state, PlayerId(0), spell_id));
+        assert_eq!(
+            hand_cast_free_permission_source(
+                &state,
+                PlayerId(0),
+                state.objects.get(&spell_id).unwrap()
+            ),
+            Some((emblem_id, CastFrequency::Unlimited)),
+            "permission source should be the command-zone emblem"
+        );
+    }
+
+    /// Issue #1355 regression: Tamiyo emblem's hand qualifier must not free-cast
+    /// commanders from the command zone (mirrors Omniscience guard).
+    #[test]
+    fn tamiyo_emblem_does_not_free_cast_commander_from_command_zone() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.command_zone = true;
+
+        let emblem_id = create_object(
+            &mut state,
+            CardId(922),
+            PlayerId(0),
+            "Emblem".to_string(),
+            Zone::Command,
+        );
+        {
+            let emblem = state.objects.get_mut(&emblem_id).unwrap();
+            emblem.is_emblem = true;
+            emblem.static_definitions.push(
+                parse_static_line(
+                    "You may cast spells from your hand without paying their mana costs.",
+                )
+                .expect("Tamiyo emblem static should parse"),
+            );
+        }
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(923),
+            PlayerId(0),
+            "Dragon Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(5);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Commander".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cost should compute");
+        assert!(
+            !matches!(cost, ManaCost::NoCost),
+            "Tamiyo emblem must not apply to command-zone commanders, got {cost:?}"
         );
     }
 
@@ -28972,7 +29206,7 @@ mod tests {
                 dynamic_count: None,
             })
             .affected(TargetFilter::SelfRef);
-            reduction.active_zones = vec![Zone::Hand, Zone::Stack];
+            reduction.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
             obj.static_definitions.push(reduction);
         }
 
@@ -36690,7 +36924,7 @@ mod tests {
                 dynamic_count: None,
             })
             .affected(TargetFilter::SelfRef);
-            def.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
             obj.static_definitions.push(def);
         }
 

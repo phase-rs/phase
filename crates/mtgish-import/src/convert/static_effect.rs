@@ -299,14 +299,13 @@ pub fn convert_permanent_rule(
         P::MustBlock => StaticMode::MustBlock,
         P::MustBeBlocked => StaticMode::MustBeBlocked,
         P::CanBlockOnly(filter) if is_creature_with_flying_filter(filter) => {
-            StaticMode::BlockRestriction
+            StaticMode::BlockRestriction {
+                filter: engine::types::statics::block_only_creatures_with_flying_filter(),
+            }
         }
-        P::CanBlockOnly(filter) => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "StaticMode::BlockRestriction",
-                needed_variant: format!("parameterized block-only filter: {filter:?}"),
-            });
-        }
+        P::CanBlockOnly(filter) => StaticMode::BlockRestriction {
+            filter: filter::convert(filter)?,
+        },
         P::CantAttackIfDefendingPlayer(condition) => {
             return Ok(StaticDefinition::new(StaticMode::CantAttack)
                 .affected(affected)
@@ -1009,7 +1008,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(converted.mode, StaticMode::BlockRestriction);
+        assert!(matches!(
+            converted.mode,
+            StaticMode::BlockRestriction { .. }
+        ));
         assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
     }
 

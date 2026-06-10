@@ -392,6 +392,12 @@ pub enum GameEvent {
     TokenCreated {
         object_id: ObjectId,
         name: String,
+        /// CR 111.1: the object id of the ability/spell that created this token
+        /// (the creating effect's `source_id`). Lets consumers attribute a token
+        /// to its creator — e.g. "destroy all OTHER creatures" sparing only the
+        /// tokens the resolving spell itself made, distinct from tokens a
+        /// replacement effect produced during the same resolution.
+        source_id: ObjectId,
     },
     /// Digital-only: A card was conjured from outside the game into a zone.
     ObjectConjured {

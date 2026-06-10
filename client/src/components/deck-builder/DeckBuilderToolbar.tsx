@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { FormatFilter } from "./FormatFilter";
+import { SelectField } from "../ui/SelectField";
 
 function PencilIcon({ className }: { className?: string }) {
   return (
@@ -78,7 +79,7 @@ export function DeckBuilderToolbar({
       <div className="order-3 flex w-full flex-col gap-2 lg:order-none lg:w-auto lg:flex-row lg:items-center">
         {/* Format: compact native select up to tablet, full button row at lg+
             (where there's horizontal room for the ~15-format wall). */}
-        <select
+        <SelectField
           value={format}
           onChange={(e) => onFormatChange(e.target.value as GameFormat)}
           aria-label={t("toolbar.format")}
@@ -89,7 +90,7 @@ export function DeckBuilderToolbar({
               {label}
             </option>
           ))}
-        </select>
+        </SelectField>
         <div className="hidden lg:block">
           <FormatFilter selected={format} onChange={onFormatChange} />
         </div>
@@ -118,10 +119,11 @@ export function DeckBuilderToolbar({
           {t("toolbar.clone")}
         </button>
         {savedDecks.length > 0 && (
-          <select
+          <SelectField
             onChange={(e) => e.target.value && onLoad(e.target.value)}
             value=""
-            className="max-w-[8rem] shrink-0 rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:outline-none sm:max-w-none"
+            wrapperClassName="max-w-[8rem] shrink-0 sm:max-w-none"
+            className="rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white focus:outline-none"
           >
             <option value="">{t("toolbar.loadDeck")}</option>
             {savedDecks.map((name) => (
@@ -129,7 +131,7 @@ export function DeckBuilderToolbar({
                 {name}
               </option>
             ))}
-          </select>
+          </SelectField>
         )}
       </div>
     </div>

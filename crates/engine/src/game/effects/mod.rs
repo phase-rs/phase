@@ -1852,6 +1852,13 @@ pub(crate) fn try_resolve_batch(
 }
 
 /// Dispatch to the appropriate effect handler using typed pattern matching.
+///
+/// Canonical single-effect dispatch — one exhaustive match over `Effect`.
+/// Production callers outside `effects/` must enter through
+/// [`resolve_ability_chain`], which additionally handles ability-level
+/// conditions, `optional`, and chained sub-abilities. Calling a per-effect
+/// `<module>::resolve` directly bypasses those semantics; direct calls are
+/// reserved for tests and for dispatch inside this module tree.
 pub fn resolve_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,

@@ -356,6 +356,18 @@ body {
   display: none;
 }
 
+/* Deck builder fills the shell content column without forcing a page scrollbar.
+   Subtracts the sticky social header and (on narrow viewports) the bottom tab
+   bar reserve that shell-content already applies via pb-[76px]. */
+.deck-builder-shell {
+  height: calc(100dvh - env(safe-area-inset-top) - 44px - 76px - env(safe-area-inset-bottom));
+}
+@media (min-width: 820px) {
+  .deck-builder-shell {
+    height: calc(100dvh - env(safe-area-inset-top) - 56px - env(safe-area-inset-bottom));
+  }
+}
+
 @media (min-width: 1200px) {
   :root {
     --card-base: clamp(4.5rem, calc((5.9vw + 12vh) / 2), 7.25rem);
@@ -501,6 +513,57 @@ body {
   touch-action: pan-x;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
+}
+
+/* Thin scrollbar for scrollable panels and modals — pill thumb, subtle track, arrow buttons */
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.45) rgba(255, 255, 255, 0.06);
+}
+.thin-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 9999px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.42);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.62);
+  background-clip: padding-box;
+}
+.thin-scrollbar::-webkit-scrollbar-button:single-button {
+  display: block;
+  height: 10px;
+  background-color: transparent;
+}
+.thin-scrollbar::-webkit-scrollbar-button:single-button:vertical:decrement {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5'%3E%3Cpath fill='rgba(255,255,255,0.55)' d='M4 0 8 5H0z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.thin-scrollbar::-webkit-scrollbar-button:single-button:vertical:increment {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5'%3E%3Cpath fill='rgba(255,255,255,0.55)' d='M0 0h8L4 5z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.thin-scrollbar::-webkit-scrollbar-button:single-button:horizontal:decrement {
+  width: 10px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 5 8'%3E%3Cpath fill='rgba(255,255,255,0.55)' d='M0 4 5 0v8z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.thin-scrollbar::-webkit-scrollbar-button:single-button:horizontal:increment {
+  width: 10px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 5 8'%3E%3Cpath fill='rgba(255,255,255,0.55)' d='M5 4 0 0v8z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
 }
 
 /* Thin scrollbar for zone viewer (graveyard/exile) */

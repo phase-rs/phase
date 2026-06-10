@@ -305,6 +305,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 // CR 702.29c: Cycling emits a dedicated `GameEvent::Cycled`, not a
                 // `KeywordAbilityActivated` event, so this arm is unreachable.
                 AbilityTag::Cycling => " activates cycling: ",
+                // CR 702.165a: Backup is a triggered ability — it never emits a
+                // `KeywordAbilityActivated` event, so this arm is unreachable.
+                AbilityTag::Backup => " activates backup: ",
             };
             vec![
                 player_seg(state, *player_id),
@@ -717,7 +720,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![text("Day/Night changed to "), text(new_state)]
         }
 
-        GameEvent::TokenCreated { object_id, name } => vec![
+        GameEvent::TokenCreated {
+            object_id, name, ..
+        } => vec![
             text("Token created: "),
             LogSegment::CardName {
                 name: name.clone(),
@@ -1319,6 +1324,7 @@ mod tests {
             GameEvent::TokenCreated {
                 object_id: ObjectId(1),
                 name: "Zombie".to_string(),
+                source_id: ObjectId(0),
             },
             GameEvent::PowerToughnessChanged {
                 object_id: ObjectId(1),

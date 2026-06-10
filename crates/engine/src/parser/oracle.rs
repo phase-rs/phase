@@ -77,10 +77,11 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_mayhem_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    lower_static_ir, parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
-    parse_chosen_creature_type_static_prefix, parse_collect_evidence_alt_cost,
-    parse_every_creature_type_static_prefix, parse_spells_alternative_cost, parse_static_line,
-    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
+    parse_cast_spells_alternative_cost_multi, parse_chosen_creature_type_static_prefix,
+    parse_collect_evidence_alt_cost, parse_every_creature_type_static_prefix,
+    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
+    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -1194,7 +1195,7 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    if lower == "your speed can increase beyond 4." || lower == "your speed can increase beyond 4" {
+    if is_speed_unlock_sentence(&lower) {
         return false;
     }
 
@@ -1271,7 +1272,24 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    if is_static_pattern(&effect_lower) && !should_defer_spell_to_effect(&effect_lower) {
+    // CR 111.3 + CR 111.4: mask double-quoted spans (a created token/permanent's
+    // defined inline ability text) before spell-line static classification, so a
+    // token's quoted "can't block" etc. doesn't mark this resolution line static.
+    // This function is already spell-scoped (caller is inside `if is_spell {`).
+    // The adjacent is_replacement_pattern check below stays on the UNMASKED text.
+    //
+    // Gate the mask on a token/permanent-creation verb being present: only then is
+    // a quoted span an inline ability *of the created object* ("create ... with
+    // \"…\""). On a line with no creation verb the quote is instead a granted-
+    // ability payload ("…perpetually gain \"This spell costs {1} less\""), whose
+    // inner static shape is load-bearing for routing — masking it there misroutes
+    // the grant (coverage regression: Circadian Struggle, Absorb Energy).
+    let static_view = if scan_contains(&effect_lower, "create") {
+        crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&effect_lower)
+    } else {
+        std::borrow::Cow::Borrowed(effect_lower.as_str())
+    };
+    if is_static_pattern(&static_view) && !should_defer_spell_to_effect(&effect_lower) {
         return false;
     }
 
@@ -2177,9 +2195,7 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        if lower == "your speed can increase beyond 4."
-            || lower == "your speed can increase beyond 4"
-        {
+        if is_speed_unlock_sentence(&lower) {
             let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
             if !defs.is_empty() {
                 result.statics.extend(defs);
@@ -2786,7 +2802,27 @@ pub(crate) fn parse_oracle_ir(
         // continuous effects from spell resolution (CR 611.2a) and must reach the
         // effect parser at Priority 9. Damage-verb lines are also deferred because
         // parse_effect_chain handles embedded statics via split_clause_sequence.
-        if is_static_pattern(&lower) {
+        //
+        // CR 111.3 + CR 111.4: a double-quoted span is an inline granted ability of
+        // a created token/permanent (the token's defined "text"), not the host
+        // line's own static clause; mask it before spell-line static classification
+        // so e.g. a token's "This token can't block." doesn't route the whole
+        // sorcery to the static parser. Spell-scoped only — the masked view feeds
+        // the gate predicate exclusively; every replacement gate below and the
+        // static_line passed to parse_static_line* stay on the UNMASKED text.
+        //
+        // Gate on a creation verb: only "create ... with \"…\"" makes the quote an
+        // inline ability of the created object. Without one, the quote is a granted-
+        // ability payload ("…perpetually gain \"This spell costs {1} less\"") whose
+        // inner static shape is load-bearing for routing — masking it there
+        // misroutes the grant (coverage regression: Circadian Struggle, Absorb
+        // Energy). Non-creation lines therefore keep the UNMASKED baseline view.
+        let static_classify_view = if is_spell && scan_contains(&lower, "create") {
+            crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower)
+        } else {
+            std::borrow::Cow::Borrowed(lower.as_str())
+        };
+        if is_static_pattern(&static_classify_view) {
             // CR 614.1c / CR 707.9: Lines that are both static-shaped (e.g.
             // trailing "doesn't untap during…" from a reflexive "When you do"
             // clause) and a copy-replacement ("enter as a copy of") must route
@@ -4146,6 +4182,18 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
     'parse_constraints: loop {
         let lower = remaining.to_lowercase();
         let tp = TextPair::new(&remaining, &lower);
+
+        // CR 602.5b: A printed "Once each turn" activation restriction stays
+        // attached to this activated ability even if the object changes control.
+        if let Some(((), rest_original)) = nom_on_lower(&remaining, &lower, |i| {
+            value((), tag("once each turn, ")).parse(i)
+        }) {
+            constraints
+                .restrictions
+                .push(ActivationRestriction::OnlyOnceEachTurn);
+            remaining = rest_original.trim().to_string();
+            continue;
+        }
 
         if let Some((before, after)) = tp.rsplit_around(" and only if ") {
             if !before.original.trim().is_empty() {
@@ -7493,7 +7541,9 @@ mod tests {
         assert_eq!(r.statics.len(), 1);
         assert_eq!(
             r.statics[0].mode,
-            crate::types::statics::StaticMode::BlockRestriction
+            crate::types::statics::StaticMode::BlockRestriction {
+                filter: crate::types::statics::block_only_creatures_with_flying_filter(),
+            }
         );
     }
 
@@ -11216,7 +11266,8 @@ mod tests {
         assert!(matches!(
             target,
             TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
+                controller: Some(ControllerRef::You),
+                tag: None,
             }
         ));
         assert!(
@@ -13611,7 +13662,7 @@ mod tests {
         assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
         assert_eq!(
             r.statics[0].active_zones,
-            vec![Zone::Hand, Zone::Stack, Zone::Command]
+            crate::types::zones::self_spell_cost_mod_active_zones()
         );
         assert!(
             r.parse_warnings

@@ -1317,7 +1317,13 @@ fn split_on_clone_source_zone(after_copy: &str) -> Option<(&str, &str, Zone)> {
         let suffix = &after_copy[pos..];
         return Some((type_text, suffix, Zone::Battlefield));
     }
-    Some((after_copy, "", Zone::Battlefield))
+    // CR 614.1c: no zone phrase and no "except" clause — the whole post-`copy
+    // of` remainder is the type phrase. Drop the sentence-final period so the
+    // downstream `parse_type_phrase` leftover guard accepts plain
+    // controller-scoped filters like "a creature you control" (Mirror Image)
+    // or "an artifact or creature you control" (Waxen Shapethief), which carry
+    // no zone/except boundary to absorb the trailing punctuation.
+    Some((after_copy.trim_end_matches('.'), "", Zone::Battlefield))
 }
 
 /// Attach `FilterProp::InZone { zone }` to a filter produced by `parse_type_phrase`.
@@ -9239,6 +9245,46 @@ mod tests {
             }
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
+    }
+
+    /// CR 707.9 + CR 614.1c: Mirror Image / Waxen Shapethief — "enter as a copy
+    /// of a creature you control" with no zone phrase and no except clause. The
+    /// controller-scoped filter must parse despite the sentence-final period
+    /// (previously left as `parse_type_phrase` leftover, dropping the clone).
+    #[test]
+    fn clone_creature_you_control_no_zone_phrase() {
+        let mirror = parse_replacement_line(
+            "You may have this creature enter as a copy of a creature you control.",
+            "Mirror Image",
+        )
+        .expect("Mirror Image clone should parse");
+        assert_eq!(mirror.event, ReplacementEvent::Moved);
+        match &*mirror.execute.as_ref().unwrap().effect {
+            Effect::BecomeCopy { target, .. } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    assert_eq!(
+                        tf.controller,
+                        Some(ControllerRef::You),
+                        "filter must be scoped to creatures you control",
+                    );
+                }
+                other => panic!("Expected Typed creature filter, got {other:?}"),
+            },
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+
+        // Same class with a union filter (Waxen Shapethief) must also parse.
+        let waxen = parse_replacement_line(
+            "You may have this creature enter as a copy of an artifact or creature you control.",
+            "Waxen Shapethief",
+        )
+        .expect("Waxen Shapethief clone should parse");
+        assert_eq!(waxen.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            &*waxen.execute.as_ref().unwrap().effect,
+            Effect::BecomeCopy { .. }
+        ));
     }
 
     /// CR 707.9a + CR 702.3: Wall of Stolen Identity — clone except adds Wall

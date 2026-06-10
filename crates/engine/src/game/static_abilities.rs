@@ -253,8 +253,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // casting.rs::is_blocked_by_per_turn_cast_limit(). Coverage support is via is_data_carrying_static().
 
     // Promoted Tier 3 statics -- parser-produced, rule-modification handlers
-    // CR 509.1b: BlockRestriction — restricts what a creature can block.
-    registry.insert(StaticMode::BlockRestriction, handle_rule_mod);
+    // Note: BlockRestriction is data-carrying — runtime enforcement is in
+    // combat.rs::can_block_pair via blocker-side static scan. Coverage support
+    // is via is_data_carrying_static().
     // CR 402.2: NoMaximumHandSize — player has no maximum hand size.
     registry.insert(StaticMode::NoMaximumHandSize, handle_rule_mod);
     // CR 305.2: MayPlayAdditionalLand — player may play additional lands.
@@ -1568,7 +1569,6 @@ mod tests {
             StaticMode::Lifelink,
             StaticMode::Shroud,
             // Tier 3 promoted statics
-            StaticMode::BlockRestriction,
             StaticMode::NoMaximumHandSize,
             StaticMode::MayPlayAdditionalLand,
             StaticMode::MayChooseNotToUntap,

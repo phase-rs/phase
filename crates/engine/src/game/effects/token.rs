@@ -825,6 +825,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         events.push(GameEvent::TokenCreated {
             object_id: obj_id,
             name: spec.characteristics.display_name.clone(),
+            source_id: spec.source_id,
         });
 
         // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.

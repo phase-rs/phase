@@ -705,7 +705,32 @@ pub(crate) fn is_effect_sentence_candidate(lower: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::nom_primitives::strip_double_quoted_spans;
     use super::*;
+
+    #[test]
+    fn masked_white_suns_twilight_is_not_static() {
+        // The only static-shaped marker ("can't block") lives INSIDE the token's
+        // quoted ability text; masking it must yield a non-static spell line.
+        let line = "you gain x life. create x 1/1 colorless phyrexian mite artifact \
+            creature tokens with toxic 1 and \"this token can't block.\" if x is 5 or more, \
+            destroy all other creatures.";
+        assert!(!is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    #[test]
+    fn masked_brood_birthing_stays_static() {
+        // Brood Birthing invariant: the "have " grant marker is OUTSIDE the quote,
+        // so masking the quoted span must NOT flip the line off static.
+        let line = "they have \"sacrifice this token: add {c}.\"";
+        assert!(is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    #[test]
+    fn unquoted_cant_block_static_unchanged() {
+        // No quotes → fast path → classification unchanged.
+        assert!(is_static_pattern("creatures you control can't block"));
+    }
 
     #[test]
     fn classifies_enters_with_counter_trigger() {

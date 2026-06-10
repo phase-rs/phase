@@ -71,7 +71,7 @@ export function ModalPanelShell({
             </button>
           </div>
 
-          <div className={`min-h-0 flex-1 pb-[env(safe-area-inset-bottom)] ${bodyClassName}`}>
+          <div className={`thin-scrollbar min-h-0 flex-1 pb-[env(safe-area-inset-bottom)] ${bodyClassName}`}>
             {children}
           </div>
         </motion.div>

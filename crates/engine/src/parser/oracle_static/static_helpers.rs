@@ -12,7 +12,7 @@ use super::support::*;
 /// 3. Global taxing: "Noncreature spells cost {1} more to cast" (Thalia)
 /// 4. Broad: "Spells you cast cost {1} less to cast"
 /// 5. Self-spell: "This spell costs {N} less to cast for each ..." (Tolarian Terror)
-///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack, Command]`.
+///    — emitted with `affected = SelfRef`, `active_zones = self_spell_cost_mod_active_zones()`.
 ///
 /// CR 601.2f: Parse the spell-type prefix of a cost-modification line before
 /// `"cost"`. Handles compound subjects such as Goblin Anarchomancer's
@@ -173,14 +173,12 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         return None;
     }
 
-    // CR 601.2f + CR 117.7: Detect self-spell cost reduction ("this spell costs {N} less ...").
+    // CR 601.2f: Detect self-spell cost reduction ("this spell costs {N} less ...").
     // Distinct from battlefield cost modification (e.g., "creature spells you cast cost {1} less")
     // because the static must apply to the card while it is in hand (or on the stack during
     // casting), not once it has entered the battlefield. The caller wires this into
-    // `active_zones = [Hand, Stack, Command]` with `affected = SelfRef` so
-    // the casting-time scanner finds it on the spell being cast from normal
-    // hand casting, the cost-determination stack step, and commander casting
-    // from the command zone.
+    // `active_zones = self_spell_cost_mod_active_zones()` with `affected =
+    // SelfRef` so the casting-time scanner finds it on the spell being cast.
     let is_self_spell = parse_self_spell_cost_subject(lower).is_some();
 
     let amount_is_variable_x = nom_primitives::scan_contains(lower, "{x}");
@@ -457,7 +455,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     // Build the affected filter for the static definition.
     // This controls which objects are "affected" — for cost modification statics,
     // this is the source permanent's controller scope (used by the registry).
-    // CR 117.7: Self-spell cost reduction ("This spell costs {N} less ...") uses
+    // CR 601.2f: Self-spell cost reduction ("This spell costs {N} less ...") uses
     // SelfRef so the casting-time self-cost scanner matches it on the spell itself.
     let affected = if is_self_spell {
         TargetFilter::SelfRef
@@ -491,14 +489,14 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         .affected(affected)
         .description(text.to_string());
 
-    // CR 117.7 + CR 601.2f: A self-spell cost reduction must apply while the
+    // CR 601.2f: A self-spell cost reduction must apply while the
     // card is in hand (pre-cast affordability checks), in the command zone
-    // (commander casting), and on the stack (final cost determination during
-    // casting). Without opting in via `active_zones`, layer collection would
-    // ignore the static outside the battlefield, and the card would never
-    // reduce its own cost.
+    // (commander casting), in the graveyard or exile (alternative-zone casting),
+    // and on the stack (final cost determination during casting). Without opting
+    // in via `active_zones`, layer collection would ignore the static outside
+    // the battlefield, and the card would never reduce its own cost.
     if is_self_spell {
-        definition.active_zones = vec![Zone::Hand, Zone::Stack, Zone::Command];
+        definition.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
     }
     if let Some(filter) = first_qualified_spell_filter.as_ref() {
         definition.condition = Some(first_qualified_spell_condition(filter));
@@ -663,7 +661,10 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
             TargetFilter::Or {
                 filters: vec![
                     TargetFilter::StackSpell,
-                    TargetFilter::StackAbility { controller: None },
+                    TargetFilter::StackAbility {
+                        controller: None,
+                        tag: None,
+                    },
                 ],
             },
             tag::<_, _, OracleError<'_>>("a spell or ability"),
@@ -673,7 +674,10 @@ fn parse_it_targets_that_targets_spell_filter(cond_text: &str) -> Option<TargetF
             tag::<_, _, OracleError<'_>>("a spell"),
         ),
         value(
-            TargetFilter::StackAbility { controller: None },
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+            },
             alt((
                 tag::<_, _, OracleError<'_>>("an activated or triggered ability"),
                 tag("a triggered or activated ability"),

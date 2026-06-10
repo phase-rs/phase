@@ -16,6 +16,9 @@ permissions:
 jobs:
   resolve-release-ref:
     name: Resolve Release Ref
+    # Every downstream job needs this one, so guarding the root skips the entire
+    # release graph in forks (which lack the deploy/release secrets anyway).
+    if: github.repository == 'phase-rs/phase'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

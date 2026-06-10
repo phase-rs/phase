@@ -8,6 +8,8 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { SelectField } from "../ui/SelectField";
+
 import type { CubeDraftSettings } from "../../adapter/draft-adapter";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { fetchCubeList } from "../../services/cubeCobra";
@@ -138,7 +140,8 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
       <div className="grid gap-3 md:grid-cols-[260px_1fr]">
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.deckAddables")}</span>
-          <select
+          <SelectField
+            wrapperClassName="w-full"
             value={settings.addable_cards.policy}
             onChange={(e) =>
               setSettings((prev) => ({
@@ -149,12 +152,12 @@ export function CubeSetupPanel({ onStart, startLabel, disabled }: CubeSetupPanel
                 },
               }))
             }
-            className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
+            className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
           >
             <option value="StandardBasics">{t("cubeSetup.addablesStandardBasics")}</option>
             <option value="StandardBasicsPlusCustom">{t("cubeSetup.addablesBasicsPlusCustom")}</option>
             <option value="CustomOnly">{t("cubeSetup.addablesCustomOnly")}</option>
-          </select>
+          </SelectField>
         </label>
         <label className="flex flex-col gap-1">
           <span className="text-xs uppercase tracking-[0.16em] text-white/35">{t("cubeSetup.customAddableCards")}</span>

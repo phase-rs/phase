@@ -559,7 +559,10 @@ mod tests {
 
         let counter_ability = ResolvedAbility::new(
             Effect::Counter {
-                target: TargetFilter::StackAbility { controller: None },
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
                 source_rider: Some(CounterSourceRider::LosesAbilities {
                     static_def: Box::new(source_static),
                 }),
@@ -711,7 +714,10 @@ mod tests {
 
         let counter_ability = ResolvedAbility::new(
             Effect::Counter {
-                target: TargetFilter::StackAbility { controller: None },
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
                 source_rider: Some(CounterSourceRider::Destroy),
             },
             vec![TargetRef::Object(ability_on_stack)],
@@ -1179,7 +1185,7 @@ mod tests {
 
     /// CR 113.3 + CR 405.1: "Counter all abilities" — the resolver matches
     /// every activated/triggered ability on the stack, including keyword actions, via
-    /// `TargetFilter::StackAbility { controller: None }` and removes the entry without moving any
+    /// `TargetFilter::StackAbility { controller: None, tag: None }` and removes the entry without moving any
     /// card to a graveyard (abilities aren't cards).
     #[test]
     fn test_counter_all_abilities_removes_ability_entries() {
@@ -1272,7 +1278,10 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::CounterAll {
-                target: TargetFilter::StackAbility { controller: None },
+                target: TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                },
             },
             vec![],
             ObjectId(999),
@@ -1349,6 +1358,7 @@ mod tests {
             Effect::CounterAll {
                 target: TargetFilter::StackAbility {
                     controller: Some(ControllerRef::Opponent),
+                    tag: None,
                 },
             },
             vec![],

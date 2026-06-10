@@ -37,8 +37,8 @@ use crate::types::ability::{
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, Effect, FilterProp, ObjectScope, OriginConstraint, PlayerFilter,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject, StaticCondition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier, ZoneChangeClause,
 };
 #[cfg(test)]
@@ -159,6 +159,7 @@ fn becomes_target_source_filter(controller: ControllerRef) -> TargetFilter {
             },
             TargetFilter::StackAbility {
                 controller: Some(controller),
+                tag: None,
             },
         ],
     }
@@ -2364,6 +2365,9 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
 /// Parallel to `static_condition_to_ability_condition` in `oracle_effect/mod.rs`.
 /// Returns `None` for variants that have no `TriggerCondition` equivalent —
 /// the caller falls through to the next strategy.
+///
+/// Exhaustive on purpose — when you add a `StaticCondition` variant, decide
+/// here whether it bridges (CLAUDE.md: bridges must be kept exhaustive).
 fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<TriggerCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringPlayersTurn {
@@ -2812,9 +2816,20 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             // <type> counter(s) on it" are handled by the combinator-based
             // `try_extract_had_counter_condition` (composes the negation and
             // type axes) so the positive and negated forms share one authority.
-            // CR 702.112a: "if it's renowned" / "if ~ is renowned" — renown state check
-            ("if it's renowned", TriggerCondition::SourceIsRenowned),
-            ("if ~ is renowned", TriggerCondition::SourceIsRenowned),
+            // CR 702.112b: "if it's renowned" — the event-subject creature's designation.
+            // CR 702.112a: "if ~ is renowned" — the source permanent's designation.
+            (
+                "if it's renowned",
+                TriggerCondition::IsRenowned {
+                    subject: RenownSubject::EventSubject,
+                },
+            ),
+            (
+                "if ~ is renowned",
+                TriggerCondition::IsRenowned {
+                    subject: RenownSubject::Source,
+                },
+            ),
             // CR 506.2 + CR 508.1b + CR 603.4: "if none of those creatures attacked you" —
             // intervening-if for "whenever another player attacks with N or more creatures"
             // triggers that reward defensive (non-aggressor) opponents.
@@ -4115,6 +4130,16 @@ fn split_and_when_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
         let first = condition[..pos].trim().to_string();
         let second_start = pos + " and ".len();
         // Capitalize: the second half already starts with "whenever"
+        let second =
+            normalize_compound_pronouns(&capitalize_first(condition[second_start..].trim()));
+        return Some(vec![first, second]);
+    }
+    // CR 603.2: "When ~ enters and at the beginning of your upkeep" (Gathering
+    // Stone) — two independent trigger events sharing one effect.
+    if let Ok((_, (before, _))) = split_once_on(cond_lower, " and at the beginning of ") {
+        let pos = before.len();
+        let first = condition[..pos].trim().to_string();
+        let second_start = pos + " and ".len();
         let second =
             normalize_compound_pronouns(&capitalize_first(condition[second_start..].trim()));
         return Some(vec![first, second]);
@@ -6432,6 +6457,9 @@ fn try_parse_event(
         BecomesTargetSpell {
             qualifier: Option<TargetFilter>,
         },
+        /// CR 702.165a: the targeting source is a Backup keyword ability on the
+        /// stack (e.g. Huge Truck "becomes the target of a backup ability").
+        BecomesTargetBackupAbility,
         DealtCombatDamage,
         DealtDamage,
         /// CR 120.10 + CR 120.2b: Excess noncombat damage received by the subject.
@@ -6567,6 +6595,20 @@ fn try_parse_event(
             value(SimpleEvent::TappedForMana, tag("is tapped for mana")),
         ))
         .or(alt((
+            // CR 702.165a: "becomes the target of a backup ability" — the source
+            // is specifically a Backup keyword ability on the stack. Lives in this
+            // second `alt` block (the first hit nom's tuple-arity limit); collision-
+            // free with every arm because no other phrase shares its "of a backup
+            // ability" suffix (neither generic spell-or-ability arm matches it).
+            value(
+                SimpleEvent::BecomesTargetBackupAbility,
+                tag("becomes the target of a backup ability"),
+            ),
+            // CR 115.1: Plural form for batched "become the target" triggers.
+            value(
+                SimpleEvent::BecomesTargetBackupAbility,
+                tag("become the target of a backup ability"),
+            ),
             value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
             // CR 701.26: Plural form for batched "one or more ... become untapped" triggers.
             value(SimpleEvent::BecomesUntapped, tag("become untapped")),
@@ -6675,6 +6717,16 @@ fn try_parse_event(
                     }
                 } else {
                     TargetFilter::StackSpell
+                });
+            }
+            // CR 702.165a + CR 115.1: the targeting source must be a Backup
+            // keyword ability on the stack — filtered by `AbilityTag::Backup`.
+            SimpleEvent::BecomesTargetBackupAbility => {
+                def.mode = TriggerMode::BecomesTarget;
+                set_trigger_subject(&mut def, subject);
+                def.valid_source = Some(TargetFilter::StackAbility {
+                    controller: None,
+                    tag: Some(AbilityTag::Backup),
                 });
             }
             SimpleEvent::DealtCombatDamage => {
@@ -13700,6 +13752,33 @@ mod tests {
         );
     }
 
+    /// CR 702.112: "if it's renowned" (event subject, 702.112b) and "if ~ is
+    /// renowned" (source, 702.112a) map to distinct `RenownSubject` axes.
+    #[test]
+    fn extract_if_condition_renowned_disambiguates_subject() {
+        let (_, it_cond) = extract_if_condition("if it's renowned, draw a card.");
+        assert!(
+            matches!(
+                it_cond,
+                Some(TriggerCondition::IsRenowned {
+                    subject: RenownSubject::EventSubject
+                })
+            ),
+            "expected IsRenowned {{ EventSubject }}, got {it_cond:?}",
+        );
+
+        let (_, self_cond) = extract_if_condition("if ~ is renowned, draw a card.");
+        assert!(
+            matches!(
+                self_cond,
+                Some(TriggerCondition::IsRenowned {
+                    subject: RenownSubject::Source
+                })
+            ),
+            "expected IsRenowned {{ Source }}, got {self_cond:?}",
+        );
+    }
+
     /// CR 603.4: Inline "then if" without a sentence boundary ("X then if Y,
     /// Z") — the condition still scopes to the then-clause sub_ability and
     /// must not be hoisted. Covers punctuation-free variants of the pattern.
@@ -19726,6 +19805,40 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn trigger_becomes_target_of_backup_ability() {
+        // CR 702.165a: Huge Truck pattern — "becomes the target of a backup
+        // ability" parses to a `BecomesTarget` trigger whose `valid_source` is a
+        // stack ability tagged `Backup`, with the subject ("another creature you
+        // control") routed to `valid_card`.
+        let def = parse_trigger_line(
+            "Whenever another creature you control becomes the target of a backup ability, draw a card.",
+            "Huge Truck",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        // valid_source is the new backup-tag stack-ability filter — this is the
+        // assertion that flips if the converter arm is reverted.
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::StackAbility {
+                controller: None,
+                tag: Some(AbilityTag::Backup),
+            })
+        );
+        // Subject: "another creature you control" → Typed creature / You / Another.
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        }) = def.valid_card.expect("backup trigger has a subject filter")
+        else {
+            panic!("expected a Typed subject filter for the backup trigger");
+        };
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::Another));
     }
 
     #[test]
@@ -27015,6 +27128,56 @@ mod snapshot_tests {
         );
         assert_eq!(defs.len(), 2, "compound trigger should split into 2");
         insta::assert_json_snapshot!(defs[0]);
+    }
+
+    #[test]
+    fn trigger_compound_enters_and_upkeep_splits() {
+        let defs = parse_trigger_lines_at_index(
+            "When this artifact enters and at the beginning of your upkeep, look at the top card of your library. If it's a card of the chosen type, you may reveal it and put it into your hand.",
+            "Gathering Stone",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            defs.len(),
+            2,
+            "enters+upkeep compound must split into 2 triggers"
+        );
+        assert!(
+            matches!(defs[0].mode, TriggerMode::ChangesZone),
+            "first half should be ETB, got {:?}",
+            defs[0].mode
+        );
+        assert!(
+            matches!(defs[1].mode, TriggerMode::Phase),
+            "second half should be upkeep phase, got {:?}",
+            defs[1].mode
+        );
+        let expected_condition = Some(AbilityCondition::RevealedHasCardType {
+            card_types: vec![],
+            additional_filter: Some(FilterProp::IsChosenCreatureType),
+            subtype_filter: None,
+        });
+        for (idx, def) in defs.iter().enumerate() {
+            let execute = def
+                .execute
+                .as_deref()
+                .unwrap_or_else(|| panic!("trigger {idx} should keep the shared effect"));
+            assert!(
+                matches!(&*execute.effect, Effect::Dig { .. }),
+                "trigger {idx} should look at the top card, got {:?}",
+                execute.effect
+            );
+            let reveal = execute
+                .sub_ability
+                .as_deref()
+                .unwrap_or_else(|| panic!("trigger {idx} should keep the chosen-type reveal gate"));
+            assert_eq!(
+                reveal.condition,
+                expected_condition.clone(),
+                "trigger {idx} should keep the chosen-type gate"
+            );
+        }
     }
 
     #[test]

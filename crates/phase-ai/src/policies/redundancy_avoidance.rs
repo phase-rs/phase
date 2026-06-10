@@ -57,16 +57,18 @@
 //!   to short-circuit casts. Tracked separately as an oracle-parser issue.
 
 use engine::game::filter::{matches_target_filter, FilterContext};
-use engine::game::keywords::has_keyword;
+use engine::game::keywords::{has_flash, has_keyword};
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
     ContinuousModification, Duration, Effect, QuantityExpr, StaticDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, TransientContinuousEffect};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use super::activation::turn_only;
@@ -139,6 +141,9 @@ const KIND_BOUNCE_SELF_UNDO: i64 = 8;
 /// arms. The broader "diminishing returns on +1/+1 counters" case stays deferred
 /// (see the module TODOs); only the strictly-redundant zero-count sub-case fires.
 const KIND_ADD_COUNTER_ZERO: i64 = 9;
+/// CR 601.3b: Activating a flash-cast permission (Alchemist's Refuge class)
+/// when no hand spell would gain instant-speed timing.
+const KIND_FLASH_CAST_PERMISSION: i64 = 10;
 
 pub struct RedundancyAvoidancePolicy;
 
@@ -309,7 +314,10 @@ fn redundancy_delta(
             static_abilities,
             target,
             ..
-        } => generic_effect_keyword_redundancy(state, source_id, static_abilities, target.as_ref()),
+        } => generic_effect_keyword_redundancy(state, source_id, static_abilities, target.as_ref())
+            .or_else(|| {
+                generic_effect_flash_cast_permission_redundancy(state, ai_player, static_abilities)
+            }),
         Effect::Animate {
             keywords, target, ..
         } => animate_keyword_redundancy(state, source_id, keywords, target),
@@ -903,6 +911,62 @@ fn resolve_affected_candidates(
     out
 }
 
+fn static_grants_flash_cast(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash,
+            ..
+        } | StaticMode::CastWithFlash
+    )
+}
+
+/// A sorcery-speed hand spell gains timing value from a flash-cast grant.
+fn hand_spell_benefits_from_flash_grant(obj: &engine::game::game_object::GameObject) -> bool {
+    if obj.card_types.core_types.contains(&CoreType::Land) {
+        return false;
+    }
+    if obj.card_types.core_types.contains(&CoreType::Instant) {
+        return false;
+    }
+    !has_flash(obj)
+}
+
+/// Issue #1528 — penalise activating Alchemist's Refuge-style flash grants
+/// when the AI's hand has no spell that would actually gain instant speed.
+fn generic_effect_flash_cast_permission_redundancy(
+    state: &GameState,
+    ai_player: PlayerId,
+    static_abilities: &[StaticDefinition],
+) -> Option<(f64, i64, i64)> {
+    let flash_stats: Vec<_> = static_abilities
+        .iter()
+        .filter(|s| static_grants_flash_cast(&s.mode))
+        .collect();
+    if flash_stats.is_empty() {
+        return None;
+    }
+    let player = state.players.iter().find(|p| p.id == ai_player)?;
+    let has_beneficiary = player.hand.iter().any(|&id| {
+        let Some(obj) = state.objects.get(&id) else {
+            return false;
+        };
+        if !hand_spell_benefits_from_flash_grant(obj) {
+            return false;
+        }
+        flash_stats.iter().any(|stat| {
+            stat.affected.as_ref().is_none_or(|filter| {
+                matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
+            })
+        })
+    });
+    if has_beneficiary {
+        None
+    } else {
+        Some((-2.0, KIND_FLASH_CAST_PERMISSION, 0))
+    }
+}
+
 /// Walk `StaticDefinition.modifications` and collect the keywords that
 /// would be granted. Other modification kinds (AddPower, GrantAbility,
 /// etc.) are ignored here — this predicate is specifically about keyword
@@ -1324,6 +1388,137 @@ mod tests {
         assert_eq!(
             delta, -2.0,
             "redundant keyword grant should emit -2.0 delta"
+        );
+    }
+
+    #[test]
+    fn flash_cast_permission_without_sorcery_speed_hand_spell_penalized() {
+        let mut state = GameState::new_two_player(0);
+        let refuge_id = make_creature_with_ability(
+            &mut state,
+            "Alchemist's Refuge",
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash,
+                })],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+        );
+        let instant = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        state.players[0].hand.push_back(instant);
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(refuge_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(
+            delta, -2.0,
+            "flash permission with only instants in hand should be redundant"
+        );
+    }
+
+    #[test]
+    fn flash_cast_permission_with_sorcery_in_hand_not_penalized() {
+        let mut state = GameState::new_two_player(0);
+        let refuge_id = make_creature_with_ability(
+            &mut state,
+            "Alchemist's Refuge",
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash,
+                })],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+        );
+        let sorcery = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Divination".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&sorcery)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Sorcery);
+        state.players[0].hand.push_back(sorcery);
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(refuge_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(
+            delta, 0.0,
+            "flash permission should remain viable when a sorcery can use it"
+        );
+    }
+
+    #[test]
+    fn flash_cast_permission_with_already_flash_permanent_penalized() {
+        let mut state = GameState::new_two_player(0);
+        let refuge_id = make_creature_with_ability(
+            &mut state,
+            "Alchemist's Refuge",
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash,
+                })],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+        );
+        let artifact = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Shimmer Myr".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&artifact).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.keywords.push(Keyword::Flash);
+        state.players[0].hand.push_back(artifact);
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(refuge_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(
+            delta, -2.0,
+            "flash permission should be redundant when the only affected permanent already has flash"
         );
     }
 

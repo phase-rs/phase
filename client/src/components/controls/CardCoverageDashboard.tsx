@@ -6,6 +6,7 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { useSetList, type SetMeta } from "../../hooks/useSetList";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { scryfallLegalityKey } from "../../services/scryfall";
+import { SelectField } from "../ui/SelectField";
 
 // Supported handlers are now derived from the coverage export, not a hardcoded list.
 // See `extractHandlerUsage` below — a handler is listed iff the parser produces it
@@ -351,7 +352,8 @@ function CardCoverageView() {
                 onChange={(e) => { setSearch(e.target.value); setFocusIndex(-1); }}
                 className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-sm text-white placeholder-slate-500 outline-none focus:border-sky-400/40"
               />
-              <select
+              <SelectField
+                chevronSize="sm"
                 value={statusFilter}
                 onChange={(e) => { setStatusFilter(e.target.value as StatusFilter); setFocusIndex(-1); }}
                 className="rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
@@ -359,18 +361,20 @@ function CardCoverageView() {
                 <option value="all">{t("coverage.filterAll")}</option>
                 <option value="supported">{t("coverage.filterSupported")}</option>
                 <option value="unsupported">{t("coverage.filterUnsupported")}</option>
-              </select>
+              </SelectField>
             </div>
             <div className="flex gap-2">
-              <select
+              <SelectField
+                wrapperClassName="min-w-0 flex-1"
+                chevronSize="sm"
                 value={sortMode}
                 onChange={(e) => setSortMode(e.target.value as SortMode)}
-                className="min-w-0 flex-1 rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
+                className="w-full rounded-[12px] border border-white/10 bg-black/18 px-2 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
               >
                 <option value="name">{t("coverage.sortAz")}</option>
                 <option value="gaps-desc">{t("coverage.sortMostGaps")}</option>
                 <option value="gaps-asc">{t("coverage.sortFewestGaps")}</option>
-              </select>
+              </SelectField>
             </div>
           </div>
 
@@ -816,7 +820,8 @@ function GapAnalysisView() {
       {/* Format filter bar */}
       <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3 sm:px-6">
         <span className="text-xs text-slate-500">{t("coverage.filterByFormat")}</span>
-        <select
+        <SelectField
+          chevronSize="sm"
           value={formatFilter}
           onChange={(e) => setFormatFilter(e.target.value as FormatFilter)}
           className="rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
@@ -824,7 +829,7 @@ function GapAnalysisView() {
           {filterOptions.map(({ key, label }) => (
             <option key={key} value={key}>{label}</option>
           ))}
-        </select>
+        </SelectField>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
