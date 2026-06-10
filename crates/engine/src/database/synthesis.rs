@@ -1545,7 +1545,7 @@ pub fn synthesize_level_up(face: &mut CardFace) {
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() })
                     // CR 702.87a: "Activate only as a sorcery." `.sorcery_speed()`
-                    // sets the display flag and pushes `AsSorcery` for runtime.
+                    // pushes `ActivationRestriction::AsSorcery`, the single authority.
                     .sorcery_speed(),
                 )
             } else {
