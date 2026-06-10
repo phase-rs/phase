@@ -2740,9 +2740,16 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
             alt((tag::<_, _, OracleError<'_>>("can't"), tag("cannot"))),
             tag(" "),
         ),
-        separated_list1(
-            alt((tag(", or "), tag(", "), tag(" or "))),
-            parse_restriction_list_atom,
+        // A static line's terminal period can reach here (the predicate keeps it
+        // when no trailing duration strips it), so absorb an optional trailing
+        // "." in the combinator before `all_consuming`'s eof rather than trimming
+        // the input — mirroring the dedicated `can't be regenerated` arm below.
+        terminated(
+            separated_list1(
+                alt((tag(", or "), tag(", "), tag(" or "))),
+                parse_restriction_list_atom,
+            ),
+            opt(tag(".")),
         ),
     ))
     .parse(lower)
@@ -4291,6 +4298,40 @@ mod tests {
                 StaticMode::CantCrew,
             ])
         );
+    }
+
+    #[test]
+    fn parse_restriction_modes_tolerates_trailing_period() {
+        // A static line's terminal period can reach `parse_restriction_modes`
+        // (e.g. via `try_parse_subject_restriction_clause`, whose predicate keeps
+        // the period when no trailing duration strips it). The compound atom-list
+        // grammar must tolerate it, matching the dedicated `can't be regenerated`
+        // arm which already does.
+        assert_eq!(
+            parse_restriction_modes("can't attack or block."),
+            Some(vec![StaticMode::CantAttack, StaticMode::CantBlock])
+        );
+    }
+
+    #[test]
+    fn cant_attack_or_block_with_trailing_period_builds_both_modes() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "Creatures you control can't attack or block.",
+            &mut ctx,
+        )
+        .expect("compound restriction with a trailing period should parse");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+        let modes: Vec<_> = static_abilities.iter().map(|s| s.mode.clone()).collect();
+        assert_eq!(modes, vec![StaticMode::CantAttack, StaticMode::CantBlock]);
     }
 
     #[test]
