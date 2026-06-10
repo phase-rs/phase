@@ -272,8 +272,10 @@ mod tests {
             src.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: crate::types::ability::EffectScope::Single,
+                        state: crate::types::ability::TapStateChange::Tap,
                     },
                 ))
                 .destination_zone(Zone::Battlefield)
