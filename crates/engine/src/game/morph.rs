@@ -12,7 +12,7 @@ use crate::types::zones::Zone;
 use std::sync::Arc;
 
 use super::engine::EngineError;
-use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
+use super::printed_cards::apply_back_face_to_object;
 
 /// Stores the original characteristics of a face-down card so they can be
 /// restored when the card is turned face up.
@@ -119,23 +119,31 @@ pub fn play_face_down(
         ));
     }
 
-    // Store original characteristics before overriding
-    let original = snapshot_object_face(obj);
-
-    // Move to battlefield
-    super::zones::move_to_zone(state, object_id, Zone::Battlefield, events);
-
-    // Apply face-down overrides
-    let obj = state.objects.get_mut(&object_id).unwrap();
-    apply_face_down_creature_characteristics(
-        obj,
-        &crate::types::ability::FaceDownProfile::vanilla_2_2(),
-    );
-
-    // Store original characteristics so turn_face_up can restore them
-    obj.back_face = Some(original);
-
-    Ok(())
+    // CR 708.3 + CR 614.1c: route the face-down battlefield entry through the
+    // zone-change pipeline. The delivery tail applies the face-down 2/2 profile
+    // (snapshot the real face into `back_face`, overwrite with the vanilla 2/2 —
+    // CR 708.2a) AND seeds enters-with-counters statics ("creatures you control
+    // enter with an additional +1/+1 counter" — Hardened Scales class), which
+    // the raw `move_to_zone` + manual override skipped entirely. CR 708.3: the
+    // permanent is turned face down BEFORE it enters, so the tail does this
+    // before the ETB-counter/trigger blocks — the manual post-move override is
+    // dropped (the tail is the single authority, mirroring `manifest_card` and
+    // change_zone's face-down path).
+    //
+    // CR 616.1 / CR 303.4f: a face-down 2/2 vanilla creature is not an Aura and
+    // carries no Moved redirect or counter-replacement choice, so a battlefield-
+    // entry pause is unreachable; the bail keeps the helper safe by construction
+    // (the prompt is parked centrally by `move_object`).
+    match super::zone_pipeline::move_object(
+        state,
+        super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
+            .face_down(crate::types::ability::FaceDownProfile::vanilla_2_2()),
+        events,
+    ) {
+        super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
+        super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+        | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => Ok(()),
+    }
 }
 
 /// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
@@ -227,26 +235,32 @@ pub fn manifest_card(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    let obj = state
-        .objects
-        .get(&object_id)
-        .ok_or_else(|| EngineError::InvalidAction("Object not found for manifest".to_string()))?;
+    if !state.objects.contains_key(&object_id) {
+        return Err(EngineError::InvalidAction(
+            "Object not found for manifest".to_string(),
+        ));
+    }
 
-    // Store original characteristics before overriding
-    let original = snapshot_object_face(obj);
-
-    // Move to battlefield
-    super::zones::move_to_zone(state, object_id, Zone::Battlefield, events);
-
-    // Apply face-down overrides — CR 701.40a: 2/2 creature with no text/name/subtypes/mana cost
-    let obj = state.objects.get_mut(&object_id).unwrap();
-    apply_face_down_creature_characteristics(
-        obj,
-        &crate::types::ability::FaceDownProfile::vanilla_2_2(),
-    );
-    obj.back_face = Some(original);
-
-    Ok(())
+    // CR 701.40a + CR 708.3 + CR 614.1c: route the face-down manifest entry
+    // through the zone-change pipeline. The delivery tail applies the vanilla
+    // 2/2 face-down profile (snapshot real face into `back_face`, overwrite —
+    // CR 708.2a) AND seeds enters-with-counters statics (Hardened Scales class),
+    // which the raw `move_to_zone` + manual override skipped. The manual
+    // post-move override is dropped (the tail is the single authority).
+    //
+    // CR 616.1 / CR 303.4f: a face-down 2/2 vanilla creature is not an Aura and
+    // carries no Moved redirect or counter-replacement choice, so a battlefield-
+    // entry pause is unreachable; the bail keeps the helper safe by construction.
+    match super::zone_pipeline::move_object(
+        state,
+        super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
+            .face_down(crate::types::ability::FaceDownProfile::vanilla_2_2()),
+        events,
+    ) {
+        super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
+        super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+        | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => Ok(()),
+    }
 }
 
 /// CR 701.40a: Manifest puts the top card of library onto battlefield face down as a 2/2 creature.
@@ -293,6 +307,7 @@ pub fn manifest(
 
 #[cfg(test)]
 mod tests {
+    use super::super::printed_cards::snapshot_object_face;
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::QuantityExpr;

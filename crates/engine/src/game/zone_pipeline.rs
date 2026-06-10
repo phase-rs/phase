@@ -297,6 +297,15 @@ impl ZoneMoveRequest {
         self
     }
 
+    /// CR 708.2a + CR 708.3: enters the battlefield face down showing the given
+    /// profile (morph / manifest vanilla 2/2). The delivery tail snapshots the
+    /// real face into `back_face` and applies the profile before the entry, so
+    /// callers no longer override characteristics manually after the move.
+    pub fn face_down(mut self, profile: FaceDownProfile) -> Self {
+        self.mods.face_down_profile = Some(profile);
+        self
+    }
+
     /// Library placement override (`LibraryPosition::Top` / `Bottom` /
     /// `NthFromTop`). Only meaningful when `to == Zone::Library`.
     pub fn at_library_position(mut self, position: LibraryPosition) -> Self {
