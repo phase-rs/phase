@@ -2,6 +2,9 @@ use std::collections::HashSet;
 
 use crate::game::layers;
 use crate::game::replacement::{self, ReplacementResult};
+use crate::game::zone_pipeline::{
+    self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
+};
 use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -524,11 +527,30 @@ fn check_lethal_damage(
                     );
                     match replacement::replace_event(state, zone_proposed, events) {
                         ReplacementResult::Execute(zone_event) => {
-                            if let ProposedEvent::ZoneChange {
-                                object_id: oid, to, ..
-                            } = zone_event
+                            // CR 701.19b + CR 614: the inner ZoneChange already
+                            // cleared the replacement consult — seal it as a proof
+                            // token and deliver through the single pipeline tail so
+                            // a lethal-damage death redirected to the battlefield
+                            // (Rest in Peace / "would die -> return" class) gets the
+                            // full enter-tapped / enter-with-counters / ETB-counter
+                            // delivery treatment instead of a bare move.
+                            if let Ok(approved) =
+                                ApprovedZoneChange::approve_post_replacement(zone_event)
                             {
-                                zones::move_to_zone(state, oid, to, events);
+                                let ctx = DeliveryCtx {
+                                    source_id: source,
+                                    exile_links: ExileLinkSpec::default(),
+                                };
+                                // CR 704.3: completing all SBAs may require a
+                                // replacement choice surfaced by the delivery tail
+                                // (e.g. CR 614.12a Devour as-enters). Pause exactly
+                                // as the regeneration NeedsChoice arm below does;
+                                // `state.waiting_for` is already set by the tail.
+                                if let ZoneDeliveryResult::NeedsChoice(_) =
+                                    zone_pipeline::deliver(state, approved, ctx, events)
+                                {
+                                    return;
+                                }
                             }
                         }
                         ReplacementResult::Prevented => {}
@@ -3436,5 +3458,109 @@ mod tests {
 
         assert!(state.battlefield.contains(&role));
         assert!(state.players[0].graveyard.is_empty());
+    }
+
+    /// Phase B discriminating test for the SBA lethal-damage-destruction loop
+    /// (`check_lethal_damage`, sba.rs ~:531). Before Phase B the inner ZoneChange
+    /// was delivered with a bare `zones::move_to_zone`, so a lethal-damage death
+    /// redirected to the battlefield (CR 614.6) dropped the CR 614.1c
+    /// `EntersWithAdditionalCounters` static (Kalain class). Routing the inner
+    /// delivery through `zone_pipeline::deliver` restores the full delivery tail.
+    ///
+    /// Drives the real lethal-damage SBA (`check_lethal_damage` ->
+    /// `replace_event` -> `deliver`) for a single check and asserts the
+    /// re-entered creature receives the additional +1/+1 counter. The private
+    /// `check_lethal_damage` is driven directly (rather than the repeating
+    /// `check_state_based_actions`) so exactly one redirected entry is delivered
+    /// — repeated SBA passes would re-deliver the entry and stack the counter,
+    /// obscuring the discriminating signal. FAILS on the old raw move (0
+    /// counters), passes through the tail (exactly 1).
+    #[test]
+    fn sba_lethal_damage_redirected_to_battlefield_applies_enters_with_counters_tail() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
+            ReplacementDefinition, StaticDefinition, TypedFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+        use std::sync::Arc;
+
+        let mut state = setup();
+        // A 2/2 with lethal damage marked and a "would die -> return to the
+        // battlefield" self-redirect.
+        let victim = create_creature(&mut state, CardId(1), PlayerId(0), "Resilient Bear", 2, 2);
+        {
+            let obj = state.objects.get_mut(&victim).unwrap();
+            obj.damage_marked = 2; // CR 704.5g: lethal damage.
+            let def = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .destination_zone(Zone::Graveyard)
+                .valid_card(TargetFilter::SelfRef)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        origin: None,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                ))
+                .description("Return to the battlefield instead of dying".to_string());
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        // CR 614.1c: a separate P0 enchantment grants "other creatures you
+        // control enter with an additional +1/+1 counter".
+        let lord = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Lord".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&lord).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            let def = StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ));
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        let mut any_performed = false;
+        check_lethal_damage(&mut state, &mut events, &mut any_performed);
+
+        assert!(
+            any_performed,
+            "the lethal-damage SBA must have acted on the creature"
+        );
+        assert_eq!(
+            state.objects[&victim].zone,
+            Zone::Battlefield,
+            "the Moved redirect returns the lethally-damaged creature to the battlefield"
+        );
+        assert_eq!(
+            state.objects[&victim]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "a lethal-damage death redirected to the battlefield must receive the CR 614.1c \
+             enters-with-additional-counter via the full delivery tail"
+        );
     }
 }
