@@ -4595,7 +4595,15 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // transition so zone-change triggers, counterspell targeting
     // (`FilterProp::InZone { Stack }`), and on-resolution bookkeeping all see
     // the spell as living on the stack.
-    super::zones::move_to_zone(state, object_id, Zone::Stack, events);
+    //
+    // CR 601.2a: "a player first moves that card ... to the stack" — part of the
+    // casting process, not a discrete replaceable event. Route through the zone
+    // pipeline under the `CastingToStack` exempt cause so this production caller
+    // goes through the single entry while the consult is skipped (PLAN §3). The
+    // spell moves itself, so the attribution source is the object.
+    let stack_req =
+        crate::game::zone_pipeline::ZoneMoveRequest::casting_to_stack(object_id, object_id);
+    crate::game::zone_pipeline::move_object(state, stack_req, events);
     if casting_variant == CastingVariant::Foretell {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cast_variant_paid = Some((

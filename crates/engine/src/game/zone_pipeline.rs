@@ -77,6 +77,37 @@ pub enum ZoneChangeCause {
     DebugCommand,
 }
 
+impl ZoneChangeCause {
+    /// CR-exempt causes skip the `replace_event` consult (the "would"-semantics
+    /// layer) and go straight to delivery. Each is a game *procedure* or a
+    /// non-replaceable rules action, not a discrete event that effects watch:
+    ///
+    /// - `CastingToStack` (CR 601.2a): part of the casting process; no Moved
+    ///   replacement targets stack entry.
+    /// - `PregameProcedure` (CR 103.5): pregame draws / mulligan shuffles and
+    ///   bottom-of-library returns happen before any effect exists to replace.
+    /// - `PlayerLeftGame` (CR 800.4a): "This is not a state-based action"; all
+    ///   objects the player owns leave the game as a single rules action.
+    /// - `MergedComponentRouting` (CR 730.3): the merged-permanent move already
+    ///   consulted replacements; the component split is internal routing.
+    /// - `DebugCommand`: operator intent is "force the state".
+    ///
+    /// The unconditional primitive guards (CR 111.8 token, CR 614.1d ETB block,
+    /// CR 400.7 cleanup) still run in `zones.rs` delivery for every cause — the
+    /// exemption is only of the replacement consult, never of the rules that
+    /// must hold for any move (PLAN §2 / §3).
+    fn is_exempt(&self) -> bool {
+        matches!(
+            self,
+            ZoneChangeCause::CastingToStack { .. }
+                | ZoneChangeCause::PregameProcedure
+                | ZoneChangeCause::PlayerLeftGame
+                | ZoneChangeCause::MergedComponentRouting
+                | ZoneChangeCause::DebugCommand
+        )
+    }
+}
+
 /// Destination modifiers — the union of what the pipeline copies need to seed
 /// onto the proposed `ZoneChange` before the replacement consult.
 #[derive(Default)]
@@ -170,6 +201,59 @@ impl ZoneMoveRequest {
             object_id,
             to,
             cause: ZoneChangeCause::SpellResolutionDefault,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 601.2a: casting moves the card from where it is to the stack — part
+    /// of the casting process, exempt from the replacement consult.
+    pub fn casting_to_stack(object_id: ObjectId, source: ObjectId) -> Self {
+        Self {
+            object_id,
+            to: Zone::Stack,
+            cause: ZoneChangeCause::CastingToStack { source },
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 103.5: pregame procedure (opening-draw / mulligan shuffle, bottom-of-
+    /// library returns, opening-hand actions) — exempt from the replacement
+    /// consult. `placement` is honored so mulligan bottoming reuses the
+    /// library-placement arm.
+    pub fn pregame(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::PregameProcedure,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 800.4a: a player left the game; objects they own leave the game (are
+    /// exiled). "This is not a state-based action" — exempt from the consult.
+    pub fn player_left_game(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::PlayerLeftGame,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// Debug/admin tooling forcing a zone change — exempt from the consult.
+    pub fn debug(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::DebugCommand,
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
@@ -385,6 +469,48 @@ pub(crate) fn move_object(
         exile_links.tracking,
         ZoneDeliveryExileTracking::TrackBySource
     );
+
+    // PLAN §3: exempt causes skip the `replace_event` consult and go straight to
+    // delivery. The proposed event is sealed directly (no matcher pass) and runs
+    // the same delivery tail as a post-replacement event, so the unconditional
+    // primitive guards (CR 111.8 / 614.1d / 400.7) still apply. Exempt callers
+    // carry default `EntryMods` today; seed any they DO carry so the contract is
+    // uniform with the consulting path. The intrinsic enters-with-counters
+    // seeding (CR 614.1c) is part of the "would" layer and is deliberately NOT
+    // applied — matching the raw `move_to_zone` behavior these callers replace.
+    if req.cause.is_exempt() {
+        let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
+        if let ProposedEvent::ZoneChange {
+            enter_transformed,
+            enter_tapped,
+            controller_override,
+            enter_with_counters,
+            face_down_profile,
+            ..
+        } = &mut proposed
+        {
+            *enter_transformed = req.mods.enter_transformed;
+            if !req.mods.enter_tapped.is_unspecified() {
+                *enter_tapped = req.mods.enter_tapped;
+            }
+            *controller_override = req.mods.controller_override;
+            enter_with_counters.extend(req.mods.enter_with_counters.iter().cloned());
+            *face_down_profile = req.mods.face_down_profile.clone().map(Box::new);
+        }
+        let approved = ApprovedZoneChange::seal(proposed);
+        return match deliver(
+            state,
+            approved,
+            DeliveryCtx {
+                source_id,
+                exile_links,
+            },
+            events,
+        ) {
+            ZoneDeliveryResult::Done => ZoneMoveResult::Done,
+            ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+        };
+    }
 
     execute_zone_move(
         state,

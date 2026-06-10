@@ -32,26 +32,16 @@ pub fn apply_debug_action(
             simulate,
         } => {
             validate_object(state, object_id)?;
+            // Debug forces a zone change — route through the zone pipeline under
+            // the `DebugCommand` exempt cause (skips the replacement consult; the
+            // unconditional primitive guards still run). The library-position
+            // arm folds the raw `move_to_library_position` / `_at_index` siblings
+            // in via the placement request.
+            let mut req = crate::game::zone_pipeline::ZoneMoveRequest::debug(object_id, to_zone);
             if to_zone == Zone::Library {
-                match library_position.unwrap_or(LibraryPosition::Bottom) {
-                    LibraryPosition::Top => {
-                        zones::move_to_library_position(state, object_id, true, events);
-                    }
-                    LibraryPosition::Bottom => {
-                        zones::move_to_library_position(state, object_id, false, events);
-                    }
-                    LibraryPosition::NthFromTop { n } => {
-                        zones::move_to_library_at_index(
-                            state,
-                            object_id,
-                            Some(n.saturating_sub(1) as usize),
-                            events,
-                        );
-                    }
-                }
-            } else {
-                zones::move_to_zone(state, object_id, to_zone, events);
+                req = req.at_library_position(library_position.unwrap_or(LibraryPosition::Bottom));
             }
+            crate::game::zone_pipeline::move_object(state, req, events);
             if simulate {
                 super::sba::check_state_based_actions(state, events);
                 super::triggers::process_triggers(state, events);
@@ -136,8 +126,10 @@ pub fn apply_debug_action(
                 .take(count as usize)
                 .copied()
                 .collect();
+            // Debug mill — route through the pipeline under `DebugCommand`.
             for id in top_ids {
-                zones::move_to_zone(state, id, Zone::Graveyard, events);
+                let req = crate::game::zone_pipeline::ZoneMoveRequest::debug(id, Zone::Graveyard);
+                crate::game::zone_pipeline::move_object(state, req, events);
             }
         }
 
@@ -605,7 +597,13 @@ pub fn route_debug_create_to_battlefield(
     // without the entering permanent's "when ~ enters" abilities going on the
     // stack.
     if !run_etb {
-        zones::move_to_zone(state, object_id, Zone::Battlefield, &mut events);
+        // Debug staging — route through the pipeline under `DebugCommand` (skips
+        // the replacement consult; no intrinsic enters-with-counter seeding,
+        // matching the prior raw placement). ETB triggers / SBA are still NOT
+        // run here (the delivery tail emits no triggers); that is `run_etb`'s
+        // job below.
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::debug(object_id, Zone::Battlefield);
+        crate::game::zone_pipeline::move_object(state, req, &mut events);
         crate::game::layers::mark_layers_full(state);
         return ActionResult {
             events,

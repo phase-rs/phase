@@ -13,7 +13,6 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::turns;
-use super::zones;
 
 /// CR 103.5: A player's starting hand size is normally seven cards.
 const STARTING_HAND_SIZE: usize = 7;
@@ -286,8 +285,12 @@ fn handle_serum_powder(
         .collect();
     let exiled_count = hand_ids.len();
 
+    // CR 103.5: pregame procedure — route through the zone pipeline under the
+    // `PregameProcedure` exempt cause (no effect exists pregame to replace a
+    // mulligan move; PLAN §3).
     for card_id in hand_ids {
-        zones::move_to_zone(state, card_id, Zone::Exile, events);
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(card_id, Zone::Exile);
+        crate::game::zone_pipeline::move_object(state, req, events);
     }
 
     // CR 103.5b + Serum Powder Oracle text: "draw that many cards" — draw
@@ -394,8 +397,13 @@ pub fn handle_opening_hand_bottom(
     let expected_count = pending[idx].count;
 
     validate_bottom_selection(state, player, &cards, expected_count)?;
+    // CR 103.5: pregame bottoming — route to the library bottom through the
+    // pipeline's library-placement arm under the `PregameProcedure` exempt
+    // cause (folds the raw `move_to_library_position` sibling in).
     for card_id in cards {
-        zones::move_to_library_position(state, card_id, false, events);
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(card_id, Zone::Library)
+            .at_library_position(crate::types::ability::LibraryPosition::Bottom);
+        crate::game::zone_pipeline::move_object(state, req, events);
     }
 
     *state.prepaid_mulligan_bottoms.entry(player).or_insert(0) += expected_count;
@@ -434,8 +442,13 @@ pub fn handle_mulligan_bottom(
 
     validate_bottom_selection(state, player, &cards, expected_count)?;
 
+    // CR 103.5: pregame bottoming — route to the library bottom through the
+    // pipeline's library-placement arm under the `PregameProcedure` exempt
+    // cause (folds the raw `move_to_library_position` sibling in).
     for card_id in cards {
-        zones::move_to_library_position(state, card_id, false, events);
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(card_id, Zone::Library)
+            .at_library_position(crate::types::ability::LibraryPosition::Bottom);
+        crate::game::zone_pipeline::move_object(state, req, events);
     }
 
     pending.remove(idx);
@@ -567,8 +580,11 @@ fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &m
         .copied()
         .collect();
 
+    // CR 103.5: pregame mulligan — return the hand to the library through the
+    // pipeline under the `PregameProcedure` exempt cause, then shuffle.
     for card_id in hand_ids {
-        zones::move_to_zone(state, card_id, Zone::Library, events);
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(card_id, Zone::Library);
+        crate::game::zone_pipeline::move_object(state, req, events);
     }
 
     // Shuffle library
@@ -593,7 +609,10 @@ fn draw_n(state: &mut GameState, player_id: PlayerId, count: usize, events: &mut
         }
 
         let top_card = player.library[0];
-        zones::move_to_zone(state, top_card, Zone::Hand, events);
+        // CR 103.5: pregame draw — route through the pipeline under the
+        // `PregameProcedure` exempt cause.
+        let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(top_card, Zone::Hand);
+        crate::game::zone_pipeline::move_object(state, req, events);
     }
 
     events.push(GameEvent::CardsDrawn {
