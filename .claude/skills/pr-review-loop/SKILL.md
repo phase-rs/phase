@@ -41,30 +41,42 @@ A running tally carried in the wakeup prompt is an *optional cache* to skip re-d
 
 ### 1. Select candidates
 
-List open PRs `>= floor`, ascending:
+List open PRs `>= floor`, ascending, excluding **(a)** any authored by `ACTING_LOGIN` (don't review your own work) — fold the author filter into the `jq` so the emitted number list is already clean:
 
 ```bash
 gh pr list --repo "$REPO" --state open --limit 100 \
-  --json number,author,createdAt \
-  --jq ".[] | select(.number >= $floor) | .number" | sort -n
+  --json number,author \
+  --jq ".[] | select(.number >= $floor and .author.login != \"$ACTING_LOGIN\") | .number" | sort -n
 ```
 
-Exclude:
-- **(a)** PRs authored by `ACTING_LOGIN` (don't review your own work).
-- **(b)** PRs already carrying a comment or review by any login in `defer_to`.
+Then exclude **(b)** any PR already carrying a comment or review by a login in `defer_to` — defer to that reviewer rather than piling on. Per candidate `$n`:
+
+```bash
+skip=""
+for who in $defer_to; do
+  c=$(gh pr view "$n" --repo "$REPO" --json comments --jq "[.comments[] | select(.author.login==\"$who\")] | length")
+  r=$(gh pr view "$n" --repo "$REPO" --json reviews  --jq "[.reviews[]  | select(.author.login==\"$who\")] | length")
+  { [ "$c" != "0" ] || [ "$r" != "0" ]; } && { skip="$who"; break; }
+done
+[ -n "$skip" ] && continue   # a defer_to reviewer is already engaged
+```
 
 ### 2. Per-PR dedup gate — the loop's efficiency core
 
 For each surviving candidate, decide review / re-review / skip. Query each field with its **own** `gh pr view --json X --jq` call — combining fields into one blob and piping through a shell var triggers jq control-char parse errors.
 
+The "ledger" is *all* of the acting login's prior activity on the PR — a plain comment (what this loop posts) **or** a formal review (a human runner may have left one). Take the max timestamp across both; one extra cheap call avoids redundantly re-reviewing a PR whose only prior verdict was a formal review:
+
 ```bash
-# Most-recent review comment by the acting login on this PR:
-last=$(gh pr view "$n" --repo "$REPO" --json comments \
-  --jq "[.comments[] | select(.author.login==\"$ACTING_LOGIN\") | .createdAt] | max")
+lc=$(gh pr view "$n" --repo "$REPO" --json comments \
+  --jq "[.comments[] | select(.author.login==\"$ACTING_LOGIN\") | .createdAt] | max // empty")
+lr=$(gh pr view "$n" --repo "$REPO" --json reviews \
+  --jq "[.reviews[]  | select(.author.login==\"$ACTING_LOGIN\") | .submittedAt] | max // empty")
+last=$(printf '%s\n%s\n' "$lc" "$lr" | grep -v '^$' | sort | tail -n1)   # ISO-8601 sorts lexically
 ```
 
-- **No prior comment (`last` empty/null)** → first review. Go to step 3.
-- **Prior comment exists** → check for an *actual code commit* after it. An actual code commit is a **non-merge** commit (a merge/rebase-from-main commit has ≥2 parents and does not change the PR's own content):
+- **No prior activity (`last` empty)** → first review. Go to step 3.
+- **Prior activity exists** → check for an *actual code commit* after it. An actual code commit is a **non-merge** commit (a merge/rebase-from-main commit has ≥2 parents and does not change the PR's own content):
 
 ```bash
 gh api "repos/$REPO/pulls/$n/commits" --paginate \
