@@ -10094,8 +10094,7 @@ fn apply_mana_spell_grants(
 // unchanged while the implementation lives in `game/costs.rs`.
 pub use super::costs::pay_ability_cost;
 pub(crate) use super::costs::{
-    pause_cost_payment_for_replacement_choice, pay_ability_cost_for_activation,
-    AbilityCostPaymentOutcome,
+    pause_cost_payment_for_replacement_choice, pay_ability_cost_for_activation, PaymentOutcome,
 };
 
 fn pending_activation_after_cost_pause(
@@ -11379,7 +11378,7 @@ pub fn handle_activate_ability(
                     ));
                 }
                 stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-                if let AbilityCostPaymentOutcome::Paused { remaining_cost } =
+                if let PaymentOutcome::Paused { remaining_cost } =
                     pay_ability_cost_for_activation(state, player, source_id, cost, events)?
                 {
                     state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(
@@ -11469,7 +11468,7 @@ pub fn handle_activate_ability(
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-        if let AbilityCostPaymentOutcome::Paused { remaining_cost } =
+        if let PaymentOutcome::Paused { remaining_cost } =
             pay_ability_cost_for_activation(state, player, source_id, cost, events)?
         {
             state.pending_cast = Some(Box::new(pending_activation_after_cost_pause(

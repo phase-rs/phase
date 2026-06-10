@@ -495,7 +495,7 @@ fn pay_activation_costs_after_target_selection(
             &mut assigned_ability,
             activation_cost,
         );
-        if let super::casting::AbilityCostPaymentOutcome::Paused { remaining_cost } =
+        if let super::casting::PaymentOutcome::Paused { remaining_cost } =
             pay_ability_cost_for_activation(
                 state,
                 player,

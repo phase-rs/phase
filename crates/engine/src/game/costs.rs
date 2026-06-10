@@ -1,48 +1,120 @@
-//! Ability-activation cost payment authority (L2).
+//! Ability cost payment authority (L2).
 //!
-//! This module is the single authority that executes payment of an activated
-//! ability's cost (CLAUDE.md: "Single authority for ability costs"). It owns
-//! the only `match` over `AbilityCost` that mutates player/object state to pay
-//! a cost, plus the CR 616.1 replacement-pause bookkeeping.
+//! This module is the single authority that executes payment of an ability's
+//! cost (CLAUDE.md: "Single authority for ability costs"). It owns the only
+//! `match` over `AbilityCost` that mutates player/object state to pay a cost,
+//! plus the CR 616.1 replacement-pause bookkeeping. Both activation-time
+//! (CR 601.2g/h) and resolution-time (CR 118.12) payment flow through it; the
+//! caller selects the regime via [`PaymentScope`], which carries the two
+//! genuine differences (CR-confirmed in the unification plan §2): quantity
+//! resolution context and mana payment context.
 //!
-//! Extracted verbatim from `casting.rs` as a pure code-motion seam (Phase 1 of
-//! the cost-payment unification plan). The activation flow, the
-//! `WaitingFor::PayCost` emission/resume handlers, the affordability aggregate
+//! Originally extracted from `casting.rs` as a pure code-motion seam (Phase 1);
+//! Phase 2 introduced [`PaymentScope`] and routed the resolution-time
+//! `Effect::PayCost` arms (`effects/pay.rs`) through this authority, deleting
+//! their duplicate Mana/ManaDynamic/PayLife/PayEnergy/Composite/Discard
+//! implementations. The activation flow, the `WaitingFor::PayCost`
+//! emission/resume handlers, the affordability aggregate
 //! (`can_pay_ability_cost_now`), the cost finder helpers, and the mana planner
-//! all remain in `casting.rs` for now; `casting.rs` re-exports the symbols
-//! moved here via `pub(crate) use` shims so existing call sites compile
-//! unchanged.
+//! all remain in `casting.rs`; `casting.rs` re-exports the moved symbols via
+//! `pub(crate) use` shims so existing call sites compile unchanged.
 //!
 //! L1-primitives-only rule (TARGET invariant): code here pays costs through
 //! L1 resource primitives (`life_costs`, `effects::counters`, `sacrifice`,
 //! `effects::discard`, `zones`, `effects::attach`, and the mana payment path
 //! in `casting.rs`) and must never re-implement resource math beyond a direct
-//! L1 call. Known exceptions carried over verbatim by the Phase-1 pure move,
-//! to be collapsed in Phase 2/5: the `PayEnergy` arm hand-rolls the energy
-//! decrement (pending a `players::pay_energy` L1 helper) and the `Tap` arm
-//! sets `tapped` directly.
+//! L1 call. This rule binds the L3 resume handlers too: the
+//! `WaitingFor::PayCost` / `WardDiscardChoice` / `WardSacrificeChoice` resume
+//! handlers (in `engine.rs`/`engine_payment_choices.rs`) match on
+//! `PayCostKind`/`WaitingFor` variants and may call L1 primitives
+//! (`sacrifice_permanent`, `discard_as_cost`, …) to execute a player's concrete
+//! selection, but they must never match on `AbilityCost` or re-implement the
+//! resource math that lives here (risk R8). Known exceptions carried over
+//! verbatim, to be collapsed in Phase 5: the `PayEnergy` arm hand-rolls the
+//! energy decrement (pending a `players::pay_energy` L1 helper) and the `Tap`
+//! arm sets `tapped` directly.
 
 use std::collections::HashSet;
 
-use crate::types::ability::{AbilityCost, TargetFilter, REMOVE_COUNTER_COST_ALL};
+use crate::types::ability::{AbilityCost, EffectKind, TargetFilter, REMOVE_COUNTER_COST_ALL};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::casting::{
-    ability_mana_payment_excluded_sources, pay_ability_mana_cost, pay_ability_mana_cost_excluding,
+    ability_mana_payment_excluded_sources, can_pay_effect_mana_cost_after_auto_tap,
+    find_eligible_discard_targets, pay_ability_mana_cost, pay_ability_mana_cost_excluding,
+    pay_effect_mana_cost,
 };
 use super::engine::EngineError;
-use super::quantity::resolve_quantity;
+use super::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use super::speed::{effective_speed, set_speed};
+use crate::types::ability::ResolvedAbility;
+
+/// Selects the payment regime for `pay_ability_cost_inner`. The two variants
+/// capture the only CR-confirmed differences between activation-time and
+/// resolution-time payment (unification plan §2):
+///
+/// - **Quantity resolution.** Activation resolves dynamic amounts with
+///   `resolve_quantity(state, expr, player, source)`; resolution resolves them
+///   against the payer-adjusted [`ResolvedAbility`] via
+///   `resolve_quantity_with_targets` so event/target refs
+///   (`Power { CostPaidObject }`, …) read the right object (CR 608.2k).
+/// - **Mana payment context.** Activation uses the CR 601.2g mana-ability
+///   window (`pay_ability_mana_cost`); resolution uses the effect-context
+///   auto-tap path (`pay_effect_mana_cost`, CR 118.12).
+///
+/// Failure semantics are also scope-conditioned and handled by the caller:
+/// activation maps [`PaymentOutcome::Failed`] to `EngineError::ActionNotAllowed`
+/// (CR 601.2h "Unpayable costs can't be paid"); resolution maps it to
+/// `cost_payment_failed_flag` (CR 118.12 "if [a player] can't").
+pub(crate) enum PaymentScope<'a> {
+    Activation {
+        excluded_sources: &'a HashSet<ObjectId>,
+    },
+    /// `ability` is the PAYER-ADJUSTED `ResolvedAbility` clone (controller
+    /// swapped to the resolved payer, per `effects/pay.rs`). All
+    /// quantity-resolving arms read it via `resolve_quantity_with_targets`.
+    Resolution { ability: &'a ResolvedAbility },
+}
+
+/// A cost payment could not be completed. The reason string is the human-
+/// readable failure carried over from the original `EngineError` messages;
+/// the activation adapter re-wraps it as `EngineError::ActionNotAllowed`, the
+/// resolution adapter discards it and sets `cost_payment_failed_flag`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PaymentFailure {
+    pub reason: String,
+}
+
+impl PaymentFailure {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Build a [`PaymentOutcome::Failed`] from a reason string.
+fn payment_failed(reason: impl Into<String>) -> PaymentOutcome {
+    PaymentOutcome::Failed {
+        reason: PaymentFailure::new(reason),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AbilityCostPaymentOutcome {
-    Complete,
+pub(crate) enum PaymentOutcome {
+    /// The cost was paid in full.
+    Paid,
+    /// CR 616.1: a replacement-effect choice interrupted payment. Reserved
+    /// exclusively for the `pause_cost_payment_for_replacement_choice` path.
     Paused { remaining_cost: Option<AbilityCost> },
+    /// CR 601.2h / CR 118.12: the cost was not (fully) paid. The caller maps
+    /// this to the scope-appropriate failure channel (see [`PaymentScope`]).
+    Failed { reason: PaymentFailure },
 }
 
 fn combine_remaining_costs(
@@ -58,6 +130,23 @@ fn combine_remaining_costs(
         0 => None,
         1 => costs.into_iter().next(),
         _ => Some(AbilityCost::Composite { costs }),
+    }
+}
+
+/// Resolve a cost's dynamic amount in the active scope (plan §2): activation
+/// uses `resolve_quantity` (player + source); resolution uses
+/// `resolve_quantity_with_targets` against the payer-adjusted ability so
+/// event/target refs read the right object (CR 608.2k).
+fn resolve_cost_quantity(
+    state: &GameState,
+    expr: &crate::types::ability::QuantityExpr,
+    player: PlayerId,
+    source_id: ObjectId,
+    scope: &PaymentScope,
+) -> i32 {
+    match scope {
+        PaymentScope::Activation { .. } => resolve_quantity(state, expr, player, source_id),
+        PaymentScope::Resolution { ability } => resolve_quantity_with_targets(state, expr, ability),
     }
 }
 
@@ -88,9 +177,46 @@ pub(crate) fn pay_ability_cost_for_activation(
     source_id: ObjectId,
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
-) -> Result<AbilityCostPaymentOutcome, EngineError> {
+) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
-    pay_ability_cost_inner(state, player, source_id, cost, events, &excluded_sources)
+    let outcome = pay_ability_cost_inner(
+        state,
+        player,
+        source_id,
+        cost,
+        events,
+        &PaymentScope::Activation {
+            excluded_sources: &excluded_sources,
+        },
+    )?;
+    // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
+    // payment failure to an illegal action — the authority's `Failed` is the
+    // activation flow's `Err(ActionNotAllowed)`, preserving the pre-Phase-2
+    // contract so the `if let Paused` call sites are unaffected.
+    match outcome {
+        PaymentOutcome::Failed { reason } => Err(EngineError::ActionNotAllowed(reason.reason)),
+        paid_or_paused => Ok(paid_or_paused),
+    }
+}
+
+/// CR 118.12: Pay an ability's cost during the resolution of an
+/// `Effect::PayCost`. `ability` is the payer-adjusted clone (see
+/// [`PaymentScope::Resolution`]); `payer` is its resolved controller.
+pub(crate) fn pay_ability_cost_for_resolution(
+    state: &mut GameState,
+    payer: PlayerId,
+    cost: &AbilityCost,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
+    pay_ability_cost_inner(
+        state,
+        payer,
+        ability.source_id,
+        cost,
+        events,
+        &PaymentScope::Resolution { ability },
+    )
 }
 
 fn pay_ability_cost_inner(
@@ -99,8 +225,8 @@ fn pay_ability_cost_inner(
     source_id: ObjectId,
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
-    excluded_sources: &HashSet<ObjectId>,
-) -> Result<AbilityCostPaymentOutcome, EngineError> {
+    scope: &PaymentScope,
+) -> Result<PaymentOutcome, EngineError> {
     match cost {
         AbilityCost::Tap => {
             let obj = state
@@ -124,55 +250,99 @@ fn pay_ability_cost_inner(
                 caused_by: None,
             });
         }
-        AbilityCost::Mana { cost } => {
-            // CR 106.6: Ability activation — restriction enforcement routes
-            // through `allows_activation` (not `allows_spell`) via the
-            // activation context built from the source permanent's types.
-            if excluded_sources.is_empty() {
-                pay_ability_mana_cost(state, player, source_id, cost, events)?;
-            } else {
-                pay_ability_mana_cost_excluding(
-                    state,
-                    player,
-                    source_id,
-                    cost,
-                    events,
-                    excluded_sources,
-                )?;
+        AbilityCost::Mana { cost } => match scope {
+            // CR 601.2g: Activation pays through the mana-ability window. CR
+            // 106.6: restriction enforcement routes through `allows_activation`
+            // (not `allows_spell`) via the activation context built from the
+            // source permanent's types.
+            PaymentScope::Activation { excluded_sources } => {
+                if excluded_sources.is_empty() {
+                    pay_ability_mana_cost(state, player, source_id, cost, events)?;
+                } else {
+                    pay_ability_mana_cost_excluding(
+                        state,
+                        player,
+                        source_id,
+                        cost,
+                        events,
+                        excluded_sources,
+                    )?;
+                }
             }
-        }
+            // CR 118.12: Resolution-time mana payment uses the effect-context
+            // auto-tap path. Pre-flight then pay; either step failing is a
+            // payment failure (not an engine error).
+            PaymentScope::Resolution { .. } => {
+                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, cost)
+                    || pay_effect_mana_cost(state, player, source_id, cost, events).is_err()
+                {
+                    return Ok(payment_failed("insufficient mana"));
+                }
+            }
+        },
+        // CR 118.4 + CR 107.3c: Dynamic-generic mana. At activation it should
+        // have been announced/resolved upstream (error). At resolution it
+        // resolves the dynamic generic against the payer-adjusted ability and
+        // pays it via the effect-context auto-tap path.
+        AbilityCost::ManaDynamic { quantity } => match scope {
+            PaymentScope::Activation { .. } => {
+                return Ok(payment_failed(
+                    "ManaDynamic cost should be resolved upstream",
+                ));
+            }
+            PaymentScope::Resolution { .. } => {
+                let amount = resolve_cost_quantity(state, quantity, player, source_id, scope);
+                let mana_cost = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
+                if !can_pay_effect_mana_cost_after_auto_tap(state, player, source_id, &mana_cost)
+                    || pay_effect_mana_cost(state, player, source_id, &mana_cost, events).is_err()
+                {
+                    return Ok(payment_failed("insufficient mana"));
+                }
+            }
+        },
         AbilityCost::Composite { costs } => {
             for (index, sub_cost) in costs.iter().enumerate() {
-                let outcome = pay_ability_cost_inner(
-                    state,
-                    player,
-                    source_id,
-                    sub_cost,
-                    events,
-                    excluded_sources,
-                )?;
-                if let AbilityCostPaymentOutcome::Paused { remaining_cost } = outcome {
-                    return Ok(AbilityCostPaymentOutcome::Paused {
-                        remaining_cost: combine_remaining_costs(
-                            remaining_cost,
-                            &costs[index + 1..],
-                        ),
-                    });
+                let outcome =
+                    pay_ability_cost_inner(state, player, source_id, sub_cost, events, scope)?;
+                match outcome {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Paused { remaining_cost } => {
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: combine_remaining_costs(
+                                remaining_cost,
+                                &costs[index + 1..],
+                            ),
+                        });
+                    }
+                    // CR 601.2h: Partial payments are not allowed; resolution-
+                    // scope callers pre-gate the whole composite via
+                    // `can_pay`, so a mid-composite `Failed` propagates without
+                    // committing the remaining sub-costs.
+                    failed @ PaymentOutcome::Failed { .. } => return Ok(failed),
                 }
             }
         }
+        // CR 119.4: Paying life IS losing life. Activation applies direct
+        // "can't pay life" statics (`pay_life_as_cast_or_activation_cost`);
+        // resolution routes through `pay_life_as_cost` (CR 118.12).
         AbilityCost::PayLife { amount } => {
-            let amount = resolve_quantity(state, amount, player, source_id);
+            let amount = resolve_cost_quantity(state, amount, player, source_id, scope);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
-            match super::life_costs::pay_life_as_cast_or_activation_cost(
-                state, player, amount, events,
-            ) {
+            let result = match scope {
+                PaymentScope::Activation { .. } => {
+                    super::life_costs::pay_life_as_cast_or_activation_cost(
+                        state, player, amount, events,
+                    )
+                }
+                PaymentScope::Resolution { .. } => {
+                    super::life_costs::pay_life_as_cost(state, player, amount, events)
+                }
+            };
+            match result {
                 super::life_costs::PayLifeCostResult::Paid { .. } => {}
                 super::life_costs::PayLifeCostResult::InsufficientLife
                 | super::life_costs::PayLifeCostResult::Prohibited => {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Cannot pay life cost".to_string(),
-                    ));
+                    return Ok(payment_failed("Cannot pay life cost"));
                 }
             }
         }
@@ -181,15 +351,13 @@ fn pay_ability_cost_inner(
             if matches!(target, TargetFilter::SelfRef) {
                 if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
                 {
-                    return Err(EngineError::ActionNotAllowed(
-                        "Cannot sacrifice this permanent as a cost".to_string(),
-                    ));
+                    return Ok(payment_failed("Cannot sacrifice this permanent as a cost"));
                 }
                 match super::sacrifice::sacrifice_permanent(state, source_id, player, events)? {
                     super::sacrifice::SacrificeOutcome::Complete => {}
                     super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                         pause_cost_payment_for_replacement_choice(state, choice_player);
-                        return Ok(AbilityCostPaymentOutcome::Paused {
+                        return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
                     }
@@ -208,11 +376,66 @@ fn pay_ability_cost_inner(
             super::effects::discard::DiscardOutcome::Complete => {}
             super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
                 pause_cost_payment_for_replacement_choice(state, choice_player);
-                return Ok(AbilityCostPaymentOutcome::Paused {
+                return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,
                 });
             }
         },
+        // CR 118.12 + CR 701.9: Resolution-time "discard N cards of your choice"
+        // cost (e.g. "discard a card"). The choice of which cards to discard is
+        // acquired via a `WaitingFor::DiscardChoice` round-trip when there is a
+        // real choice; when the eligible set exactly fills the requirement the
+        // discard auto-pays. This shape is resolution-only — the activation
+        // flow surfaces hand-discard costs through the `WaitingFor::PayCost`
+        // detour before payment, so the activation scope falls through to the
+        // interactive-pass-through arm below.
+        AbilityCost::Discard {
+            count,
+            filter,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+        } if matches!(scope, PaymentScope::Resolution { .. }) => {
+            let count =
+                resolve_cost_quantity(state, count, player, source_id, scope).max(0) as usize;
+            let eligible = find_eligible_discard_targets(state, player, source_id, filter.as_ref());
+            if eligible.len() < count {
+                return Ok(payment_failed("not enough cards to discard"));
+            }
+            if count == 0 {
+                // CR 118.12: record the (zero) paid count for downstream chain
+                // steps that read `QuantityRef::EventContextAmount`.
+                state.last_effect_count = Some(0);
+                return Ok(PaymentOutcome::Paid);
+            }
+            // Forced-choice fast path (plan R4): when the eligible set exactly
+            // fills the requirement there is no choice to surface, so the
+            // discard executes immediately. This is a runtime check, not a
+            // classifier fact.
+            if eligible.len() == count {
+                for card_id in eligible {
+                    if let super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
+                        choice_player,
+                    ) = super::effects::discard::discard_as_cost(state, card_id, player, events)
+                    {
+                        pause_cost_payment_for_replacement_choice(state, choice_player);
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
+                }
+                state.last_effect_count = Some(count as i32);
+            } else {
+                state.waiting_for = WaitingFor::DiscardChoice {
+                    player,
+                    count,
+                    cards: eligible,
+                    source_id,
+                    effect_kind: EffectKind::PayCost,
+                    up_to: false,
+                    unless_filter: None,
+                };
+            }
+        }
         // CR 118.3: A self-ref "exile this card" activation cost — the source
         // exiles itself from whatever zone the cost names. Covers exile-from-
         // graveyard costs (CR 702.97a Scavenge, Renew), the exile-from-hand
@@ -236,7 +459,7 @@ fn pay_ability_cost_inner(
             // land" paid from the battlefield).
             if let Some(z) = zone {
                 if obj.zone != *z {
-                    return Err(EngineError::ActionNotAllowed(format!(
+                    return Ok(payment_failed(format!(
                         "Cannot exile self for cost: source is not in {z:?}"
                     )));
                 }
@@ -263,7 +486,7 @@ fn pay_ability_cost_inner(
                     count,
                     target: TargetFilter::SelfRef,
                 } => {
-                    let count = super::quantity::resolve_quantity(state, count, player, source_id);
+                    let count = resolve_cost_quantity(state, count, player, source_id, scope);
                     if !super::effects::counters::add_counter_with_replacement(
                         state,
                         player,
@@ -272,33 +495,34 @@ fn pay_ability_cost_inner(
                         count.unsigned_abs(),
                         events,
                     ) {
-                        return Ok(AbilityCostPaymentOutcome::Paused {
+                        return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
                     }
                 }
                 _ => {
-                    return Err(EngineError::ActionNotAllowed(format!(
-                        "Effect-as-cost not yet resolvable: {:?}",
-                        effect
+                    return Ok(payment_failed(format!(
+                        "Effect-as-cost not yet resolvable: {effect:?}"
                     )));
                 }
             }
         }
         AbilityCost::Unimplemented { description } => {
-            return Err(EngineError::ActionNotAllowed(format!(
-                "Cost not implemented: {description}",
+            return Ok(payment_failed(format!(
+                "Cost not implemented: {description}"
             )));
         }
+        // CR 107.14: A player can pay {E} only if they have enough energy.
+        // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
+        // state at payment time.
         AbilityCost::PayEnergy { amount } => {
-            // CR 107.14: A player can pay {E} only if they have enough energy.
-            // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
-            // state at payment time.
-            let amount = u32::try_from(resolve_quantity(state, amount, player, source_id).max(0))
-                .unwrap_or(0);
+            let amount = u32::try_from(
+                resolve_cost_quantity(state, amount, player, source_id, scope).max(0),
+            )
+            .unwrap_or(0);
             let player_state = &mut state.players[player.0 as usize];
             if player_state.energy < amount {
-                return Err(EngineError::ActionNotAllowed("Not enough energy".into()));
+                return Ok(payment_failed("Not enough energy"));
             }
             player_state.energy -= amount;
             events.push(GameEvent::EnergyChanged {
@@ -307,11 +531,11 @@ fn pay_ability_cost_inner(
             });
         }
         AbilityCost::PaySpeed { amount } => {
-            let amount = resolve_quantity(state, amount, player, source_id);
+            let amount = resolve_cost_quantity(state, amount, player, source_id, scope);
             let amount = u8::try_from(amount.max(0)).unwrap_or(u8::MAX);
             let current_speed = effective_speed(state, player);
             if amount > current_speed {
-                return Err(EngineError::ActionNotAllowed("Not enough speed".into()));
+                return Ok(payment_failed("Not enough speed"));
             }
             set_speed(state, player, Some(current_speed - amount), events);
         }
@@ -330,14 +554,12 @@ fn pay_ability_cost_inner(
                     .iter()
                     .any(|subtype| subtype == "Equipment")
             {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot unattach: source is not a controlled battlefield Equipment".to_string(),
+                return Ok(payment_failed(
+                    "Cannot unattach: source is not a controlled battlefield Equipment",
                 ));
             }
             if obj.attached_to.is_none() {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot unattach: source is not attached".to_string(),
-                ));
+                return Ok(payment_failed("Cannot unattach: source is not attached"));
             }
             if let Some(old_target) = super::effects::attach::unattach(state, source_id) {
                 events.push(GameEvent::Unattached {
@@ -363,7 +585,7 @@ fn pay_ability_cost_inner(
                         amount as u32,
                         events,
                     ) {
-                        return Ok(AbilityCostPaymentOutcome::Paused {
+                        return Ok(PaymentOutcome::Paused {
                             remaining_cost: None,
                         });
                     }
@@ -417,7 +639,7 @@ fn pay_ability_cost_inner(
                         events,
                     );
                 }
-                return Ok(AbilityCostPaymentOutcome::Complete);
+                return Ok(PaymentOutcome::Paid);
             }
             // CR 601.2h: Resolve `CounterMatch::Any` to the concrete counter
             // type currently present on the source before the replacement
@@ -471,8 +693,8 @@ fn pay_ability_cost_inner(
                 EngineError::InvalidAction("Source object not found for exert cost".to_string())
             })?;
             if obj.zone != Zone::Battlefield {
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot exert: source is not on the battlefield".to_string(),
+                return Ok(payment_failed(
+                    "Cannot exert: source is not on the battlefield",
                 ));
             }
             let controller = obj.controller;
@@ -492,15 +714,6 @@ fn pay_ability_cost_inner(
                 None,
             );
         }
-        // CR 118.4 + CR 107.3c: Dynamic-generic mana primarily appears in
-        // unless-pay contexts (post-2026-05-09 fold). It should not reach an
-        // activation-time payment path, where the X is normally announced
-        // and resolved upstream.
-        AbilityCost::ManaDynamic { .. } => {
-            return Err(EngineError::ActionNotAllowed(
-                "ManaDynamic cost should be resolved upstream".into(),
-            ));
-        }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
         AbilityCost::Untap
@@ -517,10 +730,9 @@ fn pay_ability_cost_inner(
         // CR 118.12a: `OneOf` (disjunctive unless-cost) is intercepted at
         // `surface_unless_payment` and never reaches an auto-payment site.
         AbilityCost::OneOf { .. } => {
-            return Err(EngineError::ActionNotAllowed(
+            return Ok(payment_failed(
                 "OneOf cost is only valid as an unless-cost and must be \
-                 resolved interactively via UnlessPaymentChooseCost"
-                    .into(),
+                 resolved interactively via UnlessPaymentChooseCost",
             ));
         }
         // CR 702.24a: `PerCounter` is expanded into a concrete cost at the
@@ -528,12 +740,11 @@ fn pay_ability_cost_inner(
         // reach an auto-payment site as-is — the multiplier has to be resolved
         // against the live game state first.
         AbilityCost::PerCounter { .. } => {
-            return Err(EngineError::ActionNotAllowed(
+            return Ok(payment_failed(
                 "PerCounter cost must be expanded against game state before \
-                 reaching pay_ability_cost"
-                    .into(),
+                 reaching pay_ability_cost",
             ));
         }
     }
-    Ok(AbilityCostPaymentOutcome::Complete)
+    Ok(PaymentOutcome::Paid)
 }
