@@ -3843,6 +3843,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some(effect) = try_parse_leave_battlefield_exile_replacement(&lower) {
         return parsed_clause(effect);
     }
+    // CR 614.1a + CR 608.2n + CR 607.2b: "exile it instead of putting it into a
+    // graveyard as it resolves" — the resolving-spell exile rider applied by a
+    // `WhenAPlayerCasts` trigger to the triggering spell (Rod of Absorption).
+    // Must run before the generic exile dispatch, which would otherwise lower it
+    // to a no-op `ChangeZone { origin: Graveyard }` that never finds the spell
+    // (it is on the stack, not in a graveyard, when the trigger resolves).
+    if try_parse_exile_resolving_spell_instead_of_graveyard(&lower) {
+        return parsed_clause(Effect::ExileResolvingSpellInsteadOfGraveyard);
+    }
     // CR 614.1a + CR 514.2: Global "If [source] would deal damage this turn,
     // it deals that much damage plus N instead" pattern (Rankle and Torbran,
     // I Call for Slaughter). Distinct from the targeted "If a source would
@@ -9595,6 +9604,41 @@ fn is_exile_after_spell_rider_clause(lower: &str) -> bool {
             tag("exile that card instead"),
             tag("exile that spell instead"),
         )),
+    ))
+    .parse(trimmed)
+    .is_ok()
+}
+
+/// CR 614.1a + CR 608.2n + CR 607.2b: Detect the resolving-spell exile rider —
+/// "exile it instead of putting it into a graveyard as it resolves". This is the
+/// trigger BODY of a `WhenAPlayerCasts` trigger (Rod of Absorption), distinct
+/// from the post-cast rider clause `is_exile_after_spell_rider_clause` ("if that
+/// spell would be put into a graveyard, exile it instead") that trails a
+/// `CastFromZone`/`Counter` effect.
+///
+/// Composed as a single nom chain over the independent axes: the bare anaphor
+/// ("it" / "that spell") and the graveyard determiner. "a graveyard" /
+/// "its owner's graveyard" / "a player's graveyard" are leaf variants of the
+/// same slot. The trailing "as it resolves" is the resolution-timing marker that
+/// distinguishes this from the immediate "exile it" zone-move.
+fn try_parse_exile_resolving_spell_instead_of_graveyard(lower: &str) -> bool {
+    use nom::branch::alt;
+    use nom::bytes::complete::tag;
+    use nom::combinator::all_consuming;
+    use nom::Parser;
+    let trimmed = lower.trim().trim_end_matches('.').trim();
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("exile "),
+        alt((tag("it"), tag("that spell"), tag("that card"))),
+        tag(" instead of putting it into "),
+        alt((
+            tag("a graveyard"),
+            tag("the graveyard"),
+            tag("its owner's graveyard"),
+            tag("a player's graveyard"),
+            tag("their graveyard"),
+        )),
+        tag(" as it resolves"),
     ))
     .parse(trimmed)
     .is_ok()

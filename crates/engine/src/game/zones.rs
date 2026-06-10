@@ -438,6 +438,15 @@ pub fn move_to_zone(
     // with" cards here, before CR 400.7 cleanup prunes `TrackedBySource`.
     zone_change_record.linked_exile_snapshot =
         capture_linked_exile_snapshot(state, object_id, from);
+    // CR 607.2b + CR 603.10e: Persist the linked-exile snapshot as last-known
+    // information so a self-sacrifice ability that refers to "cards exiled with
+    // this permanent" (Rod of Absorption) still resolves correctly after its own
+    // source is gone and the live `TrackedBySource` links have been pruned.
+    if !zone_change_record.linked_exile_snapshot.is_empty() {
+        state
+            .linked_exile_lki
+            .insert(object_id, zone_change_record.linked_exile_snapshot.clone());
+    }
     zone_change_record.combat_status = capture_combat_status(state, object_id);
 
     apply_zone_exit_cleanup(state, object_id, from, to);

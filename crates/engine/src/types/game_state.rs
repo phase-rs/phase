@@ -6165,6 +6165,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub lki_cache: HashMap<ObjectId, LKISnapshot>,
 
+    /// CR 607.2b + CR 603.10e: Last-known "cards exiled with [source]" linkage,
+    /// captured when a source with `TrackedBySource` exile links leaves the
+    /// battlefield. The live `exile_links` are pruned on battlefield exit
+    /// (CR 400.7), but an ability that sacrifices its own source as a cost and
+    /// then refers to "cards exiled with this permanent" (Rod of Absorption)
+    /// must still see those cards at resolution. `linked_exile_cards_for_source`
+    /// consults this as its final fallback, filtered to cards still in exile, so
+    /// stale entries (cards that later left exile) contribute nothing.
+    /// Cleared on phase/step transitions via `advance_phase()`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub linked_exile_lki: HashMap<ObjectId, Vec<LinkedExileSnapshot>>,
+
     /// Transient: set by PayCost resolver when payment fails.
     /// Gates IfYouDo sub-abilities. Reset in DecideOptionalEffect handler.
     #[serde(skip)]
@@ -6690,6 +6702,7 @@ impl GameState {
             current_trigger_events: Vec::new(),
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
+            linked_exile_lki: HashMap::new(),
             cost_payment_failed_flag: false,
             pending_discard_for_cost: None,
             pending_cast: None,

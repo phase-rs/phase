@@ -80,6 +80,7 @@ pub mod end_the_turn;
 pub mod endure;
 pub mod energy;
 pub mod epic;
+pub mod exile_resolving_spell;
 // Tests for `epic` live in a sibling file (declared here, not in `epic.rs`, so
 // `epic.rs` stays implementation-only).
 #[cfg(test)]
@@ -1994,6 +1995,9 @@ pub fn resolve_effect(
         Effect::PayCost { .. } => pay::resolve(state, ability, events),
         Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
         Effect::FreeCastFromZones { .. } => free_cast_from_zones::resolve(state, ability, events),
+        Effect::ExileResolvingSpellInsteadOfGraveyard => {
+            exile_resolving_spell::resolve(state, ability, events)
+        }
         Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
         Effect::CreateDamageReplacement { .. } => {
             create_damage_replacement::resolve(state, ability, events)

@@ -752,6 +752,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::PayCost
         | EffectKind::CastFromZone
         | EffectKind::FreeCastFromZones
+        | EffectKind::ExileResolvingSpellInsteadOfGraveyard
         | EffectKind::PreventDamage
         | EffectKind::CreateDamageReplacement
         | EffectKind::Regenerate

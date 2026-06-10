@@ -26,7 +26,7 @@
     "crates/engine/src/types/card_type.rs"
   ],
   "enum_count": 282,
-  "variant_count": 3045,
+  "variant_count": 3047,
   "smell_summary": [
     {
       "enum_name": "AbilityCondition",
@@ -9617,6 +9617,18 @@
           ]
         },
         {
+          "name": "ExileResolvingSpellInsteadOfGraveyard",
+          "line": 7339,
+          "kind": "unit",
+          "field_names": [],
+          "doc": "CR 614.1a + CR 608.2n + CR 607.2b: \"Exile it instead of putting it into a graveyard as it resolves\" — the self-replacement rider applied by a `WhenAPlayerCasts` trigger to the *triggering spell* (Rod of Absorption).  At resolution this effect does NOT move the spell (it is still on the stack); it stamps the per-object `exile_from_stack_instead_of_graveyard` rider so the stack-resolution router sends the spell to exile (CR 614.1a replaces the normal CR 608.2n graveyard destination) when it finishes resolving. When the spell reaches exile, it is recorded as \"exiled with\" the trigger source so a linked ability (CR 607.2b — \"cards exiled with this artifact\") can later refer to the accumulating set.  Distinct from `ChangeZone { destination: Exile }` (which moves a card that is already in a zone) and from `FreeCastFromZones { exile_instead… }` (which stamps the same rider on a spell *cast during resolution*, with no linked-exile payoff). This effect is the trigger-driven, link-establishing form for the resolving spell itself.",
+          "cr_refs": [
+            "CR 607.2b",
+            "CR 608.2n",
+            "CR 614.1a"
+          ]
+        },
+        {
           "name": "RevealUntil",
           "line": 7577,
           "kind": "struct",
@@ -11371,6 +11383,14 @@
         {
           "name": "ExileFromTopUntil",
           "line": 9661,
+          "kind": "unit",
+          "field_names": [],
+          "doc": "",
+          "cr_refs": []
+        },
+        {
+          "name": "ExileResolvingSpellInsteadOfGraveyard",
+          "line": 9689,
           "kind": "unit",
           "field_names": [],
           "doc": "",

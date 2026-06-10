@@ -63,6 +63,18 @@ fn spell_in_zone(state: &GameState, id: ObjectId, zone: Zone) -> bool {
     state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
 }
 
+/// CR 614.1a + CR 608.2n: True when this resolving spell carries the per-object
+/// `exile_from_stack_instead_of_graveyard` marker (Rod of Absorption's "exile it
+/// instead of putting it into a graveyard as it resolves" rider). Like
+/// `CastingVariant::replaces_stack_to_graveyard_with_exile`, this is a STATIC
+/// destination rule selected when computing the spell's post-resolution zone.
+fn object_exiles_instead_of_graveyard(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.exile_from_stack_instead_of_graveyard)
+}
+
 /// CR 608.3e + CR 614.6: A permanent spell whose ETB was fully prevented goes
 /// to its owner's graveyard (only if still on the stack — see `spell_still_on_stack`).
 /// Routed through the zone pipeline so board-wide `Moved` graveyard→exile
@@ -549,7 +561,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // instead of putting it anywhere else any time it would leave the stack.
             // Flashback only appears on instants/sorceries — unconditional exile is correct.
             Zone::Exile
-        } else if casting_variant.replaces_stack_to_graveyard_with_exile()
+        } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
+            || object_exiles_instead_of_graveyard(state, entry.id))
             && !is_permanent_spell(state, entry.id)
         {
             // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
@@ -559,6 +572,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // free-cast rider is no longer read here — it is a self-scoped
             // `Moved` replacement on the spell, consulted by the pipeline when
             // the spell's stack → graveyard move is delivered below (CR 614.6).
+            // The per-object `exile_from_stack_instead_of_graveyard` marker
+            // (Rod of Absorption's "exile it instead of putting it into a
+            // graveyard as it resolves" rider, stamped on the resolving spell by
+            // `Effect::ExileResolvingSpellInsteadOfGraveyard`) is the same kind
+            // of STATIC destination rule and is honored here too.
             Zone::Exile
         } else if is_permanent_spell(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.
@@ -1029,7 +1047,32 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // path delivers the redirected move.
                 let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
                 match zone_pipeline::move_object(state, req, events) {
-                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::Done => {
+                        // CR 607.2b + CR 406.6: a spell exiled by the per-object
+                        // `exile_from_stack_instead_of_graveyard` rider (Rod of
+                        // Absorption) is "exiled with" the trigger source that
+                        // stamped it. Now that the pipeline has delivered the
+                        // move, record the linked-exile association so the
+                        // source's linked ability ("cast any number of cards
+                        // exiled with this artifact") sees the accumulating set.
+                        // Gate on the object's ACTUAL post-move zone (not the
+                        // requested `dest`) so a redirect that diverted the card
+                        // away from exile never records a spurious link, while a
+                        // redirect INTO exile still records correctly.
+                        if spell_in_zone(state, entry.id, Zone::Exile) {
+                            if let Some(link_source) = state
+                                .objects
+                                .get(&entry.id)
+                                .and_then(|obj| obj.exile_from_stack_linked_source)
+                            {
+                                super::exile_links::push_tracked_by_source(
+                                    state,
+                                    entry.id,
+                                    link_source,
+                                );
+                            }
+                        }
+                    }
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         events.push(GameEvent::StackResolved {
                             object_id: entry.id,

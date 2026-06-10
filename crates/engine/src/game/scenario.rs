@@ -2178,6 +2178,14 @@ impl<'a> AbilityActivation<'a> {
         self
     }
 
+    /// Accept optional ("you may") effects/costs during resolution
+    /// (CR 609.3 / CR 601.2f). Mirrors [`SpellCast`]'s decline default with an
+    /// opt-in accept, for abilities whose payoff is gated behind a "you may".
+    pub fn accept_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Accept;
+        self
+    }
+
     /// Drive the full activation pipeline to its conclusion and return the
     /// outcome. See [`SpellCast::resolve`] for the shared contract.
     pub fn resolve(self) -> Outcome {
