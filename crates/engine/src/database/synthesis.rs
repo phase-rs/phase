@@ -4613,7 +4613,7 @@ fn is_cumulative_upkeep_trigger(t: &TriggerDefinition) -> bool {
         && t.execute.as_deref().is_some_and(|outer| {
             matches!(
                 outer.effect.as_ref(),
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Age,
                     ..
                 }
@@ -4691,7 +4691,7 @@ pub(crate) fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> Trigger
     // counter on a permanent.
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::AddCounter {
+        Effect::PutCounter {
             counter_type: CounterType::Age,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
@@ -15338,7 +15338,7 @@ mod cumulative_upkeep_synthesis_tests {
 
         let outer = trigger.execute.as_deref().expect("execute set");
         match outer.effect.as_ref() {
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type,
                 count,
                 target,

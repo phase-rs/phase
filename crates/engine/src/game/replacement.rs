@@ -3796,11 +3796,6 @@ fn extract_etb_counters_from_effect(
             counter_type,
             count,
             ..
-        }
-        | Effect::AddCounter {
-            counter_type,
-            count,
-            ..
         } => {
             // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
             // object for ETB replacements. `CostXPaid` reads the spell's paid X
@@ -3891,9 +3886,6 @@ impl EventModifiers {
             } | Effect::Untap {
                 target: TargetFilter::SelfRef,
             } | Effect::PutCounter {
-                target: TargetFilter::SelfRef,
-                ..
-            } | Effect::AddCounter {
                 target: TargetFilter::SelfRef,
                 ..
             } | Effect::ChangeZone { .. }

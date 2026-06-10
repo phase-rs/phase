@@ -203,7 +203,7 @@ pub fn room_effects(
         // 3: Storeroom — "Put a +1/+1 counter on target creature you control"
         (DungeonId::LostMineOfPhandelver, 3) => (
             simple(
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: fixed(1),
                     target: TargetFilter::Typed(
@@ -497,7 +497,7 @@ pub fn room_effects(
         // 1: Forge — "Put two +1/+1 counters on target creature"
         (DungeonId::Undercity, 1) => (
             simple(
-                Effect::AddCounter {
+                Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: fixed(2),
                     target: TargetFilter::Typed(TypedFilter::creature()),

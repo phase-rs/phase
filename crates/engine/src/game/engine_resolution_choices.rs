@@ -1743,7 +1743,6 @@ pub(super) fn handle_resolution_choice(
                 let is_partition = !matches!(
                     cont.chain.effect,
                     crate::types::ability::Effect::PutCounter { .. }
-                        | crate::types::ability::Effect::AddCounter { .. }
                 );
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {

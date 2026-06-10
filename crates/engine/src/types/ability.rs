@@ -6102,13 +6102,6 @@ pub enum Effect {
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
     },
-    AddCounter {
-        counter_type: CounterType,
-        #[serde(default = "default_quantity_one")]
-        count: QuantityExpr,
-        #[serde(default = "default_target_filter_any")]
-        target: TargetFilter,
-    },
     RemoveCounter {
         #[serde(default)]
         counter_type: Option<CounterType>,
@@ -6687,6 +6680,14 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 122.1: Place counters on target objects.
+    /// `#[serde(alias = "AddCounter")]` (CR 122.1) accepts persisted game-session
+    /// snapshots that serialized the former duplicate `AddCounter` variant tag
+    /// (e.g. an age/charge-counter ability mid-resolution on the stack). Both
+    /// variants always shared an identical field set and resolver
+    /// (`counters::resolve_add`); the duplicate was eliminated in favor of this
+    /// single placement variant.
+    #[serde(alias = "AddCounter")]
     PutCounter {
         counter_type: CounterType,
         #[serde(default = "default_quantity_one")]
@@ -8637,7 +8638,6 @@ impl Effect {
             | Effect::Counter { target, .. }
             | Effect::Tap { target, .. }
             | Effect::Untap { target, .. }
-            | Effect::AddCounter { target, .. }
             | Effect::RemoveCounter { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
@@ -8946,7 +8946,6 @@ impl Effect {
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
-            | Effect::AddCounter { count, .. }
             | Effect::Sacrifice { count, .. }
             | Effect::Mill { count, .. }
             | Effect::Scry { count, .. }
@@ -9143,7 +9142,6 @@ impl Effect {
             // --- Effects whose magnitude is a `count: QuantityExpr` ---
             Effect::Draw { count, .. }
             | Effect::Token { count, .. }
-            | Effect::AddCounter { count, .. }
             | Effect::Sacrifice { count, .. }
             | Effect::Mill { count, .. }
             | Effect::Scry { count, .. }
@@ -9352,7 +9350,6 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Untap { .. } => "Untap",
         Effect::TapAll { .. } => "TapAll",
         Effect::UntapAll { .. } => "UntapAll",
-        Effect::AddCounter { .. } => "AddCounter",
         Effect::RemoveCounter { .. } => "RemoveCounter",
         Effect::Sacrifice { .. } => "Sacrifice",
         Effect::DiscardCard { .. } => "DiscardCard",
@@ -9544,7 +9541,6 @@ pub enum EffectKind {
     LoseLife,
     Tap,
     Untap,
-    AddCounter,
     RemoveCounter,
     Sacrifice,
     DiscardCard,
@@ -9745,7 +9741,6 @@ impl From<&Effect> for EffectKind {
             Effect::Untap { .. } => EffectKind::Untap,
             Effect::TapAll { .. } => EffectKind::TapAll,
             Effect::UntapAll { .. } => EffectKind::UntapAll,
-            Effect::AddCounter { .. } => EffectKind::AddCounter,
             Effect::RemoveCounter { .. } => EffectKind::RemoveCounter,
             Effect::Sacrifice { .. } => EffectKind::Sacrifice,
             Effect::DiscardCard { .. } => EffectKind::DiscardCard,

@@ -781,11 +781,6 @@ fn is_chosen_dependent_self_etb_counter(def: &AbilityDefinition) -> bool {
             target: TargetFilter::SelfRef,
             count,
             ..
-        }
-        | Effect::AddCounter {
-            target: TargetFilter::SelfRef,
-            count,
-            ..
         } => quantity_expr_uses_chosen_filter(count),
         _ => false,
     }

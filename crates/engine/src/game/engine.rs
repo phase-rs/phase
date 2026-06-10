@@ -18999,7 +18999,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
     // "controller pays or sacrifices":
     //   1. Synthesized trigger (PayCumulativeUpkeep, Phase=Upkeep, valid_target
     //      Controller) fires when the controller's upkeep step begins.
-    //   2. Outer `Effect::AddCounter { CounterType::Age }` ticks the counter
+    //   2. Outer `Effect::PutCounter { CounterType::Age }` ticks the counter
     //      on the source before the sub-ability runs.
     //   3. Sub-ability `Effect::Sacrifice` carries `unless_pay` =
     //      `AbilityCost::PerCounter { Age, SelfRef, base }`, which expands at
@@ -19765,7 +19765,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
     /// `TriggerCondition::SourceInZone { Battlefield }` guard wired in
     /// `build_cumulative_upkeep_trigger`. Without that guard, the trigger
     /// would resolve against the (now-hand-zone) source object: the outer
-    /// `Effect::AddCounter` would still write an age counter onto the object
+    /// `Effect::PutCounter` would still write an age counter onto the object
     /// in hand, and the sub-ability would still prompt the controller with a
     /// `Mana{1}` unless-payment — a spurious prompt fundamentally inconsistent
     /// with CR 702.24a.

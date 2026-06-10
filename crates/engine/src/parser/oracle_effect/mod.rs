@@ -9664,9 +9664,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
             *target = TargetFilter::ParentTarget;
         }
-        Effect::PutCounter { target, .. }
-        | Effect::AddCounter { target, .. }
-        | Effect::RemoveCounter { target, .. } => {
+        Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => {
             *target = TargetFilter::ParentTarget;
         }
         // CR 608.2c: a self-referential zone change ("Exile Venture Forth with
@@ -10929,7 +10927,6 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Counter { target, .. }
         | Effect::Tap { target, .. }
         | Effect::Untap { target, .. }
-        | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::Sacrifice { target, .. }
         | Effect::DiscardCard { target, .. }
@@ -13011,8 +13008,7 @@ fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
         || is_token_creating_effect(effect)
         || matches!(
             effect,
-            Effect::AddCounter { .. }
-                | Effect::PutCounter { .. }
+            Effect::PutCounter { .. }
                 | Effect::PutCounterAll { .. }
                 | Effect::MultiplyCounter { .. }
                 | Effect::MoveCounters { .. }
@@ -13201,7 +13197,6 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
         | Effect::PutCounter { target, .. }
-        | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. }
         | Effect::ChangeZone { target, .. }
         | Effect::ChangeZoneAll { target, .. }
@@ -13435,9 +13430,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::ExileTop { player: target, .. }
         | Effect::Manifest { target, .. }
         | Effect::TargetOnly { target, .. } => f(target),
-        Effect::PutCounter { target, .. }
-        | Effect::AddCounter { target, .. }
-        | Effect::RemoveCounter { target, .. } => f(target),
+        Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
         Effect::LoseLife {
             target: Some(target),
