@@ -21,6 +21,23 @@ pub(crate) enum InvertedAsLongAs {
     Skip,
 }
 
+/// Single authority for recognizing the speed-cap-lift sentence
+/// "Your speed can increase beyond 4" (with or without the trailing period).
+///
+/// CR 702.179d–e: a player's speed normally tops out at 4 (the inherent
+/// speed trigger stops at "less than 4", and "max speed" means exactly 4);
+/// this static lifts that cap. The routing call sites in `oracle.rs` and the
+/// semantic parse in [`parse_static_line_inner`] all delegate here — never
+/// re-encode the phrase as a string literal elsewhere.
+pub(crate) fn is_speed_unlock_sentence(lower: &str) -> bool {
+    all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("your speed can increase beyond 4"),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
 fn parse_each_other_players_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
@@ -160,9 +177,7 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    if tp.lower == "your speed can increase beyond 4."
-        || tp.lower == "your speed can increase beyond 4"
-    {
+    if is_speed_unlock_sentence(tp.lower) {
         return Some(
             StaticDefinition::new(StaticMode::SpeedCanIncreaseBeyondFour)
                 .affected(TargetFilter::Player)
