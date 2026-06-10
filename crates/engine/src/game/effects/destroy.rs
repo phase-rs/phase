@@ -93,7 +93,6 @@ fn deliver_destruction_zone_change(
     let ctx = DeliveryCtx {
         source_id: source,
         exile_links: ExileLinkSpec::default(),
-        played_from_zone: None,
         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
     };
     !matches!(

@@ -91,8 +91,8 @@ pub(super) fn handle_replacement_choice(
                 // provenance (CR 603.6a, from the event's `cause`), and the
                 // CR 701.24a library-shuffle arm.
                 //
-                // Divergence reconciliation (the three blockers, resolved by
-                // parameterizing the shared tail instead of keeping a copy):
+                // Divergence reconciliation (resolved by parameterizing the
+                // shared tail instead of keeping a copy):
                 // (1) `DeliveryCtx.drain = CallerEpilogue` — the tail skips the
                 //     `post_replacement_continuation` drain; the epilogue below
                 //     keeps draining WITH the spell-resolution ctx and with
@@ -100,10 +100,15 @@ pub(super) fn handle_replacement_choice(
                 // (2) `pending_spell_resolution` ordering is therefore
                 //     untouched: `apply_pending_spell_resolution` still runs in
                 //     the epilogue before that drain.
-                // (3) `played_from_zone` (PLAN OQ#3, UNDECIDED): captured
-                //     pre-move and ridden on `DeliveryCtx` so the shared
-                //     machinery re-stamps it after `reset_for_battlefield_entry`
-                //     — behavior preserved exactly, no OQ#3 adjudication.
+                // (3) PLAN OQ#3 (RESOLVED): play/cast provenance is not a ctx
+                //     knob. `played_from_zone` (CR 305.1 land-play provenance)
+                //     survives battlefield entry naturally — it is cleared only
+                //     on battlefield EXIT, so the pre-move capture that used to
+                //     ride `DeliveryCtx` here preserved a value that was never
+                //     destroyed (verified no-op). The cast-link family that IS
+                //     entry-cleared (kicker / convoke / cast-timing, CR 400.7d)
+                //     is restored structurally inside the shared delivery for
+                //     `Stack → Battlefield` events (`CastLinkSnapshot`).
                 event @ ProposedEvent::ZoneChange { .. } => {
                     let (object_id, to, cause) = match &event {
                         ProposedEvent::ZoneChange {
@@ -114,10 +119,6 @@ pub(super) fn handle_replacement_choice(
                         } => (*object_id, *to, *cause),
                         _ => unreachable!("arm pattern guarantees ZoneChange"),
                     };
-                    let played_from_zone = state
-                        .objects
-                        .get(&object_id)
-                        .and_then(|obj| obj.played_from_zone);
                     let Ok(approved) =
                         crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(
                             event,
@@ -131,7 +132,6 @@ pub(super) fn handle_replacement_choice(
                         crate::game::zone_pipeline::DeliveryCtx {
                             source_id: cause,
                             exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
-                            played_from_zone,
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
                         },
@@ -1594,6 +1594,122 @@ mod tests {
 
         assert_eq!(state.objects[&land].zone, Zone::Battlefield);
         assert_eq!(state.objects[&land].played_from_zone, Some(Zone::Hand));
+    }
+
+    /// CR 400.7d + CR 608.3 discriminating test (fail-first): a permanent
+    /// spell whose `Stack → Battlefield` entry parks on a replacement prompt
+    /// must, on resume, still carry its cast link — the kicker payments,
+    /// additional-cost count, convoked creatures, and cast-timing permission
+    /// that `reset_for_battlefield_entry` (CR 400.7) clears on entry. The
+    /// direct stack.rs resolution path restored these in its bespoke epilogue,
+    /// but the resume path delivered through the shared machinery with NO
+    /// restore (and no `PendingSpellResolution` is stashed when the pause comes
+    /// from the generic ZoneChange consult rather than stack.rs's own
+    /// NeedsChoice arm) — so a resumed kicked permanent was silently de-kicked
+    /// and "if it was kicked" ETB gates (CR 702.33f) failed. The
+    /// `CastLinkSnapshot` in `deliver_replaced_zone_change` restores the family
+    /// structurally for every `Stack → Battlefield` delivery.
+    #[test]
+    fn zone_change_replacement_choice_preserves_cast_link_for_resolving_spell() {
+        use crate::types::ability::{CastTimingPermission, KickerVariant};
+
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Kicked Bear".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // The cast pathway (`finalize_cast_to_stack`) stamps the cast link
+            // onto the stack object; mirror that establishment here.
+            obj.kickers_paid = vec![KickerVariant::First];
+            obj.additional_cost_payment_count = 1;
+            obj.convoked_creatures = vec![ObjectId(777)];
+            obj.cast_timing_permission =
+                Some((CastTimingPermission::AsThoughHadFlash, state.turn_number));
+        }
+        install_optional_replacement(&mut state, ReplacementEvent::Moved);
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(spell, Zone::Stack, Zone::Battlefield, None);
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).expect("accept");
+
+        let obj = &state.objects[&spell];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(
+            obj.kickers_paid,
+            vec![KickerVariant::First],
+            "CR 400.7d: the resumed permanent must keep the kicker payments of \
+             the spell that became it — the entry reset cleared them and the \
+             resume path had no restore"
+        );
+        assert_eq!(obj.additional_cost_payment_count, 1);
+        assert_eq!(obj.convoked_creatures, vec![ObjectId(777)]);
+        assert_eq!(
+            obj.cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number)),
+            "CR 603.4: cast-timing permission is re-stamped with the resolution \
+             turn so same-turn trigger gates compare equal"
+        );
+    }
+
+    /// CR 400.7 rules pin for the `CastLinkSnapshot` establishment gate: an
+    /// effect-driven put (Reanimate class, `from != Stack`) must NOT resurrect
+    /// stale cast provenance. A graveyard card carrying leftover kicker memory
+    /// (simulating any exit-clear gap) enters the battlefield as a NEW object —
+    /// `reset_for_battlefield_entry` clears the cast link and the snapshot
+    /// restore must not re-apply it, or "if it was kicked" gates (CR 702.33f)
+    /// would wrongly fire on the reanimated permanent.
+    #[test]
+    fn effect_put_from_graveyard_does_not_resurrect_cast_link() {
+        use crate::game::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+        use crate::types::ability::KickerVariant;
+
+        let mut state = GameState::new_two_player(42);
+        let corpse = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Buried Bear".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&corpse).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // Stale cast memory on the graveyard object (must NOT survive an
+            // effect-driven battlefield entry).
+            obj.kickers_paid = vec![KickerVariant::First];
+            obj.additional_cost_payment_count = 2;
+        }
+
+        let mut events = Vec::new();
+        let result = zone_pipeline::move_object(
+            &mut state,
+            ZoneMoveRequest::effect(corpse, Zone::Battlefield, corpse),
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+
+        let obj = &state.objects[&corpse];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(
+            obj.kickers_paid.is_empty(),
+            "CR 400.7: an effect-put permanent is a new object — stale kicker \
+             memory must not survive (the cast-link restore is gated on \
+             `from == Stack`)"
+        );
+        assert_eq!(obj.additional_cost_payment_count, 0);
     }
 
     /// CR 615.1: When the player declines (or the replacement pipeline returns

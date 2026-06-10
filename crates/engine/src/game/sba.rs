@@ -584,7 +584,6 @@ fn check_lethal_damage(
                                 let ctx = DeliveryCtx {
                                     source_id: source,
                                     exile_links: ExileLinkSpec::default(),
-                                    played_from_zone: None,
                                     drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
                                 };
                                 // CR 704.3: completing all SBAs may require a

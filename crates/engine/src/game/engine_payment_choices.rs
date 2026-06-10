@@ -435,7 +435,6 @@ fn pay_top_library_exile_cost(
             crate::game::zone_pipeline::DeliveryCtx {
                 source_id,
                 exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
-                played_from_zone: None,
                 drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
             },
             events,
