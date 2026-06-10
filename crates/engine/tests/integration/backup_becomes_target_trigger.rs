@@ -43,10 +43,10 @@ fn backup_ability_target_fires_becomes_target_trigger() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // P0's payoff creature on the battlefield.
-    let payoff = scenario
-        .add_creature_from_oracle(P0, "Huge Truck", 4, 4, HUGE_TRUCK_TRIGGER)
-        .id();
+    // P0's payoff creature on the battlefield (the trigger source). Its id is not
+    // needed — the backup targets a different creature so this one's "another
+    // creature you control" trigger fires.
+    scenario.add_creature_from_oracle(P0, "Huge Truck", 4, 4, HUGE_TRUCK_TRIGGER);
 
     // P0's Backup 1 creature in hand — its ETB targets a creature with a tagged
     // backup ability.
@@ -60,11 +60,14 @@ fn backup_ability_target_fires_becomes_target_trigger() {
 
     let mut runner = scenario.build();
 
-    // Cast the backup creature; the harness drives the ETB trigger's target
-    // selection from the declared intent (the payoff creature). When that target
-    // locks, `GameEvent::BecomesTarget` fires with the backup ability as source,
-    // matching the payoff's `valid_source = StackAbility { tag: Backup }`.
-    let outcome = runner.cast(backup).target_object(payoff).resolve();
+    // Cast the backup creature; its ETB targets a creature. The target must be a
+    // creature OTHER than the payoff (Huge Truck), because the trigger fires on
+    // "ANOTHER creature you control" — Huge Truck targeting itself would not count.
+    // The Backup Bear targets itself: it is another creature P0 controls relative
+    // to Huge Truck. When that target locks, `GameEvent::BecomesTarget` fires with
+    // the backup ability as source, matching the payoff's
+    // `valid_source = StackAbility { tag: Backup }`.
+    let outcome = runner.cast(backup).target_object(backup).resolve();
 
     // The becomes-target trigger drew exactly one card. This assertion flips to 0
     // if the `AbilityTag::Backup` stamp, the `tag` filter, or the parser
