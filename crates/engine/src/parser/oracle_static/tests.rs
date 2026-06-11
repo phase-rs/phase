@@ -3041,6 +3041,97 @@ fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
 }
 
 #[test]
+fn static_first_qualified_spell_costs_more_handles_each_opponent_casts() {
+    let def = parse_static_line(
+        "The first noncreature spell each opponent casts each turn costs {1} more to cast.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected RaiseCost, got {:?}", def.mode);
+    };
+
+    let filter = spell_filter.as_ref().expect("expected spell filter");
+    assert!(matches!(
+        filter,
+        TargetFilter::Typed(tf)
+            if tf
+                .type_filters
+                .iter()
+                .any(|entry| matches!(entry, TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)))
+    ));
+
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::Opponent)
+        ))
+    );
+
+    let condition = def.condition.expect("expected first-spell condition");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if matches!(
+            inner,
+            TargetFilter::Typed(tf)
+                if tf
+                    .type_filters
+                    .iter()
+                    .any(|entry| matches!(entry, TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Creature)))
+        )
+    ));
+}
+
+#[test]
+fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
+    let def =
+        parse_static_line("The first spell you cast each turn costs {1} less to cast.").unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    assert_eq!(
+        spell_filter,
+        &Some(TargetFilter::Typed(TypedFilter::card()))
+    );
+
+    let condition = def.condition.expect("expected first-spell condition");
+    assert!(matches!(
+        &condition,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: Some(inner),
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } if inner == spell_filter.as_ref().unwrap()
+    ));
+}
+
+#[test]
 fn static_spells_cost_x_less_where_x_is_your_speed() {
     let def = parse_static_line(
         "Noncreature spells you cast cost {X} less to cast, where X is your speed.",

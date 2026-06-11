@@ -1488,13 +1488,13 @@ pub(crate) fn parse_first_qualified_spell_filter(
 ) -> Option<(TargetFilter, NthEventTimingKind)> {
     let after_prefix = nom_tag_lower(lower, lower, "the first ")?;
 
-    // Split the subject at the "you cast" infix that separates the pre-spell
+    // Split the subject at the cast infix that separates the pre-spell
     // qualifier ("<type> spell") from the post-spell modifier + timing region
-    // ("with {X} in its mana cost each turn cost[s] …"). CR templating always
-    // places "you cast" between the spell noun and any post-spell modifier.
-    let (_, (pre, post)) = nom_primitives::split_once_on(after_prefix, " you cast ").ok()?;
+    // ("with {X} in its mana cost each turn cost[s] ..."). CR templating always
+    // places the caster phrase between the spell noun and any post-spell modifier.
+    let (pre, post) = split_first_spell_cast_region(after_prefix)?;
 
-    // Scan the post-"you cast" region for the timing phrase. Everything before
+    // Scan the post-caster region for the timing phrase. Everything before
     // it is a leading post-spell modifier ("with {X} in its mana cost"); the
     // cost-modification verb ("costs {1} less …") follows the timing phrase and
     // is discarded. The timing phrase — not a " cost" literal — is the anchor,
@@ -1557,13 +1557,28 @@ pub(crate) fn parse_first_qualified_spell_filter(
     };
 
     let filter = match (type_filter, post_filter) {
-        (None, None) => return None,
+        (None, None) => TargetFilter::Typed(TypedFilter::card()),
         (Some(f), None) | (None, Some(f)) => f,
         (Some(a), Some(b)) => TargetFilter::And {
             filters: vec![a, b],
         },
     };
     Some((filter, timing))
+}
+
+fn split_first_spell_cast_region(subject: &str) -> Option<(&str, &str)> {
+    [
+        " you cast ",
+        " your opponents cast ",
+        " opponents cast ",
+        " each opponent casts ",
+    ]
+    .into_iter()
+    .find_map(|phrase| {
+        nom_primitives::split_once_on(subject, phrase)
+            .ok()
+            .map(|(_, split)| split)
+    })
 }
 
 /// CR 601.2 + CR 102.1: Match the timing phrase of a first-qualified-spell
@@ -1600,17 +1615,8 @@ fn parse_first_spell_timing_phrase(i: &str) -> OracleResult<'_, NthEventTimingKi
 /// `parse_first_spell_timing_phrase` matches; text before that is the post-spell
 /// modifier. Returns `None` when no recognized timing phrase is present.
 fn split_first_spell_timing(text: &str) -> Option<(NthEventTimingKind, &str)> {
-    let mut idx = 0;
-    loop {
-        let candidate = text[idx..].trim_start();
-        if let Ok((_, timing)) = parse_first_spell_timing_phrase(candidate) {
-            return Some((timing, text[..idx].trim_end()));
-        }
-        // allow-noncombinator: word-boundary scan to advance to the next
-        // candidate; the timing phrase itself is matched by the nom combinator.
-        let next = text[idx..].find(' ')?;
-        idx += next + 1;
-    }
+    let (before, timing, _) = nom_primitives::scan_preceded(text, parse_first_spell_timing_phrase)?;
+    Some((timing, before.trim_end()))
 }
 
 /// CR 601.2f + CR 107.3: Build the "first qualified spell <timing>" gate.
@@ -1644,7 +1650,9 @@ pub(crate) fn first_qualified_spell_condition(
         },
         // Other player-scoped turn windows have no representable `StaticCondition`
         // for a cost static; the caller declines these via the filter parser.
-        NthEventTimingKind::Restricted(_) => first_this_turn,
+        NthEventTimingKind::Restricted(_) => {
+            unreachable!("unsupported player-scoped turn window for cost static")
+        }
     }
 }
 

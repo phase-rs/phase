@@ -196,6 +196,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     // Determine player scope from "you cast", "your opponents cast", or bare
     let controller = if nom_primitives::scan_contains(lower, "your opponents cast")
         || nom_primitives::scan_contains(lower, "opponents cast")
+        || nom_primitives::scan_contains(lower, "each opponent casts")
     {
         Some(ControllerRef::Opponent)
     } else if nom_primitives::scan_contains(lower, "you cast") {
