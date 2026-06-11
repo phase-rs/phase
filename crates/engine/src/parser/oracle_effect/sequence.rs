@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::multispace1;
+use nom::character::complete::{multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -1830,27 +1830,22 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - determiner ("the copy/copies" — Fork/Twincast; "that copy" — the Chain
 ///     cycle's "a new target for that copy").
 fn recognize_copy_retarget_clause(lower: &str) -> bool {
-    let clause = lower
-        .trim()
-        .trim_end_matches('.')
-        .trim_end_matches(',')
-        .trim();
-    let clause = clause
-        .strip_prefix("and ")
-        .or_else(|| clause.strip_prefix(", and "))
-        .unwrap_or(clause);
     value(
         (),
         (
-            opt(tag::<_, _, OracleError<'_>>("you ")),
+            multispace0,
+            opt(alt((tag::<_, _, OracleError<'_>>(", and "), tag("and ")))),
+            opt(tag("you ")),
             tag("may choose "),
             alt((tag("a new target "), tag("new targets "))),
             tag("for "),
             alt((tag("the copies"), tag("the copy"), tag("that copy"))),
+            opt(alt((tag("."), tag(",")))),
+            multispace0,
             eof,
         ),
     )
-    .parse(clause)
+    .parse(lower.trim())
     .is_ok()
 }
 
@@ -5053,7 +5048,7 @@ mod tests {
             "expected three sentence chunks, got {chunks:?}"
         );
         assert!(
-            chunks[2].contains("choose new targets"),
+            nom_primitives::scan_contains(&chunks[2].to_ascii_lowercase(), "choose new targets "),
             "win chunk must include retarget clause: {:?}",
             chunks[2]
         );

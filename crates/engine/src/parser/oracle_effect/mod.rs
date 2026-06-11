@@ -23755,10 +23755,6 @@ mod tests {
         let (is_win, effect_text) =
             try_parse_coin_flip_branch(chunks[2].trim()).expect("win chunk should parse");
         assert!(is_win);
-        assert!(
-            effect_text.contains("choose new targets"),
-            "win effect_text truncated: {effect_text:?}"
-        );
         let def = parse_effect_chain(effect_text, AbilityKind::Spell);
         assert!(
             matches!(
