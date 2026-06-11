@@ -814,10 +814,12 @@ fn merge_stacking_leave_routes_all_components_and_restores_survivor() {
     assert!(survivor.merge_layer_effect_id.is_none());
 }
 
-/// CR 614.6: "If a card would be put into a graveyard from anywhere, exile it
-/// instead." (Rest in Peace / Leyline of the Void class.) A graveyard→exile
-/// `Moved` redirect scoped to its own source, installed on a battlefield object
-/// so the merged-permanent leave event consults it.
+/// CR 614.6: a token-INCLUSIVE graveyard→exile `Moved` redirect, mirroring the
+/// actual Rest in Peace text "If a card or token would be put into a graveyard
+/// from anywhere, exile it instead" (`valid_card: None` — no card/token
+/// scoping; Leyline of the Void's card-only subject is a different, card-scoped
+/// class). Installed on a battlefield object so the merged-permanent leave
+/// event consults it.
 fn graveyard_exile_replacement() -> crate::types::ability::ReplacementDefinition {
     use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
     use crate::types::replacements::ReplacementEvent;
@@ -870,7 +872,7 @@ fn cr_730_3d_redirect_on_merged_leave_propagates_to_all_components() {
     let host = sc.add_creature(P0, "Host", 2, 2).id();
     let rider = sc.add_creature(P0, "Rider", 4, 4).id();
     // Install a global graveyard→exile redirect on a separate battlefield object
-    // (an opponent's Rest in Peace) so the merged-permanent leave consults it.
+    // (a Rest in Peace–class permanent) so the merged-permanent leave consults it.
     let rip = sc.add_creature(P0, "Rest in Peace", 0, 0).id();
     let mut state = sc.state;
     state
@@ -949,8 +951,21 @@ fn cr_730_3e_nontoken_merged_leave_carries_token_component_with_redirect() {
         .push(graveyard_exile_replacement());
 
     let mut events = Vec::new();
-    merge_object_onto(&mut state, token_rider, host, MergeSide::Top, &mut events);
+    // CR 730.2d: the merged permanent is a token only if the TOPMOST component
+    // is a token — merge the token rider underneath so the card host stays
+    // topmost and the survivor remains a non-token (the clause-1 premise).
+    merge_object_onto(
+        &mut state,
+        token_rider,
+        host,
+        MergeSide::Bottom,
+        &mut events,
+    );
     state.battlefield.retain(|&id| id != token_rider);
+    assert!(
+        !state.objects[&host].is_token,
+        "premise: the merged permanent must be NON-token for 730.3e clause 1"
+    );
 
     let result = move_object(
         &mut state,
