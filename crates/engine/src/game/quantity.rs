@@ -2888,14 +2888,12 @@ fn resolve_mana_symbols_in_mana_cost(
         .unwrap_or(0)
 }
 
-/// CR 208.3 + CR 113.6 + CR 400.7: Resolve a per-object scalar (power, toughness)
-/// through an `ObjectScope`, with LKI fallback for the source.
+/// CR 208.3 + CR 608.2h + CR 400.7: Resolve a per-object scalar (power, toughness)
+/// through an `ObjectScope`, with LKI fallback when the object left its zone.
 ///
 /// Single authority for `Power { scope }` / `Toughness { scope }` resolution
 /// (Π-6). `obj_extract` returns the property for a current object; `lki_extract`
-/// returns the same property from a Last Known Information snapshot. LKI fallback
-/// applies only to the source object — Target reads only the current state per
-/// CR 113.6 (a target's identity is captured on cast/announce).
+/// returns the same property from a Last Known Information snapshot.
 fn resolve_object_pt<F, G>(
     state: &GameState,
     scope: ObjectScope,
@@ -2916,13 +2914,28 @@ where
             .and_then(&obj_extract)
             .or_else(|| state.lki_cache.get(&ctx.source).and_then(&lki_extract))
             .unwrap_or(0),
+        // CR 608.2h: once a targeted object has left the battlefield, its power
+        // and toughness survive only as last known information. The object now
+        // in its new zone has had +1/+1 counters and continuous modifiers
+        // stripped (CR 122.2 / CR 613), so reading it live under-reports — Swords
+        // to Plowshares on a 3/3 with eight +1/+1 counters must gain 11 life, not
+        // 3. Prefer live battlefield state over a stale same-step LKI snapshot;
+        // otherwise use LKI, then fall back to live state for non-battlefield
+        // target-card reads that never had a battlefield LKI.
         ObjectScope::Target => targets
             .iter()
             .find_map(|t| match t {
-                TargetRef::Object(id) => state.objects.get(id),
+                TargetRef::Object(id) => Some(*id),
                 _ => None,
             })
-            .and_then(&obj_extract)
+            .map(|id| {
+                let live = state.objects.get(&id);
+                live.filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+                    .and_then(&obj_extract)
+                    .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
+                    .or_else(|| live.and_then(&obj_extract))
+                    .unwrap_or(0)
+            })
             .unwrap_or(0),
         ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
             .and_then(&obj_extract)
@@ -7649,6 +7662,56 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn resolve_target_power_prefers_live_battlefield_object_over_stale_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Returned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut stale_lki = state.objects[&target].snapshot_public_characteristics();
+        stale_lki.power = Some(2);
+        stale_lki.toughness = Some(2);
+        state.lki_cache.insert(target, stale_lki);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: expr.clone(),
+                player: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            5,
+            "live battlefield target must win over same-step LKI from an earlier incarnation"
+        );
     }
 
     #[test]
