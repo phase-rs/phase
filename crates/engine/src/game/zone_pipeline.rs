@@ -2110,4 +2110,197 @@ mod w3_library_placement_tests {
             "the resumed delivery must honor LibraryPosition::Top, not shuffle the position away"
         );
     }
+
+    /// F-A (CR 616.1 + CR 701.24a): the library placement must survive a SECOND
+    /// sequential park on the same event. The first optional redirect parks (the
+    /// placement is stashed onto `PendingReplacement` by the W3 arm); declining
+    /// it re-enters `pipeline_loop`, which finds a SECOND optional redirect that
+    /// became applicable in the interim and re-parks a fresh `PendingReplacement`
+    /// — created with `library_placement: None`. `handle_replacement_choice` must
+    /// thread the captured placement onto that re-park so the FINAL delivery
+    /// (after declining both) still places the card at the requested index
+    /// instead of the tail auto-shuffling it away.
+    ///
+    /// The second redirect is gated by `UnlessControlsMatching` on a sentinel
+    /// creature so it is suppressed on the first scan and becomes applicable once
+    /// the sentinel is removed between the two choices (a realistic board change
+    /// across a paused replacement). Before the fix the re-park reset the
+    /// placement to `None`, so the final delivery shuffled — the order assertion
+    /// below fails (and the `ShuffledLibrary` absence assertion guards against a
+    /// seed-identity permutation false-pass).
+    #[test]
+    fn library_placement_survives_two_sequential_parks() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{
+            ReplacementCondition, ReplacementMode, TypeFilter, TypedFilter,
+        };
+        use crate::types::actions::GameAction;
+
+        fn optional_library_exile_redirect(
+            condition: Option<ReplacementCondition>,
+        ) -> ReplacementDefinition {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .mode(ReplacementMode::Optional { decline: None })
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Exile,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                ))
+                .destination_zone(Zone::Library);
+            if let Some(condition) = condition {
+                def = def.condition(condition);
+            }
+            def
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![a, b];
+
+        // Sentinel creature that suppresses the second redirect until removed.
+        let sentinel = create_object(
+            &mut state,
+            CardId(90010),
+            PlayerId(0),
+            "Sentinel".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&sentinel)
+            .unwrap()
+            .card_types
+            .core_types = vec![crate::types::card_type::CoreType::Creature];
+
+        // Redirect #1: always applicable. Redirect #2: suppressed while the
+        // controller controls a creature (the sentinel).
+        let r1 = create_object(
+            &mut state,
+            CardId(90004),
+            PlayerId(0),
+            "Redirect One".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&r1)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_library_exile_redirect(None));
+
+        let r2 = create_object(
+            &mut state,
+            CardId(90005),
+            PlayerId(0),
+            "Redirect Two".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&r2)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_library_exile_redirect(Some(
+                ReplacementCondition::UnlessControlsMatching {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Creature)
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
+                },
+            )));
+
+        let placed = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Placed".to_string(),
+            Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(placed, Zone::Library, placed)
+                .at_library_position(LibraryPosition::Top),
+            &mut events,
+        );
+
+        // Only redirect #1 applies (the sentinel suppresses #2), so this is a
+        // single-candidate optional park that stashes the placement.
+        let ZoneMoveResult::NeedsChoice(chooser) = result else {
+            panic!("expected the first optional redirect to park, got a non-pausing result");
+        };
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|p| p.library_placement.clone()),
+            Some(LibraryPosition::Top),
+            "the first parked record must stash the requested library placement"
+        );
+
+        // Remove the sentinel so redirect #2 becomes applicable on the re-scan.
+        state.battlefield.retain(|id| *id != sentinel);
+        state.objects.remove(&sentinel);
+
+        // Decline the first redirect — the resume re-enters pipeline_loop, finds
+        // redirect #2 now applicable, and re-parks. Without the fix this re-park
+        // carries `library_placement: None`.
+        state.priority_player = chooser;
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("resume first replacement choice");
+
+        assert!(
+            state.pending_replacement.is_some(),
+            "the second optional redirect must re-park after the sentinel is removed"
+        );
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|p| p.library_placement.clone()),
+            Some(LibraryPosition::Top),
+            "the re-parked record must still carry the placement threaded from the first park",
+        );
+
+        // Decline the second redirect — the event resolves as the original plain
+        // library ZoneChange and delivers to the library at the requested index.
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+            .expect("resume second replacement choice");
+
+        // The discriminating assertion: the placed card must land at the requested
+        // top index with the existing order preserved. Before the fix the second
+        // park reset the placement to `None` and the delivery tail auto-shuffled
+        // the requested position away.
+        assert_eq!(state.objects[&placed].zone, Zone::Library);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![placed, a, b],
+            "after two declined parks the placement must still honor LibraryPosition::Top"
+        );
+    }
 }

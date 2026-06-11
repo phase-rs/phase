@@ -64,18 +64,20 @@ pub fn resolve(
         // ZoneChange, so the redirect-aware check below (which expects the card
         // may have landed elsewhere) had no Moved redirect to react to. No
         // Exile-targeting Moved redirect exists in the current pool, so this is
-        // behavior-preserving today; no counters means it cannot pause. Assert
-        // `Done` rather than discarding the result so a future reachable pause
-        // trips tests instead of silently executing past a parked prompt.
+        // behavior-preserving today. CR 616.1: a future Exile-targeting redirect
+        // could surface an ordering choice mid-reveal; park the prompt (mirrors
+        // `exile_from_top_until`'s NeedsChoice arm) and return rather than
+        // continuing to reveal the remaining cards past a parked prompt.
         let result = zone_pipeline::move_object(
             state,
             ZoneMoveRequest::effect(card_id, Zone::Exile, ability.source_id),
             events,
         );
-        debug_assert!(
-            matches!(result, zone_pipeline::ZoneMoveResult::Done),
-            "ripple reveal-to-exile must not pause (no Exile-targeting redirect today)"
-        );
+        if let zone_pipeline::ZoneMoveResult::NeedsChoice(player) = result {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
+        }
 
         // CR 614.1: a replacement may have redirected the card elsewhere; only
         // count it as revealed if it actually landed in exile.

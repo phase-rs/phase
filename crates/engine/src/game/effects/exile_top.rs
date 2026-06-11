@@ -65,18 +65,21 @@ pub fn resolve(
         // redirect that sends it elsewhere correctly records no link (redirect-
         // safe), and the tail's `push_with_kind` keeps the per-turn rolling list in
         // lockstep exactly as the former caller-side `push_tracked_by_source` did.
-        // No counters / no Exile-targeting Moved redirect means it cannot pause;
-        // assert `Done` rather than discarding the result so a future reachable
-        // pause trips tests instead of silently executing past a parked prompt.
+        // No Exile-targeting `Moved` redirect exists in the current pool, so this
+        // does not pause today. CR 616.1: a future Exile-targeting redirect could
+        // surface an ordering choice mid-loop; park the prompt (mirrors
+        // `exile_from_top_until`'s NeedsChoice arm) and return rather than
+        // continuing to mutate/classify the remaining cards past a parked prompt.
         let mut request = ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id);
         if track_exiled_by_source {
             request = request.track_exiled_by_source();
         }
         let result = zone_pipeline::move_object(state, request, events);
-        debug_assert!(
-            matches!(result, zone_pipeline::ZoneMoveResult::Done),
-            "ExileTop must not pause (no Exile-targeting redirect today)"
-        );
+        if let zone_pipeline::ZoneMoveResult::NeedsChoice(player) = result {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
+        }
         // CR 406.3: The face-down mark stays in this caller's per-card epilogue —
         // there is no pipeline knob for it (CR 708 face-down profiles are
         // battlefield-only), so it is set directly after the move below.

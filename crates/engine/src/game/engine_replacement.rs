@@ -576,9 +576,23 @@ pub(super) fn handle_replacement_choice(
 
             Ok(waiting_for)
         }
-        super::replacement::ReplacementResult::NeedsChoice(player) => Ok(
-            super::replacement::replacement_choice_waiting_for(player, state),
-        ),
+        super::replacement::ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1 + CR 701.24a: a SECOND ordering choice on the same
+            // library-placement event re-parked a fresh `PendingReplacement`
+            // inside `pipeline_loop` with `library_placement: None`. Reapply the
+            // placement captured before `continue_replacement` consumed the prior
+            // record so the eventual delivery still honors the requested index
+            // instead of the tail auto-shuffling it away. `None` for every
+            // non-library parked event (no-op).
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                if pending.library_placement.is_none() {
+                    pending.library_placement = parked_library_placement.clone();
+                }
+            }
+            Ok(super::replacement::replacement_choice_waiting_for(
+                player, state,
+            ))
+        }
         super::replacement::ReplacementResult::Prevented => {
             if state.pending_counter_additions.is_some() {
                 state.waiting_for = WaitingFor::Priority {
