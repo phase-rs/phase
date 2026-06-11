@@ -3,12 +3,12 @@ use std::collections::HashSet;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
-use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::StaticMode;
+#[cfg(test)]
 use crate::types::zones::Zone;
 
 pub(crate) fn allowed_draw_count(
@@ -168,7 +168,9 @@ pub fn apply_draw_after_replacement(
     events: &mut Vec<GameEvent>,
 ) {
     let ProposedEvent::Draw {
-        player_id, count, ..
+        player_id,
+        count,
+        applied,
     } = event
     else {
         debug_assert!(
@@ -206,26 +208,61 @@ pub fn apply_draw_after_replacement(
     state.last_effect_count = Some(drawn_count);
 
     for obj_id in cards_to_draw {
-        // Zone-pipeline bucketing (PLAN Risk #5, corrected Phase C round 4): this
-        // library -> hand draw delivery is NOT migrated to `move_object`.
-        // Rationale (two-part):
-        //   (1) `Moved` defs with an explicit `destination_zone` only target
-        //       Graveyard (Rest in Peace class) or Battlefield (as-enters
-        //       modifiers) — neither matches a Hand/Exile delivery.
-        //   (2) Self-ETB as-enters defs are stamped `destination_zone:
-        //       Battlefield` at construction (parser + synthesis), so the
-        //       destination-`None` Moved class that would otherwise match EVERY
-        //       destination no longer exists for this card class. The remaining
-        //       destination-`None` Moved defs are deliberate departure-watchers
-        //       (unearth / "would leave the battlefield" — battlefield-origin
-        //       only, irrelevant to a library -> hand move).
-        // Routing through the pipeline would therefore consult nothing and only
-        // add an unresumed-pause path. Draw-level replacements already apply at
-        // `ReplacementEvent::Draw` upstream of this delivery. The same finding
-        // covers the rest of the Hand/Exile C9 tail (gift_delivery, connive,
-        // explore, turns return-to-hand; haunt, discover, exile_top, cascade,
-        // collect_evidence, ripple exile-as-cost/effect).
-        zones::move_to_zone(state, obj_id, Zone::Hand, events);
+        // CR 121.1 (PLAN Risk #5, tranche 4): drawing IS a Library → Hand zone
+        // change, so the per-card delivery routes through the unified pipeline
+        // (`move_object` via `ZoneMoveRequest::draw`) with the inner `Moved`
+        // consult ENABLED — a future "cards you would draw go to exile instead"
+        // redirect must see this move. The raw `zones::move_to_zone` bypass that
+        // previously lived here was the exact debt the pipeline exists to
+        // eliminate; "consults nothing in the current pool" did not justify a
+        // permanent bypass that a future `Moved` def would silently miss.
+        //
+        // CR 614.5 dedup guard: a replacement effect gets only one opportunity to
+        // affect an event "or any modified events that may replace that event".
+        // The outer `ReplacementEvent::Draw` pass already ran (upstream of this
+        // delivery), and its applied-`ReplacementId` set rides in `applied`.
+        // Seeding it into the inner `Moved` consult (`ZoneMoveRequest::draw(obj_id,
+        // applied.clone())`) stops a def that matches BOTH the Draw class and the
+        // Moved class from firing twice — `find_applicable_replacements` skips any
+        // rid already in the seeded set (`already_applied`). One `applied` snapshot
+        // per draw event; cloned per card because each delivered card is a
+        // distinct zone-change event.
+        let _ = crate::game::zone_pipeline::move_object(
+            state,
+            crate::game::zone_pipeline::ZoneMoveRequest::draw(obj_id, applied.clone()),
+            events,
+        );
+        // CR 616.1 + OQ#1 (audit-justified non-interactivity; delivery
+        // post-condition): no production `Moved` def can match a Library → Hand
+        // move today (every destination-unconstrained `Moved` def is `valid_card:
+        // SelfRef`-bound to a battlefield host; the only `valid_card: None` class
+        // — Rest in Peace / Leyline "put into a graveyard → exile" — is
+        // destination-gated to Graveyard), so a draw cannot surface a CR 616.1
+        // ordering choice and no `pending_batch_deliveries` resume is wired.
+        //
+        // The assert catches the MECHANICAL non-delivery bug: if the card is
+        // still in the library, the move stranded — `move_object` returned a
+        // swallowed `NeedsChoice` (the tranche-3 hazard: parked
+        // `pending_replacement` overwritten by the next card, truncating SBAs)
+        // or otherwise failed — yet `CardDrawn` + the draw counters fire below as
+        // if it were delivered. A legitimate future redirect (card → graveyard /
+        // exile) is intentionally NOT asserted against: forbidding it here would
+        // break the very consult the migration enables. The OPEN question a
+        // future migrator must settle when a real to-Hand/redirect `Moved` def is
+        // added: whether a move-level-redirected card still counts as "drawn" (the
+        // `CardDrawn` emission + counter increments below currently assume yes),
+        // and — if the redirect can be interactive — route this loop through
+        // `move_objects_simultaneously_then` + a `BatchCompletion` (OQ#1: extend
+        // the shared batch machinery, never add a per-flow pause).
+        debug_assert!(
+            state
+                .objects
+                .get(&obj_id)
+                .is_none_or(|o| o.zone != crate::types::zones::Zone::Library),
+            "draw delivery stranded the card in the library — move_object returned \
+             a swallowed NeedsChoice or otherwise failed to deliver, yet CardDrawn \
+             and the draw counters fire below"
+        );
         // CR 121.1 + CR 504.1: Increment per-step + per-turn counters BEFORE
         // emitting the event so the ordinal embedded in `CardDrawn` reflects
         // this draw (1-indexed). Triggers/replacements that gate on "first
@@ -831,5 +868,240 @@ mod tests {
             state.pending_miracle_offers.is_empty(),
             "non-first-drawn miracle card must not queue an offer"
         );
+    }
+}
+
+/// CR 121.1 + CR 614.5: tranche-4 draw-pipeline migration coverage. These drive
+/// the REAL draw pipeline (`resolve` / `apply_draw_after_replacement` →
+/// `zone_pipeline::move_object`), not hand-constructed expected state.
+/// `draw_consult_runs_for_unseeded_moved_redirect` is the migration tripwire — it
+/// installs an always-matching `Moved` redirect with an EMPTY seed and asserts the
+/// drawn card is redirected to the graveyard, which fails under the old raw
+/// `zones::move_to_zone` bypass (no consult) and under any regression that makes
+/// `ZoneChangeCause::Draw` exempt. The dedup test then pins that a def already
+/// applied at the Draw level is suppressed at the Moved level (CR 614.5), and the
+/// graveyard-gated test pins the destination gate (CR 614.6).
+#[cfg(test)]
+mod tranche4_draw_pipeline_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::parser::oracle_replacement::parse_replacement_line;
+    use crate::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::proposed_event::ReplacementId;
+    use crate::types::replacements::ReplacementEvent;
+
+    fn draw_one_ability() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )
+    }
+
+    /// The audit's NEGATIVE case, end-to-end: a REAL parsed "If a card would be
+    /// put into a graveyard from anywhere, exile it instead" (Leyline of the
+    /// Void / Rest in Peace class) `Moved` def is `destination_zone:
+    /// Graveyard`-gated, so it must NOT fire on a draw (a Library → Hand move).
+    /// The drawn card lands in HAND untouched. This pins that routing the draw
+    /// through `move_object`'s inner `Moved` consult does not let a
+    /// graveyard-scoped redirect leak onto the draw delivery (CR 614.6
+    /// destination-zone gate).
+    #[test]
+    fn draw_with_parsed_graveyard_exile_def_on_board_still_lands_in_hand() {
+        let mut sc = GameScenario::new();
+        let rip = sc.add_creature(P0, "Rest in Peace", 0, 0).id();
+        let drawn = sc.add_card_to_library_top(P0, "Mountain");
+        let mut state = sc.state;
+
+        // Install the REAL parsed graveyard-exile redirect (destination_zone:
+        // Graveyard) on a battlefield permanent.
+        let def = parse_replacement_line(
+            "If a card would be put into a graveyard from anywhere, exile it instead.",
+            "Rest in Peace",
+        )
+        .expect("graveyard-exile replacement line must parse");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(
+            def.destination_zone,
+            Some(Zone::Graveyard),
+            "the graveyard-exile redirect must be destination-gated to Graveyard"
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &draw_one_ability(), &mut events).unwrap();
+
+        // Discriminating assertion: the drawn card is in HAND, not Exile. If the
+        // migration mis-routed the destination gate, the card would be exiled.
+        assert_eq!(
+            state.objects[&drawn].zone,
+            Zone::Hand,
+            "CR 614.6: a Graveyard-destination redirect must not fire on a \
+             Library → Hand draw — the drawn card lands in hand"
+        );
+        assert!(state.players[0].hand.contains(&drawn));
+        assert!(
+            events.iter().any(
+                |e| matches!(e, GameEvent::CardDrawn { object_id, .. } if *object_id == drawn)
+            ),
+            "the migrated draw must still emit CardDrawn for the delivered card"
+        );
+    }
+
+    /// CR 614.6 dedup guard (the heart of this tranche), discriminating: a
+    /// destination-unconstrained `valid_card: None` `Moved` def that ALSO fired
+    /// at the `ReplacementEvent::Draw` level must NOT fire again at the inner
+    /// `Moved` delivery level. No parsed card produces a to-Hand `Moved` redirect
+    /// today (audit), so this installs a synthetic always-matching `Moved` def
+    /// and drives `apply_draw_after_replacement` with the def's `ReplacementId`
+    /// pre-seeded into the Draw event's `applied` set. The seed is synthetic /
+    /// forward-looking — a real Draw pass only deposits `ReplacementEvent::Draw`
+    /// rids, and a `Moved` def's rid can never appear there (the registry
+    /// dispatches by event), so this models the future case the guard is armor
+    /// against rather than a production-reachable state. The guard threads that
+    /// set into the
+    /// per-card `ZoneMoveRequest::draw`, which seeds the inner consult's
+    /// `applied`; the matcher's `already_applied(&rid)` skip then prevents the
+    /// second application. The redirect would have sent the card to the graveyard
+    /// — so the discriminating assertion is that the card lands in HAND (guard
+    /// held), not Graveyard (guard absent → double-apply).
+    #[test]
+    fn dedup_guard_blocks_moved_def_already_applied_at_draw_level() {
+        let mut sc = GameScenario::new();
+        let source = sc.add_creature(P0, "Dedup Source", 0, 0).id();
+        let drawn = sc.add_card_to_library_top(P0, "Mountain");
+        let mut state = sc.state;
+
+        // A synthetic destination-unconstrained `Moved` redirect (Library/Hand →
+        // Graveyard) on a battlefield permanent. `valid_card: None` matches every
+        // card, including the drawn one; no `destination_zone` gate, so it WOULD
+        // match the Library → Hand draw if not deduped.
+        let redirect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Graveyard,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        );
+        let def = crate::types::ability::ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(redirect)
+            .description("synthetic always-match Moved".to_string());
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+        // The def's ReplacementId is index 0 on `source`.
+        let rid = ReplacementId { source, index: 0 };
+
+        // Drive the apply path with the rid PRE-SEEDED into the Draw event's
+        // applied set — modelling a def that already fired at the Draw level.
+        let mut applied = std::collections::HashSet::new();
+        applied.insert(rid);
+        let mut events = Vec::new();
+        apply_draw_after_replacement(
+            &mut state,
+            ProposedEvent::Draw {
+                player_id: P0,
+                count: 1,
+                applied,
+            },
+            &mut events,
+        );
+
+        // Discriminating: guard held → card in HAND. Revert the seed-threading
+        // and the redirect double-applies, sending it to the graveyard.
+        assert_eq!(
+            state.objects[&drawn].zone,
+            Zone::Hand,
+            "CR 614.6: a Moved def already applied at the Draw level must not \
+             re-fire at the inner Moved delivery — the drawn card stays in hand"
+        );
+        assert!(state.players[0].graveyard.is_empty());
+    }
+
+    /// MIGRATION TRIPWIRE (positive discriminator): the SAME synthetic
+    /// always-match `Moved` redirect, but with an EMPTY seed (nothing applied
+    /// upstream), MUST be consulted by the migrated draw and redirect the drawn
+    /// card to the graveyard. This is the assertion the dedup test cannot make:
+    /// it fails under the old raw `zones::move_to_zone` bypass (no consult → card
+    /// stays in hand) and under any regression that marks `ZoneChangeCause::Draw`
+    /// exempt (consult skipped → card stays in hand). A single mandatory candidate,
+    /// so `pipeline_loop` returns `Execute` with no CR 616.1 choice. CR 121.1:
+    /// drawing is a replaceable Library → Hand zone change.
+    #[test]
+    fn draw_consult_runs_for_unseeded_moved_redirect() {
+        let mut sc = GameScenario::new();
+        let source = sc.add_creature(P0, "Redirect Source", 0, 0).id();
+        let drawn = sc.add_card_to_library_top(P0, "Mountain");
+        let mut state = sc.state;
+
+        let redirect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Graveyard,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        );
+        let def = crate::types::ability::ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(redirect)
+            .description("synthetic always-match Moved".to_string());
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        // EMPTY seed: nothing applied upstream, so the inner consult MUST fire on
+        // the Library → Hand draw and redirect the card.
+        let mut events = Vec::new();
+        apply_draw_after_replacement(
+            &mut state,
+            ProposedEvent::Draw {
+                player_id: P0,
+                count: 1,
+                applied: std::collections::HashSet::new(),
+            },
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&drawn].zone,
+            Zone::Graveyard,
+            "CR 121.1: a draw routed through the pipeline must consult Moved defs — \
+             an always-match redirect sends the drawn card to the graveyard. Hand \
+             here means the consult did not run (raw-bypass or exempt-Draw regression)."
+        );
+        assert!(state.players[0].graveyard.contains(&drawn));
     }
 }

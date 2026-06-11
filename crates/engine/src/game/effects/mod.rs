@@ -257,6 +257,9 @@ pub(crate) fn matches_player_scope(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != controller && p.life_gained_this_turn > 0
                     }
+                    // CR 104.5 / CR 800.4: Players who lost have left the game;
+                    // this filter is quantity-only and has no live effect recipient.
+                    PlayerFilter::HasLostTheGame => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
                     // who was dealt combat damage this turn, optionally
                     // restricted to a matching source.
@@ -5593,6 +5596,7 @@ fn scoped_player_matches_filter(
         // `TriggerCondition::DuringPlayersTurn` fallthrough pattern at
         // game/triggers.rs:3703-3723).
         PlayerFilter::DefendingPlayer
+        | PlayerFilter::HasLostTheGame
         | PlayerFilter::OpponentDealtCombatDamage { .. }
         | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::HighestSpeed

@@ -524,6 +524,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- Unconditional life-floor: "damage that would reduce your life total to
+    // less than N reduces it to N instead" (Ali from Cairo, Fortune Thief,
+    // Sustaining Spirit). CR 614.1a. Tried after the conditional Worship arm,
+    // which claims the "if you control …" prefix. ---
+    if let Some(def) = parse_unconditional_life_floor_damage_replacement(&norm_lower) {
+        return Some(def);
+    }
+
     None
 }
 
@@ -3228,12 +3236,56 @@ fn parse_graveyard_exile_replacement(
         ShuffleBack { reveal: bool },
     }
 
-    let ((scope, outcome), _rest) = nom_on_lower(original_text, norm_lower, |i| {
+    // CR 730.3e + CR 111.1: the subject's token axis. "a card or token" is
+    // token-INCLUSIVE (Rest in Peace) and adds no constraint; "a card" is
+    // token-EXCLUDING (Leyline of the Void) and adds a `NonToken` filter so
+    // a dying token reaches the graveyard (and dies-triggers fire) instead of
+    // being wrongly redirected. Any other subject (`~`, "that spell", "a
+    // permanent", a counter condition) leaves the axis `Unscoped` — the
+    // pre-existing token-inclusive behavior, preserved.
+    #[derive(Clone, Copy)]
+    enum TokenScope {
+        Unscoped,
+        NonToken,
+    }
+
+    let ((scope, token_scope, outcome), _rest) = nom_on_lower(original_text, norm_lower, |i| {
         // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
         let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
         // Subject: accept any phrase up to " would be put into " — covers
         // "a card", "a nontoken creature", "~", "a creature an opponent controls", …
-        let (i, _) = take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+        // — and classify its token axis (CR 730.3e) from the captured slice.
+        let (i, subject) = take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+        // CR 730.3e + CR 111.1: a card-noun subject WITHOUT an "or token" rider
+        // is token-excluding (Leyline of the Void: "a card"). The inclusive RIP
+        // phrasing ("a card or token") names tokens explicitly and stays
+        // unscoped. The token-rider check wins over the bare-card check, so
+        // "a card or token" is never misread as token-excluding.
+        //
+        // The token axis is a terminal-noun classification of the noun phrase
+        // `take_until` already tokenized off. "Ends with <noun>" is expressed as
+        // a forward combinator — `take_until(noun) + tag(noun) + eof` — so the
+        // classification stays combinator-pure (no raw tail string-ops) and is
+        // correct for arbitrarily long subjects ("a nontoken creature card",
+        // "a creature an opponent controls") where a first-word split would not
+        // be.
+        fn subject_ends_with<'a>(subject: &'a str, noun: &'static str) -> bool {
+            terminated(
+                (take_until(noun), tag(noun)),
+                eof::<&'a str, OracleError<'a>>,
+            )
+            .parse(subject)
+            .is_ok()
+        }
+        let names_token =
+            subject_ends_with(subject, " or token") || subject_ends_with(subject, " or tokens");
+        let names_card =
+            subject_ends_with(subject, " card") || subject_ends_with(subject, " cards");
+        let token_scope = if names_card && !names_token {
+            TokenScope::NonToken
+        } else {
+            TokenScope::Unscoped
+        };
         let (i, _) = tag::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
         let (i, scope) = alt((
             value(Scope::Opponent, tag("an opponent's graveyard")),
@@ -3263,7 +3315,7 @@ fn parse_graveyard_exile_replacement(
         ))
         .parse(i)?;
 
-        Ok((i, (scope, outcome)))
+        Ok((i, (scope, token_scope, outcome)))
     })?;
 
     // Destination routing is determined by the outcome branch.
@@ -3274,14 +3326,21 @@ fn parse_graveyard_exile_replacement(
 
     // CR 400.3 + CR 108.3: "opponent's graveyard" means cards owned by an opponent
     // (cards go to owner's graveyard, so ownership is the stable discriminant).
-    let valid_card = match scope {
-        Scope::Opponent => Some(TargetFilter::Typed(TypedFilter::default().properties(
-            vec![FilterProp::Owned {
-                controller: ControllerRef::Opponent,
-            }],
-        ))),
-        Scope::Any => None,
-    };
+    // CR 730.3e + CR 111.1: a token-excluding subject ("a card") adds `NonToken`
+    // so a dying token is NOT redirected (Leyline of the Void must let an
+    // opponent's token reach the graveyard so dies-triggers fire — Blood Artist
+    // class). Both axes are leaf `FilterProp`s on one `TypedFilter`.
+    let mut props = Vec::new();
+    if let Scope::Opponent = scope {
+        props.push(FilterProp::Owned {
+            controller: ControllerRef::Opponent,
+        });
+    }
+    if let TokenScope::NonToken = token_scope {
+        props.push(FilterProp::NonToken);
+    }
+    let valid_card =
+        (!props.is_empty()).then(|| TargetFilter::Typed(TypedFilter::default().properties(props)));
 
     // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts only
     // the `destination` field from this top-level ChangeZone — other fields here
@@ -5879,6 +5938,79 @@ fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDe
     )
 }
 
+/// CR 614.1a: Parse the UNCONDITIONAL life-floor replacement:
+/// - "damage that would reduce your life total to less than N reduces it to N instead"
+///   (Fortune Thief, Sustaining Spirit)
+/// - "damage that would reduce your life total to 0 reduces it to 1 instead"
+///   (Ali from Cairo printed wording — lethal threshold "to 0", floor M)
+///
+/// Identical to [`parse_life_floor_damage_replacement`] but without the Worship-class
+/// "if you control a [filter]," guard. Dispatched after the conditional arm.
+fn parse_unconditional_life_floor_damage_replacement(
+    norm_lower: &str,
+) -> Option<ReplacementDefinition> {
+    let floor_minimum = alt((
+        parse_unconditional_life_floor_less_than_form,
+        parse_unconditional_life_floor_to_zero_form,
+    ))
+    .parse(norm_lower)
+    .ok()
+    .map(|(_, minimum)| minimum)?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .damage_modification(DamageModification::LifeFloor {
+                minimum: floor_minimum,
+            })
+            .damage_target_filter(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Controller,
+            }),
+    )
+}
+
+/// "damage that would reduce your life total to less than N reduces it to N instead."
+fn parse_unconditional_life_floor_less_than_form(input: &str) -> OracleResult<'_, i32> {
+    let (rest, minimum) = preceded(
+        tag::<_, _, OracleError<'_>>("damage that would reduce your life total to less than "),
+        nom_primitives::parse_number,
+    )
+    .parse(input)?;
+    let (rest, floor_val) = preceded(
+        tag::<_, _, OracleError<'_>>(" reduces it to "),
+        nom_primitives::parse_number,
+    )
+    .parse(rest)?;
+    if floor_val != minimum {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    let (rest, _) = all_consuming((
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(rest)?;
+    Ok((rest, minimum as i32))
+}
+
+/// Ali from Cairo printed wording: "…to 0 reduces it to M instead."
+fn parse_unconditional_life_floor_to_zero_form(input: &str) -> OracleResult<'_, i32> {
+    let (rest, floor_val) = preceded(
+        tag::<_, _, OracleError<'_>>(
+            "damage that would reduce your life total to 0 reduces it to ",
+        ),
+        nom_primitives::parse_number,
+    )
+    .parse(input)?;
+    let (rest, _) = all_consuming((
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(rest)?;
+    Ok((rest, floor_val as i32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8449,7 +8581,9 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        assert!(def.valid_card.is_none()); // matches all objects
+        // CR 730.3e: "a card or token" names tokens explicitly — token-inclusive,
+        // so NO `NonToken` constraint and (with `Any` scope) no `valid_card` at all.
+        assert!(def.valid_card.is_none()); // matches all objects, tokens included
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -8469,14 +8603,21 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // valid_card should scope to opponent-owned cards
+        // valid_card should scope to opponent-owned cards AND exclude tokens:
+        // CR 730.3e + CR 111.1 — "a card" (no "or token") is token-excluding, so a
+        // dying token reaches the graveyard (dies-triggers fire — Blood Artist
+        // class) instead of being wrongly exiled.
         match &def.valid_card {
             Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
+                assert!(
+                    properties.contains(&FilterProp::NonToken),
+                    "'a card' subject must exclude tokens (CR 730.3e)"
+                );
             }
-            other => panic!("Expected Typed filter with Owned, got {other:?}"),
+            other => panic!("Expected Typed filter with Owned + NonToken, got {other:?}"),
         }
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
@@ -8486,6 +8627,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 730.3e + CR 111.1: a card-only subject targeting ANY graveyard ("a
+    /// card would be put into a graveyard") is token-EXCLUDING with no
+    /// controller scope — `valid_card` is `NonToken` alone. This is the live
+    /// Leyline-class bug fix: without the `NonToken` axis a dying token was
+    /// wrongly redirected (exiled), suppressing dies-triggers.
+    #[test]
+    fn card_only_any_graveyard_excludes_tokens() {
+        let def = parse_replacement_line(
+            "If a card would be put into a graveyard from anywhere, exile it instead.",
+            "Some Card-Scoped Hoser",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(
+                    properties.contains(&FilterProp::NonToken),
+                    "'a card' subject must exclude tokens (CR 730.3e)"
+                );
+                assert!(
+                    !properties.contains(&FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    }),
+                    "any-graveyard scope must not add an owner constraint"
+                );
+            }
+            other => panic!("Expected Typed filter with NonToken, got {other:?}"),
+        }
     }
 
     #[test]
@@ -11063,6 +11235,71 @@ mod tests {
                 player: crate::types::ability::DamageTargetPlayerScope::Controller
             }),
             "damage target should be Controller"
+        );
+    }
+
+    /// CR 614.1a: the UNCONDITIONAL life-floor (Ali from Cairo, Fortune Thief,
+    /// Sustaining Spirit) parses to the same `DamageDone` + `LifeFloor` +
+    /// Controller-target replacement as Worship, but with NO condition — the
+    /// previously-dropped `Effect:replacement_structure` gap.
+    #[test]
+    fn parses_unconditional_life_floor_replacement() {
+        let def = parse_replacement_line(
+            "Damage that would reduce your life total to 0 reduces it to 1 instead.",
+            "Ali from Cairo",
+        )
+        .expect("Ali from Cairo printed 'to 0' wording should parse");
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.condition, None);
+        assert_eq!(
+            def.damage_modification,
+            Some(crate::types::ability::DamageModification::LifeFloor { minimum: 1 })
+        );
+
+        for card in ["Ali from Cairo", "Fortune Thief", "Sustaining Spirit"] {
+            let def = parse_replacement_line(
+                "Damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+                card,
+            )
+            .unwrap_or_else(|| panic!("{card}: unconditional life-floor should parse"));
+
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{card}");
+            assert_eq!(
+                def.condition, None,
+                "{card}: unconditional form must carry NO condition (cf. Worship's IfControlsMatching)"
+            );
+            assert_eq!(
+                def.damage_modification,
+                Some(crate::types::ability::DamageModification::LifeFloor { minimum: 1 }),
+                "{card}: damage modification should be LifeFloor(1)"
+            );
+            assert_eq!(
+                def.damage_target_filter,
+                Some(crate::types::ability::DamageTargetFilter::Player {
+                    player: crate::types::ability::DamageTargetPlayerScope::Controller
+                }),
+                "{card}: damage target should be Controller"
+            );
+        }
+    }
+
+    /// Guard: the conditional Worship form still routes to the conditional arm
+    /// (keeps its `IfControlsMatching` condition) — the unconditional arm must
+    /// not swallow it.
+    #[test]
+    fn conditional_worship_life_floor_still_carries_condition() {
+        let def = parse_replacement_line(
+            "If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+            "Worship",
+        )
+        .expect("Worship should still parse");
+        assert!(
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::IfControlsMatching { .. })
+            ),
+            "Worship must keep its IfControlsMatching condition, got {:?}",
+            def.condition
         );
     }
 }

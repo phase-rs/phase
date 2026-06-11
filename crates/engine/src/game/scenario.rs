@@ -1036,21 +1036,11 @@ impl<'a> CardBuilder<'a> {
         let face = build_face_from_oracle(obj, &kw_strings, oracle_text);
         let obj = self.state.objects.get_mut(&self.id).unwrap();
         apply_card_face_to_object(obj, &face);
-        // CR 603.6a: `create_object` registers the trigger index before Oracle
-        // text is applied. Re-index after `from_oracle_text` so scenario-seeded
-        // triggers (e.g. upkeep lines added via `add_creature_from_oracle`) fire.
+        // CR 603.6a: Scenario seeding uses `create_object` + `add_to_zone`, not
+        // `move_to_zone`, so ETB registration never runs. Re-index after Oracle
+        // text is applied so synthesized upkeep triggers are consultable.
         if zone == Zone::Battlefield {
-            let object_id = self.id;
-            let registration = self.state.objects.get(&object_id).map(|obj| {
-                let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
-                    obj.trigger_definitions.as_slice().iter().cloned().collect();
-                let synthetic = crate::game::trigger_index::has_synthetic_keyword_trigger_for(obj);
-                (defs, synthetic)
-            });
-            if let Some((defs, synthetic)) = registration {
-                self.state.trigger_index.remove(object_id);
-                self.state.trigger_index.add(object_id, &defs, synthetic);
-            }
+            crate::game::trigger_index::reindex_object_triggers(self.state, self.id);
         }
         self
     }

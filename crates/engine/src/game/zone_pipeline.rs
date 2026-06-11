@@ -23,13 +23,15 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    BatchCompletion, ExileLinkKind, GameState, PendingBatchDeliveries, PendingCounterPostAction,
-    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    BatchCompletion, ExileLinkKind, GameState, MergedCardComponentRoute, PendingBatchDeliveries,
+    PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
+use std::collections::HashSet;
+
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{ProposedEvent, ReplacementId};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
@@ -64,6 +66,25 @@ pub enum ZoneChangeCause {
     /// zone. Mechanically a return-to-zone move, but a named CR class — full
     /// pipeline, NOT exempt.
     CommanderRuleReturn,
+    /// CR 121.1: drawing a card — "A player draws a card by putting the top card
+    /// of their library into their hand." Drawing IS a Library → Hand zone
+    /// change, so it runs the full pipeline (the inner `Moved` consult fires for
+    /// any def that scopes to a Hand-destination move). Carries no source object:
+    /// the draw-step draw (CR 504.1) is a turn-based action with no causing
+    /// object, and effect-driven draws attribute their `Moved` redirects to the
+    /// REPLACEMENT's source (see `track_exiled_by_source` flow in delivery), not
+    /// to the draw cause — so sourcelessness is correct. NOT exempt.
+    ///
+    /// `seed_applied` carries the OUTER `ReplacementEvent::Draw` pass's applied
+    /// `ReplacementId` set so the inner `Moved` consult does not re-fire a def
+    /// that already fired at draw level (CR 614.5: a replacement gets one
+    /// opportunity to affect an event "or any modified events that may replace
+    /// that event"). This payload lives on the variant — not on `ZoneMoveRequest`
+    /// — because `Draw` is the only producer; every other cause would carry a
+    /// dead empty set. Built only by [`ZoneMoveRequest::draw`].
+    Draw {
+        seed_applied: HashSet<ReplacementId>,
+    },
     // ---- exempt causes: pipeline-internal, replacement consult skipped ----
     /// CR 601.2a: "the player first moves that card ... to the stack" — part of
     /// the casting process, not a discrete replaceable event.
@@ -106,7 +127,11 @@ impl ZoneChangeCause {
             | ZoneChangeCause::Cost { .. }
             | ZoneChangeCause::SpellResolutionDefault
             | ZoneChangeCause::StateBasedAction
-            | ZoneChangeCause::CommanderRuleReturn => false,
+            | ZoneChangeCause::CommanderRuleReturn
+            // CR 121.1: drawing is a replaceable Library → Hand zone change; it
+            // MUST consult `Moved` defs (e.g. a future "cards you would draw are
+            // put into exile instead" redirect).
+            | ZoneChangeCause::Draw { .. } => false,
             ZoneChangeCause::CastingToStack { .. }
             | ZoneChangeCause::PregameProcedure
             | ZoneChangeCause::PlayerLeftGame
@@ -209,6 +234,26 @@ impl ZoneMoveRequest {
             object_id,
             to,
             cause: ZoneChangeCause::SpellResolutionDefault,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 121.1 + CR 504.1: drawing a card moves the top card of the library
+    /// into the owner's hand. Like [`Self::spell_resolution_default`], this is a
+    /// sourceless move that STILL consults the pipeline (Draw is non-exempt) —
+    /// the draw-step draw (CR 504.1) is a turn-based action with no causing
+    /// object, and an effect-driven draw's `Moved` redirect is attributed to the
+    /// REPLACEMENT's source, not the draw cause. `seed_applied` carries the
+    /// outer `ReplacementEvent::Draw` pass's applied set so the inner `Moved`
+    /// consult does not double-apply a def that already fired at draw level
+    /// (CR 614.5, PLAN Risk #5).
+    pub fn draw(object_id: ObjectId, seed_applied: HashSet<ReplacementId>) -> Self {
+        Self {
+            object_id,
+            to: Zone::Hand,
+            cause: ZoneChangeCause::Draw { seed_applied },
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
@@ -329,11 +374,24 @@ impl ZoneMoveRequest {
     /// The source object this move is attributed to, if any. Exempt causes that
     /// carry no source return `None`.
     fn source(&self) -> Option<ObjectId> {
+        // Exhaustive, no wildcard: a new `ZoneChangeCause` variant must make an
+        // explicit source decision (mirrors `is_exempt`'s mandate above) rather
+        // than silently inherit `None`.
         match &self.cause {
             ZoneChangeCause::Effect { source }
             | ZoneChangeCause::Cost { source }
             | ZoneChangeCause::CastingToStack { source } => Some(*source),
-            _ => None,
+            // CR 504.1: a draw-step draw is a turn-based action with no causing
+            // object; effect-driven draws attribute redirects to the replacement
+            // source, not the move cause — so `Draw` is sourceless.
+            ZoneChangeCause::Draw { .. }
+            | ZoneChangeCause::SpellResolutionDefault
+            | ZoneChangeCause::StateBasedAction
+            | ZoneChangeCause::CommanderRuleReturn
+            | ZoneChangeCause::PregameProcedure
+            | ZoneChangeCause::PlayerLeftGame
+            | ZoneChangeCause::MergedComponentRouting
+            | ZoneChangeCause::DebugCommand => None,
         }
     }
 }
@@ -600,6 +658,52 @@ pub(crate) fn move_object(
         exile_links.tracking,
         ZoneDeliveryExileTracking::TrackBySource
     );
+
+    // CR 121.1 + CR 614.5 (PLAN Risk #5): a draw (Library → Hand) consults the
+    // pipeline so a `Moved` def scoped to a Hand-destination move can redirect
+    // the drawn card. Drawing never enters the battlefield, so it has none of
+    // `execute_zone_move`'s battlefield-entry machinery (ETB counters, aura
+    // host, cast-link snapshot, devour) — run the bare consult + delivery here,
+    // seeding the proposed event's `applied` set from the OUTER
+    // `ReplacementEvent::Draw` pass (the `Draw` variant's `seed_applied`). The
+    // dedup guard: a def already in `applied` is skipped at
+    // `find_applicable_replacements`' `already_applied(&rid)` gate, so it cannot
+    // fire at both the Draw level and this Moved level. The seed lives on the
+    // `Draw` cause variant — no other cause produces one.
+    if let ZoneChangeCause::Draw { seed_applied } = req.cause {
+        let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
+        if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+            *applied = seed_applied;
+        }
+        return match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => match deliver_replaced_zone_change(
+                state,
+                event,
+                source_id,
+                exile_links.duration.as_ref(),
+                track_exiled_by_source,
+                PostReplacementDrainOwner::DeliveryTail,
+                None,
+                events,
+            ) {
+                ZoneDeliveryResult::Done => ZoneMoveResult::Done,
+                ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+            },
+            ReplacementResult::Prevented => ZoneMoveResult::Done,
+            ReplacementResult::NeedsChoice(player) => {
+                // CR 616.1: park the surfaced ordering prompt (mirrors the
+                // placement / `execute_zone_move` NeedsChoice arms). No
+                // production `Moved` def targets a Hand destination today (audit:
+                // every destination-unconstrained `Moved` def is `valid_card:
+                // SelfRef`-bound to a battlefield host, and the only
+                // `valid_card: None` class is destination-gated to Graveyard), so
+                // this is unreachable for the current pool — parked for
+                // correctness if a future to-Hand redirect surfaces a choice.
+                replacement::park_waiting_for(state, player);
+                ZoneMoveResult::NeedsChoice(player)
+            }
+        };
+    }
 
     // PLAN §3: exempt causes skip the `replace_event` consult and go straight to
     // delivery. The proposed event is sealed directly (no matcher pass) and runs
@@ -911,6 +1015,29 @@ fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destinati
 /// the next object surfaces its own prompt. Rebuilds each tail request with the
 /// stashed batch-uniform context (attribution source, tap-state, exile
 /// tracking) so the resumed deliveries match the originals.
+///
+/// RE-PAUSE CONTRACT (the explicit guarantee for "a LATER item in the same batch
+/// parks after the first one already parked and was resumed"): everything a batch
+/// needs to finish identically across an arbitrary number of sequential parks is
+/// held in `state.pending_batch_deliveries` — NOT on the stack and NOT in the
+/// resuming caller — so each park can re-stash it for the next one:
+///   * the **undelivered tail** (`remaining`) — `deliver_batch` re-stashes the
+///     still-undelivered suffix on every re-park, so no object is ever dropped;
+///   * the **batch-uniform request context** (`destination`, `source_id`,
+///     `enter_tapped`, `exile_tracking`) — re-applied to every rebuilt request so
+///     the second-park resume produces requests equivalent to the originals
+///     (e.g. seek's `enter_tapped`, mill's self-anchored attribution);
+///   * the **post-loop `completion`** — taken out here, then re-attached via
+///     `ensure_batch_record` on the `NeedsChoice` arm so it survives the second
+///     pause boundary and still runs EXACTLY ONCE, the moment the final tail
+///     empties (never early, never twice).
+///
+/// Because all of this lives on the parked record (not in `route_rest_partition`
+/// or any synchronous caller frame), a second, third, … park is just another
+/// `deliver_batch` → re-stash cycle. The contract is pinned by
+/// `mill_double_redirect_choice_continuation` (two sequential parks, no
+/// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
+/// parks WITH a completion that must fire once after the second park drains).
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.pending_batch_deliveries.take() {
         let completion = pending.completion;
@@ -1239,6 +1366,100 @@ pub(crate) fn apply_face_down_entry_profile(
     }
 }
 
+/// CR 730.3e (second clause) + CR 730.2d + CR 614.6: compute the card-component
+/// routing override for a merged permanent's leave.
+///
+/// `survivor_dest` is the merged permanent's already-consulted destination (the
+/// survivor's post-replacement `to`). For a NON-token survivor every component
+/// followed `survivor_dest` (clause 1, CR 730.3d) and this returns `None`. For a
+/// TOKEN survivor (CR 730.2d: token iff the topmost component is a token), a
+/// card-scoped (`NonToken`) `Moved` redirect did NOT match the survivor — so
+/// `survivor_dest` is the pre-replacement default zone — but it DOES move the
+/// merged permanent's CARD components. We discover where by running ONE
+/// component-aware consult for a representative card component: a single
+/// `replace_event` over a `ZoneChange { from: Battlefield, to: survivor_dest }`
+/// proposal for that card. This is NOT a per-component re-consult — CR 616.1
+/// ordering is resolved once for the card partition, never per card — and it
+/// only READS the resolved destination (replacement does not move the object).
+///
+/// Returns `Some` only when the card consult diverges from `survivor_dest`
+/// (i.e. a card-scoped redirect genuinely applies to cards but not the token
+/// survivor); otherwise `None` (no override — the existing single-`to` routing
+/// is already correct).
+///
+/// LIMITATION (homogeneous card partition): the representative-component consult
+/// applies one card component's resolved destination to the ENTIRE card
+/// partition. This is exact when every card component matches the card-scoped
+/// redirect identically — true for the common case (RIP/Leyline "a card …"
+/// matches every non-token) and for Mutate piles versus type-level filters (all
+/// components are creatures). It can misroute only a heterogeneous partition
+/// under a subtype/color-scoped card redirect (e.g. a green creature card merged
+/// with a red creature card under a TOKEN survivor, versus "if a green creature
+/// card would be put into a graveyard"): the off-filter card component would
+/// follow the representative's redirect instead of its own default. Fully
+/// correct per-component routing would evaluate each card component's filter
+/// individually while resolving CR 616.1 ordering only once — deferred, because
+/// per-component re-consults re-burn that ordering choice (the OQ#5
+/// single-consult mandate) and the misroute requires a token-survivor Mutate
+/// pile with mixed card characteristics under a scoped graveyard-redirect, which
+/// no current card produces.
+///
+/// `// strict-failure: a one-shot ("the next time ... instead") leave redirect
+/// would be consumed by this extra read-only consult; no such depletion-style
+/// def is in the merged-leave class (the graveyard-redirect hosers are
+/// continuous statics), so the double-stamp is benign.`
+fn compute_merged_card_component_route(
+    state: &mut GameState,
+    survivor_id: ObjectId,
+    survivor_dest: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Option<MergedCardComponentRoute> {
+    let survivor = state.objects.get(&survivor_id)?;
+    // Clause 1 (CR 730.3d) already routed every component to `survivor_dest`
+    // for a non-token survivor; only the token-survivor case needs the split.
+    if !survivor.is_token || survivor.merged_components.is_empty() {
+        return None;
+    }
+    // A representative CARD (non-token) component, excluding the survivor.
+    let card_component = survivor
+        .merged_components
+        .iter()
+        .copied()
+        .find(|&id| id != survivor_id && state.objects.get(&id).is_some_and(|o| !o.is_token))?;
+
+    // Single component-aware consult for the card partition. The card component
+    // is still absorbed (on the battlefield via the survivor), so its leave
+    // origin is the battlefield.
+    let proposed = ProposedEvent::zone_change(
+        card_component,
+        Zone::Battlefield,
+        survivor_dest,
+        Some(survivor_id),
+    );
+    let card_dest = match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) => to,
+        // Prevented / NeedsChoice / non-ZoneChange: no usable redirect for the
+        // card partition — fall back to the survivor's destination (no split).
+        // strict-failure: a NeedsChoice here means the card partition matched an
+        // Optional-mode def or a CR 616.1 ordering choice between multiple Moved
+        // candidates; the fallback skips that genuine choice (rules-wrong for
+        // the rare multi-candidate case) as the safe floor versus pausing
+        // mid-delivery. `pipeline_loop` parks `pending_replacement` BEFORE
+        // returning NeedsChoice — clear it, or the stranded record silently
+        // truncates every SBA pass (sba.rs gates on `pending_replacement`) for
+        // the rest of the game and serializes as garbage into saves.
+        _ => {
+            state.pending_replacement = None;
+            return None;
+        }
+    };
+
+    (card_dest != survivor_dest).then_some(MergedCardComponentRoute {
+        default_dest: survivor_dest,
+        card_dest,
+    })
+}
+
 /// Deliver a zone-change event that has already passed through replacement.
 ///
 /// `library_placement` (CR 701.24a): when the event's delivered destination is
@@ -1331,6 +1552,22 @@ pub(crate) fn deliver_replaced_zone_change(
             })
             .flatten();
 
+        // CR 730.3e (second clause): if a TOKEN merged permanent leaves the
+        // battlefield while a card-scoped (`NonToken`) `Moved` redirect is
+        // active, the redirect did NOT match the token survivor (so `to` above
+        // is the pre-replacement default zone for the survivor + its token
+        // components), but it DOES move the merged permanent's CARD components.
+        // Run ONE additional component-aware consult here (NOT per component —
+        // a single `replace_event` for the card-component partition, so CR 616.1
+        // ordering is computed once for the partition, not re-burned per card),
+        // and stash the resulting `card_dest` so the survivor split routes card
+        // components there while the token survivor + token components take the
+        // default zone. A no-op (no route stashed) for non-token survivors
+        // (clause 1, already handled — every component followed the survivor's
+        // redirected `to`) and when no card-scoped redirect diverges.
+        state.merged_card_component_route =
+            compute_merged_card_component_route(state, object_id, to, events);
+
         // CR 701.24a: deliver to a specific library index when the event's
         // destination is the library and a position was requested (a placement is
         // not a shuffle); otherwise the zone-default `move_to_zone` (which the
@@ -1353,6 +1590,11 @@ pub(crate) fn deliver_replaced_zone_change(
             }
             _ => zones::move_to_zone(state, object_id, to, events),
         }
+        // CR 730.3e: the survivor split (inside `move_to_zone` above) has consumed
+        // any clause-2 routing override; clear it so it never leaks into a later
+        // unrelated move. Purely synchronous lifetime (set → consumed → cleared in
+        // this one delivery), so it never crosses a pause.
+        state.merged_card_component_route = None;
         // CR 400.7d: restore the cast link immediately after the entry reset —
         // BEFORE the face-down / counter blocks, so a counter-replacement pause
         // (CR 616.1) cannot strand the resumed permanent without its kicker /
@@ -2301,6 +2543,106 @@ mod w3_library_placement_tests {
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
             vec![placed, a, b],
             "after two declined parks the placement must still honor LibraryPosition::Top"
+        );
+    }
+}
+
+#[cfg(test)]
+mod parsed_leyline_card_scoping_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::triggers::process_triggers;
+    use crate::parser::oracle_replacement::parse_replacement_line;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+    };
+    use crate::types::triggers::TriggerMode;
+
+    /// End-to-end pin of the live Leyline of the Void bug (zone pipeline
+    /// tranche 3, parser card-scoping): the def installed here is the REAL
+    /// PARSED output of Leyline's oracle line — not a hand-built mirror — so
+    /// any parser-shape drift that breaks the matcher path turns this red.
+    ///
+    /// CR 111.1: tokens are not cards, so Leyline's "a card" subject must NOT
+    /// match a dying token: the opponent's token reaches the GRAVEYARD (its
+    /// dies-trigger fires per CR 603.6c look-back, then CR 111.7 ceases it),
+    /// while an opponent's dying nontoken CARD is exiled instead (CR 614.6).
+    #[test]
+    fn parsed_leyline_token_dies_to_graveyard_card_is_exiled() {
+        let mut sc = GameScenario::new();
+        let leyline = sc.add_creature(P0, "Leyline of the Void", 0, 0).id();
+        let token = sc.add_creature(P1, "Zombie Token", 2, 2).id();
+        let card_creature = sc.add_creature(P1, "Zombie", 2, 2).id();
+        let mut state = sc.state;
+        state.objects.get_mut(&token).unwrap().is_token = true;
+
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+            "Leyline of the Void",
+        )
+        .expect("Leyline of the Void's replacement line must parse");
+        state
+            .objects
+            .get_mut(&leyline)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        // Blood Artist-class observable: a self-scoped dies trigger on the token.
+        state
+            .objects
+            .get_mut(&token)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard)
+                    .trigger_zones(vec![Zone::Battlefield])
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .description("When this creature dies, you gain 1 life.".to_string()),
+            );
+
+        // The opponent's TOKEN dies through the real pipeline.
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(token, Zone::Graveyard, token),
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&token].zone,
+            Zone::Graveyard,
+            "CR 111.1: 'a card' excludes tokens — the dying token must reach the \
+             graveyard, not be exiled (the pre-tranche-3 live bug)"
+        );
+        process_triggers(&mut state, &events);
+        assert!(
+            !state.stack.is_empty(),
+            "the token's dies-trigger must fire (CR 603.6c look-back) — exiling \
+             it instead suppressed Blood Artist-class triggers"
+        );
+
+        // Contrast: the opponent's nontoken CARD is exiled by the same def.
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card_creature, Zone::Graveyard, card_creature),
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&card_creature].zone,
+            Zone::Exile,
+            "CR 614.6: the opponent's dying nontoken card is exiled instead"
         );
     }
 }

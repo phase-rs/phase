@@ -8213,6 +8213,79 @@ mod tests {
         );
     }
 
+    /// Issue #2933: Black Dragon Gate must offer {B} and the as-enters chosen
+    /// color when tapped — not only the chosen color.
+    #[test]
+    fn black_dragon_gate_tap_offers_fixed_black_or_chosen_color() {
+        use crate::game::mana_sources::activatable_land_mana_options;
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::mana::ManaType;
+
+        let mut state = setup_game_at_main_phase();
+        let gate = create_object(
+            &mut state,
+            CardId(347),
+            PlayerId(0),
+            "Black Dragon Gate".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&gate).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Gate".to_string());
+        }
+        apply_oracle_to_object(
+            &mut state,
+            gate,
+            "Black Dragon Gate",
+            "This land enters tapped.\nAs this land enters, choose a color other than black.\n{T}: Add {B} or one mana of the chosen color.",
+        );
+        state
+            .objects
+            .get_mut(&gate)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
+
+        let options = activatable_land_mana_options(&state, gate, PlayerId(0));
+        let types: Vec<ManaType> = options.iter().map(|o| o.mana_type).collect();
+        assert!(
+            types.contains(&ManaType::Black),
+            "Black Dragon Gate must offer {{B}}, got {types:?}"
+        );
+        assert!(
+            types.contains(&ManaType::Red),
+            "Black Dragon Gate must offer chosen Red, got {types:?}"
+        );
+        assert_eq!(types.len(), 2);
+
+        let tap_black = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: gate,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(tap_black.waiting_for, WaitingFor::ChooseManaColor { .. }),
+            "two-color Gate must prompt before producing mana, got {:?}",
+            tap_black.waiting_for
+        );
+
+        let resolved = apply_as_current(
+            &mut state,
+            GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Black),
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert!(matches!(resolved.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.objects[&gate].tapped);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
+    }
+
     #[test]
     fn thriving_grove_play_land_stays_tapped_after_color_choice() {
         let mut state = setup_game_at_main_phase();

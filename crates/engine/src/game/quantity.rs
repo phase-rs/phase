@@ -2888,14 +2888,12 @@ fn resolve_mana_symbols_in_mana_cost(
         .unwrap_or(0)
 }
 
-/// CR 208.3 + CR 113.6 + CR 400.7: Resolve a per-object scalar (power, toughness)
-/// through an `ObjectScope`, with LKI fallback for the source.
+/// CR 208.3 + CR 608.2h + CR 400.7: Resolve a per-object scalar (power, toughness)
+/// through an `ObjectScope`, with LKI fallback when the object left its zone.
 ///
 /// Single authority for `Power { scope }` / `Toughness { scope }` resolution
 /// (Π-6). `obj_extract` returns the property for a current object; `lki_extract`
-/// returns the same property from a Last Known Information snapshot. LKI fallback
-/// applies only to the source object — Target reads only the current state per
-/// CR 113.6 (a target's identity is captured on cast/announce).
+/// returns the same property from a Last Known Information snapshot.
 fn resolve_object_pt<F, G>(
     state: &GameState,
     scope: ObjectScope,
@@ -2916,13 +2914,28 @@ where
             .and_then(&obj_extract)
             .or_else(|| state.lki_cache.get(&ctx.source).and_then(&lki_extract))
             .unwrap_or(0),
+        // CR 608.2h: once a targeted object has left the battlefield, its power
+        // and toughness survive only as last known information. The object now
+        // in its new zone has had +1/+1 counters and continuous modifiers
+        // stripped (CR 122.2 / CR 613), so reading it live under-reports — Swords
+        // to Plowshares on a 3/3 with eight +1/+1 counters must gain 11 life, not
+        // 3. Prefer live battlefield state over a stale same-step LKI snapshot;
+        // otherwise use LKI, then fall back to live state for non-battlefield
+        // target-card reads that never had a battlefield LKI.
         ObjectScope::Target => targets
             .iter()
             .find_map(|t| match t {
-                TargetRef::Object(id) => state.objects.get(id),
+                TargetRef::Object(id) => Some(*id),
                 _ => None,
             })
-            .and_then(&obj_extract)
+            .map(|id| {
+                let live = state.objects.get(&id);
+                live.filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+                    .and_then(&obj_extract)
+                    .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
+                    .or_else(|| live.and_then(&obj_extract))
+                    .unwrap_or(0)
+            })
             .unwrap_or(0),
         ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
             .and_then(&obj_extract)
@@ -3496,6 +3509,12 @@ pub(crate) fn resolve_player_count(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> i32 {
+    // CR 104.3: eliminated players are excluded from the generic player loop
+    // below (`!p.is_eliminated`), so count them on a dedicated path.
+    if matches!(filter, PlayerFilter::HasLostTheGame) {
+        return usize_to_i32_saturating(state.players.iter().filter(|p| p.is_eliminated).count());
+    }
+
     if let PlayerFilter::OpponentAttacked {
         subject,
         scope: AttackScope::ThisCombat,
@@ -3535,6 +3554,8 @@ pub(crate) fn resolve_player_count(
                         PlayerFilter::OpponentGainedLife => {
                             p.id != controller && p.life_gained_this_turn > 0
                         }
+                        // Handled by the early return above; unreachable here.
+                        PlayerFilter::HasLostTheGame => false,
                         // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each
                         // opponent who was dealt combat damage this turn,
                         // optionally restricted to a matching source.
@@ -6739,6 +6760,25 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
     }
 
+    /// CR 104.3: `PlayerCount { HasLostTheGame }` counts eliminated players only.
+    #[test]
+    fn player_count_has_lost_the_game_counts_eliminated_players() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[1].is_eliminated = true;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::HasLostTheGame,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+
+        state.players[2].is_eliminated = true;
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
+    }
+
     /// CR 119.2 + CR 700.1: `PlayerCount { OpponentLostLife }` counts only
     /// opponents whose `life_lost_this_turn > 0` — Belbe's mana count base.
     #[test]
@@ -7649,6 +7689,56 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn resolve_target_power_prefers_live_battlefield_object_over_stale_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Returned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let mut stale_lki = state.objects[&target].snapshot_public_characteristics();
+        stale_lki.power = Some(2);
+        stale_lki.toughness = Some(2);
+        state.lki_cache.insert(target, stale_lki);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: expr.clone(),
+                player: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &expr, &ability),
+            5,
+            "live battlefield target must win over same-step LKI from an earlier incarnation"
+        );
     }
 
     #[test]

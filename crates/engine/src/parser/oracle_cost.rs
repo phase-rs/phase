@@ -19,7 +19,7 @@ use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, BeholdCostAction, CostReduction, CounterCostSelection, FilterProp, PlayerScope,
-    QuantityExpr, QuantityRef, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
+    QuantityExpr, QuantityRef, TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
     REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
@@ -575,6 +575,54 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 filter: None,
             };
         }
+        // CR 107.3a + CR 118.8: "Exile X card(s) from your graveyard" — variable
+        // count announced during casting (Harvest Pyre). Ordered before the typed
+        // `parse_type_phrase` arm, which cannot represent a bare zone with no filter.
+        if let Some(((), rest_after_x)) =
+            nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
+        {
+            let after_lower = rest_after_x.to_lowercase();
+            if nom_on_lower(rest_after_x, &after_lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("card from your graveyard"),
+                        tag("cards from your graveyard"),
+                    )),
+                )
+                .parse(i)
+            })
+            .is_some()
+            {
+                return AbilityCost::Exile {
+                    count: EXILE_COST_X,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                };
+            }
+        }
+        // CR 118.8: "Exile N card(s) from your graveyard" without a type filter.
+        if let Some((count, after_count)) = parse_number(&rest_lower) {
+            let after_count_lower = after_count.trim_start().to_lowercase();
+            if nom_on_lower(after_count.trim_start(), &after_count_lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("card from your graveyard"),
+                        tag("cards from your graveyard"),
+                    )),
+                )
+                .parse(i)
+            })
+            .is_some()
+            {
+                return AbilityCost::Exile {
+                    count,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                };
+            }
+        }
         let count = parse_number(&rest_lower).map(|(n, _)| n).unwrap_or(1);
         let filter_start = parse_number(rest)
             .map(|(_, remaining)| remaining)
@@ -900,8 +948,31 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         _ => return None, // Only generic mana reduction supported
     };
 
-    // Strip " less to activate for each " or " less to cast for each "
     let after_mana = after_mana.trim_start();
+
+    // CR 602.2b + CR 601.2f conditional flat form: "... less to activate if [condition]" /
+    // "... less to cast if [condition]". The reduction is a flat {amount_per}
+    // (count = Fixed(1)) gated by `condition`. Checked before the "for each"
+    // form; if the "if " marker is present but the condition does not parse,
+    // return None so the clause stays a loud gap (coverage honesty) rather than
+    // silently mis-parsing.
+    if let Some(((), cond_text)) = nom_on_lower(after_mana, after_mana, |i| {
+        value(
+            (),
+            alt((tag("less to activate if "), tag("less to cast if "))),
+        )
+        .parse(i)
+    }) {
+        let cond_text = cond_text.trim().trim_end_matches('.').trim();
+        let condition = super::oracle_condition::parse_restriction_condition(cond_text)?;
+        return Some(CostReduction {
+            amount_per,
+            count: QuantityExpr::Fixed { value: 1 },
+            condition: Some(condition),
+        });
+    }
+
+    // Strip " less to activate for each " or " less to cast for each "
     let ((), after_less) = nom_on_lower(after_mana, after_mana, |i| {
         value(
             (),
@@ -919,6 +990,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         return Some(CostReduction {
             amount_per,
             count: QuantityExpr::Ref { qty },
+            condition: None,
         });
     }
 
@@ -933,6 +1005,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         count: QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         },
+        condition: None,
     })
 }
 
@@ -1459,6 +1532,30 @@ mod tests {
             }
             other => panic!("Expected Sacrifice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn cost_exile_x_cards_from_graveyard() {
+        assert_eq!(
+            parse_oracle_cost("Exile X cards from your graveyard"),
+            AbilityCost::Exile {
+                count: EXILE_COST_X,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_exile_two_cards_from_graveyard() {
+        assert_eq!(
+            parse_oracle_cost("Exile two cards from your graveyard"),
+            AbilityCost::Exile {
+                count: 2,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            }
+        );
     }
 
     #[test]
@@ -2167,5 +2264,62 @@ mod tests {
             }
             other => panic!("Expected OneOf, got {:?}", other),
         }
+    }
+
+    /// CR 602.2b + CR 601.2f: the conditional flat form "costs {N} less to activate if
+    /// [condition]" parses to a `CostReduction` with `count = Fixed(1)` and a
+    /// `condition` gate (Esquire of the King, Razorlash Transmogrant, …) — the
+    /// previously-dropped `Effect:this` clause.
+    #[test]
+    fn cost_reduction_conditional_flat_form_carries_condition() {
+        let def = try_parse_cost_reduction(
+            "this ability costs {2} less to activate if you control a legendary creature",
+        )
+        .expect("conditional cost reduction should parse");
+        assert_eq!(def.amount_per, 2);
+        assert_eq!(def.count, QuantityExpr::Fixed { value: 1 });
+        assert!(
+            def.condition.is_some(),
+            "the 'if [condition]' gate must be captured, got {:?}",
+            def.condition
+        );
+
+        // "if you're <something the condition parser doesn't model>" must NOT
+        // silently mis-parse: an unrecognized condition yields no reduction
+        // (stays a loud gap) rather than an unconditional one.
+        assert!(
+            try_parse_cost_reduction(
+                "this ability costs {2} less to activate if the moon is gibbous"
+            )
+            .is_none(),
+            "unparseable condition must not produce an (unconditional) reduction"
+        );
+    }
+
+    #[test]
+    fn cost_reduction_conditional_opponent_nonbasic_lands() {
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {4} less to activate if an opponent controls four or more nonbasic lands",
+        )
+        .expect("opponent nonbasic land gate should parse");
+        assert_eq!(reduction.amount_per, 4);
+        assert_eq!(reduction.count, QuantityExpr::Fixed { value: 1 });
+        assert!(reduction.condition.is_some());
+    }
+
+    /// Regression: the "for each" scaling form is unchanged and carries no
+    /// condition.
+    #[test]
+    fn cost_reduction_for_each_form_unconditional() {
+        let def = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each artifact you control",
+        )
+        .expect("for-each cost reduction should still parse");
+        assert_eq!(def.amount_per, 1);
+        assert_eq!(def.condition, None, "for-each form is unconditional");
+        assert!(
+            !matches!(def.count, QuantityExpr::Fixed { .. }),
+            "for-each count is a dynamic ref, not Fixed"
+        );
     }
 }

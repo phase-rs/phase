@@ -524,18 +524,20 @@ pub fn display_land_mana_pips(
             // chosen color"), show both available mana choices.
             ManaProduction::ChosenColor {
                 fixed_alternative, ..
-            } => {
-                if let Some(color) = fixed_alternative {
-                    push(&mut pips, ManaPip::Color(*color));
+            } => match (fixed_alternative, obj.chosen_color()) {
+                (None, None) => {
+                    push(&mut pips, ManaPip::OneOfColors(ManaColor::ALL.to_vec()));
                 }
-                match obj.chosen_color() {
-                    Some(color) => push(&mut pips, ManaPip::Color(color)),
-                    None if fixed_alternative.is_none() => {
-                        push(&mut pips, ManaPip::OneOfColors(ManaColor::ALL.to_vec()));
+                _ => {
+                    for mana_type in
+                        chosen_color_mana_type_options(state, object_id, *fixed_alternative)
+                    {
+                        if let Some(color) = mana_type_to_color(mana_type) {
+                            push(&mut pips, ManaPip::Color(color));
+                        }
                     }
-                    None => {}
                 }
-            }
+            },
             // CR 106.7: Dynamically computed from opponent lands.
             ManaProduction::OpponentLandColors { .. } => {
                 let colors: Vec<ManaColor> = opponent_land_color_options(state, controller)
@@ -925,20 +927,9 @@ fn profile_kind_from_production(
             fixed_alternative, ..
         } => {
             let count = resolved_production_count(produced, state, resolved);
-            let mut options = state
-                .objects
-                .get(&object_id)
-                .and_then(|obj| obj.chosen_color())
-                .map(|color| vec![mana_color_to_type(&color)])
-                .unwrap_or_default();
+            let options = chosen_color_mana_type_options(state, object_id, *fixed_alternative);
             if options.is_empty() {
                 return None;
-            }
-            if let Some(alt) = fixed_alternative {
-                let alt_type = mana_color_to_type(alt);
-                if !options.contains(&alt_type) {
-                    options.push(alt_type);
-                }
             }
             if count <= 1 && options.len() == 1 {
                 Some(ActivatableManaProfileKind::Exact(options))
@@ -1432,6 +1423,37 @@ pub(crate) fn activation_condition_satisfied(
     .is_ok()
 }
 
+/// CR 106.1: Resolve the mana-type option set for `ChosenColor` production.
+///
+/// Gate lands ("Add {B} or one mana of the chosen color") carry a
+/// `fixed_alternative` alongside the as-enters chosen color — both are legal
+/// outputs once the color is chosen. Pure chosen-color producers (Utopia Sprawl)
+/// with no color chosen yet fall back to all five colors so preview and
+/// mana-source analysis paths surface a non-empty set.
+pub(crate) fn chosen_color_mana_type_options(
+    state: &GameState,
+    object_id: ObjectId,
+    fixed_alternative: Option<ManaColor>,
+) -> Vec<ManaType> {
+    let mut options = Vec::new();
+    if let Some(fixed) = fixed_alternative {
+        options.push(mana_color_to_type(&fixed));
+    }
+    if let Some(chosen) = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.chosen_color())
+    {
+        let chosen_type = mana_color_to_type(&chosen);
+        if !options.contains(&chosen_type) {
+            options.push(chosen_type);
+        }
+    } else if fixed_alternative.is_none() {
+        return ManaColor::ALL.iter().map(mana_color_to_type).collect();
+    }
+    options
+}
+
 fn mana_options_from_production(
     state: &GameState,
     controller: PlayerId,
@@ -1461,15 +1483,11 @@ fn mana_options_from_production(
             }
             options
         }
-        // CR 106.1a: Resolve the source permanent's chosen color. If the
-        // permanent has no chosen color yet (e.g., still in library / sideboard
-        // preview), return empty so it isn't offered as a mana source.
-        ManaProduction::ChosenColor { .. } => state
-            .objects
-            .get(&object_id)
-            .and_then(|obj| obj.chosen_color())
-            .map(|color| vec![mana_color_to_type(&color)])
-            .unwrap_or_default(),
+        // CR 106.1: Resolve chosen-color production, including the fixed-color
+        // alternative on Gate lands ("Add {B} or one mana of the chosen color").
+        ManaProduction::ChosenColor {
+            fixed_alternative, ..
+        } => chosen_color_mana_type_options(state, object_id, *fixed_alternative),
         // CR 106.7: Compute colors dynamically from opponent-controlled lands.
         ManaProduction::OpponentLandColors { .. } => opponent_land_color_options(state, controller),
         // CR 106.7 + CR 106.1b: Compute the full type set (incl. Colorless)
@@ -2244,6 +2262,68 @@ mod tests {
         // nothing pre-resolution.
         let trigger_only = pips_for_production(ManaProduction::TriggerEventManaType);
         assert!(trigger_only.is_empty());
+    }
+
+    #[test]
+    fn gate_land_fixed_or_chosen_exposes_both_mana_options() {
+        // Issue #2933: Black Dragon Gate — `{T}: Add {B} or one mana of the
+        // chosen color` must surface both Black and the as-enters chosen color
+        // in activatable land mana options (not just the chosen color).
+        use crate::types::ability::ChosenAttribute;
+
+        let mut state = GameState::new_two_player(42);
+        let gate = create_object(
+            &mut state,
+            CardId(347),
+            PlayerId(0),
+            "Black Dragon Gate".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&gate).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.chosen_attributes
+                .push(ChosenAttribute::Color(ManaColor::Red));
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::ChosenColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            contribution: ManaContribution::Base,
+                            fixed_alternative: Some(ManaColor::Black),
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let options = activatable_land_mana_options(&state, gate, PlayerId(0));
+        let types: Vec<_> = options.iter().map(|o| o.mana_type).collect();
+        assert!(
+            types.contains(&ManaType::Black),
+            "Gate land must offer printed {{B}}, got {types:?}"
+        );
+        assert!(
+            types.contains(&ManaType::Red),
+            "Gate land must offer chosen color Red, got {types:?}"
+        );
+        assert_eq!(types.len(), 2, "expected exactly two distinct options");
+
+        assert_eq!(
+            chosen_color_mana_type_options(&state, gate, Some(ManaColor::Black)),
+            vec![ManaType::Black, ManaType::Red]
+        );
+        assert!(source_could_produce_two_or_more_colors(
+            &state,
+            gate,
+            PlayerId(0)
+        ));
     }
 
     #[test]

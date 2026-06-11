@@ -6,8 +6,8 @@ use super::support::*;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
-    Duration, Effect, ObjectProperty, PlayerScope, PtStat, PtValueScope, QuantityExpr,
-    SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+    Duration, Effect, ObjectProperty, PlayerFilter, PlayerScope, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -282,9 +282,9 @@ fn cant_attack_static_splits_self_reference() {
 }
 
 /// CR 508.1c: The terminal-phrase guard must NOT mis-split scoped attack
-/// restrictions. "can't attack alone" (Sightless Brawler) and the Vow cycle's
-/// "can't attack you or planeswalkers you control" are different restrictions
-/// owned by other branches — the plain-`CantAttack` splitter must decline.
+/// restrictions. "can't attack alone" (Sightless Brawler) is owned by a
+/// different branch; the Vow cycle's "can't attack you or planeswalkers you
+/// control" must be parsed as a defended-scope `CantAttack`, not a blanket one.
 #[test]
 fn cant_attack_split_declines_scoped_restrictions() {
     let alone = parse_static_line_multi("Enchanted creature gets +3/+2 and can't attack alone.");
@@ -297,10 +297,14 @@ fn cant_attack_split_declines_scoped_restrictions() {
     let scoped = parse_static_line_multi(
         "Enchanted creature gets +2/+2, has vigilance, and can't attack you or planeswalkers you control.",
     );
-    assert!(
-        !scoped.iter().any(|d| d.mode == StaticMode::CantAttack),
-        "scoped \"can't attack you …\" must not become a plain CantAttack, got {:?}",
-        scoped.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    let scoped_lockout = scoped
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .unwrap_or_else(|| panic!("expected scoped CantAttack, got {:?}", scoped));
+    assert_eq!(
+        scoped_lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "scoped \"can't attack you ...\" must not become a blanket CantAttack"
     );
 }
 
@@ -374,6 +378,79 @@ fn cant_attack_or_block_split_does_not_suppress_siblings() {
             .iter()
             .any(|d| d.mode == StaticMode::CantAttackOrBlock),
         "bare can't-block split must NOT produce CantAttackOrBlock"
+    );
+}
+
+/// CR 508.1b + CR 508.1c: Vow of Lightning — "Enchanted creature gets +2/+2, has first
+/// strike, and can't attack you or planeswalkers you control." must produce the
+/// +2/+2 and first-strike grant AND a companion `CantAttack` scoped to
+/// `PlayerOrPlaneswalker`. Previously the attack restriction was silently
+/// dropped, so the enchanted creature could freely attack the Aura controller.
+#[test]
+fn cant_attack_scoped_splits_from_pt_and_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2, has first strike, and can't attack you or planeswalkers you control.",
+    );
+    let lockout = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .unwrap_or_else(|| panic!("expected a CantAttack companion, got {:?}", defs));
+    assert_eq!(
+        lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "companion must be scoped to PlayerOrPlaneswalker, got {:?}",
+        lockout.attack_defended
+    );
+    assert!(
+        lockout.affected.is_some(),
+        "CantAttack companion must carry an affected filter"
+    );
+    // The leading grant must also be preserved.
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous),
+        "leading +2/+2 and first-strike grant must be preserved"
+    );
+}
+
+/// CR 508.1b + CR 508.1c: "and can't attack you" (Player scope only, without
+/// planeswalkers) also splits into a `CantAttack` with `defended = Player`.
+#[test]
+fn cant_attack_scoped_player_only_variant() {
+    let defs = parse_static_line_multi("Enchanted creature gets +0/+3 and can't attack you.");
+    let lockout = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected a CantAttack companion for 'can't attack you'");
+    assert_eq!(
+        lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::Player),
+        "companion must be scoped to Player, got {:?}",
+        lockout.attack_defended
+    );
+}
+
+/// CR 508.1b + CR 508.1c: The scoped-attack splitter must not suppress the
+/// existing bare-attack and cant-attack-or-block splitters.
+#[test]
+fn cant_attack_scoped_split_does_not_suppress_siblings() {
+    // Bare "can't attack" must still route to plain CantAttack with no defended scope.
+    let bare = parse_static_line_multi("Enchanted creature gets +2/+2 and can't attack.");
+    let bare_lockout = bare
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("bare cant-attack splitter must still produce CantAttack");
+    assert_eq!(
+        bare_lockout.attack_defended, None,
+        "bare CantAttack must have no defended scope"
+    );
+
+    // "can't attack or block" must still route to CantAttackOrBlock.
+    let aob = parse_static_line_multi(
+        "Enchanted creature loses all abilities and can't attack or block.",
+    );
+    assert!(
+        aob.iter().any(|d| d.mode == StaticMode::CantAttackOrBlock),
+        "cant-attack-or-block splitter must still produce CantAttackOrBlock"
     );
 }
 
@@ -7022,6 +7099,39 @@ fn static_parse_for_each_clause_other_creature() {
 }
 
 #[test]
+fn static_rampant_frogantua_lost_game_multiplier() {
+    let def =
+        parse_static_line("This creature gets +10/+10 for each player who has lost the game.")
+            .expect("Rampant Frogantua lost-game static should parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddDynamicPower { value, .. }
+                    | ContinuousModification::AddDynamicToughness { value, .. }
+                    if matches!(
+                        value,
+                        QuantityExpr::Multiply {
+                            factor: 10,
+                            inner,
+                        } if matches!(
+                            inner.as_ref(),
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::PlayerCount {
+                                    filter: PlayerFilter::HasLostTheGame,
+                                },
+                            }
+                        )
+                    )
+            )
+        }),
+        "expected +10/+10 keyed on HasLostTheGame, got {:?}",
+        def.modifications
+    );
+}
+
+#[test]
 fn static_self_gets_dynamic_power_for_each_creature() {
     // CR 613.4c: "~ gets +1/+0 for each other creature you control"
     let result = parse_static_line("~ gets +1/+0 for each other creature you control.");
@@ -10305,6 +10415,28 @@ fn cant_cast_spells_with_chosen_name() {
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
+}
+
+#[test]
+fn passive_spells_with_chosen_name_cant_be_cast() {
+    // CR 101.2 + CR 201.2: passive-voice name-lock — Meddling Mage, Nevermore,
+    // Voidstone Gargoyle. "All players" scope (no subject). The active-voice
+    // form ("[subject] can't cast spells with the chosen name") is covered above.
+    for text in [
+        "Spells with the chosen name can't be cast.",
+        "Spells with the chosen name can't be cast",
+    ] {
+        let def = parse_static_line(text)
+            .unwrap_or_else(|| panic!("should parse passive name-lock: {text:?}"));
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: ProhibitionScope::AllPlayers,
+            },
+            "{text:?}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::HasChosenName), "{text:?}");
+    }
 }
 
 #[test]

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 const MENU_GAP_PX = 4;
@@ -6,6 +6,25 @@ const MENU_VIEWPORT_PADDING_PX = 8;
 const MENU_MAX_HEIGHT_PX = 280;
 /** Matches AppShell `pb-[76px]` tab-bar reserve on viewports below 820px. */
 const MOBILE_TAB_BAR_RESERVE_PX = 76;
+/** Shell tab bar appears below this width — menus become bottom sheets. */
+const MOBILE_SHEET_MEDIA_QUERY = "(max-width: 819px)";
+
+function useMobileSheetLayout(): boolean {
+  const [mobileSheet, setMobileSheet] = useState(() =>
+    typeof window !== "undefined"
+      ? window.matchMedia(MOBILE_SHEET_MEDIA_QUERY).matches
+      : false,
+  );
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia(MOBILE_SHEET_MEDIA_QUERY);
+    const handleChange = () => setMobileSheet(mediaQuery.matches);
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
+
+  return mobileSheet;
+}
 
 function getViewportBottomInset(): number {
   if (window.matchMedia("(min-width: 820px)").matches) {
@@ -35,10 +54,18 @@ export interface MenuSelectItem {
   label: string;
 }
 
+export interface MenuSelectGroup {
+  label: string;
+  items: MenuSelectItem[];
+}
+
 export interface MenuSelectProps {
   /** Visible trigger label (e.g. placeholder text). */
   label: string;
-  items: MenuSelectItem[];
+  /** Ungrouped options rendered before any `groups` sections. */
+  items?: MenuSelectItem[];
+  /** Grouped sections (e.g. Constructed / Commander format families). */
+  groups?: MenuSelectGroup[];
   onSelect: (value: string) => void;
   disabled?: boolean;
   /** Accessible name when `label` shows the current value instead of the control name. */
@@ -75,9 +102,20 @@ function getScrollParents(element: HTMLElement | null): (HTMLElement | Window)[]
   return parents;
 }
 
+function flattenMenuItems(
+  items: MenuSelectItem[] | undefined,
+  groups: MenuSelectGroup[] | undefined,
+): MenuSelectItem[] {
+  return [
+    ...(items ?? []),
+    ...(groups ?? []).flatMap((group) => group.items),
+  ];
+}
+
 export function MenuSelect({
   label,
   items,
+  groups,
   onSelect,
   disabled = false,
   ariaLabel,
@@ -86,12 +124,13 @@ export function MenuSelect({
   className = "",
 }: MenuSelectProps) {
   const listboxId = useId();
+  const mobileSheet = useMobileSheetLayout();
   const [open, setOpen] = useState(false);
   const [minWidthPx, setMinWidthPx] = useState<number | undefined>(undefined);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
-  const itemsKey = items.map((item) => item.label).join("\0");
+  const allItems = useMemo(() => flattenMenuItems(items, groups), [items, groups]);
   const [menuStyle, setMenuStyle] = useState<{
     top: number | "auto";
     bottom: number | "auto";
@@ -111,16 +150,17 @@ export function MenuSelect({
     if (!measure) return;
 
     let contentWidth = 0;
-    for (const sample of [label, ...items.map((item) => item.label)]) {
+    for (const sample of [label, ...allItems.map((item) => item.label)]) {
       measure.textContent = sample;
       contentWidth = Math.max(contentWidth, measure.offsetWidth);
     }
 
     // px-3 padding + chevron + gap between label and icon.
     setMinWidthPx(Math.min(contentWidth + 48, TRIGGER_MAX_WIDTH_PX));
-  }, [label, itemsKey]);
+  }, [label, allItems]);
 
   const updatePosition = useCallback(() => {
+    if (mobileSheet) return;
     const trigger = triggerRef.current;
     if (!trigger) return;
 
@@ -148,7 +188,7 @@ export function MenuSelect({
       top: openUp ? "auto" : rect.bottom + MENU_GAP_PX,
       bottom: openUp ? window.innerHeight - rect.top + MENU_GAP_PX : "auto",
     });
-  }, []);
+  }, [mobileSheet]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -162,7 +202,7 @@ export function MenuSelect({
         : null;
     (selectedOption ?? menu?.querySelector<HTMLButtonElement>('[role="option"]'))?.focus();
     selectedOption?.scrollIntoView({ block: "nearest" });
-  }, [open, selectedValue, updatePosition]);
+  }, [open, selectedValue, updatePosition, mobileSheet]);
 
   useEffect(() => {
     if (!open) return;
@@ -218,7 +258,27 @@ export function MenuSelect({
         parent.removeEventListener("scroll", handleScroll);
       });
     };
-  }, [open, updatePosition]);
+  }, [open, updatePosition, mobileSheet]);
+
+  const renderOption = (item: MenuSelectItem) => (
+    <button
+      key={item.value}
+      type="button"
+      role="option"
+      onClick={() => {
+        onSelect(item.value);
+        setOpen(false);
+      }}
+      aria-selected={selectedValue === item.value}
+      className={[
+        "flex w-full min-w-0 items-center px-3 py-2 text-left text-sm transition-colors hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none",
+        selectedValue === item.value ? "bg-white/10 text-white" : "text-slate-200",
+      ].join(" ")}
+      title={item.label}
+    >
+      <span className="min-w-0 truncate">{item.label}</span>
+    </button>
+  );
 
   const triggerClassName = [
     "flex w-full items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/18 px-3 py-1.5 text-left text-sm text-white transition-colors",
@@ -259,41 +319,53 @@ export function MenuSelect({
 
       {open &&
         createPortal(
-          <div
-            ref={menuRef}
-            id={listboxId}
-            role="listbox"
-            aria-label={ariaLabel ?? label}
-            className="fixed z-[120] flex flex-col overflow-x-hidden overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar"
-            onWheel={(event) => event.stopPropagation()}
-            style={{
-              top: menuStyle.top,
-              bottom: menuStyle.bottom,
-              left: menuStyle.left,
-              width: menuStyle.width,
-              maxHeight: menuStyle.maxHeight,
-            }}
-          >
-            {items.map((item) => (
+          <>
+            {mobileSheet && (
               <button
-                key={item.value}
                 type="button"
-                role="option"
-                onClick={() => {
-                  onSelect(item.value);
-                  setOpen(false);
-                }}
-                aria-selected={selectedValue === item.value}
-                className={[
-                  "flex w-full min-w-0 items-center px-3 py-2 text-left text-sm transition-colors hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none",
-                  selectedValue === item.value ? "bg-white/10 text-white" : "text-slate-200",
-                ].join(" ")}
-                title={item.label}
-              >
-                <span className="min-w-0 truncate">{item.label}</span>
-              </button>
-            ))}
-          </div>,
+                aria-label={ariaLabel ?? label}
+                className="fixed inset-0 z-[119] bg-black/60"
+                onClick={() => setOpen(false)}
+              />
+            )}
+            <div
+              ref={menuRef}
+              id={listboxId}
+              role="listbox"
+              aria-label={ariaLabel ?? label}
+              className={[
+                "fixed z-[120] flex flex-col overflow-x-hidden overflow-y-auto overscroll-contain border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar",
+                mobileSheet
+                  ? "inset-x-0 bottom-[calc(76px+env(safe-area-inset-bottom))] max-h-[min(70dvh,calc(100dvh-76px-env(safe-area-inset-bottom)-1rem))] rounded-t-2xl rounded-b-none border-b-0"
+                  : "rounded-xl",
+              ].join(" ")}
+              onWheel={(event) => event.stopPropagation()}
+              style={
+                mobileSheet
+                  ? undefined
+                  : {
+                      top: menuStyle.top,
+                      bottom: menuStyle.bottom,
+                      left: menuStyle.left,
+                      width: menuStyle.width,
+                      maxHeight: menuStyle.maxHeight,
+                    }
+              }
+            >
+              {items?.map((item) => renderOption(item))}
+              {groups?.map((group) => (
+                <div key={group.label}>
+                  <div
+                    role="presentation"
+                    className="px-3 py-1.5 text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-slate-500"
+                  >
+                    {group.label}
+                  </div>
+                  {group.items.map((item) => renderOption(item))}
+                </div>
+              ))}
+            </div>
+          </>,
           document.body,
         )}
     </div>

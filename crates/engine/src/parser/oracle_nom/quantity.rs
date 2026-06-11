@@ -347,6 +347,25 @@ fn attach_controller_to_quantity_filter(filter: &mut TargetFilter, controller: C
     }
 }
 
+fn attach_property_to_quantity_filter(filter: &mut TargetFilter, property: FilterProp) {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. })
+            if !properties
+                .iter()
+                .any(|existing| property.same_kind(existing)) =>
+        {
+            properties.push(property);
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for filter in filters {
+                attach_property_to_quantity_filter(filter, property.clone());
+            }
+        }
+        TargetFilter::Not { filter } => attach_property_to_quantity_filter(filter, property),
+        _ => {}
+    }
+}
+
 fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
@@ -365,8 +384,35 @@ fn parse_quantity_controller_suffix(input: &str) -> OracleResult<'_, ControllerR
             ControllerRef::SourceChosenPlayer,
             tag(" the chosen player controls"),
         ),
+        // CR 109.4: "your opponents control" — aggregate across each opponent's
+        // permanents (Angry Mob, Chameleon Spirit, Entropic Specter class).
+        value(ControllerRef::Opponent, tag(" your opponents control")),
     ))
     .parse(input)
+}
+
+fn parse_pre_controller_chosen_filter_suffix(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        // CR 105.4: "of the chosen color" filters by the source's chosen color.
+        value(FilterProp::IsChosenColor, tag(" of the chosen color")),
+        value(FilterProp::IsChosenColor, tag(" of that color")),
+    ))
+    .parse(input)
+}
+
+/// CR 121.1 + CR 604.3: "cards you've drawn this turn" after "the number of".
+/// Reuses the runtime `CardsDrawnThisTurn` quantity ref already wired for
+/// condition checks (Duelist of the Mind CDA).
+fn parse_number_of_cards_drawn_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, player) = alt((
+        value(PlayerScope::Controller, tag("cards you've drawn this turn")),
+        value(
+            PlayerScope::Controller,
+            tag("cards you have drawn this turn"),
+        ),
+    ))
+    .parse(input)?;
+    Ok((rest, QuantityRef::CardsDrawnThisTurn { player }))
 }
 
 /// Parse an optional ", rounded up/down" / ", round up/down" suffix.
@@ -676,6 +722,9 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // `parse_number_of_controlled_type`, whose " you control" suffix does
         // not match the battlefield-wide form.
         parse_number_of_type_on_battlefield_with_keyword,
+        // CR 121.1: "cards you've drawn this turn" — must precede generic
+        // controlled-type arms whose type words could overlap.
+        parse_number_of_cards_drawn_this_turn,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -875,7 +924,11 @@ fn parse_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
         )));
     }
 
+    let (rest, chosen_prop) = opt(parse_pre_controller_chosen_filter_suffix).parse(rest)?;
     let (rest, controller) = parse_quantity_controller_suffix(rest)?;
+    if let Some(prop) = chosen_prop {
+        attach_property_to_quantity_filter(&mut filter, prop);
+    }
     attach_controller_to_quantity_filter(&mut filter, controller);
     Ok((rest, QuantityRef::ObjectCount { filter }))
 }
@@ -3064,6 +3117,79 @@ mod tests {
                 }
                 other => panic!("{text:?}: expected ObjectCount, got {other:?}"),
             }
+        }
+    }
+
+    /// CR 604.3 + CR 109.4: opponent-controlled and chosen-player CDA counts.
+    #[test]
+    fn parse_number_of_controlled_type_opponent_and_chosen_player_cda() {
+        let (rest, q) = parse_quantity_ref("the number of Swamps your opponents control").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                assert!(tf
+                    .type_filters
+                    .contains(&TypeFilter::Subtype("Swamp".into())));
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+
+        let (rest, q) =
+            parse_quantity_ref("the number of tapped lands the chosen player controls").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::SourceChosenPlayer));
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf.properties.contains(&FilterProp::Tapped));
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// CR 121.1 + CR 604.3: cards drawn this turn as a CDA quantity (Duelist of the Mind).
+    #[test]
+    fn parse_number_of_cards_drawn_this_turn_cda() {
+        for text in [
+            "the number of cards you've drawn this turn",
+            "the number of cards you have drawn this turn",
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "", "{text:?} should fully consume");
+            assert_eq!(
+                q,
+                QuantityRef::CardsDrawnThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                "{text:?}"
+            );
+        }
+    }
+
+    /// End-to-end: CDA static lines must lower once the quantity arms parse.
+    #[test]
+    fn parse_cda_static_lines_opponent_drawn_and_chosen_player() {
+        use crate::parser::oracle_static::parse_static_line;
+
+        for line in [
+            "~'s power is equal to the number of cards you've drawn this turn.",
+            "~'s power is equal to the number of tapped lands the chosen player controls.",
+            "~'s power and toughness are each equal to 2 plus the number of Swamps your opponents control.",
+        ] {
+            let def = parse_static_line(line).unwrap_or_else(|| panic!("{line:?} should parse"));
+            assert!(
+                def.characteristic_defining,
+                "{line:?} should be a CDA"
+            );
+            assert!(
+                !def.modifications.is_empty(),
+                "{line:?} should emit dynamic P/T mods"
+            );
         }
     }
 

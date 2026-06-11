@@ -104,9 +104,10 @@ mod support {
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
         try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
         try_split_and_cant_attack, try_split_and_cant_attack_or_block,
-        try_split_and_cant_be_attached, try_split_and_cant_be_blocked,
-        try_split_and_cant_be_sacrificed, try_split_and_cant_be_targeted, try_split_and_cant_block,
-        try_split_and_doesnt_untap, try_split_and_must_attack_block,
+        try_split_and_cant_attack_scoped, try_split_and_cant_be_attached,
+        try_split_and_cant_be_blocked, try_split_and_cant_be_sacrificed,
+        try_split_and_cant_be_targeted, try_split_and_cant_block, try_split_and_doesnt_untap,
+        try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{

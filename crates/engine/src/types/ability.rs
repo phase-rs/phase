@@ -3887,6 +3887,11 @@ pub enum PlayerFilter {
     OpponentLostLife,
     /// Each opponent who gained life this turn (life_gained_this_turn > 0).
     OpponentGainedLife,
+    /// CR 104.3 + CR 104.5: Each player who has lost the game (`is_eliminated`).
+    /// Quantity-only: players who lost have left the game, so this is not a live
+    /// effect recipient filter. Rampant Frogantua class: "+10/+10 for each
+    /// player who has lost the game".
+    HasLostTheGame,
     /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was dealt
     /// combat damage this turn, optionally restricted to damage from a source
     /// matching `source`. Resolved against `state.damage_dealt_this_turn`
@@ -5049,6 +5054,8 @@ pub const REMOVE_COUNTER_COST_ALL: u32 = u32::MAX - 1;
 /// Sentinel for "any number of" remove-counter costs. This still requires a
 /// count choice, but is distinct from literal `X` for parser/data clarity.
 pub const REMOVE_COUNTER_COST_ANY_NUMBER: u32 = u32::MAX - 2;
+/// Sentinel for literal `X` in exile costs that use the compact numeric count.
+pub const EXILE_COST_X: u32 = u32::MAX;
 
 pub fn is_x_remove_counter_cost_count(count: u32) -> bool {
     count == REMOVE_COUNTER_COST_X
@@ -10329,14 +10336,25 @@ pub enum CastingRestriction {
     RequiresCondition { condition: Option<ParsedCondition> },
 }
 
-/// CR 601.2f: Self-referential cost reduction on an activated ability.
-/// "This ability costs {N} less to activate for each [condition]"
+/// CR 602.2b + CR 601.2f: Self-referential cost reduction on an activated ability.
+/// "This ability costs {N} less to activate for each [condition]" (scaling), or
+/// "This ability costs {N} less to activate if [condition]" (conditional flat:
+/// `count = Fixed(1)` gated by `condition`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostReduction {
     /// Generic mana reduced per counted object (the {N} value).
     pub amount_per: u32,
     /// How many objects to count (e.g., legendary creatures you control).
+    /// For the conditional flat form this is `Fixed(1)`.
     pub count: QuantityExpr,
+    /// CR 602.2b + CR 601.2f: Optional gate for the conditional flat form — the reduction
+    /// applies only when this condition holds at cost-determination time
+    /// (Razorlash Transmogrant, Esquire of the King, …). `None` = unconditional
+    /// (the "for each" scaling form and all pre-existing reductions). Evaluated
+    /// at runtime via the shared `restrictions::evaluate_condition`, the same
+    /// path `ActivationRestriction::RequiresCondition` uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<ParsedCondition>,
 }
 
 /// CR 601.2c + CR 603.3d + CR 608.2d: Whether object/player choices for an

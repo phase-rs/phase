@@ -4763,15 +4763,7 @@ pub(super) fn apply_where_x_effect_expression(
             if let Some(times) = scale {
                 *times = apply_where_x_quantity_expression(times.clone(), where_x_expression);
             }
-            match cost {
-                AbilityCost::PayLife { amount }
-                | AbilityCost::PaySpeed { amount }
-                | AbilityCost::PayEnergy { amount }
-                | AbilityCost::ManaDynamic { quantity: amount } => {
-                    *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
-                }
-                _ => {}
-            }
+            apply_where_x_to_ability_cost(cost, where_x_expression);
         }
         Effect::GenericEffect {
             static_abilities, ..
@@ -4783,6 +4775,75 @@ pub(super) fn apply_where_x_effect_expression(
             }
         }
         _ => {}
+    }
+}
+
+/// CR 107.3i + CR 118.1: Propagate a "where X is <expression>" binding into the
+/// `QuantityExpr` amounts of a resolution-time `AbilityCost`. Exhaustive over
+/// `AbilityCost` (no wildcard) so a future variant carrying an X-amount — e.g. a
+/// `Composite { …PayLife(X)… }` producer — forces a deliberate decision here
+/// instead of silently skipping the rewrite. Recurses into the compositional
+/// (`Composite`/`OneOf`), wrapping (`PerCounter`), and effect-nesting
+/// (`EffectCost`) variants. The no-X variants
+/// are enumerated as explicit no-ops: their amounts are either fixed integers
+/// (`Loyalty`, `Mill`, `Blight`, counts on Sacrifice/Exile/TapCreatures/…) or a
+/// static `ManaCost`/object filter that the where-X mana-value clause does not
+/// bind (X-in-mana-cost is concretized at announcement, not by this rewrite).
+fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Option<&str>) {
+    match cost {
+        AbilityCost::PayLife { amount }
+        | AbilityCost::PaySpeed { amount }
+        | AbilityCost::PayEnergy { amount }
+        | AbilityCost::ManaDynamic { quantity: amount } => {
+            *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+        }
+        // CR 701.9: "discard X cards, where X is …" — the discard count is a
+        // `QuantityExpr` and must track the same where-X binding.
+        AbilityCost::Discard { count, .. } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
+        }
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            for sub in costs.iter_mut() {
+                apply_where_x_to_ability_cost(sub, where_x_expression);
+            }
+        }
+        AbilityCost::PerCounter { base, .. } => {
+            apply_where_x_to_ability_cost(base, where_x_expression);
+        }
+        // CR 107.3i + CR 118.1: An effect performed as a cost nests an `Effect`
+        // (e.g. `PutCounter { count: QuantityExpr }`), whose own quantity can
+        // carry the surrounding where-X binding. Recurse through the shared
+        // `apply_where_x_effect_expression` rewriter so a "where X is …" clause
+        // flows into the nested effect's count exactly as it does for the
+        // sub-ability's effects — never re-implement the per-effect quantity walk.
+        AbilityCost::EffectCost { effect } => {
+            apply_where_x_effect_expression(effect, where_x_expression);
+        }
+        // No X-bearing `QuantityExpr` amount to bind: fixed integer counts
+        // (`Loyalty`, `Mill`, `Blight`, counts on Sacrifice/Exile/…) or a static
+        // `ManaCost`/object filter that this where-X mana-value clause does not
+        // bind (X-in-mana-cost is concretized at announcement, not by this
+        // rewrite).
+        AbilityCost::Mana { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Unimplemented { .. } => {}
     }
 }
 
@@ -5057,7 +5118,36 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     // Count: digits, English word, or article ("a"/"an").
     let (rest, count) = nom_primitives::parse_number.parse(input)?;
     let (rest, _) = tag(" ").parse(rest)?;
-
+    // "N fewer [type] counter(s)" — counter-relative-to-LKI pattern (Nine-Lives Familiar class).
+    // CR 603.7c + CR 107.1b: The delayed trigger reads the source's pre-death counter count
+    // via LKI and subtracts N, clamped to zero.
+    if let Ok((fewer_rest, _)) = tag::<_, _, OracleError<'_>>("fewer ").parse(rest) {
+        let (fewer_rest, type_token) = take_until(" counter").parse(fewer_rest)?;
+        let counter_type = crate::types::counter::parse_counter_type(type_token);
+        let (fewer_rest, _) = tag(" counter").parse(fewer_rest)?;
+        let (fewer_rest, _) =
+            nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")).parse(fewer_rest)?;
+        let (fewer_rest, _) =
+            nom::combinator::opt(tag::<_, _, OracleError<'_>>(" on it")).parse(fewer_rest)?;
+        return Ok((
+            fewer_rest,
+            (
+                counter_type.clone(),
+                QuantityExpr::ClampMin {
+                    inner: Box::new(QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(counter_type),
+                            },
+                        }),
+                        offset: -(count as i32),
+                    }),
+                    minimum: 0,
+                },
+            ),
+        ));
+    }
     // Optional "additional " — a synonym in this grammatical position.
     let (rest, _) =
         nom::combinator::opt(tag::<_, _, OracleError<'_>>("additional ")).parse(rest)?;
@@ -5124,8 +5214,8 @@ mod tests {
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, PtValue, QuantityExpr,
-        QuantityRef, TargetFilter, TriggerDefinition,
+        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, ObjectScope, PtValue,
+        QuantityExpr, QuantityRef, TargetFilter, TriggerDefinition,
     };
     use crate::types::counter::CounterType;
     use crate::types::phase::Phase;
@@ -5373,11 +5463,56 @@ mod tests {
             assert!(
                 delayed_lose,
                 "expected a delayed LoseTheGame at the extra turn's end step in {text:?}, got {effects:?}"
-            );
+                        );
         }
     }
-}
 
+    /// Issue #528: Nine-Lives Familiar — "return it to the battlefield with one
+    /// fewer revival counter on it" must produce a ClampMin(Offset(CountersOn))
+    /// quantity, not a bogus counter type "fewer revival".
+    #[test]
+    fn return_to_battlefield_with_one_fewer_counter_produces_offset_quantity() {
+        let (target, dest, remainder) = strip_return_destination_ext_with_remainder(
+            "it to the battlefield with one fewer revival counter on it",
+        );
+        assert_eq!(target, "it");
+        let dest = dest.expect("expected a battlefield return destination");
+        assert_eq!(dest.zone, Zone::Battlefield);
+        assert_eq!(dest.enter_with_counters.len(), 1);
+        let (ct, qty) = &dest.enter_with_counters[0];
+        assert_eq!(*ct, CounterType::Generic("revival".to_string()));
+        // ClampMin { Offset { Ref { CountersOn { Source, revival } }, -1 }, 0 }
+        match qty {
+            QuantityExpr::ClampMin { inner, minimum } => {
+                assert_eq!(*minimum, 0);
+                match inner.as_ref() {
+                    QuantityExpr::Offset { inner, offset } => {
+                        assert_eq!(*offset, -1);
+                        match inner.as_ref() {
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::CountersOn {
+                                        scope,
+                                        counter_type,
+                                    },
+                            } => {
+                                assert_eq!(*scope, ObjectScope::Source);
+                                assert_eq!(
+                                    *counter_type,
+                                    Some(CounterType::Generic("revival".to_string()))
+                                );
+                            }
+                            other => panic!("expected CountersOn ref, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Offset, got {other:?}"),
+                }
+            }
+            other => panic!("expected ClampMin, got {other:?}"),
+        }
+        assert_eq!(remainder, "");
+    }
+}
 #[cfg(test)]
 mod where_x_tests {
     use super::parse_where_x_quantity_expression;

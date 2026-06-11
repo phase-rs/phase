@@ -830,6 +830,84 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
     Some(defs)
 }
 
+/// CR 508.1b + CR 508.1c: Decompose `"<grant or restriction>[,] and can't
+/// attack you [or planeswalkers you control]"` (the Vow cycle — Vow of
+/// Lightning, Duty, Flight, Torment, Wildness) into the first conjunct's
+/// static(s) plus a companion `CantAttack` static scoped to the Aura
+/// controller's side of the board, sharing the same `affected` set.
+///
+/// Without this split the trailing attack restriction was silently dropped:
+/// Vow of Lightning ("Enchanted creature gets +2/+2, has first strike, and
+/// can't attack you or planeswalkers you control.") parsed to only the +2/+2
+/// grant and first-strike keyword — the lockout that defines the Vow cycle
+/// was completely inert and the enchanted creature could freely attack its
+/// Aura's controller.
+///
+/// Registered before `try_split_and_cant_attack` so the more specific scoped
+/// phrase is consumed first; the bare-attack splitter's terminal guard would
+/// decline the " you …" tail anyway, but ordering is belt-and-suspenders.
+///
+/// Handles two scoped forms:
+/// - `"and can't attack you"` → `CantAttack` with `defended = Player`
+/// - `"and can't attack you or planeswalkers you control"` → `CantAttack`
+///   with `defended = PlayerOrPlaneswalker`
+pub(crate) fn try_split_and_cant_attack_scoped(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_ascii_lowercase();
+
+    let (before, defended, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        let (i, _) = alt((
+            tag::<_, _, VE>("and can't attack"),
+            tag::<_, _, VE>("and can\u{2019}t attack"),
+        ))
+        .parse(i)?;
+        let (i, defended) = parse_cant_attack_defended_scope_nom(i)?;
+        let Some(defended) = defended else {
+            return Err(nom::Err::Error(OracleError::new(
+                i,
+                nom::error::ErrorKind::Tag,
+            )));
+        };
+        // Optional trailing duration phrase.
+        let (i, _) = opt(alt((
+            tag::<_, _, VE>(" each combat"),
+            tag::<_, _, VE>(" this combat"),
+            tag::<_, _, VE>(" this turn"),
+        )))
+        .parse(i)?;
+        Ok((i, defended))
+    })?;
+
+    // Terminal guard: decline unless the tail is empty (punctuation only).
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let condition = defs[0].condition.clone();
+    let mut companion = StaticDefinition::new(StaticMode::CantAttack)
+        .affected(affected)
+        .attack_defended(Some(defended))
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        companion = companion.condition(condition);
+    }
+    defs.push(companion);
+    Some(defs)
+}
+
 /// CR 702.5 / CR 702.6: Decompose `"<grant or restriction> and can't be
 /// enchanted [or equipped] [by other Auras]"` (and the "equipped" lead-in) into
 /// the first conjunct's static(s) plus the matching attach-prohibition

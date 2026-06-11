@@ -29,6 +29,7 @@ use crate::types::ability::{
     PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode, StaticDefinition,
     TargetFilter, TriggerDefinition,
 };
+use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
@@ -504,6 +505,37 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             statics.iter().any(static_definition_has_optional)
                 || triggers.iter().any(trigger_tree_has_optional)
         }
+        // CR 705: Flip-coin branches carry win/lose payloads as nested defs;
+        // "you may choose new targets for the copy" on the win branch (Krark)
+        // lives in `win_effect`, not at `def.optional`.
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+            ..
+        } => win_effect
+            .as_ref()
+            .is_some_and(|def| def_tree_has_optional(def))
+            || lose_effect
+                .as_ref()
+                .is_some_and(|def| def_tree_has_optional(def)),
+        Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => win_effect
+            .as_ref()
+            .is_some_and(|def| def_tree_has_optional(def))
+            || lose_effect
+                .as_ref()
+                .is_some_and(|def| def_tree_has_optional(def)),
+        Effect::FlipCoinUntilLose { win_effect, .. } => def_tree_has_optional(win_effect),
+        // CR 115.7d: "you may choose new targets for [spell]" lowers to
+        // `ChangeTargets { scope: All }` — the opt-in is at resolution time,
+        // not `def.optional`.
+        Effect::ChangeTargets {
+            scope: RetargetScope::All,
+            ..
+        } => true,
         _ => false,
     }
 }
@@ -3434,6 +3466,38 @@ mod tests {
              You may choose new targets for the copies.",
             "Thousand-Year Storm",
             &["Enchantment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
+    /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
+    /// into `FlipCoin.win_effect`.
+    #[test]
+    fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
+        let parsed = parse_named(
+            "Whenever you cast an instant or sorcery spell, flip a coin. \
+             If you lose the flip, return that spell to its owner's hand. \
+             If you win the flip, copy that spell, and you may choose new targets for the copy.",
+            "Krark, the Thumbless",
+            &["Legendary", "Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 603.2b + CR 611.2 + CR 609.4b: Xanathar's upkeep trigger bundles
+    /// look/play/spend-as-any-color permissions inside the execute tree.
+    #[test]
+    fn optional_you_may_accepts_xanathar_upkeep_permissions() {
+        let parsed = parse_named(
+            "At the beginning of your upkeep, choose target opponent. Until end of turn, \
+             that player can't cast spells, you may look at the top card of their library \
+             any time, you may play the top card of their library, and you may spend mana \
+             as though it were mana of any color to cast spells this way.",
+            "Xanathar, Guild Kingpin",
+            &["Legendary", "Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));

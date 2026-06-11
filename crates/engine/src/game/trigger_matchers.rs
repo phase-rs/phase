@@ -649,6 +649,18 @@ fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
     }
 }
 
+fn is_player_scope_attack_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Player | TargetFilter::Controller | TargetFilter::AllPlayers => true,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: Some(_),
+            properties,
+        }) => type_filters.is_empty() && properties.is_empty(),
+        _ => false,
+    }
+}
+
 /// Basic runtime matching of a TargetFilter against a game object.
 /// Handles the common filter patterns used in triggers.
 pub(super) fn target_filter_matches_object(
@@ -1329,10 +1341,56 @@ pub(super) fn matching_attack_events(
         ..
     } = event
     {
-        // Find which attacker(s) satisfy the creature filter
+        if let Some(filter) = trigger
+            .valid_source
+            .as_ref()
+            .filter(|filter| is_player_scope_attack_filter(filter))
+        {
+            // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
+            // once per attacked defending player, not once per attacking
+            // creature, while still carrying a single defending-player context.
+            let Some(attacking_player) = attacker_ids
+                .iter()
+                .find_map(|id| state.objects.get(id).map(|o| o.controller))
+            else {
+                return Vec::new();
+            };
+            if !player_matches_filter(filter, state, attacking_player, source_id) {
+                return Vec::new();
+            }
+            let mut seen_defending_players = Vec::new();
+            return attacker_ids
+                .iter()
+                .filter_map(|id| {
+                    let target = attacks
+                        .iter()
+                        .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
+                        .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+                    if !attack_target_matches(trigger, state, target, *defending_player, source_id)
+                    {
+                        return None;
+                    }
+                    let event_defending_player =
+                        attack_target_defending_player(state, target, *defending_player);
+                    if seen_defending_players.contains(&event_defending_player) {
+                        return None;
+                    }
+                    seen_defending_players.push(event_defending_player);
+                    Some(GameEvent::AttackersDeclared {
+                        attacker_ids: vec![*id],
+                        defending_player: event_defending_player,
+                        attacks: vec![(*id, target)],
+                    })
+                })
+                .collect();
+        }
+
+        // Find which attacker(s) satisfy the creature / attacking-player filter.
         let attacker_matches = |id: &ObjectId| -> bool {
             if trigger.valid_card.is_some() {
                 valid_card_matches(trigger, state, *id, source_id)
+            } else if trigger.valid_source.is_some() {
+                valid_source_matches(trigger, state, *id, source_id)
             } else {
                 *id == source_id
             }
