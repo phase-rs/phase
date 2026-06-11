@@ -304,10 +304,24 @@ fn pay_ability_cost_inner(
         },
         AbilityCost::Composite { costs } => {
             for (index, sub_cost) in costs.iter().enumerate() {
+                let prior_waiting_for = state.waiting_for.clone();
                 let outcome =
                     pay_ability_cost_inner(state, player, source_id, sub_cost, events, scope)?;
                 match outcome {
-                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Paid => {
+                        // CR 118.12: Some resolution-time sub-costs acquire a
+                        // player choice by setting `waiting_for` (currently
+                        // `DiscardChoice`). Stop here and preserve later
+                        // sub-costs as the continuation so they are paid only
+                        // after the choice is committed.
+                        if matches!(scope, PaymentScope::Resolution { .. })
+                            && state.waiting_for != prior_waiting_for
+                        {
+                            return Ok(PaymentOutcome::Paused {
+                                remaining_cost: combine_remaining_costs(None, &costs[index + 1..]),
+                            });
+                        }
+                    }
                     PaymentOutcome::Paused { remaining_cost } => {
                         return Ok(PaymentOutcome::Paused {
                             remaining_cost: combine_remaining_costs(

@@ -15,7 +15,6 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
-use super::casting;
 use super::costs::{self, PaymentOutcome};
 use super::effects;
 use super::engine::{
@@ -766,8 +765,9 @@ pub(super) fn handle_unless_payment(
             // cumulative-upkeep expansion (e.g., Jötun Owl Keeper at N age
             // counters chooses `{W}` or `{U}` for each, yielding `Composite[
             // Mana{...}, Mana{...}, ...]`). Sum the inner mana costs via
-            // `ManaCost::plus` and pay as a single combined mana cost — the
-            // same aggregation used by combat-tax `scaled()` payment.
+            // `ManaCost::plus` and pay as a single combined mana cost through
+            // the same authority/failure mapping as the single-Mana unless
+            // arm above.
             // "Then either the entire set of costs is paid, or none of them
             // is paid. Partial payments aren't allowed."
             //
@@ -782,7 +782,22 @@ pub(super) fn handle_unless_payment(
                     AbilityCost::Mana { cost } => acc.plus(cost),
                     _ => unreachable!("guard ensures all Mana"),
                 });
-                casting::pay_unless_cost(state, player, &combined, events)?;
+                let combined_cost = AbilityCost::Mana { cost: combined };
+                // CR 118.12: Pay the accumulated unless cost as a single
+                // combined mana cost, with unaffordable payment mapped to
+                // declining the unless payment.
+                match super::costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &combined_cost,
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
+                        payment_failed = true;
+                    }
+                }
             }
             AbilityCost::Composite { .. } => {
                 // CR 702.24a + CR 118.12: A non-all-Mana `Composite`
@@ -2085,6 +2100,70 @@ mod tests {
         assert_eq!(
             p0.life, 20,
             "GainLife(7) suppressed because the combined unless-cost was paid"
+        );
+    }
+
+    /// CR 118.12 + CR 702.24a: if the accumulated all-mana composite unless
+    /// cost is unpayable, the pay attempt is accepted as "can't pay" and the
+    /// unpaid effect happens. This mirrors the single-Mana unless arm's
+    /// authority-backed failure mapping.
+    #[test]
+    fn unless_payment_composite_of_one_ofs_unpayable_runs_effect() {
+        let oneof_wu = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::White],
+                    generic: 0,
+                },
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+        ];
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            player: PlayerId(0),
+            costs: oneof_wu.clone(),
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining_choices: vec![oneof_wu],
+            chosen: vec![],
+        };
+
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            wf,
+            crate::types::actions::UnlessCostBranch::Pay { index: 0 },
+            &mut events,
+        )
+        .expect("first choose-cost prompt should accumulate, not pay");
+
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            wf,
+            crate::types::actions::UnlessCostBranch::Pay { index: 0 },
+            &mut events,
+        )
+        .expect("unpayable combined mana cost should resolve as not paid");
+
+        assert_eq!(
+            state.players[0].life, 27,
+            "unpayable combined unless-cost must run the pending effect"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }),
+            "unpayable combined cost must not leave the unless prompt stuck"
         );
     }
 

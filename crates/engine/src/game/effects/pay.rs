@@ -200,7 +200,17 @@ fn resolve_ability_cost_payment(
         // CR 616.1: a replacement-effect choice — or an interactive
         // `DiscardChoice` — interrupted payment. `state.waiting_for` is already
         // set by the authority; the resolution chain resumes from there.
-        Ok(outcome @ PaymentOutcome::Paused { .. }) => Ok(outcome),
+        Ok(PaymentOutcome::Paused { remaining_cost }) => {
+            if let Some(remaining_cost) = remaining_cost.clone() {
+                super::prepend_remaining_pay_cost_continuation(
+                    state,
+                    ability,
+                    payer,
+                    remaining_cost,
+                );
+            }
+            Ok(PaymentOutcome::Paused { remaining_cost })
+        }
         Ok(outcome @ PaymentOutcome::Failed { .. }) => {
             state.cost_payment_failed_flag = true;
             Ok(outcome)
@@ -986,6 +996,87 @@ mod tests {
             }
             other => panic!("expected DiscardChoice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn composite_discard_choice_does_not_pay_following_cost_before_choice() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let first = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(10),
+            PlayerId(0),
+            "A".into(),
+            crate::types::zones::Zone::Hand,
+        );
+        let second = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(11),
+            PlayerId(0),
+            "B".into(),
+            crate::types::zones::Zone::Hand,
+        );
+        let gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ],
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(gain_life));
+        let mut events = Vec::new();
+
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DiscardChoice { cards, .. } => {
+                assert!(cards.contains(&first));
+                assert!(cards.contains(&second));
+            }
+            other => panic!("expected DiscardChoice, got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, 20,
+            "following PayLife component must not be paid before discard choice"
+        );
+
+        let waiting_for = state.waiting_for.clone();
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            crate::types::actions::GameAction::SelectCards { cards: vec![first] },
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.players[0].life, 22,
+            "after the discard choice, the remaining PayLife cost must run before the rider"
+        );
     }
 
     /// CR 118.3 + CR 601.2h: a resolution-time cost shape the authority cannot
