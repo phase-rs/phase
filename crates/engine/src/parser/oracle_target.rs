@@ -2642,7 +2642,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // Token qualifier ("creature tokens").
             | FilterProp::Token
             | FilterProp::NonToken
-            // CR 702.9: "<type> with [keyword]" suffixes bind to the type
+            // CR 702: "<type> with [keyword]" suffixes bind to the type
             // phrase that parsed them — never retroactively onto earlier Or
             // disjuncts ("artifact, enchantment, or creature with flying").
             | FilterProp::WithKeyword { .. }
