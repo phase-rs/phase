@@ -121,6 +121,16 @@ pub(crate) fn apply_zone_exit_cleanup(
     }
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
+        // CR 400.7 + CR 730.3c: a component split out of a merged permanent is a
+        // new object on every zone change, so its survivor back-link is
+        // meaningful only while it stays in the zone it split into. Clear it on
+        // ANY exit (it is re-set by `merge::split_merged_permanent_on_leave` if it
+        // re-leaves a merged permanent) so it cannot wrongly re-collect on a later
+        // continuity return after moving between non-battlefield zones (e.g.
+        // exile → graveyard). The split sets the link AFTER this cleanup runs, so
+        // this never clobbers the initial set.
+        obj_mut.split_from_merge_survivor = None;
+
         // CR 712.8a + CR 400.7: Transformed permanents revert to front face on any
         // zone exit (transform DFCs are only valid in transformed state on the battlefield).
         if obj_mut.transformed {

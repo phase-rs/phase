@@ -6540,10 +6540,24 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         else {
             continue;
         };
-        match groups.iter_mut().find(|(zone, _)| *zone == *return_zone) {
-            Some((_, ids)) => ids.push(link.exiled_id),
-            None => groups.push((*return_zone, vec![link.exiled_id])),
+        let return_zone = *return_zone;
+        let gi = match groups.iter().position(|(zone, _)| *zone == return_zone) {
+            Some(i) => i,
+            None => {
+                groups.push((return_zone, Vec::new()));
+                groups.len() - 1
+            }
+        };
+        if !groups[gi].1.contains(&link.exiled_id) {
+            groups[gi].1.push(link.exiled_id);
         }
+        // CR 730.3c: if the source exiled a MERGED permanent, it split into
+        // multiple objects (CR 730.3). The implicit "return when the source
+        // leaves" must bring back ALL of them, not just the tracked survivor —
+        // the components are co-located in exile with the survivor and return to
+        // the same zone. (A no-op when the exiled card was not a merged permanent.)
+        let components = super::merge::co_split_components(state, link.exiled_id, &groups[gi].1);
+        groups[gi].1.extend(components);
     }
 
     // Links for cards that already left exile (not returned by us) are still spent
@@ -14613,6 +14627,103 @@ mod exile_return_tests {
             state.exile_links.is_empty(),
             "ExileLink should be consumed after return"
         );
+    }
+
+    /// CR 730.3c: An "exile until this leaves" effect (Banisher Priest, Banishing
+    /// Light, Oblivion Ring) that exiles a MERGED Mutate permanent must, when it
+    /// leaves and its `UntilSourceLeaves` return fires, bring back ALL of the
+    /// component cards the merged permanent split into — not just the tracked
+    /// survivor. Regression test for the implicit-return path (companion to the
+    /// flicker/`ChangeZone` path covered in `merge_tests`).
+    #[test]
+    fn until_source_leaves_return_brings_back_all_merge_components() {
+        use crate::game::merge::{merge_object_onto, MergeSide};
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // The "O-Ring" source on P0's battlefield.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        // A merged Mutate permanent: host (survivor) + rider (absorbed component).
+        let host = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        let rider = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Rider".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events: Vec<GameEvent> = Vec::new();
+        merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+        // Runtime invariant: the mutating spell resolved off the stack, so the
+        // absorbed component is not an independent member of the battlefield list.
+        state.battlefield.retain(|&id| id != rider);
+
+        // The source exiles the merged permanent; the survivor is the tracked,
+        // exile-linked object (the component is split out alongside it).
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+        assert_eq!(state.objects.get(&host).unwrap().zone, Zone::Exile);
+        assert_eq!(state.objects.get(&rider).unwrap().zone, Zone::Exile);
+        state.exile_links.push(ExileLink {
+            exiled_id: host,
+            source_id,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
+        });
+
+        // The source leaves the battlefield → the implicit return fires.
+        events.clear();
+        crate::game::zones::move_to_zone(&mut state, source_id, Zone::Graveyard, &mut events);
+        let default_wf = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        crate::game::engine_priority::run_post_action_pipeline(
+            &mut state,
+            &mut events,
+            &default_wf,
+            true,
+        )
+        .unwrap();
+
+        // CR 730.3c: BOTH the survivor and the component card return — as separate,
+        // non-merged objects — not just the survivor.
+        for id in [host, rider] {
+            assert!(
+                state.battlefield.contains(&id),
+                "component {id:?} must return to the battlefield (CR 730.3c); battlefield={:?}, exile={:?}",
+                state.battlefield,
+                state.exile,
+            );
+            let o = state.objects.get(&id).unwrap();
+            assert!(
+                o.merged_components.is_empty(),
+                "returns un-merged (CR 730.3)"
+            );
+            assert_eq!(
+                o.split_from_merge_survivor, None,
+                "the survivor back-link clears on battlefield entry"
+            );
+        }
+        assert!(!state.exile.contains(&host) && !state.exile.contains(&rider));
     }
 
     /// CR 400.7 + CR 610.3a: End-to-end through full apply path — cast a

@@ -242,6 +242,16 @@ pub fn resolve(
     let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
     let targeted_objects =
         crate::game::effects::effect_object_targets(target_filter, &effective_targets);
+    // CR 730.3c: when this effect references the object that just left the
+    // battlefield (a flicker/blink's "return it") and that object was a merged
+    // permanent's survivor, act on the component cards it split into as well, so
+    // the whole pile is moved — not just the survivor. A no-op for ordinary
+    // (freshly chosen) targets.
+    let targeted_objects = crate::game::merge::expand_returned_merge_components(
+        state,
+        targeted_objects,
+        target_filter,
+    );
 
     if targeted_objects.is_empty() {
         // CR 115.6: "Up to one target" — if the player chose zero targets during

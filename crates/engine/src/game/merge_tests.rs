@@ -296,6 +296,136 @@ fn zone_change_origin(events: &[GameEvent], id: ObjectId) -> Option<Option<Zone>
     })
 }
 
+/// CR 730.3c: When a merged permanent is exiled, an effect that finds the object
+/// it became (a flicker/blink's "return it") must act on ALL component cards, not
+/// just the survivor. The absorbed component is recorded with a back-link to the
+/// survivor and is re-collected by `expand_returned_merge_components` — but ONLY
+/// for a continuity reference; a freshly chosen target (reanimation) must not
+/// over-return.
+#[test]
+fn exile_records_component_backlink_and_continuity_return_collects_all() {
+    use crate::types::ability::TargetFilter;
+    let (mut state, host, rider, _p0) = two_creatures();
+    // Runtime invariant: the mutating spell resolved off the stack, never listed.
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+
+    // Flicker step 1: exile the merged permanent. The survivor rides the normal
+    // move; the component is split into exile with a back-link to the survivor.
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+    assert_eq!(state.objects.get(&host).unwrap().zone, Zone::Exile);
+    assert_eq!(state.objects.get(&rider).unwrap().zone, Zone::Exile);
+    assert_eq!(
+        state.objects.get(&rider).unwrap().split_from_merge_survivor,
+        Some(host),
+        "absorbed component records the survivor it split from (CR 730.3c)"
+    );
+
+    // A continuity reference ("return it") resolving to the survivor expands to
+    // include the co-exiled component (CR 730.3c).
+    let expanded =
+        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    assert_eq!(
+        expanded,
+        vec![host, rider],
+        "a flicker returns the whole pile, not just the survivor"
+    );
+
+    // A freshly chosen target (e.g. reanimating one specific card) must NOT
+    // over-return — only continuity references expand.
+    let fresh = expand_returned_merge_components(&state, vec![host], &TargetFilter::Any);
+    assert_eq!(
+        fresh,
+        vec![host],
+        "a non-continuity target returns only the chosen object"
+    );
+}
+
+/// CR 730.3c + CR 730.3: the returned components come back as SEPARATE, non-merged
+/// objects, and the survivor back-link clears on battlefield entry.
+#[test]
+fn flicker_returns_components_unmerged_and_clears_backlink() {
+    use crate::types::ability::TargetFilter;
+    let (mut state, host, rider, _p0) = two_creatures();
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+
+    // Return the whole pile — what the `ChangeZone` return loop does for each
+    // expanded id (CR 730.3c).
+    let to_return =
+        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    for id in to_return {
+        crate::game::zones::move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+    }
+
+    for id in [host, rider] {
+        let o = state.objects.get(&id).unwrap();
+        assert_eq!(
+            o.zone,
+            Zone::Battlefield,
+            "component returned to the battlefield"
+        );
+        assert!(
+            o.merged_components.is_empty(),
+            "components return un-merged (CR 730.3)"
+        );
+        assert_eq!(
+            o.split_from_merge_survivor, None,
+            "the survivor back-link clears on battlefield entry"
+        );
+    }
+    assert!(
+        state.battlefield.contains(&host) && state.battlefield.contains(&rider),
+        "both cards are present on the battlefield as separate objects"
+    );
+}
+
+/// CR 400.7: a split-out component is a NEW object on every zone change, so its
+/// survivor back-link must clear when it moves between non-battlefield zones —
+/// not only on battlefield entry. Otherwise a component that moved on (e.g.
+/// exile → graveyard) keeps a stale link and could be wrongly re-collected by a
+/// later continuity return once it re-converges with the survivor.
+#[test]
+fn split_component_backlink_clears_on_non_battlefield_zone_move() {
+    use crate::types::ability::TargetFilter;
+    let (mut state, host, rider, _p0) = two_creatures();
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+
+    // Exile the pile: the component is split into exile with a back-link.
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+    assert_eq!(
+        state.objects.get(&rider).unwrap().split_from_merge_survivor,
+        Some(host),
+        "component records the survivor back-link when split into exile"
+    );
+
+    // The component moves exile → graveyard WITHOUT being returned (CR 400.7: a
+    // new object). The back-link must clear on this non-battlefield move.
+    crate::game::zones::move_to_zone(&mut state, rider, Zone::Graveyard, &mut events);
+    assert_eq!(
+        state.objects.get(&rider).unwrap().split_from_merge_survivor,
+        None,
+        "the survivor back-link clears on a non-battlefield zone move (CR 400.7)"
+    );
+
+    // Now move the survivor to the graveyard too, so it re-converges with the
+    // former component in one zone. A continuity reference to the survivor must
+    // NOT re-collect the moved-on component (the stale link is gone).
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+    let expanded =
+        expand_returned_merge_components(&state, vec![host], &TargetFilter::ParentTarget);
+    assert_eq!(
+        expanded,
+        vec![host],
+        "a component that already moved on is not re-collected by a later continuity return"
+    );
+}
+
 /// CR 730.2: the absorbed (non-surviving) component is part of ONE battlefield
 /// object — it must NOT be observable as an independent permanent. This pins the
 /// two confirmed `state.objects`-scan victims (`FilterProp::NameMatchesAnyPermanent`
