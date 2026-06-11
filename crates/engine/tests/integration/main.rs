@@ -134,6 +134,8 @@ mod issue_2431_ultima_tap_land_for_c;
 mod issue_2435_traumatic_critique;
 mod issue_2439_wayta_trigger_doubling;
 mod issue_2894_spymasters_vault_connive;
+mod issue_2908_weathered_wayfarer;
+mod issue_2929_arc_trail_any_other_target;
 mod issue_2938_deflecting_swat;
 mod issue_2940_krark_thumbless;
 mod issue_2941_vivien_reid;

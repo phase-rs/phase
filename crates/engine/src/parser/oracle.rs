@@ -9017,6 +9017,94 @@ mod tests {
     }
 
     #[test]
+    fn parses_activate_only_if_opponent_controls_more_lands_than_you() {
+        // Issue #859 / #2908: activation restriction lives in
+        // `activation_restrictions` as RequiresCondition — not `condition`.
+        use crate::types::ability::{
+            Comparator, ParsedCondition, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef,
+        };
+        let r = parse(
+            "{W}, {T}: Search your library for a land card, reveal it, put it into your hand, \
+             then shuffle. Activate only if an opponent controls more lands than you.",
+            "Weathered Wayfarer",
+            &[],
+            &["Creature"],
+            &["Human", "Nomad", "Cleric"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert!(
+            r.abilities[0].condition.is_none(),
+            "activation gate must not be stored on resolution `condition`"
+        );
+        let restrictions = &r.abilities[0].activation_restrictions;
+        assert!(restrictions.iter().any(|r| matches!(
+            r,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::PlayerCount {
+                            filter: PlayerFilter::ControlsCount {
+                                relation: PlayerRelation::Opponent,
+                                comparator: Comparator::GT,
+                                ..
+                            },
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                })
+            }
+        )));
+    }
+
+    #[test]
+    fn parses_activate_only_if_opponent_controls_at_least_n_more_lands_than_you() {
+        // Issue #2908: Isolated Watchtower — offset threshold variant.
+        use crate::types::ability::{
+            Comparator, ParsedCondition, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef,
+        };
+        let r = parse(
+            "{3}, {T}: Draw a card. Activate only if an opponent controls at least two more \
+             lands than you.",
+            "Isolated Watchtower",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let restrictions = &r.abilities[0].activation_restrictions;
+        let parsed_gate = restrictions.iter().find_map(|r| match r {
+            ActivationRestriction::RequiresCondition { condition } => condition.clone(),
+            _ => None,
+        });
+        match parsed_gate.as_ref() {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        comparator: Comparator::GE,
+                                        count,
+                                        ..
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => match count.as_ref() {
+                QuantityExpr::Offset { offset: 2, .. } => {}
+                other => panic!("expected Offset(+2) count threshold, got {other:?}"),
+            },
+            other => panic!(
+                "expected RequiresCondition with existential opponent GE (you+2), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn parses_activate_only_if_condition_and_only_once_each_turn() {
         // CR 602.5b: "Activate only if [condition] and only once each turn" must produce
         // both a RequiresCondition restriction (with the condition) and OnlyOnceEachTurn.
