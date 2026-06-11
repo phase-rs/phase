@@ -23,6 +23,8 @@
 //! Parameterizing on the counter type and its live count covers any spell mana
 //! value and any current/future card with this structure — not a single card.
 
+use engine::game::functioning_abilities::active_static_definitions;
+use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::types::ability::{
     AbilityDefinition, Comparator, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
     TargetFilter, TriggerDefinition,
@@ -31,6 +33,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 
 use super::context::PolicyContext;
@@ -58,6 +61,9 @@ impl ChaliceAvoidancePolicy {
         let Some(spell) = ctx.source_object() else {
             return 0.0;
         };
+        if !spell_can_be_countered(ctx.state, spell.id) {
+            return 0.0;
+        }
         let spell_mana_value = spell.mana_cost.mana_value();
 
         // Pick the worst applicable Chalice: an own Chalice that matches is the
@@ -111,6 +117,23 @@ impl TacticalPolicy for ChaliceAvoidancePolicy {
             reason: PolicyReason::new("chalice_self_counter"),
         }
     }
+}
+
+fn spell_can_be_countered(
+    state: &GameState,
+    spell_id: engine::types::identifiers::ObjectId,
+) -> bool {
+    let ctx = StaticCheckContext {
+        source_id: Some(spell_id),
+        target_id: Some(spell_id),
+        ..Default::default()
+    };
+    if check_static_ability(state, StaticMode::CantBeCountered, &ctx) {
+        return false;
+    }
+    state.objects.get(&spell_id).is_none_or(|obj| {
+        !active_static_definitions(state, obj).any(|sd| sd.mode == StaticMode::CantBeCountered)
+    })
 }
 
 /// Iterate every Chalice-class permanent on the battlefield, paired with the
@@ -205,11 +228,12 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
+    use engine::types::ability::{AbilityDefinition, AbilityKind, StaticDefinition, TypedFilter};
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
+    use engine::types::statics::StaticMode;
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
 
@@ -366,6 +390,27 @@ mod tests {
         add_chalice(&mut state, AI, 0);
         let (decision, candidate) = cast_candidate(&mut state, 0);
         assert!(score(&state, &decision, &candidate) < -5.0);
+    }
+
+    /// CR 101.2: A spell that can't be countered is not eaten by Chalice, so the
+    /// AI must not demote casting it solely because its mana value matches.
+    #[test]
+    fn uncounterable_spell_is_not_penalized() {
+        let mut state = GameState::new_two_player(0);
+        add_chalice(&mut state, AI, 2);
+        let (decision, candidate) = cast_candidate(&mut state, 2);
+        let spell_id = match &candidate.action {
+            GameAction::CastSpell { object_id, .. } => *object_id,
+            _ => unreachable!("test builds a cast candidate"),
+        };
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeCountered));
+
+        assert_eq!(score(&state, &decision, &candidate), 0.0);
     }
 
     /// Activation gates the policy off entirely when no Chalice is present and
