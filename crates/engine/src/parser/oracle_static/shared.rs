@@ -635,6 +635,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1d: "<grant or restriction> and can't attack you [or planeswalkers
+    // you control]" — the Vow cycle (Vow of Lightning / Duty / Flight / Torment
+    // / Wildness). Registered before the bare-attack splitter so the more
+    // specific scoped phrase is consumed first.
+    if let Some(defs) = try_split_and_cant_attack_scoped(&stripped) {
+        return defs;
+    }
+
     // CR 508.1c: "<grant> and can't attack" pairs a P/T (or keyword) grant with an
     // attacking restriction under one subject (Cagemail). Split so the CantAttack
     // clause is not dropped. The terminal-phrase guard keeps the scoped

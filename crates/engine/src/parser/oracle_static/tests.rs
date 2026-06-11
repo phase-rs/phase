@@ -377,6 +377,79 @@ fn cant_attack_or_block_split_does_not_suppress_siblings() {
     );
 }
 
+/// CR 508.1d: Vow of Lightning — "Enchanted creature gets +2/+2, has first
+/// strike, and can't attack you or planeswalkers you control." must produce the
+/// +2/+2 and first-strike grant AND a companion `CantAttack` scoped to
+/// `PlayerOrPlaneswalker`. Previously the attack restriction was silently
+/// dropped, so the enchanted creature could freely attack the Aura controller.
+#[test]
+fn cant_attack_scoped_splits_from_pt_and_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2, has first strike, and can't attack you or planeswalkers you control.",
+    );
+    let lockout = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected a CantAttack companion, got {:?}");
+    assert_eq!(
+        lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "companion must be scoped to PlayerOrPlaneswalker, got {:?}",
+        lockout.attack_defended
+    );
+    assert!(
+        lockout.affected.is_some(),
+        "CantAttack companion must carry an affected filter"
+    );
+    // The leading grant must also be preserved.
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::Continuous),
+        "leading +2/+2 and first-strike grant must be preserved"
+    );
+}
+
+/// CR 508.1d: "and can't attack you" (Player scope only, without planeswalkers)
+/// also splits into a `CantAttack` with `defended = Player`.
+#[test]
+fn cant_attack_scoped_player_only_variant() {
+    let defs = parse_static_line_multi("Enchanted creature gets +0/+3 and can't attack you.");
+    let lockout = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected a CantAttack companion for 'can't attack you'");
+    assert_eq!(
+        lockout.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::Player),
+        "companion must be scoped to Player, got {:?}",
+        lockout.attack_defended
+    );
+}
+
+/// CR 508.1d: The scoped-attack splitter must not suppress the existing
+/// bare-attack and cant-attack-or-block splitters.
+#[test]
+fn cant_attack_scoped_split_does_not_suppress_siblings() {
+    // Bare "can't attack" must still route to plain CantAttack with no defended scope.
+    let bare = parse_static_line_multi("Enchanted creature gets +2/+2 and can't attack.");
+    let bare_lockout = bare
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("bare cant-attack splitter must still produce CantAttack");
+    assert_eq!(
+        bare_lockout.attack_defended, None,
+        "bare CantAttack must have no defended scope"
+    );
+
+    // "can't attack or block" must still route to CantAttackOrBlock.
+    let aob = parse_static_line_multi(
+        "Enchanted creature loses all abilities and can't attack or block.",
+    );
+    assert!(
+        aob.iter().any(|d| d.mode == StaticMode::CantAttackOrBlock),
+        "cant-attack-or-block splitter must still produce CantAttackOrBlock"
+    );
+}
+
 /// CR 701.21: Assault Suit — "Equipped creature gets +2/+2, has haste, can't
 /// attack you or planeswalkers you control, and can't be sacrificed." must
 /// include an `Other("CantBeSacrificed")` static alongside the +2/+2 grant.
