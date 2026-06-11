@@ -2343,3 +2343,146 @@ pub(crate) fn try_parse_scoped_must_attack_block(
             .collect(),
     )
 }
+
+/// CR 611.3a + CR 613.1f: Detect and split
+/// `"PRIMARY and FOREIGN_SUBJECT have/has/gains/gain KEYWORD [as long as COND]"`
+/// (including the inverted form `"As long as COND, PRIMARY and FOREIGN_SUBJECT …"`).
+///
+/// A "foreign subject" is any noun phrase parseable by `parse_continuous_subject_filter`
+/// that does NOT resolve to `SelfRef`. Example: "creatures you control have vigilance"
+/// after "~ gets +2/+2 and" — Angelic Field Marshal's Lieutenant ability.
+///
+/// Returns two `StaticDefinition`s: one for the primary (existing `affected`) plus a
+/// companion `Continuous` def for the foreign-subject keyword grant. Both inherit the
+/// same `StaticCondition` when present so the gate applies to both effects.
+///
+/// CR 109.5 + CR 611.3a: the condition binds each effect independently (CR 611.3a),
+/// but MTG print convention always states one condition for the whole clause, so both
+/// defs receive the same condition object.
+pub(crate) fn try_split_and_foreign_keyword_grant(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    // Normalize the inverted "As long as COND, EFFECT" orientation so the rest
+    // of the logic always operates on EFFECT with an optional separate COND.
+    let (effect_original, condition_text): (String, Option<String>) =
+        if let Some(split) = try_split_inverted_as_long_as(&tp) {
+            (
+                split.effect_text.clone(),
+                Some(split.condition_text.clone()),
+            )
+        } else if let Some((before, after)) = text.split_once(" as long as ") {
+            (
+                before.trim().to_string(),
+                Some(after.trim().trim_end_matches('.').to_string()),
+            )
+        } else {
+            (text.to_string(), None)
+        };
+
+    let effect_lower = effect_original.to_lowercase();
+
+    // Scan for "and FOREIGN_SUBJECT verb KEYWORD" in the effect text.
+    // We try each grant verb and check every " and " position.
+    for verb in [" have ", " has ", " gains ", " gain "] {
+        let mut search_pos = 0;
+        while search_pos < effect_lower.len() {
+            let and_pos = match effect_lower[search_pos..].find(" and ") {
+                Some(offset) => search_pos + offset,
+                None => break,
+            };
+            let after_and = &effect_lower[and_pos + 5..];
+
+            let verb_offset = match after_and.find(verb) {
+                Some(o) => o,
+                None => {
+                    search_pos = and_pos + 5;
+                    continue;
+                }
+            };
+
+            let subject_lower = after_and[..verb_offset].trim();
+            if subject_lower.is_empty() {
+                search_pos = and_pos + 5;
+                continue;
+            }
+
+            // Subject must resolve to a recognised non-SelfRef filter.
+            let companion_filter = match parse_continuous_subject_filter(subject_lower) {
+                Some(f) if !matches!(f, TargetFilter::SelfRef) => f,
+                _ => {
+                    search_pos = and_pos + 5;
+                    continue;
+                }
+            };
+
+            // Keyword text is everything after the verb.
+            let kw_start = and_pos + 5 + verb_offset + verb.len();
+            if kw_start >= effect_original.len() {
+                search_pos = and_pos + 5;
+                continue;
+            }
+            let keyword_text = effect_original[kw_start..].trim().trim_end_matches('.');
+            if keyword_text.is_empty() {
+                search_pos = and_pos + 5;
+                continue;
+            }
+
+            // Parse keyword list into companion modifications.
+            let mut companion_mods = Vec::new();
+            for part in split_keyword_list(keyword_text) {
+                push_grant_clause_modifications(&mut companion_mods, part.as_ref(), None);
+            }
+            if companion_mods.is_empty() {
+                search_pos = and_pos + 5;
+                continue;
+            }
+
+            // Primary text is everything before " and FOREIGN_SUBJECT".
+            let primary_text = effect_original[..and_pos].trim_end_matches(',').trim();
+            if primary_text.is_empty() {
+                search_pos = and_pos + 5;
+                continue;
+            }
+
+            // Re-parse the primary with the condition included so the primary def
+            // already carries the condition object.
+            let primary_full = if let Some(ref cond) = condition_text {
+                format!("{primary_text} as long as {cond}.")
+            } else {
+                format!("{primary_text}.")
+            };
+            let mut primary_defs = parse_static_line_multi(&primary_full);
+            if primary_defs.is_empty() {
+                search_pos = and_pos + 5;
+                continue;
+            }
+
+            for def in &mut primary_defs {
+                def.description = Some(text.to_string());
+            }
+
+            // Resolve the condition object for the companion.
+            let condition = condition_text.as_deref().and_then(|ct| {
+                parse_static_condition(ct).or(Some(StaticCondition::Unrecognized {
+                    text: ct.to_string(),
+                }))
+            });
+            let effective_condition =
+                condition.or_else(|| primary_defs.first().and_then(|d| d.condition.clone()));
+
+            let mut companion = StaticDefinition::continuous()
+                .affected(companion_filter)
+                .modifications(companion_mods)
+                .description(text.to_string());
+            if let Some(cond) = effective_condition {
+                companion.condition = Some(cond);
+            }
+
+            primary_defs.push(companion);
+            return Some(primary_defs);
+        }
+    }
+
+    None
+}

@@ -814,6 +814,15 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 611.3a + CR 613.1f: "PRIMARY and FOREIGN_SUBJECT have/has/gains/gain
+    // KEYWORD [as long as COND]" — compound static where the second conjunct has
+    // a different subject (e.g., Angelic Field Marshal: "~ gets +2/+2 and
+    // creatures you control have vigilance as long as you control your commander").
+    // Must run before the single-return fallback that can only produce one def.
+    if let Some(defs) = try_split_and_foreign_keyword_grant(&stripped) {
+        return defs;
+    }
+
     // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
     // ("enchanted creature ...", "equipped creature ...") may decompose into more
     // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).
