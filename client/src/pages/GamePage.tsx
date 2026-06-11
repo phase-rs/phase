@@ -896,7 +896,6 @@ function GamePageContent({
     }
     const wf = engineWaitingFor;
     if (!canActForWaitingState) {
-      dismissedCastableZoneViewerKeyRef.current = null;
       return;
     }
 

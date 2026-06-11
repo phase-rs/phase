@@ -94,6 +94,10 @@ describe("getCastableZoneViewerTarget", () => {
     type: "CastSpell",
     data: { object_id: 7, card_id: 700, targets: [] },
   };
+  const activateAction: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 7, ability_index: 0 },
+  };
 
   function makeGraveyardObject(id: number): GameObject {
     return {
@@ -190,6 +194,17 @@ describe("getCastableZoneViewerTarget", () => {
         { type: "CastingVariantChoice", data: { player: 0, object_id: 7, card_id: 700, options: [] } },
         objects,
         { "7": [castAction] },
+      ),
+    ).toBeNull();
+  });
+
+  it("ignores graveyard objects without play or cast actions", () => {
+    const objects = { 7: makeGraveyardObject(7) };
+    expect(
+      getCastableZoneViewerTarget(
+        { type: "Priority", data: { player: 0 } },
+        objects,
+        { "7": [activateAction] },
       ),
     ).toBeNull();
   });
