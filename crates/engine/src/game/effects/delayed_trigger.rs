@@ -288,6 +288,18 @@ fn snapshot_parent_dependent_quantities(
             snapshot_pt_value(power, state, ability);
             snapshot_pt_value(toughness, state, ability);
         }
+        // CR 603.7c + CR 122.2: Snapshot counter-relative quantities inside
+        // ChangeZone.enter_with_counters so the LKI-based counter count is
+        // frozen at delayed trigger creation time (before step transition
+        // clears the LKI cache).
+        Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } => {
+            for (_, qty) in enter_with_counters.iter_mut() {
+                snapshot_quantity_expr(qty, state, ability);
+            }
+        }
         _ => {}
     }
 }
@@ -356,6 +368,32 @@ fn snapshot_quantity_ref(
     ability: &ResolvedAbility,
 ) -> Option<i32> {
     use crate::types::ability::ObjectScope;
+    // CR 603.7c + CR 400.7: CountersOn { Source } uses ability.source_id,
+    // not targets — handle it before the target_object_id extraction which
+    // early-returns None when targets is empty (common for dies triggers).
+    if let QuantityRef::CountersOn {
+        scope: ObjectScope::Source,
+        counter_type,
+    } = qty
+    {
+        let source_id = ability.source_id;
+        // Mirrors resolve_counters_on_scope (quantity.rs:2778): live first,
+        // LKI fallback.
+        let live = state.objects.get(&source_id);
+        let on_battlefield =
+            live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
+        if !on_battlefield {
+            if let Some(lki) = state.lki_cache.get(&source_id) {
+                return Some(crate::game::quantity::counter_count_from_map(
+                    &lki.counters,
+                    counter_type.as_ref(),
+                ));
+            }
+        }
+        return live.map(|obj| {
+            crate::game::quantity::counter_count_from_map(&obj.counters, counter_type.as_ref())
+        });
+    }
     let target_object_id = ability.targets.iter().find_map(|t| match t {
         TargetRef::Object(id) => Some(*id),
         _ => None,
@@ -1457,6 +1495,130 @@ mod tests {
                 );
             }
             other => panic!("expected Mana{{Colorless}}, got {other:?}"),
+        }
+    }
+
+    /// Issue #528: Nine-Lives Familiar — snapshot_parent_dependent_quantities must
+    /// freeze CountersOn { Source } inside ChangeZone.enter_with_counters to a Fixed
+    /// value from LKI at delayed trigger creation time (before step transition clears
+    /// the LKI cache).
+    #[test]
+    fn snapshot_counters_on_source_in_change_zone_enter_with_counters() {
+        use crate::types::game_state::LKISnapshot;
+        use std::collections::HashMap;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(7); // Nine-Lives Familiar that just died
+
+        // Populate LKI cache as if the source died with 5 revival counters
+        let mut lki_counters = HashMap::new();
+        lki_counters.insert(CounterType::Generic("revival".to_string()), 5);
+        state.lki_cache.insert(
+            source_id,
+            LKISnapshot {
+                name: "Nine-Lives Familiar".to_string(),
+                power: Some(3),
+                toughness: Some(3),
+                base_power: Some(3),
+                base_toughness: Some(3),
+                mana_value: 4,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: Vec::new(),
+                counters: lki_counters,
+            },
+        );
+
+        // Set up the trigger event (dies = zone change to graveyard)
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: source_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                source_id,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        // Build the delayed trigger inner effect: ChangeZone with enter_with_counters
+        // containing ClampMin { Offset { CountersOn { Source, revival }, -1 }, 0 }
+        let revival_type = CounterType::Generic("revival".to_string());
+        let counter_qty = QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(revival_type.clone()),
+                    },
+                }),
+                offset: -1,
+            }),
+            minimum: 0,
+        };
+
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![(revival_type.clone(), counter_qty)],
+                face_down_profile: None,
+            },
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![],
+            source_id, // source_id = the dying creature
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        // Verify the delayed trigger's enter_with_counters was snapshotted:
+        // CountersOn(Source) resolved to Fixed(5) from LKI. The outer Offset and
+        // ClampMin wrappers are preserved (snapshot only freezes Ref leaves).
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::ChangeZone {
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(enter_with_counters.len(), 1);
+                let (ct, qty) = &enter_with_counters[0];
+                assert_eq!(*ct, revival_type);
+                assert_eq!(
+                    *qty,
+                    QuantityExpr::ClampMin {
+                        inner: Box::new(QuantityExpr::Offset {
+                            inner: Box::new(QuantityExpr::Fixed { value: 5 }),
+                            offset: -1,
+                        }),
+                        minimum: 0,
+                    },
+                    "CountersOn(Source) with 5 revival counters in LKI must snapshot to \
+                     ClampMin {{ Offset {{ Fixed(5), -1 }}, 0 }}"
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
         }
     }
 }
