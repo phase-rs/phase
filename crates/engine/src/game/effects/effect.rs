@@ -143,11 +143,22 @@ fn register_transient_effect(
         return;
     }
     // CR 603.2 + CR 608.2c: Judith modal sub-abilities set `target:
-    // TriggeringSource` (the GenericEffect `target` parameter), not
-    // `static_def.affected`. Short-circuit only on that parameter — when
-    // `affected: TriggeringSource` with chosen targets, the inherited-target
-    // branch below must still run (Earthbender Ascension).
-    if matches!(target_filter, Some(TargetFilter::TriggeringSource)) {
+    // TriggeringSource` (the GenericEffect `target` parameter); a SequentialSibling
+    // continuous grant on a non-targeted trigger ("put a +1/+1 counter on it. It
+    // gains haste until end of turn" — Surrak and Goreclaw, issue #2378) instead
+    // carries `affected: TriggeringSource` with `target: None`. Both name the
+    // triggering object directly, so when there is no chosen target to inherit
+    // (`ability.targets.is_empty()`), resolve via `resolve_event_context_target`
+    // here. We must NOT short-circuit when targets exist: `affected:
+    // TriggeringSource` with chosen targets is the inherited-target form that the
+    // branch below resolves against `ability.targets` (Earthbender Ascension).
+    let affected_is_triggering_source = static_def
+        .affected
+        .as_ref()
+        .is_some_and(|filter| matches!(filter, TargetFilter::TriggeringSource));
+    if matches!(target_filter, Some(TargetFilter::TriggeringSource))
+        || (target_filter.is_none() && affected_is_triggering_source && ability.targets.is_empty())
+    {
         if let Some(TargetRef::Object(obj_id)) =
             crate::game::targeting::resolve_event_context_target(
                 state,
@@ -993,6 +1004,81 @@ mod tests {
             .modifications
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Lifelink,
+            }));
+    }
+
+    /// Issue #2378 class: a non-targeted trigger whose SequentialSibling continuous
+    /// grant carries `affected: TriggeringSource` with `target: None` and no chosen
+    /// targets ("put a +1/+1 counter on it. It gains haste until end of turn" —
+    /// Surrak and Goreclaw) must bind the grant to the triggering object via the
+    /// event-context resolver (CR 611.2c). Pre-fix this fell through to the
+    /// broadcast arm, which `return`ed early on the inherited-reference filter and
+    /// dropped the grant entirely. Distinct from the Earthbender test above, which
+    /// has the same affected/target shape *with* a chosen target to inherit.
+    #[test]
+    fn triggering_source_affected_without_target_or_chosen_targets_binds_trigger_source() {
+        use crate::types::game_state::ZoneChangeRecord;
+
+        let mut state = GameState::new_two_player(42);
+        let surrak = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Surrak and Goreclaw".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        // The trigger fired from the creature's enter-the-battlefield event;
+        // `TriggeringSource` resolves to `entering` through this record.
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                entering,
+                None,
+                Zone::Battlefield,
+            )),
+        });
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::TriggeringSource)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }]);
+        // No chosen targets: a non-targeted "it gains haste" sibling clause.
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![],
+            surrak,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the haste grant must bind to exactly the triggering creature"
+        );
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(tce.affected, TargetFilter::SpecificObject { id: entering });
+        assert!(tce
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
             }));
     }
 
