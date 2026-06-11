@@ -6,8 +6,9 @@ use super::support::*;
 use super::*;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, DamageKindFilter,
-    Duration, Effect, ObjectProperty, PlayerFilter, PlayerScope, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+    Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TypeFilter,
+    ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -2909,6 +2910,80 @@ fn static_cost_floor_canonical_form_no_condition() {
     assert!(
         def.condition.is_none(),
         "canonical form has no trailing condition"
+    );
+}
+
+/// CR 601.2f + CR 107.3 + CR 122.1a: Zimone, Infinite Analyst's per-counter
+/// cost reduction — "The first spell you cast with {X} in its mana cost each
+/// turn costs {1} less to cast for each +1/+1 counter on ~." This regressed
+/// (issue #1359): the static dropped both the `{X}`-cost spell filter and the
+/// "first spell each turn" gate, so the reduction applied to every spell, every
+/// time. Asserts all three load-bearing axes are present:
+///   1. `spell_filter` carries `HasXInManaCost` (CR 107.3) — only {X}-spells.
+///   2. `condition` gates on `SpellsCastThisTurn(HasXInManaCost) == 0` — only
+///      the FIRST such spell each turn. "each turn" carries NO `DuringYourTurn`,
+///      so the first {X}-spell qualifies on any player's turn.
+///   3. `dynamic_count` is `CountersOn { Source, Plus1Plus1 }` — reduces by K
+///      for K +1/+1 counters on the source (CR 122.1a).
+#[test]
+fn static_zimone_first_x_spell_each_turn_reduces_per_plus1_counter() {
+    let def = parse_static_line(
+        "The first spell you cast with {X} in its mana cost each turn costs {1} less to cast for each +1/+1 counter on ~.",
+    )
+    .unwrap();
+
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ref dynamic_count,
+        ..
+    } = def.mode
+    else {
+        panic!("expected ReduceCost, got {:?}", def.mode);
+    };
+
+    // Axis 1: only spells with {X} in their mana cost are reduced.
+    let filter = spell_filter
+        .as_ref()
+        .expect("expected {X}-cost spell filter");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected typed spell filter, got {filter:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::HasXInManaCost),
+        "reduction must be gated on HasXInManaCost, got {tf:?}"
+    );
+
+    // Axis 3: per-+1/+1-counter dynamic quantity on the source.
+    assert!(
+        matches!(
+            dynamic_count,
+            Some(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Plus1Plus1),
+            })
+        ),
+        "reduction amount must be per +1/+1 counter on the source, got {dynamic_count:?}"
+    );
+
+    // Axis 2: only the FIRST {X}-spell each turn — no DuringYourTurn for the
+    // "each turn" timing (any player's turn qualifies).
+    let condition = def.condition.expect("expected first-spell-each-turn gate");
+    assert!(
+        matches!(
+            &condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter: Some(inner),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } if matches!(inner, TargetFilter::Typed(itf) if itf.properties.contains(&FilterProp::HasXInManaCost))
+        ),
+        "expected SpellsCastThisTurn(HasXInManaCost) == 0 with no DuringYourTurn, got {condition:?}"
     );
 }
 

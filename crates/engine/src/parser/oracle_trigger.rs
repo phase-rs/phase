@@ -9673,7 +9673,7 @@ fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefin
 /// matching the parsed `PlayerFilter`; e.g. The Council of Four, Rashmi and
 /// Ragavan).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum NthEventTimingKind {
+pub(crate) enum NthEventTimingKind {
     /// "each turn" / "in a turn" — no turn-ownership restriction.
     Unrestricted,
     /// Restricted to a specific player's turn (CR 603.4 + CR 102.1).

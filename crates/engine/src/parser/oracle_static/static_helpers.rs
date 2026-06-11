@@ -207,7 +207,8 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         None
     };
 
-    let first_qualified_spell_filter = parse_first_qualified_spell_filter(lower);
+    let first_qualified_spell = parse_first_qualified_spell_filter(lower);
+    let first_qualified_spell_filter = first_qualified_spell.as_ref().map(|(filter, _)| filter);
     let target_cost_filter = parse_cost_modifier_target_filter(lower);
 
     // Extract "from [zone(s)]" clause between player scope and "cost".
@@ -251,7 +252,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     // E.g., "Creature spells you cast" → Creature, "Instant and sorcery spells" → AnyOf(Instant, Sorcery)
     let spell_filter = if is_self_spell {
         parse_self_spell_target_cost_filter(lower)
-    } else if let Some(filter) = first_qualified_spell_filter.clone() {
+    } else if let Some(filter) = first_qualified_spell_filter.cloned() {
         Some(filter)
     // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     } else if let Some(cost_idx) = lower.find(" cost") {
@@ -498,8 +499,8 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
     if is_self_spell {
         definition.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
     }
-    if let Some(filter) = first_qualified_spell_filter.as_ref() {
-        definition.condition = Some(first_qualified_spell_condition(filter));
+    if let Some((filter, timing)) = first_qualified_spell.as_ref() {
+        definition.condition = Some(first_qualified_spell_condition(filter, timing));
     }
 
     // Extract trailing "if [condition]" / "as long as [condition]" clause from
