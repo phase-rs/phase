@@ -16,10 +16,10 @@ use engine::types::ability::{
 };
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::CounterType;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+use engine::types::CounterType;
 
 const MINUS_THREE_ORACLE: &str = "Destroy target artifact, enchantment, or creature with flying.";
 
@@ -71,8 +71,7 @@ fn setup_vivien_with_minus_three() -> (engine::game::scenario::GameRunner, Objec
         obj.base_power = None;
         obj.base_toughness = None;
         obj.loyalty = Some(5);
-        obj.counters
-            .insert(CounterType::Loyalty, 5);
+        obj.counters.insert(CounterType::Loyalty, 5);
 
         let minus_three =
             AbilityDefinition::new(AbilityKind::Activated, vivien_minus_three_destroy_effect())
