@@ -349,6 +349,7 @@ fn collect_matching_triggers(
         } = event
         {
             if *object_id == obj_id {
+                // allow-raw-authority: record.keywords is a characteristic snapshot (ZoneChangeRecord preserves LKI keyword set)
                 synthesize_granted_keyword_triggers(source_obj, record.keywords.iter())
             } else {
                 Vec::new()
