@@ -26,10 +26,12 @@ use crate::types::game_state::{
     BatchCompletion, ExileLinkKind, GameState, MergedCardComponentRoute, PendingBatchDeliveries,
     PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
+use std::collections::HashSet;
+
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{ProposedEvent, ReplacementId};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
@@ -64,6 +66,25 @@ pub enum ZoneChangeCause {
     /// zone. Mechanically a return-to-zone move, but a named CR class — full
     /// pipeline, NOT exempt.
     CommanderRuleReturn,
+    /// CR 121.1: drawing a card — "A player draws a card by putting the top card
+    /// of their library into their hand." Drawing IS a Library → Hand zone
+    /// change, so it runs the full pipeline (the inner `Moved` consult fires for
+    /// any def that scopes to a Hand-destination move). Carries no source object:
+    /// the draw-step draw (CR 504.1) is a turn-based action with no causing
+    /// object, and effect-driven draws attribute their `Moved` redirects to the
+    /// REPLACEMENT's source (see `track_exiled_by_source` flow in delivery), not
+    /// to the draw cause — so sourcelessness is correct. NOT exempt.
+    ///
+    /// `seed_applied` carries the OUTER `ReplacementEvent::Draw` pass's applied
+    /// `ReplacementId` set so the inner `Moved` consult does not re-fire a def
+    /// that already fired at draw level (CR 614.5: a replacement gets one
+    /// opportunity to affect an event "or any modified events that may replace
+    /// that event"). This payload lives on the variant — not on `ZoneMoveRequest`
+    /// — because `Draw` is the only producer; every other cause would carry a
+    /// dead empty set. Built only by [`ZoneMoveRequest::draw`].
+    Draw {
+        seed_applied: HashSet<ReplacementId>,
+    },
     // ---- exempt causes: pipeline-internal, replacement consult skipped ----
     /// CR 601.2a: "the player first moves that card ... to the stack" — part of
     /// the casting process, not a discrete replaceable event.
@@ -106,7 +127,11 @@ impl ZoneChangeCause {
             | ZoneChangeCause::Cost { .. }
             | ZoneChangeCause::SpellResolutionDefault
             | ZoneChangeCause::StateBasedAction
-            | ZoneChangeCause::CommanderRuleReturn => false,
+            | ZoneChangeCause::CommanderRuleReturn
+            // CR 121.1: drawing is a replaceable Library → Hand zone change; it
+            // MUST consult `Moved` defs (e.g. a future "cards you would draw are
+            // put into exile instead" redirect).
+            | ZoneChangeCause::Draw { .. } => false,
             ZoneChangeCause::CastingToStack { .. }
             | ZoneChangeCause::PregameProcedure
             | ZoneChangeCause::PlayerLeftGame
@@ -209,6 +234,26 @@ impl ZoneMoveRequest {
             object_id,
             to,
             cause: ZoneChangeCause::SpellResolutionDefault,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 121.1 + CR 504.1: drawing a card moves the top card of the library
+    /// into the owner's hand. Like [`Self::spell_resolution_default`], this is a
+    /// sourceless move that STILL consults the pipeline (Draw is non-exempt) —
+    /// the draw-step draw (CR 504.1) is a turn-based action with no causing
+    /// object, and an effect-driven draw's `Moved` redirect is attributed to the
+    /// REPLACEMENT's source, not the draw cause. `seed_applied` carries the
+    /// outer `ReplacementEvent::Draw` pass's applied set so the inner `Moved`
+    /// consult does not double-apply a def that already fired at draw level
+    /// (CR 614.5, PLAN Risk #5).
+    pub fn draw(object_id: ObjectId, seed_applied: HashSet<ReplacementId>) -> Self {
+        Self {
+            object_id,
+            to: Zone::Hand,
+            cause: ZoneChangeCause::Draw { seed_applied },
             mods: EntryMods::default(),
             placement: None,
             exile_links: ExileLinkSpec::default(),
@@ -329,11 +374,24 @@ impl ZoneMoveRequest {
     /// The source object this move is attributed to, if any. Exempt causes that
     /// carry no source return `None`.
     fn source(&self) -> Option<ObjectId> {
+        // Exhaustive, no wildcard: a new `ZoneChangeCause` variant must make an
+        // explicit source decision (mirrors `is_exempt`'s mandate above) rather
+        // than silently inherit `None`.
         match &self.cause {
             ZoneChangeCause::Effect { source }
             | ZoneChangeCause::Cost { source }
             | ZoneChangeCause::CastingToStack { source } => Some(*source),
-            _ => None,
+            // CR 504.1: a draw-step draw is a turn-based action with no causing
+            // object; effect-driven draws attribute redirects to the replacement
+            // source, not the move cause — so `Draw` is sourceless.
+            ZoneChangeCause::Draw { .. }
+            | ZoneChangeCause::SpellResolutionDefault
+            | ZoneChangeCause::StateBasedAction
+            | ZoneChangeCause::CommanderRuleReturn
+            | ZoneChangeCause::PregameProcedure
+            | ZoneChangeCause::PlayerLeftGame
+            | ZoneChangeCause::MergedComponentRouting
+            | ZoneChangeCause::DebugCommand => None,
         }
     }
 }
@@ -600,6 +658,52 @@ pub(crate) fn move_object(
         exile_links.tracking,
         ZoneDeliveryExileTracking::TrackBySource
     );
+
+    // CR 121.1 + CR 614.5 (PLAN Risk #5): a draw (Library → Hand) consults the
+    // pipeline so a `Moved` def scoped to a Hand-destination move can redirect
+    // the drawn card. Drawing never enters the battlefield, so it has none of
+    // `execute_zone_move`'s battlefield-entry machinery (ETB counters, aura
+    // host, cast-link snapshot, devour) — run the bare consult + delivery here,
+    // seeding the proposed event's `applied` set from the OUTER
+    // `ReplacementEvent::Draw` pass (the `Draw` variant's `seed_applied`). The
+    // dedup guard: a def already in `applied` is skipped at
+    // `find_applicable_replacements`' `already_applied(&rid)` gate, so it cannot
+    // fire at both the Draw level and this Moved level. The seed lives on the
+    // `Draw` cause variant — no other cause produces one.
+    if let ZoneChangeCause::Draw { seed_applied } = req.cause {
+        let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
+        if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+            *applied = seed_applied;
+        }
+        return match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => match deliver_replaced_zone_change(
+                state,
+                event,
+                source_id,
+                exile_links.duration.as_ref(),
+                track_exiled_by_source,
+                PostReplacementDrainOwner::DeliveryTail,
+                None,
+                events,
+            ) {
+                ZoneDeliveryResult::Done => ZoneMoveResult::Done,
+                ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+            },
+            ReplacementResult::Prevented => ZoneMoveResult::Done,
+            ReplacementResult::NeedsChoice(player) => {
+                // CR 616.1: park the surfaced ordering prompt (mirrors the
+                // placement / `execute_zone_move` NeedsChoice arms). No
+                // production `Moved` def targets a Hand destination today (audit:
+                // every destination-unconstrained `Moved` def is `valid_card:
+                // SelfRef`-bound to a battlefield host, and the only
+                // `valid_card: None` class is destination-gated to Graveyard), so
+                // this is unreachable for the current pool — parked for
+                // correctness if a future to-Hand redirect surfaces a choice.
+                replacement::park_waiting_for(state, player);
+                ZoneMoveResult::NeedsChoice(player)
+            }
+        };
+    }
 
     // PLAN §3: exempt causes skip the `replace_event` consult and go straight to
     // delivery. The proposed event is sealed directly (no matcher pass) and runs
