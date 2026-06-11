@@ -900,8 +900,31 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         _ => return None, // Only generic mana reduction supported
     };
 
-    // Strip " less to activate for each " or " less to cast for each "
     let after_mana = after_mana.trim_start();
+
+    // CR 602.2b + CR 601.2f conditional flat form: "... less to activate if [condition]" /
+    // "... less to cast if [condition]". The reduction is a flat {amount_per}
+    // (count = Fixed(1)) gated by `condition`. Checked before the "for each"
+    // form; if the "if " marker is present but the condition does not parse,
+    // return None so the clause stays a loud gap (coverage honesty) rather than
+    // silently mis-parsing.
+    if let Some(((), cond_text)) = nom_on_lower(after_mana, after_mana, |i| {
+        value(
+            (),
+            alt((tag("less to activate if "), tag("less to cast if "))),
+        )
+        .parse(i)
+    }) {
+        let cond_text = cond_text.trim().trim_end_matches('.').trim();
+        let condition = super::oracle_condition::parse_restriction_condition(cond_text)?;
+        return Some(CostReduction {
+            amount_per,
+            count: QuantityExpr::Fixed { value: 1 },
+            condition: Some(condition),
+        });
+    }
+
+    // Strip " less to activate for each " or " less to cast for each "
     let ((), after_less) = nom_on_lower(after_mana, after_mana, |i| {
         value(
             (),
@@ -919,6 +942,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         return Some(CostReduction {
             amount_per,
             count: QuantityExpr::Ref { qty },
+            condition: None,
         });
     }
 
@@ -933,6 +957,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
         count: QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         },
+        condition: None,
     })
 }
 
@@ -2167,5 +2192,51 @@ mod tests {
             }
             other => panic!("Expected OneOf, got {:?}", other),
         }
+    }
+
+    /// CR 602.2b + CR 601.2f: the conditional flat form "costs {N} less to activate if
+    /// [condition]" parses to a `CostReduction` with `count = Fixed(1)` and a
+    /// `condition` gate (Esquire of the King, Razorlash Transmogrant, …) — the
+    /// previously-dropped `Effect:this` clause.
+    #[test]
+    fn cost_reduction_conditional_flat_form_carries_condition() {
+        let def = try_parse_cost_reduction(
+            "this ability costs {2} less to activate if you control a legendary creature",
+        )
+        .expect("conditional cost reduction should parse");
+        assert_eq!(def.amount_per, 2);
+        assert_eq!(def.count, QuantityExpr::Fixed { value: 1 });
+        assert!(
+            def.condition.is_some(),
+            "the 'if [condition]' gate must be captured, got {:?}",
+            def.condition
+        );
+
+        // "if you're <something the condition parser doesn't model>" must NOT
+        // silently mis-parse: an unrecognized condition yields no reduction
+        // (stays a loud gap) rather than an unconditional one.
+        assert!(
+            try_parse_cost_reduction(
+                "this ability costs {2} less to activate if the moon is gibbous"
+            )
+            .is_none(),
+            "unparseable condition must not produce an (unconditional) reduction"
+        );
+    }
+
+    /// Regression: the "for each" scaling form is unchanged and carries no
+    /// condition.
+    #[test]
+    fn cost_reduction_for_each_form_unconditional() {
+        let def = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each artifact you control",
+        )
+        .expect("for-each cost reduction should still parse");
+        assert_eq!(def.amount_per, 1);
+        assert_eq!(def.condition, None, "for-each form is unconditional");
+        assert!(
+            !matches!(def.count, QuantityExpr::Fixed { .. }),
+            "for-each count is a dynamic ref, not Fixed"
+        );
     }
 }

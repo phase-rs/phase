@@ -11670,11 +11670,20 @@ fn apply_cost_reduction(
     source_id: ObjectId,
 ) {
     if let Some(ref reduction) = ability_def.cost_reduction {
-        let count = super::quantity::resolve_quantity(state, &reduction.count, player, source_id);
-        let reduce_by = (reduction.amount_per as i32 * count).max(0) as u32;
-        if reduce_by > 0 {
-            if let Some(ref mut cost) = ability_def.cost {
-                reduce_generic_in_cost(cost, reduce_by);
+        // CR 602.2b + CR 601.2f: A conditional flat reduction ("costs {N} less … if [cond]")
+        // applies only when its gate holds at cost-determination time. `None` =
+        // unconditional (the "for each" scaling form and all legacy reductions).
+        let condition_met = reduction.condition.as_ref().is_none_or(|cond| {
+            crate::game::restrictions::evaluate_condition(state, player, source_id, cond)
+        });
+        if condition_met {
+            let count =
+                super::quantity::resolve_quantity(state, &reduction.count, player, source_id);
+            let reduce_by = (reduction.amount_per as i32 * count).max(0) as u32;
+            if reduce_by > 0 {
+                if let Some(ref mut cost) = ability_def.cost {
+                    reduce_generic_in_cost(cost, reduce_by);
+                }
             }
         }
     }
@@ -41493,6 +41502,89 @@ mod tests {
         assert!(
             can_cast_object_now(&state, PlayerId(0), command),
             "can_cast_object_now must be true (issue #2011)"
+        );
+    }
+
+    /// CR 602.2b + CR 601.2f: a conditional flat cost reduction ("costs {N} less to activate
+    /// if [condition]") reduces the activation cost only when the gate holds.
+    /// Esquire of the King class: "{cost}: … This ability costs {2} less to
+    /// activate if you control a legendary creature."
+    #[test]
+    fn conditional_cost_reduction_applies_only_when_condition_met() {
+        use crate::parser::oracle_condition::parse_restriction_condition;
+        use crate::types::ability::{CostReduction, Effect, QuantityExpr};
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCost;
+
+        let condition = parse_restriction_condition("you control a legendary creature")
+            .expect("test condition must parse");
+
+        let make_def = || {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Unimplemented {
+                    name: "test".to_string(),
+                    description: None,
+                },
+            );
+            def.cost = Some(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 6,
+                },
+            });
+            def.cost_reduction = Some(CostReduction {
+                amount_per: 3,
+                count: QuantityExpr::Fixed { value: 1 },
+                condition: Some(condition.clone()),
+            });
+            def
+        };
+        let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("expected Mana cost, got {other:?}"),
+        };
+
+        let mut state = GameState::new_two_player(1);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Esquire of the King".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Case A: controller has no legendary creature → no reduction.
+        let mut def_a = make_def();
+        apply_cost_reduction(&state, &mut def_a, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_a),
+            6,
+            "no legendary creature → full {{6}} cost"
+        );
+
+        // Case B: a legendary creature on the battlefield → {3} reduction applies.
+        let leg = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Some Legend".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&leg).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.card_types.supertypes.push(Supertype::Legendary);
+        }
+        let mut def_b = make_def();
+        apply_cost_reduction(&state, &mut def_b, PlayerId(0), src);
+        assert_eq!(
+            generic_of(&def_b),
+            3,
+            "legendary creature present → cost reduced by {{3}}"
         );
     }
 }
