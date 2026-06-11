@@ -316,19 +316,21 @@ fn install_merge_layer_effect(
 /// NOT a token (its survivor is a card, so a card-scoped redirect matches it and
 /// redirects the leave event), ALL components — token components included — take
 /// `dest` (730.3e first clause: "applies to all components of the merged
-/// permanent if it's not a token, including components that are tokens"). The
-/// second clause (the merged permanent's survivor is itself a TOKEN, so a
-/// card-scoped redirect does NOT match the survivor and its CARD components must
-/// still be moved by the redirect while the token survivor + token components
-/// take the default zone) is NOT handled here: it requires the merged-permanent
-/// leave to be consulted as a single component-aware event so the card-scoped
-/// redirect can apply to the card components without matching the token survivor.
-/// That is a replacement-pipeline extension (component-aware single consult), not
-/// a per-component re-consult (which 730.3d forbids), and no current pool `Moved`
-/// definition is card-scoped (the RIP-class parser ignores the "a card" subject
-/// and leaves `valid_card == None`, so today every such redirect is token-
-/// inclusive and matches the survivor regardless of token-ness). Tracked as a
-/// follow-up; the Commander exemption (CR 903.9b–c) is separately out of scope.
+/// permanent if it's not a token, including components that are tokens").
+///
+/// CR 730.3e SECOND clause (the merged permanent's survivor is itself a TOKEN, so
+/// a card-scoped redirect does NOT match the survivor): the token survivor + its
+/// token components take the pre-replacement default zone (`dest`), while the
+/// CARD components are "moved by the replacement effect". This split is driven by
+/// `state.merged_card_component_route`, which the pipeline
+/// (`zone_pipeline::deliver_replaced_zone_change`) stashes from a SINGLE
+/// component-aware consult (one `replace_event` for the card partition — NOT a
+/// per-component re-consult, which CR 730.3d forbids, and which would re-burn
+/// CR 616.1 ordering). When that override is present, a card component routes to
+/// its `card_dest`; a token component routes to its `default_dest` (== `dest`).
+/// The override is absent (and every component follows `dest`) for non-token
+/// survivors and whenever no card-scoped redirect diverges from the survivor's
+/// destination. The Commander exemption (CR 903.9b–c) is separately out of scope.
 ///
 /// CR 730.3a deferred: the owner's arrange-order choice for graveyard/library
 /// destinations is not modeled — components are placed in their stored
@@ -347,6 +349,17 @@ pub fn split_merged_permanent_on_leave(
     }
     let components = survivor.merged_components.clone();
 
+    // CR 730.3e (second clause): a TOKEN merged permanent leaving under a
+    // card-scoped (`NonToken`) `Moved` redirect routes its CARD components to
+    // the redirect destination (`card_dest`) while the token survivor + token
+    // components take the pre-replacement default zone (`default_dest`). The
+    // pipeline (`deliver_replaced_zone_change`) stashes this from the single
+    // component-aware consult; absent it (non-token survivor / no card-scoped
+    // divergence — clause 1), every component follows the survivor's `dest`
+    // (CR 730.3d). The override only fires when the survivor itself is a token
+    // (it lands in `default_dest == dest` via `move_to_zone`).
+    let card_route = state.merged_card_component_route;
+
     // CR 730.3 + CR 400.7: before the surviving object changes zone, drop the
     // merge's layer-1 copy effect and flush layers so it leaves as its own card.
     remove_merge_layer_effect(state, merged_id);
@@ -358,9 +371,24 @@ pub fn split_merged_permanent_on_leave(
         if component_id == merged_id {
             continue;
         }
-        // CR 730.3 + S4: route each component to ITS OWN owner's destination zone
-        // as a NEW object that did not independently leave the battlefield.
-        put_component_into_zone(state, component_id, dest, events);
+        // CR 730.3 + S4 / CR 730.3e: route each component to ITS OWN owner's
+        // destination zone as a NEW object that did not independently leave the
+        // battlefield. Under the clause-2 override, a CARD component follows the
+        // card-scoped redirect (`card_dest`); a token component (and the default
+        // case) follows the survivor's `dest`.
+        let component_dest = match card_route {
+            Some(route)
+                if state
+                    .objects
+                    .get(&component_id)
+                    .is_some_and(|o| !o.is_token) =>
+            {
+                route.card_dest
+            }
+            Some(route) => route.default_dest,
+            None => dest,
+        };
+        put_component_into_zone(state, component_id, component_dest, events);
         // CR 730.3c: record which surviving object this component split from, so an
         // effect that later finds "the object the merged permanent became" (a
         // flicker/blink return) brings this component back too, not just the

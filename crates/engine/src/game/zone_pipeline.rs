@@ -23,8 +23,8 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    BatchCompletion, ExileLinkKind, GameState, PendingBatchDeliveries, PendingCounterPostAction,
-    PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
+    BatchCompletion, ExileLinkKind, GameState, MergedCardComponentRoute, PendingBatchDeliveries,
+    PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -1262,6 +1262,72 @@ pub(crate) fn apply_face_down_entry_profile(
     }
 }
 
+/// CR 730.3e (second clause) + CR 730.2d + CR 614.6: compute the card-component
+/// routing override for a merged permanent's leave.
+///
+/// `survivor_dest` is the merged permanent's already-consulted destination (the
+/// survivor's post-replacement `to`). For a NON-token survivor every component
+/// followed `survivor_dest` (clause 1, CR 730.3d) and this returns `None`. For a
+/// TOKEN survivor (CR 730.2d: token iff the topmost component is a token), a
+/// card-scoped (`NonToken`) `Moved` redirect did NOT match the survivor — so
+/// `survivor_dest` is the pre-replacement default zone — but it DOES move the
+/// merged permanent's CARD components. We discover where by running ONE
+/// component-aware consult for a representative card component: a single
+/// `replace_event` over a `ZoneChange { from: Battlefield, to: survivor_dest }`
+/// proposal for that card. This is NOT a per-component re-consult — CR 616.1
+/// ordering is resolved once for the card partition, never per card — and it
+/// only READS the resolved destination (replacement does not move the object).
+///
+/// Returns `Some` only when the card consult diverges from `survivor_dest`
+/// (i.e. a card-scoped redirect genuinely applies to cards but not the token
+/// survivor); otherwise `None` (no override — the existing single-`to` routing
+/// is already correct).
+///
+/// `// strict-failure: a one-shot ("the next time ... instead") leave redirect
+/// would be consumed by this extra read-only consult; no such depletion-style
+/// def is in the merged-leave class (the graveyard-redirect hosers are
+/// continuous statics), so the double-stamp is benign.`
+fn compute_merged_card_component_route(
+    state: &mut GameState,
+    survivor_id: ObjectId,
+    survivor_dest: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Option<MergedCardComponentRoute> {
+    let survivor = state.objects.get(&survivor_id)?;
+    // Clause 1 (CR 730.3d) already routed every component to `survivor_dest`
+    // for a non-token survivor; only the token-survivor case needs the split.
+    if !survivor.is_token || survivor.merged_components.is_empty() {
+        return None;
+    }
+    // A representative CARD (non-token) component, excluding the survivor.
+    let card_component = survivor
+        .merged_components
+        .iter()
+        .copied()
+        .find(|&id| id != survivor_id && state.objects.get(&id).is_some_and(|o| !o.is_token))?;
+
+    // Single component-aware consult for the card partition. The card component
+    // is still absorbed (on the battlefield via the survivor), so its leave
+    // origin is the battlefield.
+    let proposed = ProposedEvent::zone_change(
+        card_component,
+        Zone::Battlefield,
+        survivor_dest,
+        Some(survivor_id),
+    );
+    let card_dest = match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) => to,
+        // Prevented / NeedsChoice / non-ZoneChange: no usable redirect for the
+        // card partition — fall back to the survivor's destination (no split).
+        _ => return None,
+    };
+
+    (card_dest != survivor_dest).then_some(MergedCardComponentRoute {
+        default_dest: survivor_dest,
+        card_dest,
+    })
+}
+
 /// Deliver a zone-change event that has already passed through replacement.
 ///
 /// `library_placement` (CR 701.24a): when the event's delivered destination is
@@ -1354,6 +1420,22 @@ pub(crate) fn deliver_replaced_zone_change(
             })
             .flatten();
 
+        // CR 730.3e (second clause): if a TOKEN merged permanent leaves the
+        // battlefield while a card-scoped (`NonToken`) `Moved` redirect is
+        // active, the redirect did NOT match the token survivor (so `to` above
+        // is the pre-replacement default zone for the survivor + its token
+        // components), but it DOES move the merged permanent's CARD components.
+        // Run ONE additional component-aware consult here (NOT per component —
+        // a single `replace_event` for the card-component partition, so CR 616.1
+        // ordering is computed once for the partition, not re-burned per card),
+        // and stash the resulting `card_dest` so the survivor split routes card
+        // components there while the token survivor + token components take the
+        // default zone. A no-op (no route stashed) for non-token survivors
+        // (clause 1, already handled — every component followed the survivor's
+        // redirected `to`) and when no card-scoped redirect diverges.
+        state.merged_card_component_route =
+            compute_merged_card_component_route(state, object_id, to, events);
+
         // CR 701.24a: deliver to a specific library index when the event's
         // destination is the library and a position was requested (a placement is
         // not a shuffle); otherwise the zone-default `move_to_zone` (which the
@@ -1376,6 +1458,11 @@ pub(crate) fn deliver_replaced_zone_change(
             }
             _ => zones::move_to_zone(state, object_id, to, events),
         }
+        // CR 730.3e: the survivor split (inside `move_to_zone` above) has consumed
+        // any clause-2 routing override; clear it so it never leaks into a later
+        // unrelated move. Purely synchronous lifetime (set → consumed → cleared in
+        // this one delivery), so it never crosses a pause.
+        state.merged_card_component_route = None;
         // CR 400.7d: restore the cast link immediately after the entry reset —
         // BEFORE the face-down / counter blocks, so a counter-replacement pause
         // (CR 616.1) cannot strand the resumed permanent without its kicker /
