@@ -10381,6 +10381,28 @@ fn cant_cast_spells_with_chosen_name() {
 }
 
 #[test]
+fn passive_spells_with_chosen_name_cant_be_cast() {
+    // CR 101.2 + CR 201.2: passive-voice name-lock — Meddling Mage, Nevermore,
+    // Voidstone Gargoyle. "All players" scope (no subject). The active-voice
+    // form ("[subject] can't cast spells with the chosen name") is covered above.
+    for text in [
+        "Spells with the chosen name can't be cast.",
+        "Spells with the chosen name can't be cast",
+    ] {
+        let def = parse_static_line(text)
+            .unwrap_or_else(|| panic!("should parse passive name-lock: {text:?}"));
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: ProhibitionScope::AllPlayers,
+            },
+            "{text:?}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::HasChosenName), "{text:?}");
+    }
+}
+
+#[test]
 fn cant_cast_spells_with_chosen_name_parenthetical() {
     // Alhammarret full text with parenthetical condition
     let def = parse_static_line(

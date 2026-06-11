@@ -992,6 +992,24 @@ pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticD
         );
     }
 
+    // --- "Spells with the chosen name can't be cast" (passive voice) ---
+    // CR 101.2 + CR 201.2: the name-lock hatebears — Meddling Mage, Nevermore,
+    // Voidstone Gargoyle. The active-voice equivalent ("[subject] can't cast
+    // spells with the chosen name") is handled in `parse_cant_cast_type_spells`;
+    // mirror it here for the passive form. `HasChosenName` is resolved at cast
+    // time by `cant_cast_filter_matches` against the source's chosen card name.
+    if let Some(rest) = nom_tag_lower(before_cant, before_cant, "spells with the chosen name") {
+        if rest.trim().is_empty() {
+            return Some(
+                StaticDefinition::new(StaticMode::CantBeCast {
+                    who: ProhibitionScope::AllPlayers,
+                })
+                .affected(TargetFilter::HasChosenName)
+                .description(text.to_string()),
+            );
+        }
+    }
+
     // Require " spells" at the end of the subject
     let type_text = before_cant.strip_suffix(" spells")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 

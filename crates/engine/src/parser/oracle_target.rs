@@ -2039,6 +2039,18 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 205.3 (#2905): positive "that's a/an <Subtype> [or a/an <Subtype>]"
+    // relative-clause restriction ("creature you control that's an Ape or a
+    // Monkey"). Append the subtype constraint as an adjective type filter so it
+    // AND-merges with the core type (Creature) rather than being dropped — the
+    // clause previously fell through, leaving every creature eligible. Checked
+    // before `parse_that_clause_suffix` (mirrors the `that isn't` arm); it only
+    // fires for real subtypes, so color/supertype "that's" clauses are unaffected.
+    if let Some((subtype_filter, consumed)) = parse_that_is_subtype_suffix(&lower[pos..]) {
+        adjective_type_filters.push(subtype_filter);
+        pos += consumed;
+    }
+
     // "that share(s) a creature type" / "that has/have [keyword]" relative clause.
     if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..], Some(ctx)) {
         properties.extend(that_props);
@@ -4638,6 +4650,70 @@ fn parse_that_isnt_subtype_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)
         vec![TypeFilter::Non(Box::new(TypeFilter::Subtype(subtype)))],
         total,
     ))
+}
+
+/// CR 205.3 (#2905): the positive counterpart of `parse_that_isnt_subtype_suffix`.
+/// Parses a "that's a/an <Subtype> [or a/an <Subtype>]*" relative clause into a
+/// single `Subtype` (one subtype) or an `AnyOf` of `Subtype`s (disjunction).
+/// "creature you control that's an Ape or a Monkey" →
+/// `AnyOf([Subtype("Ape"), Subtype("Monkey")])`, which AND-merges with the
+/// Creature core type. Returns the bytes consumed (including leading whitespace).
+/// Returns `None` unless the clause names at least one recognized subtype, so
+/// color/supertype "that's …" relative clauses are left to their own parsers.
+fn parse_that_is_subtype_suffix(text: &str) -> Option<(TypeFilter, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+
+    // Positive intro only — negation is handled by `parse_that_isnt_subtype_suffix`.
+    let after_intro = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed)
+    {
+        rest
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
+        rest
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
+        rest
+    } else {
+        return None;
+    };
+
+    // One "[a/an] <Subtype>" leg → `(Subtype, remaining)`.
+    let parse_leg = |rest: &'_ str| -> Option<(String, usize)> {
+        let after_article = if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("a ").parse(rest) {
+            ("a ".len(), r)
+        } else if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an ").parse(rest) {
+            ("an ".len(), r)
+        } else {
+            (0usize, rest)
+        };
+        let (article_len, body) = after_article;
+        let (subtype, sub_len) = parse_subtype(body)?;
+        Some((subtype, article_len + sub_len))
+    };
+
+    let mut subtypes: Vec<TypeFilter> = Vec::new();
+    let (first, first_len) = parse_leg(after_intro)?;
+    subtypes.push(TypeFilter::Subtype(first));
+    let mut rest = &after_intro[first_len..];
+
+    // Optional " or [a/an] <Subtype>" continuations.
+    loop {
+        let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(rest) else {
+            break;
+        };
+        let Some((next, next_len)) = parse_leg(after_or) else {
+            break;
+        };
+        subtypes.push(TypeFilter::Subtype(next));
+        rest = &after_or[next_len..];
+    }
+
+    let consumed = leading_ws + (trimmed.len() - rest.len());
+    let filter = if subtypes.len() == 1 {
+        subtypes.pop().expect("non-empty")
+    } else {
+        TypeFilter::AnyOf(subtypes)
+    };
+    Some((filter, consumed))
 }
 
 /// CR 115.9c: Parse the constraint after "that targets only ".
@@ -9220,6 +9296,43 @@ mod tests {
             vtf.type_filters
         );
         assert!(vtf.properties.contains(&pt(PtStat::Power)));
+    }
+
+    /// #2905 (CR 205.3): a positive "that's a/an <Subtype> [or a/an <Subtype>]"
+    /// relative clause must restrict by subtype, not be dropped (Kibo, Uktabi
+    /// Prince put counters on every creature instead of only Apes and Monkeys).
+    #[test]
+    fn parse_type_phrase_positive_subtype_relative_clause() {
+        use crate::types::ability::TypeFilter;
+
+        let (filter, _rest) = parse_type_phrase("creature you control that's an Ape or a Monkey");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "must keep the Creature core type, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.type_filters.contains(&TypeFilter::AnyOf(vec![
+                TypeFilter::Subtype("Ape".to_string()),
+                TypeFilter::Subtype("Monkey".to_string()),
+            ])),
+            "the 'that's an Ape or a Monkey' restriction must AND-merge as an \
+             AnyOf subtype disjunction, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+
+        // Single-subtype form → a bare Subtype (no AnyOf wrapper).
+        let (single, _) = parse_type_phrase("creature you control that's a Goblin");
+        let TargetFilter::Typed(stf) = single else {
+            panic!("expected Typed filter");
+        };
+        assert!(stf
+            .type_filters
+            .contains(&TypeFilter::Subtype("Goblin".to_string())));
     }
 
     #[test]

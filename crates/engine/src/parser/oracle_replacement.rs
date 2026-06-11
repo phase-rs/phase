@@ -3236,12 +3236,56 @@ fn parse_graveyard_exile_replacement(
         ShuffleBack { reveal: bool },
     }
 
-    let ((scope, outcome), _rest) = nom_on_lower(original_text, norm_lower, |i| {
+    // CR 730.3e + CR 111.1: the subject's token axis. "a card or token" is
+    // token-INCLUSIVE (Rest in Peace) and adds no constraint; "a card" is
+    // token-EXCLUDING (Leyline of the Void) and adds a `NonToken` filter so
+    // a dying token reaches the graveyard (and dies-triggers fire) instead of
+    // being wrongly redirected. Any other subject (`~`, "that spell", "a
+    // permanent", a counter condition) leaves the axis `Unscoped` — the
+    // pre-existing token-inclusive behavior, preserved.
+    #[derive(Clone, Copy)]
+    enum TokenScope {
+        Unscoped,
+        NonToken,
+    }
+
+    let ((scope, token_scope, outcome), _rest) = nom_on_lower(original_text, norm_lower, |i| {
         // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
         let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
         // Subject: accept any phrase up to " would be put into " — covers
         // "a card", "a nontoken creature", "~", "a creature an opponent controls", …
-        let (i, _) = take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+        // — and classify its token axis (CR 730.3e) from the captured slice.
+        let (i, subject) = take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+        // CR 730.3e + CR 111.1: a card-noun subject WITHOUT an "or token" rider
+        // is token-excluding (Leyline of the Void: "a card"). The inclusive RIP
+        // phrasing ("a card or token") names tokens explicitly and stays
+        // unscoped. The token-rider check wins over the bare-card check, so
+        // "a card or token" is never misread as token-excluding.
+        //
+        // The token axis is a terminal-noun classification of the noun phrase
+        // `take_until` already tokenized off. "Ends with <noun>" is expressed as
+        // a forward combinator — `take_until(noun) + tag(noun) + eof` — so the
+        // classification stays combinator-pure (no raw tail string-ops) and is
+        // correct for arbitrarily long subjects ("a nontoken creature card",
+        // "a creature an opponent controls") where a first-word split would not
+        // be.
+        fn subject_ends_with<'a>(subject: &'a str, noun: &'static str) -> bool {
+            terminated(
+                (take_until(noun), tag(noun)),
+                eof::<&'a str, OracleError<'a>>,
+            )
+            .parse(subject)
+            .is_ok()
+        }
+        let names_token =
+            subject_ends_with(subject, " or token") || subject_ends_with(subject, " or tokens");
+        let names_card =
+            subject_ends_with(subject, " card") || subject_ends_with(subject, " cards");
+        let token_scope = if names_card && !names_token {
+            TokenScope::NonToken
+        } else {
+            TokenScope::Unscoped
+        };
         let (i, _) = tag::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
         let (i, scope) = alt((
             value(Scope::Opponent, tag("an opponent's graveyard")),
@@ -3271,7 +3315,7 @@ fn parse_graveyard_exile_replacement(
         ))
         .parse(i)?;
 
-        Ok((i, (scope, outcome)))
+        Ok((i, (scope, token_scope, outcome)))
     })?;
 
     // Destination routing is determined by the outcome branch.
@@ -3282,14 +3326,21 @@ fn parse_graveyard_exile_replacement(
 
     // CR 400.3 + CR 108.3: "opponent's graveyard" means cards owned by an opponent
     // (cards go to owner's graveyard, so ownership is the stable discriminant).
-    let valid_card = match scope {
-        Scope::Opponent => Some(TargetFilter::Typed(TypedFilter::default().properties(
-            vec![FilterProp::Owned {
-                controller: ControllerRef::Opponent,
-            }],
-        ))),
-        Scope::Any => None,
-    };
+    // CR 730.3e + CR 111.1: a token-excluding subject ("a card") adds `NonToken`
+    // so a dying token is NOT redirected (Leyline of the Void must let an
+    // opponent's token reach the graveyard so dies-triggers fire — Blood Artist
+    // class). Both axes are leaf `FilterProp`s on one `TypedFilter`.
+    let mut props = Vec::new();
+    if let Scope::Opponent = scope {
+        props.push(FilterProp::Owned {
+            controller: ControllerRef::Opponent,
+        });
+    }
+    if let TokenScope::NonToken = token_scope {
+        props.push(FilterProp::NonToken);
+    }
+    let valid_card =
+        (!props.is_empty()).then(|| TargetFilter::Typed(TypedFilter::default().properties(props)));
 
     // Build the ChangeZone redirect. `event_modifiers_for_ability` extracts only
     // the `destination` field from this top-level ChangeZone — other fields here
@@ -8530,7 +8581,9 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        assert!(def.valid_card.is_none()); // matches all objects
+        // CR 730.3e: "a card or token" names tokens explicitly — token-inclusive,
+        // so NO `NonToken` constraint and (with `Any` scope) no `valid_card` at all.
+        assert!(def.valid_card.is_none()); // matches all objects, tokens included
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::ChangeZone {
@@ -8550,14 +8603,21 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.destination_zone, Some(Zone::Graveyard));
-        // valid_card should scope to opponent-owned cards
+        // valid_card should scope to opponent-owned cards AND exclude tokens:
+        // CR 730.3e + CR 111.1 — "a card" (no "or token") is token-excluding, so a
+        // dying token reaches the graveyard (dies-triggers fire — Blood Artist
+        // class) instead of being wrongly exiled.
         match &def.valid_card {
             Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
                 assert!(properties.contains(&FilterProp::Owned {
                     controller: ControllerRef::Opponent,
                 }));
+                assert!(
+                    properties.contains(&FilterProp::NonToken),
+                    "'a card' subject must exclude tokens (CR 730.3e)"
+                );
             }
-            other => panic!("Expected Typed filter with Owned, got {other:?}"),
+            other => panic!("Expected Typed filter with Owned + NonToken, got {other:?}"),
         }
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
@@ -8567,6 +8627,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 730.3e + CR 111.1: a card-only subject targeting ANY graveyard ("a
+    /// card would be put into a graveyard") is token-EXCLUDING with no
+    /// controller scope — `valid_card` is `NonToken` alone. This is the live
+    /// Leyline-class bug fix: without the `NonToken` axis a dying token was
+    /// wrongly redirected (exiled), suppressing dies-triggers.
+    #[test]
+    fn card_only_any_graveyard_excludes_tokens() {
+        let def = parse_replacement_line(
+            "If a card would be put into a graveyard from anywhere, exile it instead.",
+            "Some Card-Scoped Hoser",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(TypedFilter { properties, .. })) => {
+                assert!(
+                    properties.contains(&FilterProp::NonToken),
+                    "'a card' subject must exclude tokens (CR 730.3e)"
+                );
+                assert!(
+                    !properties.contains(&FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    }),
+                    "any-graveyard scope must not add an owner constraint"
+                );
+            }
+            other => panic!("Expected Typed filter with NonToken, got {other:?}"),
+        }
     }
 
     #[test]
