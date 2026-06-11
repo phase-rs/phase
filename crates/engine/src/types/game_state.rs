@@ -941,19 +941,7 @@ pub struct PendingChangeZoneIteration {
     /// owner's control. Resolved from `Effect::ChangeZone.enters_under`
     /// at resolver entry, so the carrier never re-evaluates a `ControllerRef`
     /// across an interactive pause.
-    ///
-    /// Legacy on-disk shape (boolean `under_your_control`) deserializes via
-    /// `deserialize_enters_under_player_compat` (best-effort: legacy `true`
-    /// is mapped to `None` because PlayerId cannot be reconstructed without
-    /// ability context at deser time; a `tracing::warn` flags the audit
-    /// trail). Emission is always the modern shape. The compat path is
-    /// guarded by `_LEGACY_DESER_ETB_CONTROLLER_2026Q2` (removed past 0.1.53).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "under_your_control",
-        deserialize_with = "crate::types::ability::deserialize_enters_under_player_compat"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_under_player: Option<PlayerId>,
     pub enters_attacking: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1373,6 +1361,22 @@ pub enum ZoneDeliveryExileTracking {
 /// (instead of keeping two divergent delivery copies) lets the resume path
 /// route through the shared `deliver` machinery while its epilogue keeps
 /// exclusive ownership of the drain.
+/// CR 730.3e (second clause): the card-component routing override for a TOKEN
+/// merged permanent leaving the battlefield under a card-scoped (`NonToken`)
+/// `Moved` redirect. The token survivor and token components are put into
+/// `default_dest` (the pre-replacement appropriate zone); the card components
+/// are "moved by the replacement effect" to `card_dest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergedCardComponentRoute {
+    /// Where the token survivor + token components go — the pre-replacement
+    /// appropriate zone (a card-scoped redirect did not match the token
+    /// survivor, so its own move is unredirected).
+    pub default_dest: Zone,
+    /// Where the card components go — the destination the card-scoped redirect
+    /// resolved to in the single component-aware consult.
+    pub card_dest: Zone,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PostReplacementDrainOwner {
     /// The shared delivery tail (`apply_zone_delivery_tail`) drains the
@@ -2899,20 +2903,7 @@ pub enum WaitingFor {
         /// `EffectZoneChoice` round-trip. `Some(pid)` routes the chosen
         /// object(s) to `pid` on battlefield entry; `None` leaves them
         /// under their owner's control.
-        ///
-        /// Legacy on-disk shape (boolean `under_your_control`) deserializes
-        /// via `deserialize_enters_under_player_compat` (best-effort: legacy
-        /// `true` is mapped to `None` because PlayerId cannot be reconstructed
-        /// without ability context at deser time; a `tracing::warn` flags the
-        /// audit trail). Emission is always the modern shape. The compat path
-        /// is guarded by `_LEGACY_DESER_ETB_CONTROLLER_2026Q2` (removed past
-        /// 0.1.53).
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            alias = "under_your_control",
-            deserialize_with = "crate::types::ability::deserialize_enters_under_player_compat"
-        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_under_player: Option<PlayerId>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enters_attacking: bool,
@@ -5852,6 +5843,23 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devour_eligible_snapshot: Option<HashSet<ObjectId>>,
 
+    /// CR 730.3e (second clause): routing override for the card components of a
+    /// TOKEN merged permanent leaving the battlefield under a card-scoped
+    /// (`NonToken`) `Moved` redirect. "If the merged permanent is a token but
+    /// some of its components are cards, the merged permanent and its token
+    /// components are put into the appropriate [default] zone, and the
+    /// components that are cards are moved by the replacement effect."
+    ///
+    /// Set by `zone_pipeline::deliver_replaced_zone_change` from the single
+    /// component-aware consult immediately before the survivor's
+    /// `zones::move_to_zone`, read by `merge::split_merged_permanent_on_leave`
+    /// to route CARD components to `card_dest` while token components follow the
+    /// survivor's `default_dest`, then cleared. Purely synchronous (set →
+    /// `move_to_zone` split consumes → cleared in the same delivery), so it
+    /// never survives a pause; the serde guard is belt-and-suspenders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_card_component_route: Option<MergedCardComponentRoute>,
+
     /// CR 707.2 + CR 614.1a + CR 616.1: Pending `CopyTokenOf` source loop
     /// paused by an interactive token-creation replacement. Drained by
     /// `token_copy::drain_pending_copy_token_resolution` after the current
@@ -6693,6 +6701,7 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_change_zone_iteration: None,
             devour_eligible_snapshot: None,
+            merged_card_component_route: None,
             pending_copy_token_resolution: None,
             pending_coin_flip: None,
             pending_repeat_until: None,
@@ -7994,51 +8003,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // CR 110.2a: serde-compat coverage for the resolved-once runtime carriers
+    // CR 110.2a: serde coverage for the resolved-once runtime carriers
     // (`PendingChangeZoneIteration` and `WaitingFor::EffectZoneChoice`).
-    // Modern shape is `Option<PlayerId>` on `enters_under_player`; the
-    // legacy on-disk shape is the boolean `under_your_control`. Routed via
-    // `#[serde(alias)]` + `deserialize_enters_under_player_compat`. Legacy
-    // `true` collapses to `None` (+ tracing::warn) because PlayerId cannot
-    // be reconstructed at deser time without ability context. See
-    // `LEGACY_DESER_ETB_CONTROLLER_2026Q2`.
     // ---------------------------------------------------------------------
-
-    /// Minimal JSON payload for a `PendingChangeZoneIteration` carrying a
-    /// custom `enters_under_player` slot (passed through verbatim).
-    fn pending_change_zone_iteration_json(enters_under_slot: &str) -> String {
-        format!(
-            r#"{{
-                "remaining": [],
-                "source_id": 7,
-                "controller": 0,
-                "origin": null,
-                "destination": "Battlefield",
-                "enter_transformed": false,
-                "enter_tapped": false,
-                {enters_under_slot}
-                "enters_attacking": false,
-                "track_exiled_by_source": false,
-                "effect_kind": "ChangeZone"
-            }}"#
-        )
-    }
-
-    #[test]
-    fn pending_change_zone_iteration_legacy_bool_true_deserializes_to_none() {
-        let json = pending_change_zone_iteration_json(r#""under_your_control": true,"#);
-        let parsed: PendingChangeZoneIteration =
-            serde_json::from_str(&json).expect("legacy true should deserialize");
-        assert_eq!(parsed.enters_under_player, None);
-    }
-
-    #[test]
-    fn pending_change_zone_iteration_legacy_bool_false_deserializes_to_none() {
-        let json = pending_change_zone_iteration_json(r#""under_your_control": false,"#);
-        let parsed: PendingChangeZoneIteration =
-            serde_json::from_str(&json).expect("legacy false should deserialize");
-        assert_eq!(parsed.enters_under_player, None);
-    }
 
     #[test]
     fn pending_change_zone_iteration_modern_shape_roundtrips() {
@@ -8070,57 +8037,6 @@ mod tests {
         let parsed: PendingChangeZoneIteration = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed.enters_under_player, Some(PlayerId(1)));
         assert_eq!(parsed, original);
-    }
-
-    /// Minimal JSON payload for `WaitingFor::EffectZoneChoice` carrying a
-    /// custom `enters_under_player` slot (passed through verbatim).
-    /// `WaitingFor` uses `#[serde(tag = "type", content = "data")]`, so the
-    /// variant body is wrapped in `"data": { ... }`.
-    fn effect_zone_choice_json(enters_under_slot: &str) -> String {
-        format!(
-            r#"{{
-                "type": "EffectZoneChoice",
-                "data": {{
-                    "player": 0,
-                    "cards": [],
-                    "count": 1,
-                    "source_id": 10,
-                    "effect_kind": "ChangeZone",
-                    "zone": "Hand",
-                    "destination": "Battlefield",
-                    {enters_under_slot}
-                    "count_param": 0
-                }}
-            }}"#
-        )
-    }
-
-    #[test]
-    fn effect_zone_choice_legacy_bool_true_deserializes_to_none() {
-        let json = effect_zone_choice_json(r#""under_your_control": true,"#);
-        let parsed: WaitingFor =
-            serde_json::from_str(&json).expect("legacy true should deserialize");
-        match parsed {
-            WaitingFor::EffectZoneChoice {
-                enters_under_player,
-                ..
-            } => assert_eq!(enters_under_player, None),
-            other => panic!("expected EffectZoneChoice, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn effect_zone_choice_legacy_bool_false_deserializes_to_none() {
-        let json = effect_zone_choice_json(r#""under_your_control": false,"#);
-        let parsed: WaitingFor =
-            serde_json::from_str(&json).expect("legacy false should deserialize");
-        match parsed {
-            WaitingFor::EffectZoneChoice {
-                enters_under_player,
-                ..
-            } => assert_eq!(enters_under_player, None),
-            other => panic!("expected EffectZoneChoice, got {other:?}"),
-        }
     }
 
     #[test]

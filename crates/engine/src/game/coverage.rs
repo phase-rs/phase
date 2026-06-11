@@ -1305,6 +1305,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::DefendingPlayer => "defending player",
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
+        PlayerFilter::HasLostTheGame => "each player who has lost the game",
         PlayerFilter::OpponentDealtCombatDamage { .. } => {
             "each opponent who was dealt combat damage this turn"
         }
@@ -5549,6 +5550,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
+        PlayerFilter::HasLostTheGame => ("HasLostTheGame", Handled),
         PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
         PlayerFilter::OpponentAttacked { .. } => ("OpponentAttacked", Handled),
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),

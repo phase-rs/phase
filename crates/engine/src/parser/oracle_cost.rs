@@ -19,7 +19,7 @@ use super::oracle_util::parse_number;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, BeholdCostAction, CostReduction, CounterCostSelection, FilterProp, PlayerScope,
-    QuantityExpr, QuantityRef, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
+    QuantityExpr, QuantityRef, TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
     REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
@@ -574,6 +574,54 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 zone: Some(Zone::Library),
                 filter: None,
             };
+        }
+        // CR 107.3a + CR 118.8: "Exile X card(s) from your graveyard" — variable
+        // count announced during casting (Harvest Pyre). Ordered before the typed
+        // `parse_type_phrase` arm, which cannot represent a bare zone with no filter.
+        if let Some(((), rest_after_x)) =
+            nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
+        {
+            let after_lower = rest_after_x.to_lowercase();
+            if nom_on_lower(rest_after_x, &after_lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("card from your graveyard"),
+                        tag("cards from your graveyard"),
+                    )),
+                )
+                .parse(i)
+            })
+            .is_some()
+            {
+                return AbilityCost::Exile {
+                    count: EXILE_COST_X,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                };
+            }
+        }
+        // CR 118.8: "Exile N card(s) from your graveyard" without a type filter.
+        if let Some((count, after_count)) = parse_number(&rest_lower) {
+            let after_count_lower = after_count.trim_start().to_lowercase();
+            if nom_on_lower(after_count.trim_start(), &after_count_lower, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("card from your graveyard"),
+                        tag("cards from your graveyard"),
+                    )),
+                )
+                .parse(i)
+            })
+            .is_some()
+            {
+                return AbilityCost::Exile {
+                    count,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                };
+            }
         }
         let count = parse_number(&rest_lower).map(|(n, _)| n).unwrap_or(1);
         let filter_start = parse_number(rest)
@@ -1487,6 +1535,30 @@ mod tests {
     }
 
     #[test]
+    fn cost_exile_x_cards_from_graveyard() {
+        assert_eq!(
+            parse_oracle_cost("Exile X cards from your graveyard"),
+            AbilityCost::Exile {
+                count: EXILE_COST_X,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_exile_two_cards_from_graveyard() {
+        assert_eq!(
+            parse_oracle_cost("Exile two cards from your graveyard"),
+            AbilityCost::Exile {
+                count: 2,
+                zone: Some(Zone::Graveyard),
+                filter: None,
+            }
+        );
+    }
+
+    #[test]
     fn cost_tap_untapped_creature_you_control() {
         assert_eq!(
             parse_oracle_cost("Tap an untapped creature you control"),
@@ -2222,6 +2294,17 @@ mod tests {
             .is_none(),
             "unparseable condition must not produce an (unconditional) reduction"
         );
+    }
+
+    #[test]
+    fn cost_reduction_conditional_opponent_nonbasic_lands() {
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {4} less to activate if an opponent controls four or more nonbasic lands",
+        )
+        .expect("opponent nonbasic land gate should parse");
+        assert_eq!(reduction.amount_per, 4);
+        assert_eq!(reduction.count, QuantityExpr::Fixed { value: 1 });
+        assert!(reduction.condition.is_some());
     }
 
     /// Regression: the "for each" scaling form is unchanged and carries no

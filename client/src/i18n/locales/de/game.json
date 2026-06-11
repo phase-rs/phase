@@ -1484,7 +1484,9 @@
     "scopeMulti": "Wähle neue Ziele für den Zauberspruch",
     "subtitle": "{{scope}}. Aktuell: {{current}}",
     "confirm": "Bestätigen",
-    "badgeNewTarget": "Neues Ziel"
+    "badgeNewTarget": "Neues Ziel",
+    "slotLabel": "Ziel {{index}}: {{current}} → {{chosen}}",
+    "unselected": "unverändert"
   },
   "separatePiles": {
     "chooserName": "Spieler {{number}}",

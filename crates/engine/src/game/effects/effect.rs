@@ -126,8 +126,10 @@ fn register_transient_effect(
     // Short-circuit BEFORE the chosen-targets branch so chained Effect
     // sub-abilities with `target: SelfRef` don't inherit the parent's targets
     // via chain propagation in `effects::mod.rs::resolve_ability_chain`.
-    let resolved_filter = target_filter.or(static_def.affected.as_ref());
-    if matches!(resolved_filter, Some(TargetFilter::SelfRef)) {
+    if matches!(
+        target_filter.or(static_def.affected.as_ref()),
+        Some(TargetFilter::SelfRef)
+    ) {
         state.add_transient_continuous_effect(
             ability.source_id,
             ability.controller,
@@ -164,23 +166,32 @@ fn register_transient_effect(
         }
         return;
     }
+    // CR 608.2c + CR 611.2c: `GenericEffect.target` is the player-chosen
+    // targeting slot (e.g. `Typed(Creature)` for "target creature"), while
+    // `static_def.affected` is the runtime binding filter (often
+    // `ParentTarget` for "apply to the chosen object"). Registration must
+    // follow `affected` when it carries an inherited-target reference —
+    // otherwise `target_filter.or(affected)` prefers the broadcast
+    // targeting descriptor and fans the grant to every matching permanent
+    // (issue #2922: Mu Yanling +2).
+    let application_filter =
+        generic_effect_application_filter(target_filter, static_def.affected.as_ref());
     let static_affected_references_target_player = target_filter.is_none()
         && static_def
             .affected
             .as_ref()
             .is_some_and(crate::game::ability_utils::filter_references_target_player);
-    let inherited_object_target = target_filter.is_none()
-        && static_def
-            .affected
-            .as_ref()
-            .is_some_and(generic_effect_affected_uses_inherited_targets)
+    let inherited_object_target = static_def
+        .affected
+        .as_ref()
+        .is_some_and(generic_effect_affected_uses_inherited_targets)
         && !static_affected_references_target_player
         && ability
             .targets
             .iter()
             .any(|target| matches!(target, TargetRef::Object(_)));
     let direct_binding_uses_targets = target_filter.is_some()
-        || matches!(resolved_filter, Some(TargetFilter::ParentTarget))
+        || application_filter.is_some_and(generic_effect_affected_uses_inherited_targets)
         || inherited_object_target;
 
     // CR 611.1 + CR 611.2c + CR 115.1: Targeted effects — register one transient
@@ -204,7 +215,7 @@ fn register_transient_effect(
             && matches!(ability.targets.first(), Some(TargetRef::Player(_)));
         for bound_filter in transient_bound_filters(
             ability,
-            resolved_filter,
+            application_filter,
             skip_companion_player_target,
             inherited_object_target,
         ) {
@@ -237,7 +248,7 @@ fn register_transient_effect(
     };
 
     // Non-targeted: resolve the affected filter (SelfRef handled above).
-    match resolved_filter {
+    match application_filter {
         // CR 113.10 + CR 702.16j: Player-scoped affected filter — register the
         // transient effect bound to the ability's controller (a player) via
         // SpecificPlayer. Queried by player_has_protection_from_everything
@@ -366,6 +377,9 @@ fn register_transient_effect(
             }
         }
         Some(filter) => {
+            if generic_effect_affected_uses_inherited_targets(filter) {
+                return;
+            }
             let filter = crate::game::effects::resolved_object_filter(ability, filter);
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
             // Broadcast filter: find matching objects at resolution time and bind each.
@@ -423,6 +437,23 @@ fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool
         filter,
         TargetFilter::TriggeringSource | TargetFilter::ParentTarget | TargetFilter::CostPaidObject
     )
+}
+
+/// CR 608.2c: Choose the filter that governs *where modifications land* at
+/// resolution. The outer `GenericEffect.target` slot names what the player
+/// chose; `static_def.affected` names how that choice is bound onto objects.
+/// Inherited-reference `affected` values (`ParentTarget`, …) win over the
+/// targeting descriptor so a `target: Typed(Creature)` + `affected:
+/// ParentTarget` pair binds to the chosen creature, not every creature.
+fn generic_effect_application_filter<'a>(
+    target_filter: Option<&'a TargetFilter>,
+    static_affected: Option<&'a TargetFilter>,
+) -> Option<&'a TargetFilter> {
+    if static_affected.is_some_and(generic_effect_affected_uses_inherited_targets) {
+        static_affected
+    } else {
+        target_filter.or(static_affected)
+    }
 }
 
 fn snapshot_transient_modifications(
@@ -1220,6 +1251,275 @@ mod tests {
                 id: target_creature
             }
         );
+    }
+
+    /// Issue #2922: `target: Typed(Creature)` names the targeting slot while
+    /// `affected: ParentTarget` binds the grant to the chosen creature. The
+    /// application filter must follow `ParentTarget`, not broadcast through the
+    /// creature targeting descriptor.
+    #[test]
+    fn parent_target_affected_with_creature_target_slot_binds_chosen_creature_only() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mu Yanling, Sky Dancer".to_string(),
+            Zone::Battlefield,
+        );
+        let target_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Chosen Target".to_string(),
+            Zone::Battlefield,
+        );
+        let other_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [target_creature, other_creature] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.keywords.push(Keyword::Flying);
+        }
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![
+                ContinuousModification::AddPower { value: -2 },
+                ContinuousModification::AddToughness { value: 0 },
+                ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Flying,
+                },
+            ]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilNextTurnOf {
+                    player: crate::types::ability::PlayerScope::Controller,
+                }),
+                target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            },
+            vec![TargetRef::Object(target_creature)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        });
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "exactly one TCE for the chosen target"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject {
+                id: target_creature
+            }
+        );
+
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&target_creature).unwrap().power,
+            Some(1),
+            "chosen creature gets -2/-0"
+        );
+        assert!(
+            !state
+                .objects
+                .get(&target_creature)
+                .unwrap()
+                .keywords
+                .contains(&Keyword::Flying),
+            "chosen creature loses flying"
+        );
+        assert_eq!(
+            state.objects.get(&other_creature).unwrap().power,
+            Some(3),
+            "non-target creature must not be debuffed"
+        );
+        assert!(
+            state
+                .objects
+                .get(&other_creature)
+                .unwrap()
+                .keywords
+                .contains(&Keyword::Flying),
+            "non-target creature must keep flying"
+        );
+    }
+
+    /// Issue #2922 guard: when no target was chosen ("up to one" → zero),
+    /// `ParentTarget` must not fall through to a creature-broadcast arm.
+    #[test]
+    fn parent_target_affected_with_creature_target_slot_empty_targets_does_not_broadcast() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mu Yanling, Sky Dancer".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [creature_a, creature_b] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.power = Some(2);
+        }
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddPower { value: -2 }]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilNextTurnOf {
+                    player: crate::types::ability::PlayerScope::Controller,
+                }),
+                target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.optional_targeting = true;
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "zero targets must not register battlefield-wide debuffs"
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(state.objects.get(&creature_a).unwrap().power, Some(2));
+        assert_eq!(state.objects.get(&creature_b).unwrap().power, Some(2));
+    }
+
+    /// Issue #2922 end-to-end: parser output for Mu Yanling's +2 resolves onto
+    /// the single chosen creature only.
+    #[test]
+    fn mu_yanling_plus_two_pump_and_lose_flying_parses_and_resolves_to_target_only() {
+        use crate::game::layers::evaluate_layers;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::AbilityKind;
+
+        let mut state = GameState::new_two_player(42);
+        let yanling = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mu Yanling, Sky Dancer".to_string(),
+            Zone::Battlefield,
+        );
+        let target_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [target_creature, bystander] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(4);
+            obj.base_toughness = Some(4);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.keywords.push(Keyword::Flying);
+        }
+
+        let parsed = parse_effect_chain(
+            "up to one target creature gets -2/-0 and loses flying",
+            AbilityKind::Activated,
+        );
+        let ability = ResolvedAbility::new(
+            (*parsed.effect).clone(),
+            vec![TargetRef::Object(target_creature)],
+            yanling,
+            PlayerId(0),
+        )
+        .duration(parsed.duration.clone().unwrap_or(Duration::UntilEndOfTurn));
+
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } = &ability.effect
+        else {
+            panic!("expected single GenericEffect, got {:?}", ability.effect);
+        };
+        assert!(
+            target.is_some(),
+            "targeting slot must be present on the parsed GenericEffect"
+        );
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget),
+            "per-static affected must bind to ParentTarget"
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject {
+                id: target_creature
+            }
+        );
+
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects.get(&target_creature).unwrap().power, Some(2));
+        assert!(!state
+            .objects
+            .get(&target_creature)
+            .unwrap()
+            .keywords
+            .contains(&Keyword::Flying));
+        assert_eq!(state.objects.get(&bystander).unwrap().power, Some(4));
+        assert!(state
+            .objects
+            .get(&bystander)
+            .unwrap()
+            .keywords
+            .contains(&Keyword::Flying));
     }
 
     // CR 305.1 + CR 611.1 + CR 611.2c + CR 115.1: A `GenericEffect` whose target

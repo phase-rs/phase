@@ -6,6 +6,7 @@ mod blight_value;
 mod board_development;
 mod board_wipe_telegraph;
 mod card_advantage;
+mod chalice_avoidance;
 mod combat_tax;
 pub(crate) mod combo_line;
 mod condition_gated_activation;

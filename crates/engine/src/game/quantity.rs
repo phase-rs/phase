@@ -3509,6 +3509,12 @@ pub(crate) fn resolve_player_count(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> i32 {
+    // CR 104.3: eliminated players are excluded from the generic player loop
+    // below (`!p.is_eliminated`), so count them on a dedicated path.
+    if matches!(filter, PlayerFilter::HasLostTheGame) {
+        return usize_to_i32_saturating(state.players.iter().filter(|p| p.is_eliminated).count());
+    }
+
     if let PlayerFilter::OpponentAttacked {
         subject,
         scope: AttackScope::ThisCombat,
@@ -3548,6 +3554,8 @@ pub(crate) fn resolve_player_count(
                         PlayerFilter::OpponentGainedLife => {
                             p.id != controller && p.life_gained_this_turn > 0
                         }
+                        // Handled by the early return above; unreachable here.
+                        PlayerFilter::HasLostTheGame => false,
                         // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each
                         // opponent who was dealt combat damage this turn,
                         // optionally restricted to a matching source.
@@ -6750,6 +6758,25 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 104.3: `PlayerCount { HasLostTheGame }` counts eliminated players only.
+    #[test]
+    fn player_count_has_lost_the_game_counts_eliminated_players() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[1].is_eliminated = true;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::HasLostTheGame,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+
+        state.players[2].is_eliminated = true;
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
     }
 
     /// CR 119.2 + CR 700.1: `PlayerCount { OpponentLostLife }` counts only

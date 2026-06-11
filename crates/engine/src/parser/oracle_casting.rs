@@ -1128,6 +1128,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_additional_cost_exile_x_cards_from_graveyard() {
+        let lower = "as an additional cost to cast this spell, exile x cards from your graveyard.";
+        let raw = "As an additional cost to cast this spell, exile X cards from your graveyard.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Required(AbilityCost::Exile {
+                count: crate::types::ability::EXILE_COST_X,
+                zone: Some(crate::types::zones::Zone::Graveyard),
+                filter: None,
+            }))
+        );
+    }
+
+    #[test]
     fn parse_additional_cost_optional_sacrifice() {
         let lower = "as an additional cost to cast this spell, you may sacrifice an artifact.";
         let raw = "As an additional cost to cast this spell, you may sacrifice an artifact.";

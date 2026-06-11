@@ -1725,6 +1725,16 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         }
     };
 
+    let tail = remaining
+        .trim_start()
+        .trim_start_matches([',', ' '])
+        .trim_start();
+    let sub_ability = if tail.is_empty() {
+        None
+    } else {
+        Some(Box::new(parse_effect_chain(tail, AbilityKind::Spell)))
+    };
+
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
@@ -1735,7 +1745,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             },
         },
         duration,
-        sub_ability: None,
+        sub_ability,
         distribute: None,
         multi_target: None,
         condition: None,
@@ -17975,6 +17985,9 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         ),
         value(RetargetScope::Single, tag("change a target of ")),
         value(RetargetScope::All, tag("you may choose new targets for ")),
+        // Peeled form when `strip_optional_effect_prefix` correctly declined to
+        // strip a specialized "you may choose new targets" retarget clause.
+        value(RetargetScope::All, tag("choose new targets for ")),
     ))
     .parse(lower)
     .ok()?;
@@ -23691,6 +23704,206 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 707.10c: Copy + bare-`and` retarget in one imperative clause (no comma).
+    #[test]
+    fn effect_copy_spell_bare_and_retarget_same_clause() {
+        let def = parse_effect_chain(
+            "copy that spell and may choose new targets for the copy",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::CopySpell {
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "expected MayChooseNewTargets, got {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 707.10c: Krark, the Thumbless win branch — comma-joined retarget clause.
+    #[test]
+    fn effect_krark_win_branch_copy_absorbs_comma_and_retarget() {
+        let def = parse_effect_chain(
+            "copy that spell, and you may choose new targets for the copy.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::CopySpell {
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "expected MayChooseNewTargets, got {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 705: Coin-flip branch lowering path (same as `try_parse_coin_flip_branch` handler).
+    #[test]
+    fn effect_krark_coin_flip_branch_lower_path_preserves_retarget() {
+        let effect_text = "copy that spell, and you may choose new targets for the copy.";
+        let ir = parse_effect_chain_ir(
+            effect_text,
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let branch_def = lower_effect_chain_ir(&ir);
+        assert!(
+            matches!(
+                *branch_def.effect,
+                Effect::CopySpell {
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "coin-flip branch lower path: {:?}",
+            branch_def.effect
+        );
+    }
+
+    /// CR 705: Full Krark text must keep retarget on the win-flip chunk through splitting.
+    #[test]
+    fn effect_krark_win_flip_chunk_includes_retarget_clause() {
+        use super::sequence::split_clause_sequence;
+        use crate::parser::oracle_effect::imperative::try_parse_coin_flip_branch;
+
+        let text = "flip a coin. If you lose the flip, return that spell to its owner's hand. \
+            If you win the flip, copy that spell, and you may choose new targets for the copy.";
+        let chunks: Vec<_> = split_clause_sequence(text)
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert!(
+            chunks.len() == 3,
+            "expected three sentence chunks, got {chunks:?}"
+        );
+        let (is_win, effect_text) =
+            try_parse_coin_flip_branch(chunks[2].trim()).expect("win chunk should parse");
+        assert!(is_win);
+        let def = parse_effect_chain(effect_text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::CopySpell {
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "parsed win branch: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 705: Prior flip-coin chunks must not poison win-branch retarget absorption.
+    #[test]
+    fn effect_krark_win_branch_retarget_after_prior_flip_chunks() {
+        let mut ctx = ParseContext::default();
+        let _ = parse_effect_chain_ir("flip a coin", AbilityKind::Spell, &mut ctx);
+        let lose_ir = parse_effect_chain_ir(
+            "return that spell to its owner's hand",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        let _ = lower_effect_chain_ir(&lose_ir);
+        let win_ir = parse_effect_chain_ir(
+            "copy that spell, and you may choose new targets for the copy.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        let win = lower_effect_chain_ir(&win_ir);
+        assert!(
+            matches!(
+                *win.effect,
+                Effect::CopySpell {
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "win branch after prior chunks: {:?}",
+            win.effect
+        );
+    }
+
+    /// CR 705: Win-branch retarget must survive IR production (pre-consolidation).
+    #[test]
+    fn effect_krark_full_flip_coin_ir_embeds_win_retarget() {
+        let text = "flip a coin. If you lose the flip, return that spell to its owner's hand. \
+            If you win the flip, copy that spell, and you may choose new targets for the copy.";
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let win_branch = ir
+            .clauses
+            .iter()
+            .find_map(|c| {
+                if let Effect::FlipCoin {
+                    win_effect: Some(win),
+                    ..
+                } = &c.parsed.effect
+                {
+                    Some(win.as_ref())
+                } else {
+                    None
+                }
+            })
+            .expect("win-branch FlipCoin clause");
+        if let Effect::CopySpell { retarget, .. } = win_branch.effect.as_ref() {
+            assert_eq!(
+                *retarget,
+                CopyRetargetPermission::MayChooseNewTargets,
+                "IR-embedded win branch: {:?}",
+                win_branch.effect
+            );
+        } else {
+            panic!("expected CopySpell win branch, got {:?}", win_branch.effect);
+        }
+    }
+
+    /// CR 707.10c + CR 705: Full Krark flip-coin chain must preserve retarget on win branch.
+    #[test]
+    fn effect_krark_full_flip_coin_chain_preserves_win_retarget() {
+        let text = "flip a coin. If you lose the flip, return that spell to its owner's hand. \
+            If you win the flip, copy that spell, and you may choose new targets for the copy.";
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+        } = &*def.effect
+        else {
+            panic!("expected FlipCoin, got {:?}", def.effect);
+        };
+        let win = win_effect.as_ref().expect("win branch");
+        let lose = lose_effect.as_ref().expect("lose branch");
+        assert!(
+            matches!(win.effect.as_ref(), Effect::CopySpell { .. }),
+            "win branch should be CopySpell, got {:?}",
+            win.effect
+        );
+        assert!(
+            matches!(
+                lose.effect.as_ref(),
+                Effect::Bounce { .. }
+                    | Effect::ChangeZone {
+                        destination: Zone::Hand,
+                        ..
+                    }
+            ),
+            "lose branch should bounce, got {:?}",
+            lose.effect
+        );
+        if let Effect::CopySpell { retarget, .. } = win.effect.as_ref() {
+            assert_eq!(
+                *retarget,
+                CopyRetargetPermission::MayChooseNewTargets,
+                "comma-and retarget must patch win-branch CopySpell"
+            );
+        }
     }
 
     /// CR 707.10c (B3): Galvanic Iteration — the retarget clause must be
@@ -31814,6 +32027,33 @@ mod tests {
                     if properties.contains(&FilterProp::HasSingleTarget)
             )));
         }
+    }
+
+    #[test]
+    fn choose_new_targets_spell_or_ability_deflecting_swat() {
+        let e = parse_effect("you may choose new targets for target spell or ability");
+        let Effect::ChangeTargets {
+            target,
+            scope,
+            forced_to,
+        } = e
+        else {
+            panic!("Expected ChangeTargets, got {e:?}");
+        };
+        assert!(matches!(scope, RetargetScope::All));
+        assert!(forced_to.is_none());
+        let TargetFilter::Or { filters } = &target else {
+            panic!("Expected Or(StackSpell, StackAbility), got {target:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.contains(&TargetFilter::StackSpell));
+        assert!(matches!(
+            filters[1],
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        ));
     }
 
     #[test]

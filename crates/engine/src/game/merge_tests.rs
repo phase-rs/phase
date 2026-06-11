@@ -988,6 +988,180 @@ fn cr_730_3e_nontoken_merged_leave_carries_token_component_with_redirect() {
     );
 }
 
+/// CR 730.3e + CR 111.1: a CARD-SCOPED graveyard→exile `Moved` redirect,
+/// mirroring Leyline of the Void's "If a card would be put into [a] graveyard
+/// from anywhere, exile it instead" — `valid_card: NonToken`, so it does NOT
+/// match a token (a dying token reaches the graveyard; dies-triggers fire). This
+/// is the parser output (item 1) modeled directly for the clause-2 split tests.
+fn graveyard_exile_replacement_card_scoped() -> crate::types::ability::ReplacementDefinition {
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, FilterProp, TargetFilter, TypedFilter,
+    };
+    use crate::types::replacements::ReplacementEvent;
+    crate::types::ability::ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
+        .valid_card(TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::NonToken]),
+        ))
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        ))
+        .description(
+            "If a card would be put into a graveyard from anywhere, exile it instead.".to_string(),
+        )
+}
+
+/// CR 730.3e (SECOND clause): "If the merged permanent is a token but some of its
+/// components are cards, the merged permanent and its token components are put
+/// into the appropriate zone, and the components that are cards are moved by the
+/// replacement effect."
+///
+/// A TOKEN merged permanent (token topmost per CR 730.2d) with a CARD component
+/// leaves the battlefield under a CARD-SCOPED graveyard→exile redirect (Leyline
+/// class). The redirect does NOT match the token survivor, so the survivor + its
+/// token components take the graveyard default; the CARD component is moved by
+/// the redirect to EXILE. Drives the REAL pipeline so `replace_event` fires the
+/// single component-aware consult.
+#[test]
+fn cr_730_3e_token_survivor_card_component_split_routes_card_to_redirect() {
+    use crate::game::scenario::GameScenario;
+    use crate::game::zone_pipeline::{move_object, ZoneMoveRequest, ZoneMoveResult};
+
+    let mut sc = GameScenario::new();
+    let token_host = sc.add_creature(P0, "Token Host", 2, 2).id();
+    let card_rider = sc.add_creature(P0, "Card Rider", 4, 4).id();
+    let leyline = sc.add_creature(P0, "Leyline of the Void", 0, 0).id();
+    let mut state = sc.state;
+    // Survivor is the TOKEN host; the card rider is an absorbed CARD component.
+    state.objects.get_mut(&token_host).unwrap().is_token = true;
+    state
+        .objects
+        .get_mut(&leyline)
+        .unwrap()
+        .replacement_definitions
+        .push(graveyard_exile_replacement_card_scoped());
+
+    let mut events = Vec::new();
+    // CR 730.2d: merge the card rider UNDERNEATH so the token host stays topmost
+    // and the merged permanent is a TOKEN (the clause-2 premise).
+    merge_object_onto(
+        &mut state,
+        card_rider,
+        token_host,
+        MergeSide::Bottom,
+        &mut events,
+    );
+    state.battlefield.retain(|&id| id != card_rider);
+    assert!(
+        state.objects[&token_host].is_token,
+        "premise: the merged permanent must be a TOKEN for 730.3e clause 2"
+    );
+
+    let result = move_object(
+        &mut state,
+        ZoneMoveRequest::effect(token_host, Zone::Graveyard, token_host),
+        &mut events,
+    );
+    assert!(matches!(result, ZoneMoveResult::Done));
+
+    // CR 730.3e clause 2: the CARD component is moved by the card-scoped redirect.
+    assert_eq!(
+        state.objects[&card_rider].zone,
+        Zone::Exile,
+        "the CARD component of a TOKEN merged permanent is moved by the \
+         card-scoped redirect to exile (CR 730.3e clause 2)"
+    );
+    // The TOKEN survivor takes the pre-replacement graveyard default (the
+    // card-scoped redirect did not match it); it then ceases to exist via the
+    // CR 111.7 SBA, but lands in the graveyard zone first.
+    assert_eq!(
+        state.objects[&token_host].zone,
+        Zone::Graveyard,
+        "the token survivor takes the pre-replacement graveyard default, NOT the \
+         card-scoped redirect (which does not match a token)"
+    );
+    assert!(
+        !state
+            .players
+            .iter()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .graveyard
+            .contains(&card_rider),
+        "the card component must not land in the graveyard default"
+    );
+}
+
+/// CR 730.3e clause-1 SIBLING assertion (token-INCLUSIVE redirect): the same
+/// token-survivor + card-component pile under a TOKEN-INCLUSIVE redirect (Rest in
+/// Peace, `valid_card: None`) sends EVERYTHING to exile — the redirect matches the
+/// token survivor too, so no clause-2 split occurs. Pins that the clause-2 split
+/// fires ONLY for a card-scoped redirect.
+#[test]
+fn cr_730_3e_token_inclusive_redirect_exiles_all_components() {
+    use crate::game::scenario::GameScenario;
+    use crate::game::zone_pipeline::{move_object, ZoneMoveRequest, ZoneMoveResult};
+
+    let mut sc = GameScenario::new();
+    let token_host = sc.add_creature(P0, "Token Host", 2, 2).id();
+    let card_rider = sc.add_creature(P0, "Card Rider", 4, 4).id();
+    let rip = sc.add_creature(P0, "Rest in Peace", 0, 0).id();
+    let mut state = sc.state;
+    state.objects.get_mut(&token_host).unwrap().is_token = true;
+    state
+        .objects
+        .get_mut(&rip)
+        .unwrap()
+        .replacement_definitions
+        .push(graveyard_exile_replacement());
+
+    let mut events = Vec::new();
+    merge_object_onto(
+        &mut state,
+        card_rider,
+        token_host,
+        MergeSide::Bottom,
+        &mut events,
+    );
+    state.battlefield.retain(|&id| id != card_rider);
+    assert!(
+        state.objects[&token_host].is_token,
+        "premise: token survivor"
+    );
+
+    let result = move_object(
+        &mut state,
+        ZoneMoveRequest::effect(token_host, Zone::Graveyard, token_host),
+        &mut events,
+    );
+    assert!(matches!(result, ZoneMoveResult::Done));
+
+    // Token-inclusive redirect matches the token survivor too — everything exiled.
+    assert_eq!(
+        state.objects[&token_host].zone,
+        Zone::Exile,
+        "token survivor exiled"
+    );
+    assert_eq!(
+        state.objects[&card_rider].zone,
+        Zone::Exile,
+        "card component exiled"
+    );
+}
+
 /// CR 608.2b + CR 702.140b: end-to-end / resolution-time coverage of the wired
 /// runtime path (the actual bug #2014 path), not just the merge primitive. These
 /// drive `stack::resolve_top` and the full `handle_cast_spell` pipeline.
