@@ -1516,11 +1516,22 @@ pub(crate) fn parse_first_qualified_spell_filter(
     // Pre-spell type/keyword qualifier (strip a bare trailing "spell" noun so a
     // post-modifier-only subject collapses to no type filter).
     let pre_trimmed = pre.trim();
-    let pre_type = pre_trimmed
-        .strip_suffix(" spell")
-        .or_else(|| (pre_trimmed == "spell").then_some(""))
-        .unwrap_or(pre_trimmed)
-        .trim();
+    let pre_type = if all_consuming(tag::<_, _, OracleError<'_>>("spell"))
+        .parse(pre_trimmed)
+        .is_ok()
+    {
+        ""
+    } else if let Ok((_, stripped)) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" spell"),
+        tag(" spell"),
+    ))
+    .parse(pre_trimmed)
+    {
+        stripped
+    } else {
+        pre_trimmed
+    }
+    .trim();
     let type_filter = if pre_type.is_empty() {
         None
     } else {
