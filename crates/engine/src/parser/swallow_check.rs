@@ -3487,8 +3487,8 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
-    /// CR 701.43 + CR 117.3a + CR 609.4b: Xanathar's upkeep bundles look/play/
-    /// spend-as-any-color permissions inside the trigger execute tree.
+    /// CR 603.2b + CR 611.2 + CR 609.4b: Xanathar's upkeep trigger bundles
+    /// look/play/spend-as-any-color permissions inside the execute tree.
     #[test]
     fn optional_you_may_accepts_xanathar_upkeep_permissions() {
         let parsed = parse_named(
