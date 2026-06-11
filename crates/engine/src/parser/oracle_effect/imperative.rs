@@ -3046,9 +3046,16 @@ pub(super) fn parse_utility_imperative_ast(
                 } else {
                     parse_target(rest)
                 };
-                #[cfg(debug_assertions)]
-                assert_no_compound_remainder(_rem, text);
-                Some(UtilityImperativeAst::Copy { target })
+                let retarget = if super::sequence::recognize_copy_retarget_clause(_rem.trim()) {
+                    // CR 707.10c: "copy that spell and may choose new targets for the
+                    // copy" — same-chunk compound when bare-`and` splitting did not run.
+                    CopyRetargetPermission::MayChooseNewTargets
+                } else {
+                    #[cfg(debug_assertions)]
+                    assert_no_compound_remainder(_rem, text);
+                    CopyRetargetPermission::KeepOriginalTargets
+                };
+                Some(UtilityImperativeAst::Copy { target, retarget })
             }
             _ => unreachable!(),
         };
@@ -3355,11 +3362,9 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             let (target, _) = parse_target(rest);
             Effect::Regenerate { target }
         }
-        UtilityImperativeAst::Copy { target } => Effect::CopySpell {
+        UtilityImperativeAst::Copy { target, retarget } => Effect::CopySpell {
             target,
-            // Step 4 continuation absorption upgrades this to MayChooseNewTargets
-            // when "you may choose new targets for the copy" follows (CR 707.10c).
-            retarget: CopyRetargetPermission::KeepOriginalTargets,
+            retarget,
             copier: None,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },

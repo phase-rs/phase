@@ -23693,6 +23693,26 @@ mod tests {
         ));
     }
 
+    /// CR 707.10c: Copy + bare-`and` retarget in one imperative clause (no comma).
+    #[test]
+    fn effect_copy_spell_bare_and_retarget_same_clause() {
+        let def = parse_effect_chain(
+            "copy that spell and may choose new targets for the copy",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::CopySpell {
+                    retarget: CopyRetargetPermission::MayChooseNewTargets,
+                    ..
+                }
+            ),
+            "expected MayChooseNewTargets, got {:?}",
+            def.effect
+        );
+    }
+
     /// CR 707.10c: Krark, the Thumbless win branch — comma-joined retarget clause.
     #[test]
     fn effect_krark_win_branch_copy_absorbs_comma_and_retarget() {

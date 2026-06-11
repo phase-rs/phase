@@ -719,10 +719,13 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // "If you win the flip, copy that spell, and you may choose
                     // new targets for the copy" must reach coin-flip branch
                     // parsing as one chunk so the CopyMayRetarget continuation
-                    // absorbs the retarget grant.
-                    let inside_prefix_clause_body = starts_prefix_clause(
-                        before_lower.trim_end().trim_end_matches(',').trim_end(),
-                    );
+                    // absorbs the retarget grant. Only suppress when the ` and `
+                    // immediately follows a comma inside a prefix clause — bare
+                    // ` and ` without a comma (Chain cycle, many copies) must still
+                    // split so the retarget grant reaches followup absorption.
+                    let trimmed_before = before_lower.trim_end();
+                    let inside_prefix_comma_and_continuation = trimmed_before.ends_with(',')
+                        && starts_prefix_clause(trimmed_before.trim_end_matches(',').trim_end());
                     let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
@@ -737,7 +740,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || have_base_pt_continuation
                         || continuous_modifier_conjunct
                         || roll_die_modifier_continuation
-                        || inside_prefix_clause_body;
+                        || inside_prefix_comma_and_continuation;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -1829,7 +1832,7 @@ fn recognize_counter_destroy_rider(lower: &str) -> bool {
 ///   - singular/plural target ("a new target" / "new targets").
 ///   - determiner ("the copy/copies" — Fork/Twincast; "that copy" — the Chain
 ///     cycle's "a new target for that copy").
-fn recognize_copy_retarget_clause(lower: &str) -> bool {
+pub(super) fn recognize_copy_retarget_clause(lower: &str) -> bool {
     value(
         (),
         (
@@ -5034,6 +5037,20 @@ mod tests {
     }
 
     // --- CR 707.10c: copy-retarget clause recognition ---
+
+    /// CR 707.10c: Bare ` and ` (no comma) inside an `if` clause must still split.
+    #[test]
+    fn if_clause_bare_and_copy_retarget_splits() {
+        let text = "if you win the flip, copy that spell and may choose new targets for the copy";
+        let chunks = clause_texts(text);
+        assert_eq!(
+            chunks,
+            vec![
+                "if you win the flip, copy that spell",
+                "may choose new targets for the copy"
+            ]
+        );
+    }
 
     /// CR 705 + CR 707.10c: Krark, the Thumbless — coin-flip win branch must not
     /// bare-`and` split off the copy-retarget grant.
