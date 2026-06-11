@@ -25,6 +25,7 @@
 //! when the haunted creature leaves the battlefield (so the payoff can read it
 //! at that moment) and pruned when the haunting card leaves exile.
 
+use super::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -88,7 +89,16 @@ pub fn resolve(
         return Ok(());
     }
 
-    super::zones::move_to_zone(state, card, Zone::Exile, events);
+    // CR 702.55a + CR 614.6: the haunting card is exiled from its graveyard.
+    // Route through the zone-change pipeline so a board-wide `Moved` exile
+    // redirect is consulted (none target Exile today — behavior-preserving,
+    // future-proof). Attributed to the card itself; no counters and no
+    // Exile-targeting Moved redirect means this cannot pause.
+    let _ = zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::effect(card, Zone::Exile, card),
+        events,
+    );
     add_haunt_link(state, card, creature);
     Ok(())
 }

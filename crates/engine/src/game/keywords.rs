@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{AbilityCost, CastVariantPaid, NinjutsuVariant};
 use crate::types::events::GameEvent;
@@ -519,7 +519,18 @@ pub fn activate_ninjutsu(
     .map_err(|e| e.to_string())?;
 
     // 1. Return creature to owner's hand
-    zones::move_to_zone(state, creature_to_return, Zone::Hand, events);
+    // CR 702.49a + CR 614.6: ninjutsu returns the unblocked attacker to its
+    // owner's hand. Route through the zone-change pipeline so a board-wide
+    // `Moved` "would be put into a hand → ... instead" redirect is consulted
+    // (none target Hand in the current pool — behavior-preserving, future-proof
+    // per the single-entry principle). Attributed to the ninja entering the
+    // battlefield. Hand destination: no counters, no Hand-targeting Moved
+    // redirect, so this cannot pause — discard the always-`Done` result.
+    let _ = zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::effect(creature_to_return, Zone::Hand, ninjutsu_obj_id),
+        events,
+    );
 
     // Remove the returned creature from combat state if it was an attacker
     if let Some(combat) = state.combat.as_mut() {

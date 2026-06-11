@@ -1,4 +1,4 @@
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
@@ -58,7 +58,18 @@ pub fn resolve(
             break;
         };
 
-        zones::move_to_zone(state, card_id, Zone::Exile, events);
+        // CR 702.60a + CR 614.6: reveal the top card by moving it to exile.
+        // Route through the zone-change pipeline so a board-wide `Moved` exile
+        // redirect is consulted — the raw mover never proposed the inner
+        // ZoneChange, so the redirect-aware check below (which expects the card
+        // may have landed elsewhere) had no Moved redirect to react to. No
+        // Exile-targeting Moved redirect exists in the current pool, so this is
+        // behavior-preserving today; no counters means it cannot pause.
+        let _ = zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::effect(card_id, Zone::Exile, ability.source_id),
+            events,
+        );
 
         // CR 614.1: a replacement may have redirected the card elsewhere; only
         // count it as revealed if it actually landed in exile.

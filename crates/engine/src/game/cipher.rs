@@ -101,7 +101,18 @@ pub fn finish_encode(
     creature_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) {
-    super::zones::move_to_zone(state, card_id, Zone::Exile, events);
+    // CR 702.99a + CR 614.6: the cipher card exiles itself on resolution. Route
+    // through the zone-change pipeline so a board-wide `Moved` "would be exiled →
+    // ... instead" redirect is consulted (none target Exile in the current pool —
+    // behavior-preserving today, future-proof per the single-entry principle).
+    // The card moves itself, attributed to its own object id. Exile/hand
+    // destinations carry no enters-with counters and no Exile-targeting Moved
+    // redirect exists, so this cannot pause — discard the always-`Done` result.
+    let _ = zone_pipeline::move_object(
+        state,
+        ZoneMoveRequest::effect(card_id, Zone::Exile, card_id),
+        events,
+    );
     add_encode_link(state, card_id, creature_id);
 }
 

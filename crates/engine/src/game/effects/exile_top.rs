@@ -1,5 +1,5 @@
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -57,7 +57,17 @@ pub fn resolve(
     // `change_zone::resolve`, which likewise delegates publishing to the
     // chain processor.
     for object_id in top_cards {
-        zones::move_to_zone(state, object_id, Zone::Exile, events);
+        // CR 614.6: exile the top card via the zone-change pipeline so a
+        // board-wide `Moved` exile redirect is consulted (none target Exile today
+        // — behavior-preserving, future-proof). Exile-link tracking and the
+        // face-down mark stay in this caller's per-card epilogue below
+        // (`push_tracked_by_source` dedupes), so the move stays behavior-identical.
+        // No counters / no Exile-targeting Moved redirect means it cannot pause.
+        let _ = zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id),
+            events,
+        );
         if track_exiled_by_source {
             crate::game::exile_links::push_tracked_by_source(state, object_id, ability.source_id);
         }
