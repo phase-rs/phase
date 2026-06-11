@@ -1319,7 +1319,18 @@ fn compute_merged_card_component_route(
         ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) => to,
         // Prevented / NeedsChoice / non-ZoneChange: no usable redirect for the
         // card partition — fall back to the survivor's destination (no split).
-        _ => return None,
+        // strict-failure: a NeedsChoice here means the card partition matched an
+        // Optional-mode def or a CR 616.1 ordering choice between multiple Moved
+        // candidates; the fallback skips that genuine choice (rules-wrong for
+        // the rare multi-candidate case) as the safe floor versus pausing
+        // mid-delivery. `pipeline_loop` parks `pending_replacement` BEFORE
+        // returning NeedsChoice — clear it, or the stranded record silently
+        // truncates every SBA pass (sba.rs gates on `pending_replacement`) for
+        // the rest of the game and serializes as garbage into saves.
+        _ => {
+            state.pending_replacement = None;
+            return None;
+        }
     };
 
     (card_dest != survivor_dest).then_some(MergedCardComponentRoute {
@@ -2411,6 +2422,106 @@ mod w3_library_placement_tests {
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
             vec![placed, a, b],
             "after two declined parks the placement must still honor LibraryPosition::Top"
+        );
+    }
+}
+
+#[cfg(test)]
+mod parsed_leyline_card_scoping_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::game::triggers::process_triggers;
+    use crate::parser::oracle_replacement::parse_replacement_line;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+        TriggerMode,
+    };
+
+    /// End-to-end pin of the live Leyline of the Void bug (zone pipeline
+    /// tranche 3, parser card-scoping): the def installed here is the REAL
+    /// PARSED output of Leyline's oracle line — not a hand-built mirror — so
+    /// any parser-shape drift that breaks the matcher path turns this red.
+    ///
+    /// CR 111.1: tokens are not cards, so Leyline's "a card" subject must NOT
+    /// match a dying token: the opponent's token reaches the GRAVEYARD (its
+    /// dies-trigger fires per CR 603.6c look-back, then CR 111.7 ceases it),
+    /// while an opponent's dying nontoken CARD is exiled instead (CR 614.6).
+    #[test]
+    fn parsed_leyline_token_dies_to_graveyard_card_is_exiled() {
+        let mut sc = GameScenario::new();
+        let leyline = sc.add_creature(P0, "Leyline of the Void", 0, 0).id();
+        let token = sc.add_creature(P1, "Zombie Token", 2, 2).id();
+        let card_creature = sc.add_creature(P1, "Zombie", 2, 2).id();
+        let mut state = sc.state;
+        state.objects.get_mut(&token).unwrap().is_token = true;
+
+        let def = parse_replacement_line(
+            "If a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+            "Leyline of the Void",
+        )
+        .expect("Leyline of the Void's replacement line must parse");
+        state
+            .objects
+            .get_mut(&leyline)
+            .unwrap()
+            .replacement_definitions
+            .push(def);
+
+        // Blood Artist-class observable: a self-scoped dies trigger on the token.
+        state
+            .objects
+            .get_mut(&token)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard)
+                    .trigger_zones(vec![Zone::Battlefield])
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                    ))
+                    .description("When this creature dies, you gain 1 life.".to_string()),
+            );
+
+        // The opponent's TOKEN dies through the real pipeline.
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(token, Zone::Graveyard, token),
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&token].zone,
+            Zone::Graveyard,
+            "CR 111.1: 'a card' excludes tokens — the dying token must reach the \
+             graveyard, not be exiled (the pre-tranche-3 live bug)"
+        );
+        process_triggers(&mut state, &events);
+        assert!(
+            !state.stack.is_empty(),
+            "the token's dies-trigger must fire (CR 603.6c look-back) — exiling \
+             it instead suppressed Blood Artist-class triggers"
+        );
+
+        // Contrast: the opponent's nontoken CARD is exiled by the same def.
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card_creature, Zone::Graveyard, card_creature),
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&card_creature].zone,
+            Zone::Exile,
+            "CR 614.6: the opponent's dying nontoken card is exiled instead"
         );
     }
 }
