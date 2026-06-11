@@ -9,10 +9,10 @@
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, SharedQuality, StaticDefinition, TargetFilter, TriggerDefinition,
-    TypedFilter,
+    EffectScope, FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -478,9 +478,7 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
         | Effect::AddPendingETBCounters { count: amount, .. } => {
             rewrite_bound_x_in_quantity_expr(amount, binding)
         }
-        Effect::AddCounter { count, .. } | Effect::PutCounter { count, .. } => {
-            rewrite_bound_x_in_quantity_expr(count, binding)
-        }
+        Effect::PutCounter { count, .. } => rewrite_bound_x_in_quantity_expr(count, binding),
         Effect::Pump {
             power, toughness, ..
         }
@@ -601,8 +599,7 @@ fn rewrite_any_target_filter_in_effect(effect: &mut Effect, typed: &TargetFilter
             *target = Some(typed.clone());
         }
         // Effects with a direct `target: TargetFilter` field.
-        Effect::AddCounter { ref mut target, .. }
-        | Effect::AddTargetReplacement { ref mut target, .. }
+        Effect::AddTargetReplacement { ref mut target, .. }
         | Effect::AdditionalPhase { ref mut target, .. }
         | Effect::Animate { ref mut target, .. }
         | Effect::Attach { ref mut target, .. }
@@ -672,13 +669,10 @@ fn rewrite_any_target_filter_in_effect(effect: &mut Effect, typed: &TargetFilter
         | Effect::Surveil { ref mut target, .. }
         | Effect::Suspect { ref mut target, .. }
         | Effect::SwitchPT { ref mut target, .. }
-        | Effect::Tap { ref mut target, .. }
-        | Effect::TapAll { ref mut target, .. }
+        | Effect::SetTapState { ref mut target, .. }
         | Effect::TargetOnly { ref mut target, .. }
         | Effect::Transform { ref mut target, .. }
         | Effect::UnattachAll { ref mut target, .. }
-        | Effect::Untap { ref mut target, .. }
-        | Effect::UntapAll { ref mut target, .. }
             if *target == TargetFilter::Any =>
         {
             *target = typed.clone();
@@ -2704,21 +2698,29 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             cant_regenerate: true,
         },
-        Action::TapPermanent(p) => Effect::Tap {
+        Action::TapPermanent(p) => Effect::SetTapState {
             target: convert_permanent(p)?,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
-        Action::UntapPermanent(p) => Effect::Untap {
+        Action::UntapPermanent(p) => Effect::SetTapState {
             target: convert_permanent(p)?,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         },
 
-        // CR 701.26: Mass tap — "Tap each <filter>" (Sleep, Cryptic Command-class).
-        // Mirrors `TapPermanent`; multi-match `TargetFilter` selects the set.
-        Action::TapEachPermanent(filter) => Effect::Tap {
+        // CR 701.26a: Mass tap — "Tap each <filter>" (Sleep, Cryptic Command-class).
+        // Preserves the legacy single-scope `Effect::Tap` with a multi-match filter.
+        Action::TapEachPermanent(filter) => Effect::SetTapState {
             target: convert_permanents(filter)?,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
-        // CR 701.26: Mass untap — "Untap each <filter>" (Wake the Dead, Awakening-class).
-        Action::UntapEachPermanent(filter) => Effect::Untap {
+        // CR 701.26b: Mass untap — "Untap each <filter>" (Wake the Dead, Awakening-class).
+        Action::UntapEachPermanent(filter) => Effect::SetTapState {
             target: convert_permanents(filter)?,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         },
         Action::DiscardACard => Effect::DiscardCard {
             count: 1,
@@ -2784,12 +2786,12 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         }
 
         // CR 122.1: Counters.
-        Action::PutACounterOfTypeOnPermanent(ct, target) => Effect::AddCounter {
+        Action::PutACounterOfTypeOnPermanent(ct, target) => Effect::PutCounter {
             counter_type: counter_type_name(ct),
             count: QuantityExpr::Fixed { value: 1 },
             target: convert_permanent(target)?,
         },
-        Action::PutACounterOfTypeOnAPermanent(ct, filter) => Effect::AddCounter {
+        Action::PutACounterOfTypeOnAPermanent(ct, filter) => Effect::PutCounter {
             counter_type: counter_type_name(ct),
             count: QuantityExpr::Fixed { value: 1 },
             target: convert_permanents(filter)?,
@@ -2797,7 +2799,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // CR 122.1: Counters — N counters of a specific type on a single
         // target permanent. Mirrors `PutACounterOfTypeOnPermanent` above
         // with a dynamic count derived from `quantity::convert(n)`.
-        Action::PutNumberCountersOfTypeOnPermanent(n, ct, target) => Effect::AddCounter {
+        Action::PutNumberCountersOfTypeOnPermanent(n, ct, target) => Effect::PutCounter {
             counter_type: counter_type_name(ct),
             count: quantity::convert(n)?,
             target: convert_permanent(target)?,
@@ -3253,7 +3255,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // one matching permanent); the each-variant uses the same filter
         // semantics — the multi-match `TargetFilter` from
         // `convert_permanents` selects the full set at resolution time.
-        Action::PutACounterOfTypeOnEachPermanent(ct, filter) => Effect::AddCounter {
+        Action::PutACounterOfTypeOnEachPermanent(ct, filter) => Effect::PutCounter {
             counter_type: counter_type_name(ct),
             count: QuantityExpr::Fixed { value: 1 },
             target: convert_permanents(filter)?,
@@ -3266,7 +3268,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // X-quantities (e.g. Oracle's Gift: "put X +1/+1 counters on each
         // Fractal you control") become `QuantityRef::Variable { "X" }` and
         // resolve from the spell's paid X at resolution.
-        Action::PutNumberCountersOfTypeOnEachPermanent(g, ct, filter) => Effect::AddCounter {
+        Action::PutNumberCountersOfTypeOnEachPermanent(g, ct, filter) => Effect::PutCounter {
             counter_type: counter_type_name(ct),
             count: quantity::convert(g)?,
             target: convert_permanents(filter)?,
@@ -6721,8 +6723,8 @@ mod tests {
         ))
         .unwrap();
 
-        let Effect::AddCounter { count, .. } = effect else {
-            panic!("expected AddCounter, got {effect:?}");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter, got {effect:?}");
         };
         assert!(matches!(
             count,

@@ -236,7 +236,7 @@ fn effect_has_p1p1_counter(effect: &engine::types::ability::Effect) -> bool {
     use engine::types::ability::Effect;
     matches!(
         effect,
-        Effect::AddCounter { counter_type, .. } | Effect::PutCounter { counter_type, .. }
+        Effect::PutCounter { counter_type, .. }
             if counter_type == &CounterType::Plus1Plus1
     )
 }
@@ -291,7 +291,7 @@ mod tests {
     fn make_generator_ability() -> AbilityDefinition {
         AbilityDefinition::new(
             AbilityKind::Activated,
-            Effect::AddCounter {
+            Effect::PutCounter {
                 counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,

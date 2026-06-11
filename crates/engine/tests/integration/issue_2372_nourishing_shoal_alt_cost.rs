@@ -11,7 +11,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::CardId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -76,6 +76,8 @@ fn nourishing_shoal_cast_surfaces_pitch_alternative_choice() {
             object_id: shoal,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast Nourishing Shoal");
 
@@ -103,6 +105,8 @@ fn nourishing_shoal_pitch_exile_binds_x_and_gains_life() {
             object_id: shoal,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast");
 

@@ -17,13 +17,14 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    CastTimingPermission, Duration, Effect, KickerVariant, LibraryPosition, ResolvedAbility,
+    StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ExileLink, ExileLinkKind, GameState, PendingCounterPostAction, WaitingFor,
-    ZoneDeliveryExileTracking,
+    BatchCompletion, ExileLink, ExileLinkKind, GameState, PendingBatchDeliveries,
+    PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -75,6 +76,44 @@ pub enum ZoneChangeCause {
     MergedComponentRouting,
     /// Debug/admin tooling (engine_debug.rs). Loud by construction.
     DebugCommand,
+}
+
+impl ZoneChangeCause {
+    /// CR-exempt causes skip the `replace_event` consult (the "would"-semantics
+    /// layer) and go straight to delivery. Each is a game *procedure* or a
+    /// non-replaceable rules action, not a discrete event that effects watch:
+    ///
+    /// - `CastingToStack` (CR 601.2a): part of the casting process; no Moved
+    ///   replacement targets stack entry.
+    /// - `PregameProcedure` (CR 103.5): pregame draws / mulligan shuffles and
+    ///   bottom-of-library returns happen before any effect exists to replace.
+    /// - `PlayerLeftGame` (CR 800.4a): "This is not a state-based action"; all
+    ///   objects the player owns leave the game as a single rules action.
+    /// - `MergedComponentRouting` (CR 730.3): the merged-permanent move already
+    ///   consulted replacements; the component split is internal routing.
+    /// - `DebugCommand`: operator intent is "force the state".
+    ///
+    /// The unconditional primitive guards (CR 111.8 token, CR 614.1d ETB block,
+    /// CR 400.7 cleanup) still run in `zones.rs` delivery for every cause — the
+    /// exemption is only of the replacement consult, never of the rules that
+    /// must hold for any move (PLAN §2 / §3).
+    // Exhaustive match, no wildcard: adding a `ZoneChangeCause` variant must
+    // force an explicit consult/exempt decision here (with its CR citation
+    // above), not silently inherit a default.
+    fn is_exempt(&self) -> bool {
+        match self {
+            ZoneChangeCause::Effect { .. }
+            | ZoneChangeCause::Cost { .. }
+            | ZoneChangeCause::SpellResolutionDefault
+            | ZoneChangeCause::StateBasedAction
+            | ZoneChangeCause::CommanderRuleReturn => false,
+            ZoneChangeCause::CastingToStack { .. }
+            | ZoneChangeCause::PregameProcedure
+            | ZoneChangeCause::PlayerLeftGame
+            | ZoneChangeCause::MergedComponentRouting
+            | ZoneChangeCause::DebugCommand => true,
+        }
+    }
 }
 
 /// Destination modifiers — the union of what the pipeline copies need to seed
@@ -160,6 +199,75 @@ impl ZoneMoveRequest {
         }
     }
 
+    /// CR 608.2n / CR 608.3e: post-resolution default move of the spell object
+    /// itself (instant/sorcery → graveyard, fizzled/countered-on-resolution
+    /// spell, prevented permanent spell → graveyard). The spell moves itself,
+    /// so there is no external source — `move_object` anchors attribution on the
+    /// object for the (inert, non-battlefield) entry bookkeeping.
+    pub fn spell_resolution_default(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::SpellResolutionDefault,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 601.2a: casting moves the card from where it is to the stack — part
+    /// of the casting process, exempt from the replacement consult.
+    pub fn casting_to_stack(object_id: ObjectId, source: ObjectId) -> Self {
+        Self {
+            object_id,
+            to: Zone::Stack,
+            cause: ZoneChangeCause::CastingToStack { source },
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 103.5: pregame procedure (opening-draw / mulligan shuffle, bottom-of-
+    /// library returns, opening-hand actions) — exempt from the replacement
+    /// consult. `placement` is honored so mulligan bottoming reuses the
+    /// library-placement arm.
+    pub fn pregame(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::PregameProcedure,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// CR 800.4a: a player left the game; objects they own leave the game (are
+    /// exiled). "This is not a state-based action" — exempt from the consult.
+    pub fn player_left_game(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::PlayerLeftGame,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
+    /// Debug/admin tooling forcing a zone change — exempt from the consult.
+    pub fn debug(object_id: ObjectId, to: Zone) -> Self {
+        Self {
+            object_id,
+            to,
+            cause: ZoneChangeCause::DebugCommand,
+            mods: EntryMods::default(),
+            placement: None,
+            exile_links: ExileLinkSpec::default(),
+        }
+    }
+
     /// CR 614.1: enters tapped.
     pub fn tapped(mut self) -> Self {
         self.mods.enter_tapped = EtbTapState::Tapped;
@@ -187,6 +295,15 @@ impl ZoneMoveRequest {
     /// CR 303.4f: pre-resolved aura host.
     pub fn attached_to(mut self, target: AttachTarget) -> Self {
         self.mods.attach_to = Some(target);
+        self
+    }
+
+    /// CR 708.2a + CR 708.3: enters the battlefield face down showing the given
+    /// profile (morph / manifest vanilla 2/2). The delivery tail snapshots the
+    /// real face into `back_face` and applies the profile before the entry, so
+    /// callers no longer override characteristics manually after the move.
+    pub fn face_down(mut self, profile: FaceDownProfile) -> Self {
+        self.mods.face_down_profile = Some(profile);
         self
     }
 
@@ -268,12 +385,43 @@ impl ApprovedZoneChange {
     }
 }
 
-/// Context threaded into `deliver`: the attributed source and exile-link spec.
-/// Consumed by the Phase B bucket-A `deliver(approved, ctx)` migrations.
-#[allow(dead_code)]
+/// Context threaded into `deliver`: the attributed source, exile-link spec,
+/// and the continuation-drain owner. Consumed by the bucket-A
+/// `deliver(approved, ctx)` migrations.
+///
+/// PLAN Open Question #3 (RESOLVED): play/cast provenance is NOT a ctx knob.
+/// `played_from_zone` (land-play provenance, CR 305.1) is established by the
+/// land-play action and cleared only on battlefield EXIT
+/// (`reset_for_battlefield_exit`) — nothing clears it during a battlefield
+/// ENTRY, so the former `ctx.played_from_zone` re-stamp preserved a value that
+/// was never destroyed (verified against `reset_for_battlefield_entry` and the
+/// field's writer set; the capture/restore was a defensive no-op since PR
+/// #1119 introduced it). The cast-link family that IS cleared on entry
+/// (CR 400.7d: kicker / additional-cost / convoke / cast-timing memory) is
+/// preserved structurally by the delivery itself — see [`CastLinkSnapshot`].
 pub(crate) struct DeliveryCtx {
     pub source_id: Option<ObjectId>,
     pub exile_links: ExileLinkSpec,
+    /// CR 614.12a: who drains `post_replacement_continuation` after this
+    /// delivery (see [`PostReplacementDrainOwner`]).
+    pub drain: PostReplacementDrainOwner,
+}
+
+/// CR 400.7d + CR 608.3: the cast-link family — information about the spell
+/// that became the permanent, which an ability of that permanent may
+/// reference ("if it was kicked", convoke history, cast-timing permission).
+/// `reset_for_battlefield_entry` (CR 400.7) clears these on entry; the
+/// delivery snapshots them from the pre-move STACK object and restores them
+/// right after the move, for `Stack → Battlefield` deliveries only.
+/// Establishment is exclusive to the cast pathway (`finalize_cast_to_stack`),
+/// so the gate makes effect-driven puts (Reanimate class) structurally unable
+/// to resurrect stale cast provenance.
+struct CastLinkSnapshot {
+    cast_from_zone: Option<Zone>,
+    cast_timing_permission: Option<CastTimingPermission>,
+    kickers_paid: Vec<KickerVariant>,
+    additional_cost_payment_count: u32,
+    convoked_creatures: Vec<ObjectId>,
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -302,8 +450,7 @@ pub(crate) enum ZoneDeliveryResult {
 ///
 /// `pub(crate)` while `ZoneMoveResult` is `pub(crate)`: every caller lives in the
 /// engine crate. (PLAN §1.3 writes `pub fn`; widening to `pub` only matters once
-/// a cross-crate consumer exists, which it does not in Phase A.)
-#[allow(dead_code)]
+/// a cross-crate consumer exists, which it does not yet.)
 pub(crate) fn move_object(
     state: &mut GameState,
     req: ZoneMoveRequest,
@@ -315,13 +462,56 @@ pub(crate) fn move_object(
         return ZoneMoveResult::Done;
     };
 
-    // Phase A: `placement` integration (folding the raw
-    // `move_to_library_position` / `move_to_library_at_index` siblings in) is
-    // Phase D. Until then a `Some` placement preserves today's behavior of those
-    // siblings — a direct, replacement-bypassing library reposition — so there
-    // is zero behavior change for the (currently nonexistent) Phase A callers
-    // that would pass one. Cross-zone replacement-respecting library placement
-    // is wired when the sibling call sites migrate.
+    // CR 111.8 + CR 603.2g (PLAN §8 Risk #11): Hoist the cheap object-level guards that
+    // `zones::move_to_zone` enforces unconditionally to BEFORE the replacement
+    // consult. The pipeline now runs `replace_event` ahead of the primitive's
+    // delivery-time guards, so a replacement could otherwise be "consumed"
+    // (`last_effect_count`, CR 616.1 choices) on a move the primitive then
+    // rejects as a no-op. These two are pure object-level reads with no game
+    // effect, so testing them up front cannot change observable behavior — it
+    // only avoids spending a one-shot replacement on a move that never happens.
+    {
+        let obj = state
+            .objects
+            .get(&req.object_id)
+            .expect("object exists (zone read above)");
+        // CR 111.8: A token that has left the battlefield can't change zones; it
+        // remains in place and ceases to exist at the next SBA (CR 111.7).
+        if zones::token_is_outside_battlefield_and_stack(obj) {
+            return ZoneMoveResult::Done;
+        }
+        // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
+        // permanent onto the battlefield — no entry event occurs, so no
+        // would-style replacement should be consulted (and the primitive would
+        // reject it as a no-op regardless), mirroring the `zones::move_to_zone`
+        // no-op guard.
+        if from_zone == Zone::Battlefield && req.to == Zone::Battlefield {
+            return ZoneMoveResult::Done;
+        }
+    }
+
+    // Library-placement arm. A `Some(placement)` request delivers directly to the
+    // requested library index via the `move_to_library_at_index` primitive,
+    // skipping the replacement consult. Phase D wires the exempt pregame/debug
+    // library-bottom and debug top/Nth callers through here; the mulligan and
+    // debug call sites pass a placement and rely on this direct delivery.
+    //
+    // DEFERRED (W3 / PLAN §3.5): running the consult on a library placement —
+    // "the consult should still run for future-proofing per the single-entry
+    // principle". It is a guaranteed no-op today: no `Moved` replacement in the
+    // card pool targets `destination_zone(Library)` (verified: 25 Battlefield /
+    // 17 Graveyard / 2 Exile destinations, zero Library; reproduce with
+    //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
+    // — re-run before lifting this deferral). Completing it correctly
+    // also requires gating the CR 701.24a delivery-tail auto-shuffle on
+    // placement-absence across the shared `deliver` / `deliver_replaced_zone_change`
+    // signatures (a library *placement* must NOT shuffle, but a plain
+    // library-destination ZoneChange MUST) — a cross-cutting change with a
+    // silent-randomization landmine for zero current correctness gain. The raw
+    // `move_to_library_position` / `_at_index` sibling production callers
+    // (put_on_top, cascade, discover, reveal_until, drawn_this_turn_choice,
+    // engine_resolution_choices) stay on the raw movers until that completion;
+    // they are library repositions with no Moved-redirect class to consult.
     if let Some(position) = &req.placement {
         if req.to == Zone::Library {
             let index = match position {
@@ -343,6 +533,69 @@ pub(crate) fn move_object(
         ZoneDeliveryExileTracking::TrackBySource
     );
 
+    // PLAN §3: exempt causes skip the `replace_event` consult and go straight to
+    // delivery. The proposed event is sealed directly (no matcher pass) and runs
+    // the same delivery tail as a post-replacement event, so the unconditional
+    // primitive guards (CR 111.8 / 614.1d / 400.7) still apply. Exempt callers
+    // carry default `EntryMods` today; seed any they DO carry so the contract is
+    // uniform with the consulting path. The intrinsic enters-with-counters
+    // seeding (CR 614.1c) is part of the "would" layer and is deliberately NOT
+    // applied — matching the raw `move_to_zone` behavior these callers replace.
+    if req.cause.is_exempt() {
+        // DebugCommand is FULLY inert: operator intent is "force the state" for
+        // scenario setup, so the delivery tail's battlefield arms must not fire
+        // either — CR 614.1c "enters with an additional counter" statics
+        // (Kalain class) must not mint counters onto a debug-staged creature,
+        // `pending_etb_counters` from delayed triggers must not be consumed,
+        // and the CR 614.12a devour snapshot must not be captured. Route
+        // through the no-tail primitive, which keeps every unconditional guard
+        // (CR 111.8 token, CR 614.1d ETB block, CR 400.7 cleanup, ZoneChanged
+        // emission) because those live in `zones::move_to_zone` itself. This
+        // also makes DebugCommand non-pausing by construction: no
+        // `apply_etb_counters` call means no counter-replacement pause can
+        // park a prompt mid-debug-action, so debug callers may discard the
+        // (always-`Done`) result. The other exempt causes keep the tail: it is
+        // inert for their destinations (pregame exile/hand have no tail arms,
+        // pregame library goes through the placement arm, elimination's
+        // battlefield departure wants the `mark_layers_full`).
+        if matches!(req.cause, ZoneChangeCause::DebugCommand) {
+            zones::move_to_zone(state, req.object_id, req.to, events);
+            return ZoneMoveResult::Done;
+        }
+        let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
+        if let ProposedEvent::ZoneChange {
+            enter_transformed,
+            enter_tapped,
+            controller_override,
+            enter_with_counters,
+            face_down_profile,
+            ..
+        } = &mut proposed
+        {
+            *enter_transformed = req.mods.enter_transformed;
+            if !req.mods.enter_tapped.is_unspecified() {
+                *enter_tapped = req.mods.enter_tapped;
+            }
+            *controller_override = req.mods.controller_override;
+            enter_with_counters.extend(req.mods.enter_with_counters.iter().cloned());
+            *face_down_profile = req.mods.face_down_profile.clone().map(Box::new);
+        }
+        let approved = ApprovedZoneChange::seal(proposed);
+        return match deliver(
+            state,
+            approved,
+            DeliveryCtx {
+                source_id,
+                exile_links,
+                drain: PostReplacementDrainOwner::DeliveryTail,
+            },
+            events,
+        ) {
+            ZoneDeliveryResult::Done => ZoneMoveResult::Done,
+            ZoneDeliveryResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+        };
+    }
+
     execute_zone_move(
         state,
         req.object_id,
@@ -354,7 +607,7 @@ pub(crate) fn move_object(
         source_id.unwrap_or(req.object_id),
         exile_links.duration.as_ref(),
         req.mods.enter_transformed,
-        req.mods.enter_tapped.is_tapped(),
+        req.mods.enter_tapped,
         req.mods.controller_override,
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
@@ -363,11 +616,277 @@ pub(crate) fn move_object(
     )
 }
 
+/// Result of a batch zone-move (`move_objects_simultaneously`).
+pub(crate) enum BatchMoveResult {
+    /// Every requested object was delivered.
+    Done,
+    /// A per-object `Moved` replacement surfaced a CR 616.1 choice mid-batch.
+    /// `state.waiting_for` is already parked (with the choosing player) and the
+    /// undelivered tail is stashed in `state.pending_batch_deliveries`, so the
+    /// caller only needs to know that it paused — the resume path
+    /// (`drain_pending_batch_deliveries`) finishes the batch.
+    NeedsChoice,
+}
+
+/// CR 603.10a batch entry: move many objects to one destination through the
+/// pipeline as a single simultaneous departure batch (the mill / mass-bounce /
+/// SBA pattern). Each object runs through `move_object`, so per-object `Moved`
+/// redirects (Rest in Peace / Leyline of the Void class) fire on every one;
+/// after the batch completes, CR 603.10a co-departure is stamped over the
+/// attempted set. This is universally safe for non-battlefield origins such as
+/// a mill: `departed_subset` DOES include the milled cards (it filters on
+/// current zone != Battlefield, and a card now in a graveyard passes), but
+/// `mark_simultaneous_departures` only stamps `ZoneChanged` events whose
+/// `from` is `Some(Zone::Battlefield)` (the zones.rs event gate) — a
+/// library-origin move produces no such event, so nothing is stamped.
+///
+/// On a mid-batch CR 616.1 ordering choice the surfaced prompt is parked and the
+/// undelivered tail is stashed in `state.pending_batch_deliveries`; the resume
+/// path drains it (`drain_pending_batch_deliveries`). The simultaneous-departure
+/// stamp is applied per delivered segment (the realistic single-redirect path
+/// never pauses, so the full batch is stamped together; only two simultaneous
+/// `Moved` redirects on one object can split a batch — no parsed card does, so
+/// the per-segment co-departure grouping in that doubly-rare case is acceptable
+/// and documented rather than threaded across the pause boundary).
+pub(crate) fn move_objects_simultaneously(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_objects_simultaneously_then(state, reqs, None, events)
+}
+
+/// CR 603.10a + CR 616.1: As [`move_objects_simultaneously`], but runs a typed
+/// post-loop cleanup ([`BatchCompletion`]) exactly once after every object in the
+/// batch has been delivered — whether the batch completes synchronously or is
+/// paused mid-pile by a per-card CR 616.1 ordering choice and finished by the
+/// drain path. This is the rest-pile entry (surveil graveyard pile + kept-on-top
+/// reorder; manifest dread graveyard pile + reveal-marker cleanup): the moves run
+/// through the pipeline so each card's `Moved` redirects fire, and the cleanup
+/// that used to run inline at the end of the loop now rides on the parked tail so
+/// a pause can never run it early or twice.
+pub(crate) fn move_objects_simultaneously_then(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    completion: Option<BatchCompletion>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
+    let destination = reqs.first().map(|r| r.to);
+    match deliver_batch(state, reqs, &ids, events) {
+        BatchMoveResult::Done => {
+            // Synchronous completion (the common single-redirect path): run the
+            // cleanup now.
+            if let Some(completion) = completion {
+                run_batch_completion(state, completion, events);
+            }
+            BatchMoveResult::Done
+        }
+        BatchMoveResult::NeedsChoice => {
+            // Paused mid-pile. `deliver_batch` stashed the undelivered tail when
+            // it was non-empty; when the paused object was the LAST in the batch
+            // the tail is empty and nothing was stashed. Either way, ensure a
+            // pending record carries the completion so the drain runs it once the
+            // paused object's redirect resolves. `destination` is irrelevant for
+            // an empty tail (no object re-delivers), so the first request's
+            // destination is a safe placeholder.
+            if let Some(completion) = completion {
+                ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard)).completion =
+                    Some(completion);
+            }
+            BatchMoveResult::NeedsChoice
+        }
+    }
+}
+
+/// CR 603.10a + CR 616.1: Dispatch a [`BatchCompletion`] to its post-loop
+/// behavior. The data lives in `types::game_state`; the behavior lives in
+/// `engine_resolution_choices` (kept-card placement / reveal-marker cleanup +
+/// continuation drain) so this module stays free of resolution semantics.
+fn run_batch_completion(
+    state: &mut GameState,
+    completion: BatchCompletion,
+    events: &mut Vec<GameEvent>,
+) {
+    crate::game::engine_resolution_choices::run_batch_completion(state, completion, events);
+}
+
+/// CR 303.4f / CR 616.1 + CR 603.10a: Hang a [`BatchCompletion`] off the current
+/// pause so the drain runs it once the paused move resolves. A single-object
+/// [`move_object`] pause (an as-enters aura host pick or a replacement-ordering
+/// prompt) does not stash a batch tail, so this creates an empty-`remaining`
+/// record carrying only the completion; the drain delivers nothing and runs the
+/// completion. Used by the reveal-until / dig kept-card sites to defer the
+/// rest-pile move when the kept card's battlefield entry pauses.
+pub(crate) fn defer_completion_on_pause(state: &mut GameState, completion: BatchCompletion) {
+    // The destination is irrelevant for an empty tail (no object re-delivers).
+    ensure_batch_record(state, Zone::Graveyard).completion = Some(completion);
+}
+
+/// Return the live parked-batch record, creating an empty-tail one (the
+/// paused-on-last-card case) if `deliver_batch` did not stash a tail. Used only
+/// to hang a [`BatchCompletion`] off a paused batch.
+fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut PendingBatchDeliveries {
+    state
+        .pending_batch_deliveries
+        .get_or_insert_with(|| PendingBatchDeliveries {
+            remaining: Vec::new(),
+            destination,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            completion: None,
+        })
+}
+
+/// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
+/// `move_object`; on a pause, parks the prompt and stashes the undelivered tail
+/// (rebuilt as `Effect`-cause requests to the same destination — the mill /
+/// mass-bounce attribution). `attempted` is the full id set whose departed
+/// subset is stamped on completion of this segment.
+fn deliver_batch(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    attempted: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let mut queue = reqs.into_iter();
+    while let Some(req) = queue.next() {
+        let destination = req.to;
+        match move_object(state, req, events) {
+            ZoneMoveResult::Done => {}
+            ZoneMoveResult::NeedsChoice(_) => {
+                // CR 616.1: `move_object` already parked the surfaced prompt
+                // (centralized park at its `replace_event` NeedsChoice arm);
+                // stash the rest of the batch so no object strands. The paused
+                // object rides in `state.pending_replacement` and is delivered
+                // by the resume path.
+                stash_batch_tail(state, queue.collect(), destination);
+                return BatchMoveResult::NeedsChoice;
+            }
+            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                // CR 303.4f: an aura-host choice flows through
+                // `WaitingFor::ReturnAsAuraTarget`, not the replacement-choice
+                // resume path. No batch flow targets a battlefield aura entry
+                // today (mill destinations are graveyard/exile/hand; mass bounce
+                // returns to hand/library), so this arm is unreachable for the
+                // current batch callers; stop and stash the tail so a future
+                // battlefield-entry batch does not silently drop its remainder.
+                //
+                // The stashed tail IS drained correctly on resume: the
+                // `ReturnAsAuraTarget` handler (engine.rs:3608-3611) and its
+                // chain-resume sibling (engine.rs:3572) both call
+                // `drain_pending_batch_deliveries` when
+                // `pending_batch_deliveries.is_some()`, so the aura-attachment
+                // pause finishes the parked batch the same way the replacement-
+                // choice resume does. (Updated for d5a12b8c6, which added the
+                // aura-resume drain; the prior note here that the tail would be
+                // "silently drained by the NEXT unrelated resume" is no longer
+                // accurate.)
+                stash_batch_tail(state, queue.collect(), destination);
+                return BatchMoveResult::NeedsChoice;
+            }
+        }
+    }
+    // CR 603.10a + CR 608.2f: every object that actually left the battlefield in
+    // this segment departed together — stamp co-departure so leaves-the-
+    // battlefield observers among the group see each other via last-known info.
+    // For non-battlefield origins (mill) this is a no-op via the EVENT gate, not
+    // the subset filter: `departed_subset` includes milled cards (their current
+    // zone — graveyard — is not Battlefield), but `mark_simultaneous_departures`
+    // only stamps `ZoneChanged` events with `from: Some(Zone::Battlefield)`, and
+    // a library-origin move emits none.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, attempted));
+    BatchMoveResult::Done
+}
+
+/// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
+/// can finish it. Captures the batch-uniform request context (CR 400.7
+/// attribution source, CR 614.1c tap-state, exile tracking) from the first tail
+/// request so the rebuilt requests are equivalent to the originals — without
+/// this the re-stash collapsed every tail request to
+/// `ZoneMoveRequest::effect(obj, dest, obj)`, dropping seek's `enter_tapped`
+/// mod and ability-source attribution across the pause boundary.
+///
+/// Batch-uniform contract (mirrors the single-`destination` design): every
+/// batch caller builds requests with one shared mod/attribution set, so the
+/// first tail request is representative. A request whose source equals its own
+/// `object_id` is the self-anchor idiom (mill) and stashes `source_id: None` so
+/// the drain re-anchors each object to itself.
+fn stash_batch_tail(state: &mut GameState, tail: Vec<ZoneMoveRequest>, destination: Zone) {
+    let Some(first) = tail.first() else {
+        return;
+    };
+    let source_id = first.source().filter(|&s| s != first.object_id);
+    let enter_tapped = first.mods.enter_tapped;
+    let exile_tracking = first.exile_links.tracking;
+    state.pending_batch_deliveries = Some(PendingBatchDeliveries {
+        remaining: tail.into_iter().map(|r| r.object_id).collect(),
+        destination,
+        source_id,
+        enter_tapped,
+        exile_tracking,
+        // The post-loop cleanup (if any) is attached by the batch caller after
+        // it observes the `NeedsChoice`; `move_objects_simultaneously` itself
+        // has no completion to stash.
+        completion: None,
+    });
+}
+
+/// CR 603.10a + CR 616.1: Resume a parked batch-delivery tail after the
+/// per-object replacement choice that paused it resolved (and its object's
+/// chosen event delivered). Re-parks — leaving `state.waiting_for` set — when
+/// the next object surfaces its own prompt. Rebuilds each tail request with the
+/// stashed batch-uniform context (attribution source, tap-state, exile
+/// tracking) so the resumed deliveries match the originals.
+pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if let Some(pending) = state.pending_batch_deliveries.take() {
+        let completion = pending.completion;
+        let ids = pending.remaining.clone();
+        let reqs: Vec<ZoneMoveRequest> = pending
+            .remaining
+            .into_iter()
+            .map(|obj_id| {
+                let mut req = ZoneMoveRequest::effect(
+                    obj_id,
+                    pending.destination,
+                    pending.source_id.unwrap_or(obj_id),
+                );
+                req.mods.enter_tapped = pending.enter_tapped;
+                req.exile_links.tracking = pending.exile_tracking;
+                req
+            })
+            .collect();
+        let destination = pending.destination;
+        match deliver_batch(state, reqs, &ids, events) {
+            BatchMoveResult::Done => {
+                // CR 603.10a + CR 616.1: the whole pile has now landed. Run the
+                // post-loop cleanup exactly once on true completion (it never ran
+                // inline because the loop paused). `Done` here is reachable only
+                // when `deliver_batch` did NOT re-park, so the completion fires at
+                // most once per batch.
+                if let Some(completion) = completion {
+                    run_batch_completion(state, completion, events);
+                }
+            }
+            BatchMoveResult::NeedsChoice => {
+                // Re-parked on the next object's CR 616.1 choice;
+                // `deliver_batch` stashed a fresh tail (or, when the re-paused
+                // object was the last in the tail, stashed nothing — create an
+                // empty record). Re-attach the cleanup so it survives the next
+                // pause boundary and runs once the remaining tail finally drains.
+                if let Some(completion) = completion {
+                    ensure_batch_record(state, destination).completion = Some(completion);
+                }
+            }
+        }
+    }
+}
+
 /// Deliver an event that already passed the replacement consult. Only callable
-/// with the `ApprovedZoneChange` proof token. This is the renamed
-/// `deliver_replaced_zone_change`; Phase A exposes it for the Phase B bucket-A
-/// migration (it is not yet called through the token by any production site).
-#[allow(dead_code)]
+/// with the `ApprovedZoneChange` proof token — the consult-once/deliver-once
+/// contract for every bucket-A post-replacement site (destroy/sacrifice/SBA
+/// lowering, the replacement-choice resume path, land play).
 pub(crate) fn deliver(
     state: &mut GameState,
     approved: ApprovedZoneChange,
@@ -384,6 +903,7 @@ pub(crate) fn deliver(
         ctx.source_id,
         ctx.exile_links.duration.as_ref(),
         track_exiled_by_source,
+        ctx.drain,
         events,
     )
 }
@@ -442,6 +962,7 @@ fn append_zone_delivery_tail_after_counter_pause(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     exile_tracking: ZoneDeliveryExileTracking,
+    drain: PostReplacementDrainOwner,
     clear_pending_etb_counters: Option<ObjectId>,
 ) -> ZoneDeliveryResult {
     let mut actions = Vec::new();
@@ -456,6 +977,7 @@ fn append_zone_delivery_tail_after_counter_pause(
         source_id,
         duration: duration.cloned(),
         exile_tracking,
+        drain,
     });
     crate::game::effects::counters::append_pending_counter_post_actions(state, actions);
     replacement_pause_delivery_result(state)
@@ -471,6 +993,7 @@ pub(crate) fn apply_zone_delivery_tail(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     exile_tracking: ZoneDeliveryExileTracking,
+    drain: PostReplacementDrainOwner,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     // CR 701.24a: To shuffle a library, randomize the cards within it so that
@@ -512,7 +1035,15 @@ pub(crate) fn apply_zone_delivery_tail(
     // `NeedsChoice` so the mass/single zone-change loop stashes the remaining
     // co-entering members and resumes after the choice (instead of dropping
     // them, issue #535 class).
-    if state.post_replacement_continuation.is_some() {
+    //
+    // `CallerEpilogue` (the replacement-choice resume path) skips this drain:
+    // its epilogue drains the continuation itself, WITH the spell-resolution
+    // ctx and with `post_replacement_source` cleared for zone changes, and
+    // only after `apply_pending_spell_resolution` (Phase-B divergence
+    // reconciliation — the tail is parameterized instead of copied).
+    if matches!(drain, PostReplacementDrainOwner::DeliveryTail)
+        && state.post_replacement_continuation.is_some()
+    {
         let waiting_for = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state,
             Some(object_id),
@@ -591,6 +1122,31 @@ fn legal_aura_attachment_targets(
     targets
 }
 
+/// CR 708.3 + CR 708.2a: Turn an object face down as part of its battlefield
+/// entry — snapshot the real face into `back_face`, then overwrite the live
+/// characteristics with the face-down profile (the morph/manifest vanilla 2/2
+/// plus any effect-specified extra types/subtypes) so the original is
+/// restorable by `turn_face_up`. Mirrors `manifest_card`'s historical sequence.
+///
+/// Single authority shared by the normal delivery tail
+/// (`deliver_replaced_zone_change`) and the replacement-choice resume arm
+/// (`engine_replacement::handle_replacement_choice`). The resume arm previously
+/// discarded the event's `face_down_profile`, so a face-down entry that parked
+/// on a CR 616.1 ordering prompt (two external enter-tapped effects — Authority
+/// of the Consuls + Imposing Sovereign class) resumed FACE UP, leaking the
+/// morpher's hidden card.
+pub(crate) fn apply_face_down_entry_profile(
+    state: &mut GameState,
+    object_id: ObjectId,
+    profile: &FaceDownProfile,
+) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        let original = crate::game::printed_cards::snapshot_object_face(obj);
+        crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
+        obj.back_face = Some(original);
+    }
+}
+
 /// Deliver a zone-change event that has already passed through replacement.
 pub(crate) fn deliver_replaced_zone_change(
     state: &mut GameState,
@@ -598,6 +1154,7 @@ pub(crate) fn deliver_replaced_zone_change(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     track_exiled_by_source: bool,
+    drain: PostReplacementDrainOwner,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     if let ProposedEvent::ZoneChange {
@@ -648,25 +1205,66 @@ pub(crate) fn deliver_replaced_zone_change(
             state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
         }
 
+        // CR 400.7d + CR 608.3: a permanent spell's resolution turns the spell
+        // into the permanent, and an ability of that permanent may reference
+        // information about the spell that became it — including what costs
+        // were paid (kicker, additional costs, convoke) and how it was cast.
+        // `reset_for_battlefield_entry` (CR 400.7) clears that cast-link family
+        // on entry, so snapshot it from the pre-move STACK object and restore
+        // it right after the move. Gated on `from == Stack`: establishment is
+        // exclusive to the cast pathway (`finalize_cast_to_stack` stamps the
+        // stack object), and an effect-driven put (Reanimate class) must NOT
+        // resurrect stale cast provenance — its entry is a new object with no
+        // cast linkage (CR 400.7, no exception applies).
+        let cast_link = (from == Zone::Stack && to == Zone::Battlefield)
+            .then(|| {
+                state.objects.get(&object_id).map(|obj| CastLinkSnapshot {
+                    cast_from_zone: obj.cast_from_zone,
+                    cast_timing_permission: obj.cast_timing_permission.map(|(p, _)| p),
+                    kickers_paid: obj.kickers_paid.clone(),
+                    additional_cost_payment_count: obj.additional_cost_payment_count,
+                    convoked_creatures: obj.convoked_creatures.clone(),
+                })
+            })
+            .flatten();
+
         zones::move_to_zone(state, object_id, to, events);
+        // CR 400.7d: restore the cast link immediately after the entry reset —
+        // BEFORE the face-down / counter blocks, so a counter-replacement pause
+        // (CR 616.1) cannot strand the resumed permanent without its kicker /
+        // convoke / cast-timing memory (the pre-pipeline stack.rs epilogue ran
+        // after the counter blocks and was skipped by their early returns).
+        if let Some(link) = cast_link {
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.cast_from_zone = link.cast_from_zone;
+                // CR 603.4: trigger conditions compare the stamp against the
+                // CURRENT turn (`triggers.rs` reads `(permission, turn)`), so
+                // re-stamp with the resolution turn — mirroring the
+                // `apply_pending_spell_resolution` restore. Cast turn and
+                // resolution turn are always equal (the stack empties before a
+                // turn ends), so this also preserves the captured value.
+                if let Some(permission) = link.cast_timing_permission {
+                    obj.cast_timing_permission = Some((permission, state.turn_number));
+                }
+                obj.kickers_paid = link.kickers_paid;
+                obj.additional_cost_payment_count = link.additional_cost_payment_count;
+                obj.convoked_creatures = link.convoked_creatures;
+            }
+        }
         if to == Zone::Battlefield || from == Zone::Battlefield {
             crate::game::layers::mark_layers_full(state);
         }
         // CR 708.3: An object put onto the battlefield face down is turned face
         // down BEFORE it enters, so its ETB abilities don't trigger and its
         // characteristics are the face-down profile (CR 708.2a), not the real
-        // card's. Mirror `manifest_card`'s sequence: snapshot the real face into
-        // `back_face`, overwrite with the face-down 2/2 (+ any specified extra
-        // types/subtypes), then store the snapshot so the original is restorable.
-        // Done before the controller-override and ETB-counter/trigger blocks
-        // below so triggers (if any later applied) see the face-down state.
+        // card's. Done before the controller-override and ETB-counter/trigger
+        // blocks below so triggers (if any later applied) see the face-down
+        // state. Shared single authority with the replacement-choice resume arm
+        // (`engine_replacement::handle_replacement_choice`), so a paused
+        // face-down entry cannot resume face-up.
         if to == Zone::Battlefield {
             if let Some(profile) = &face_down_profile {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    let original = crate::game::printed_cards::snapshot_object_face(obj);
-                    crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
-                    obj.back_face = Some(original);
-                }
+                apply_face_down_entry_profile(state, object_id, profile);
             }
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
@@ -775,6 +1373,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     source_id,
                     duration,
                     exile_tracking,
+                    drain,
                     pending_etb_cleanup,
                 );
             }
@@ -805,6 +1404,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     source_id,
                     duration,
                     exile_tracking,
+                    drain,
                     None,
                 );
             }
@@ -818,6 +1418,7 @@ pub(crate) fn deliver_replaced_zone_change(
             source_id,
             duration,
             exile_tracking,
+            drain,
             events,
         );
     }
@@ -849,7 +1450,7 @@ pub(crate) fn execute_zone_move(
     source_id: ObjectId,
     duration: Option<&Duration>,
     enter_transformed: bool,
-    effect_enter_tapped: bool,
+    enter_tapped: EtbTapState,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
@@ -870,14 +1471,19 @@ pub(crate) fn execute_zone_move(
         }
     }
 
-    // CR 614.1: Set enter_tapped on the proposed event so replacement effects preserve it.
-    if effect_enter_tapped {
+    // CR 614.1: Seed the three-state ETB tap-state directly onto the proposed
+    // event so the replacement pipeline preserves it. `Unspecified` leaves the
+    // event's default untouched (the originating effect set no explicit state);
+    // an explicit `Tapped`/`Untapped` overrides it. Seeding the enum directly
+    // (rather than collapsing through a bool) keeps the `Unspecified`-vs-
+    // `Untapped` distinction the pipeline carrier `EtbTapState` exists to hold.
+    if !enter_tapped.is_unspecified() {
         if let ProposedEvent::ZoneChange {
             enter_tapped: ref mut et,
             ..
         } = proposed
         {
-            *et = crate::types::proposed_event::EtbTapState::Tapped;
+            *et = enter_tapped;
         }
     }
 
@@ -970,6 +1576,20 @@ pub(crate) fn execute_zone_move(
         }
     }
 
+    // KNOWN GAP (CR 614.12, documented deferral): for a FACE-DOWN battlefield
+    // entry (the proposal carries `face_down_profile`), this consult runs the
+    // replacement matchers against the object's PRINTED characteristics, but
+    // CR 614.12 requires checking "the characteristics of the permanent as it
+    // would exist on the battlefield" — for a morph/manifest entry that is the
+    // face-down 2/2 with no name, types, or subtypes (CR 708.2a). A type- or
+    // name-keyed entry replacement (e.g. a Wizard-scoped "Wizards you control
+    // enter with a +1/+1 counter") therefore wrongly matches a face-down
+    // printed Wizard, and a name/type-scoped redirect wrongly applies to an
+    // entry that should look like a blank 2/2. Narrow class today (the common
+    // enter-tapped/counter statics are type-agnostic or creature-scoped, which
+    // the face-down 2/2 still satisfies); fixing it requires the matcher pass
+    // to evaluate filters against the profile-projected characteristics when
+    // `face_down_profile` is present.
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(mut event) => {
             let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;
@@ -1016,6 +1636,7 @@ pub(crate) fn execute_zone_move(
                     Some(source_id),
                     duration,
                     track_exiled_by_source,
+                    PostReplacementDrainOwner::DeliveryTail,
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {}
@@ -1046,6 +1667,7 @@ pub(crate) fn execute_zone_move(
                 Some(source_id),
                 duration,
                 track_exiled_by_source,
+                PostReplacementDrainOwner::DeliveryTail,
                 events,
             ) {
                 ZoneDeliveryResult::Done => {}
@@ -1056,6 +1678,26 @@ pub(crate) fn execute_zone_move(
             ZoneMoveResult::Done
         }
         ReplacementResult::Prevented => ZoneMoveResult::Done,
-        ReplacementResult::NeedsChoice(player) => ZoneMoveResult::NeedsChoice(player),
+        ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1: `replace_event` sets only `pending_replacement` — the
+            // wait-state was historically each caller's to set, and callers that
+            // forgot stranded the object as a zone ghost (move parked in
+            // `pending_replacement`, prompt never surfaced because the engine
+            // gates `ChooseReplacement` on the wait state). Park HERE, at the
+            // single unparked origin, so every single-move caller (counter,
+            // bounce, seek, and all future migrations) is safe by construction.
+            //
+            // Idempotence: callers that still set the wait state themselves
+            // (change_zone's `park_waiting_for` arms, end_phase /
+            // exile_from_top_until's `replacement_choice_waiting_for`) recompute
+            // the identical value from the same `pending_replacement`.
+            // `park_waiting_for` also keeps the CR 614.12a devour guard: it
+            // never clobbers an already-surfaced `EffectZoneChoice`. The
+            // delivery-tail NeedsChoice path above is NOT parked here — its
+            // wait state is already set by the counter-pause / devour machinery
+            // (`replacement_pause_delivery_result` reads it).
+            replacement::park_waiting_for(state, player);
+            ZoneMoveResult::NeedsChoice(player)
+        }
     }
 }

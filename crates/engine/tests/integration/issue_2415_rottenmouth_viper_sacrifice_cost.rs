@@ -10,7 +10,7 @@ use engine::types::ability::{
     AbilityCost, AdditionalCost, AdditionalCostRepeatability, StaticCondition,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{PayCostKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::statics::{CostModifyMode, StaticMode};
@@ -146,6 +146,8 @@ fn rottenmouth_viper_sacrifice_two_reduces_cost_by_two() {
             object_id: viper,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("begin Rottenmouth Viper cast");
 

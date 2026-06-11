@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, EffectScope, ResolvedAbility, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -52,69 +53,67 @@ fn tap_untap_target_ids(
     }
 }
 
-/// CR 701.26a: Tap — turn a permanent sideways. CR 701.26b: Untap — return to upright.
-pub fn resolve_tap(
-    state: &mut GameState,
+/// CR 701.26a (tap) / CR 701.26b (untap): Resolve `Effect::SetTapState`.
+///
+/// The `scope` field is load-bearing and genuinely divergent:
+/// - `EffectScope::Single` (legacy `Tap`/`Untap`) resolves a single chosen or
+///   source permanent through the target/SelfRef/TrackedSet/resolution-prompt
+///   path (`resolve_single`).
+/// - `EffectScope::All` (legacy `TapAll`/`UntapAll`) iterates every permanent
+///   matching the population filter (`resolve_all`).
+///
+/// `state: TapStateChange` selects the tap/untap polarity within each scope.
+pub fn resolve_set_tap_state(
+    game_state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.26a + CR 608.2c: `Effect::Tap`'s subject is resolved from its own
-    // `target` filter — `SelfRef` (the printed-name "tap ~" anaphor) and
-    // `TrackedSet` ("tap those creatures") resolve regardless of
-    // `ability.targets`, so chained `Tap` sub-abilities don't inherit the
-    // parent's targets via chain propagation in
-    // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
-    let Effect::Tap { target } = &ability.effect else {
-        return Err(EffectError::MissingParam("Tap".to_string()));
+    let Effect::SetTapState {
+        target,
+        scope,
+        state,
+    } = &ability.effect
+    else {
+        return Err(EffectError::MissingParam("SetTapState".to_string()));
     };
-    if prompt_resolution_tap_untap_choice(state, ability, target, EffectKind::Tap, events) {
-        return Ok(());
+    match scope {
+        EffectScope::Single => resolve_single(game_state, ability, target, *state, events),
+        EffectScope::All => resolve_all(game_state, ability, target, *state, events),
     }
-    let target_ids = tap_untap_target_ids(state, ability, target);
-    for obj_id in target_ids {
-        if let TapUntapOutcome::NeedsChoice(player) =
-            process_one_tap(state, obj_id, ability.source_id, events)?
-        {
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-            return Ok(());
-        };
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-    });
-
-    Ok(())
 }
 
-/// CR 701.26b: Untap target permanents — rotate back to upright position.
-pub fn resolve_untap(
+/// CR 701.26a/b + CR 608.2c: Single-permanent tap/untap (legacy
+/// `Effect::Tap`/`Effect::Untap`). The subject is resolved from the effect's
+/// own `target` filter — `SelfRef` (the printed-name "tap ~"/"untap ~" anaphor)
+/// and `TrackedSet` ("tap/untap those creatures") resolve regardless of
+/// `ability.targets`, so chained tap/untap sub-abilities don't inherit the
+/// parent's targets via chain propagation in
+/// `effects::mod.rs::resolve_ability_chain` (issue #323 class). `SelfRef` is
+/// also the runtime path for trigger shapes like Ragost's untap-self (CR 603.4
+/// intervening-if + CR 514 end step); `TrackedSet` is the chain-unified
+/// "untap those creatures" tail of a `ChooseObjectsIntoTrackedSet` chain
+/// (CR 603.7e — Magnetic Mountain / Dream Tides / Thelon's Curse).
+fn resolve_single(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    target: &TargetFilter,
+    change: TapStateChange,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.26b + CR 608.2c: `Effect::Untap`'s subject is resolved from its
-    // own `target` filter. `SelfRef` is the printed-name "untap ~" anaphor
-    // (runtime path for trigger shapes like Ragost's "At the beginning of
-    // each end step, if you gained life this turn, untap ~" — CR 603.4
-    // intervening-if + CR 514 end step). `TrackedSet` is the chain-unified
-    // "untap those creatures" tail of a `ChooseObjectsIntoTrackedSet` chain
-    // (CR 603.7e — Magnetic Mountain / Dream Tides / Thelon's Curse). Both
-    // resolve from the filter regardless of `ability.targets`, so chained
-    // `Untap` sub-abilities don't inherit the parent's targets via chain
-    // propagation in `effects::mod.rs::resolve_ability_chain` (issue #323
-    // class).
-    let Effect::Untap { target } = &ability.effect else {
-        return Err(EffectError::MissingParam("Untap".to_string()));
+    let effect_kind = match change {
+        TapStateChange::Tap => EffectKind::Tap,
+        TapStateChange::Untap => EffectKind::Untap,
     };
-    if prompt_resolution_tap_untap_choice(state, ability, target, EffectKind::Untap, events) {
+    if prompt_resolution_tap_untap_choice(state, ability, target, effect_kind, events) {
         return Ok(());
     }
     let target_ids = tap_untap_target_ids(state, ability, target);
     for obj_id in target_ids {
-        if let TapUntapOutcome::NeedsChoice(player) = process_one_untap(state, obj_id, events)? {
+        let outcome = match change {
+            TapStateChange::Tap => process_one_tap(state, obj_id, ability.source_id, events)?,
+            TapStateChange::Untap => process_one_untap(state, obj_id, events)?,
+        };
+        if let TapUntapOutcome::NeedsChoice(player) = outcome {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
             return Ok(());
@@ -252,18 +251,18 @@ fn prompt_resolution_tap_untap_choice(
     true
 }
 
-/// CR 701.26a: Tap all permanents matching the filter.
-pub fn resolve_tap_all(
+/// CR 701.26a (tap) / CR 701.26b (untap): Mass tap/untap of every permanent
+/// matching the filter (legacy `Effect::TapAll`/`Effect::UntapAll`). Unlike the
+/// single scope this never declares targets — it iterates the resolved
+/// population filter and applies the change to each matching permanent.
+fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    target: &TargetFilter,
+    change: TapStateChange,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let target_filter = match &ability.effect {
-        Effect::TapAll { target } => target.clone(),
-        _ => TargetFilter::Any,
-    };
-
-    let effective_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
+    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
 
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
@@ -277,83 +276,13 @@ pub fn resolve_tap_all(
         .collect();
 
     for obj_id in matching {
-        let proposed = ProposedEvent::Tap {
-            object_id: obj_id,
-            applied: HashSet::new(),
+        let outcome = match change {
+            TapStateChange::Tap => process_one_tap(state, obj_id, ability.source_id, events)?,
+            TapStateChange::Untap => process_one_untap(state, obj_id, events)?,
         };
-
-        match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => {
-                if let ProposedEvent::Tap { object_id, .. } = event {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = true;
-                        events.push(GameEvent::PermanentTapped {
-                            object_id,
-                            caused_by: Some(ability.source_id),
-                        });
-                    }
-                }
-            }
-            ReplacementResult::Prevented => {}
-            ReplacementResult::NeedsChoice(player) => {
-                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-                return Ok(());
-            }
-        }
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-    });
-
-    Ok(())
-}
-
-/// CR 701.26b: Untap all permanents matching the filter.
-pub fn resolve_untap_all(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    let target_filter = match &ability.effect {
-        Effect::UntapAll { target } => target.clone(),
-        _ => TargetFilter::Any,
-    };
-
-    let effective_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
-
-    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let matching: Vec<_> = state
-        .battlefield
-        .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-        })
-        .copied()
-        .collect();
-
-    for obj_id in matching {
-        let proposed = ProposedEvent::Untap {
-            object_id: obj_id,
-            applied: HashSet::new(),
-        };
-
-        match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(event) => {
-                if let ProposedEvent::Untap { object_id, .. } = event {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = false;
-                        events.push(GameEvent::PermanentUntapped { object_id });
-                    }
-                }
-            }
-            ReplacementResult::Prevented => {}
-            ReplacementResult::NeedsChoice(player) => {
-                state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-                return Ok(());
-            }
+        if let TapUntapOutcome::NeedsChoice(player) = outcome {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
         }
     }
 
@@ -370,8 +299,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Effect, MultiTargetSpec, QuantityExpr, TargetChoiceTiming, TargetFilter, TypeFilter,
-        TypedFilter,
+        Effect, EffectScope, MultiTargetSpec, QuantityExpr, TapStateChange, TargetChoiceTiming,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -380,8 +309,10 @@ mod tests {
 
     fn make_tap_ability(target: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![TargetRef::Object(target)],
             ObjectId(100),
@@ -391,8 +322,10 @@ mod tests {
 
     fn make_untap_ability(target: ObjectId) -> ResolvedAbility {
         ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             vec![TargetRef::Object(target)],
             ObjectId(100),
@@ -412,7 +345,7 @@ mod tests {
         );
         let mut events = Vec::new();
 
-        resolve_tap(&mut state, &make_tap_ability(obj_id), &mut events).unwrap();
+        resolve_set_tap_state(&mut state, &make_tap_ability(obj_id), &mut events).unwrap();
 
         assert!(state.objects[&obj_id].tapped);
         assert!(events
@@ -440,8 +373,10 @@ mod tests {
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
 
         let ability = ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             vec![], // empty — SelfRef must resolve via source_id
             obj_id,
@@ -449,7 +384,7 @@ mod tests {
         );
         let mut events = Vec::new();
 
-        resolve_untap(&mut state, &ability, &mut events).unwrap();
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
 
         assert!(
             !state.objects[&obj_id].tapped,
@@ -474,8 +409,10 @@ mod tests {
         );
 
         let ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             obj_id,
@@ -483,7 +420,7 @@ mod tests {
         );
         let mut events = Vec::new();
 
-        resolve_tap(&mut state, &ability, &mut events).unwrap();
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
 
         assert!(
             state.objects[&obj_id].tapped,
@@ -504,7 +441,7 @@ mod tests {
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
         let mut events = Vec::new();
 
-        resolve_untap(&mut state, &make_untap_ability(obj_id), &mut events).unwrap();
+        resolve_set_tap_state(&mut state, &make_untap_ability(obj_id), &mut events).unwrap();
 
         assert!(!state.objects[&obj_id].tapped);
         assert!(events
@@ -559,12 +496,14 @@ mod tests {
             .push(CoreType::Creature);
 
         let mut ability = ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Land],
                     controller: None,
                     properties: vec![],
                 }),
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             vec![],
             ObjectId(100),
@@ -574,7 +513,7 @@ mod tests {
         ability.target_choice_timing = TargetChoiceTiming::Resolution;
         let mut events = Vec::new();
 
-        resolve_untap(&mut state, &ability, &mut events).unwrap();
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
             WaitingFor::EffectZoneChoice {
@@ -685,14 +624,18 @@ mod tests {
         });
 
         let ability = ResolvedAbility::new(
-            Effect::UntapAll { target: filter },
+            Effect::SetTapState {
+                target: filter,
+                scope: EffectScope::All,
+                state: TapStateChange::Untap,
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),
         );
         let mut events = Vec::new();
 
-        resolve_untap_all(&mut state, &ability, &mut events).unwrap();
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
 
         // All 3 nonland permanents should be untapped
         assert!(
@@ -761,16 +704,117 @@ mod tests {
         });
 
         let ability = ResolvedAbility::new(
-            Effect::TapAll { target: filter },
+            Effect::SetTapState {
+                target: filter,
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+            },
             vec![],
             ObjectId(100),
             PlayerId(0),
         );
         let mut events = Vec::new();
 
-        resolve_tap_all(&mut state, &ability, &mut events).unwrap();
+        resolve_set_tap_state(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.objects[&creature].tapped, "creature should be tapped");
         assert!(!state.objects[&land].tapped, "land should not be tapped");
+    }
+
+    /// Building-block test: `resolve_set_tap_state` routes every
+    /// (scope, state) quadrant correctly. CR 701.26a (tap) / CR 701.26b (untap).
+    #[test]
+    fn set_tap_state_routes_all_four_quadrants() {
+        use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        // Helper: a single battlefield permanent in a known tap state.
+        fn one_creature(tapped: bool) -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Bear".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            state.objects.get_mut(&id).unwrap().tapped = tapped;
+            (state, id)
+        }
+
+        let single = |state: TapStateChange, id: ObjectId| {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Any,
+                    scope: EffectScope::Single,
+                    state,
+                },
+                vec![TargetRef::Object(id)],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let all = |state: TapStateChange| {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                    scope: EffectScope::All,
+                    state,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        // (Single, Tap): untapped → tapped via the target path.
+        let (mut state, id) = one_creature(false);
+        resolve_set_tap_state(
+            &mut state,
+            &single(TapStateChange::Tap, id),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(state.objects[&id].tapped, "Single/Tap must tap the target");
+
+        // (Single, Untap): tapped → untapped via the target path.
+        let (mut state, id) = one_creature(true);
+        resolve_set_tap_state(
+            &mut state,
+            &single(TapStateChange::Untap, id),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            !state.objects[&id].tapped,
+            "Single/Untap must untap the target"
+        );
+
+        // (All, Tap): untapped → tapped via the population-filter path.
+        let (mut state, id) = one_creature(false);
+        resolve_set_tap_state(&mut state, &all(TapStateChange::Tap), &mut Vec::new()).unwrap();
+        assert!(
+            state.objects[&id].tapped,
+            "All/Tap must tap each matching permanent"
+        );
+
+        // (All, Untap): tapped → untapped via the population-filter path.
+        let (mut state, id) = one_creature(true);
+        resolve_set_tap_state(&mut state, &all(TapStateChange::Untap), &mut Vec::new()).unwrap();
+        assert!(
+            !state.objects[&id].tapped,
+            "All/Untap must untap each matching permanent"
+        );
     }
 }

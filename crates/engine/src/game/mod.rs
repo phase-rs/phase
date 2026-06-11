@@ -24,6 +24,7 @@ pub mod commander;
 pub mod companion;
 pub(crate) mod conditions;
 pub mod cost_payability;
+pub(crate) mod costs;
 pub mod coverage;
 pub mod dash;
 #[cfg(test)]

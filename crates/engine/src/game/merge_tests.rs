@@ -174,6 +174,128 @@ fn leave_split_routes_each_component_to_its_owners_graveyard() {
     );
 }
 
+/// CR 730.3 + CR 712.21: a merged permanent is a SINGLE permanent — when it
+/// leaves the battlefield, "leaves the battlefield" / "dies" observers must
+/// trigger exactly once (for the survivor), not once per component card. Those
+/// observers key on a zone change whose origin is the battlefield, so the
+/// regression check is: exactly ONE emitted `ZoneChanged` has
+/// `from == Some(Battlefield)`, while the absorbed component is put into the
+/// graveyard with `from == None` (it did not independently leave the
+/// battlefield). Each component still produces a `to == Graveyard` zone change,
+/// so "whenever a card is put into a graveyard from anywhere" fires per card
+/// (CR 712.21: "a card is put into a graveyard" triggers once per card).
+#[test]
+fn merged_permanent_leaving_emits_single_battlefield_exit_event() {
+    let (mut state, host, rider, _p0) = two_creatures();
+    // Reproduce the runtime invariant: the mutating spell resolved off the STACK
+    // and is never an independent member of the battlefield list.
+    state.battlefield.retain(|&id| id != rider);
+
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+
+    // Isolate the leave: the merged permanent is destroyed → graveyard.
+    events.clear();
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+
+    let battlefield_exits = count_zone_changes(&events, Some(Zone::Battlefield), None);
+    assert_eq!(
+        battlefield_exits, 1,
+        "exactly one battlefield-exit event (CR 730.3: one permanent leaves) — \
+         the survivor's; the absorbed component must not emit its own"
+    );
+
+    // The survivor is the single battlefield-exit; the component leaves with no origin.
+    assert_eq!(
+        zone_change_origin(&events, host),
+        Some(Some(Zone::Battlefield)),
+        "survivor (host) leaves the battlefield"
+    );
+    assert_eq!(
+        zone_change_origin(&events, rider),
+        Some(None),
+        "absorbed component enters the graveyard as a NEW object (origin None), \
+         so it does not trigger leaves-the-battlefield / dies observers"
+    );
+
+    // CR 712.21: both cards are put into a graveyard (per-card graveyard observers
+    // still fire for each component).
+    assert_eq!(
+        count_zone_changes(&events, None, Some(Zone::Graveyard)),
+        2,
+        "both the survivor and the component are put into a graveyard"
+    );
+}
+
+/// CR 730.3 + CR 712.21: the single-battlefield-exit invariant must hold
+/// regardless of pile size — a creature mutated twice (three components) leaving
+/// the battlefield still produces exactly ONE battlefield-exit event, so a
+/// death payoff (Blood Artist, Midnight Reaper, etc.) triggers once, not thrice.
+#[test]
+fn merged_stack_leaving_emits_single_battlefield_exit_regardless_of_pile_size() {
+    use crate::game::scenario::GameScenario;
+
+    let mut sc = GameScenario::new();
+    let host = sc.add_creature(P0, "Host", 2, 2).id();
+    let rider1 = sc.add_creature(P0, "Rider1", 4, 4).id();
+    let rider2 = sc.add_creature(P0, "Rider2", 6, 6).id();
+    let mut state = sc.state;
+    // Runtime invariant: mutating spells resolve off the stack, never listed.
+    state.battlefield.retain(|&id| id != rider1 && id != rider2);
+
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider1, host, MergeSide::Top, &mut events);
+    merge_object_onto(&mut state, rider2, host, MergeSide::Top, &mut events);
+
+    events.clear();
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut events);
+
+    assert_eq!(
+        count_zone_changes(&events, Some(Zone::Battlefield), None),
+        1,
+        "a 3-component pile still leaves the battlefield as ONE permanent (CR 730.3)"
+    );
+    // All three cards reach the graveyard (CR 712.21: per-card graveyard observers).
+    assert_eq!(
+        count_zone_changes(&events, None, Some(Zone::Graveyard)),
+        3,
+        "all three component cards are put into a graveyard"
+    );
+    assert_eq!(zone_change_origin(&events, rider1), Some(None));
+    assert_eq!(zone_change_origin(&events, rider2), Some(None));
+}
+
+/// Count emitted `ZoneChanged` events optionally filtered by origin and/or
+/// destination zone. `origin`/`destination` of `None` means "any".
+fn count_zone_changes(
+    events: &[GameEvent],
+    origin: Option<Zone>,
+    destination: Option<Zone>,
+) -> usize {
+    events
+        .iter()
+        .filter(|e| match e {
+            GameEvent::ZoneChanged { from, to, .. } => {
+                origin.is_none_or(|z| *from == Some(z)) && destination.is_none_or(|z| *to == z)
+            }
+            _ => false,
+        })
+        .count()
+}
+
+/// Return the `from` origin of the (first) `ZoneChanged` event for `id`, or
+/// `None` if no such event was emitted. The outer `Option` distinguishes
+/// "no event" from the inner `Option<Zone>` origin (`Some(None)` = emitted with
+/// origin `None`).
+fn zone_change_origin(events: &[GameEvent], id: ObjectId) -> Option<Option<Zone>> {
+    events.iter().find_map(|e| match e {
+        GameEvent::ZoneChanged {
+            object_id, from, ..
+        } if *object_id == id => Some(*from),
+        _ => None,
+    })
+}
+
 /// CR 730.2: the absorbed (non-surviving) component is part of ONE battlefield
 /// object — it must NOT be observable as an independent permanent. This pins the
 /// two confirmed `state.objects`-scan victims (`FilterProp::NameMatchesAnyPermanent`

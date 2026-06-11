@@ -57,7 +57,12 @@ fn capture_attachment_snapshot(
 /// revert (CR 712.14), exile permission clearing (CR 113.6e), monstrous reset
 /// (CR 701.37b), counter clearing (CR 122.2), layer pruning, and mana-tap
 /// cleanup.
-fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zone, to: Zone) {
+pub(crate) fn apply_zone_exit_cleanup(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+) {
     // CR 400.7: An object that changes zones becomes a new object with no
     // memory of its previous existence. Both the short-lived `revealed_cards`
     // (cleared at action boundaries) and the persistent `public_revealed_cards`
@@ -116,13 +121,26 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     }
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
-        // CR 712.14 + CR 400.7: Transformed permanents revert to front face on zone change.
+        // CR 712.8a + CR 400.7: Transformed permanents revert to front face on any
+        // zone exit (transform DFCs are only valid in transformed state on the battlefield).
         if obj_mut.transformed {
             if let Some(back_face) = obj_mut.back_face.clone() {
                 let current_back = snapshot_object_face(obj_mut);
                 apply_back_face_to_object(obj_mut, back_face);
                 obj_mut.back_face = Some(current_back);
                 obj_mut.transformed = false;
+            }
+        }
+
+        // CR 712.8a + CR 400.7: MDFC objects showing their back face revert to
+        // front face in any zone other than the stack or battlefield (back face is
+        // valid on the stack while the spell is being cast, and on the battlefield).
+        if obj_mut.modal_back_face && to != Zone::Stack && to != Zone::Battlefield {
+            if let Some(back_face) = obj_mut.back_face.clone() {
+                let current_back = snapshot_object_face(obj_mut);
+                apply_back_face_to_object(obj_mut, back_face);
+                obj_mut.back_face = Some(current_back);
+                obj_mut.modal_back_face = false;
             }
         }
 
@@ -329,6 +347,31 @@ pub fn create_object(
     id
 }
 
+/// CR 700.11: A player has "descended this turn" when a permanent card has
+/// been put into their graveyard from anywhere this turn. Single authority for
+/// the descend bookkeeping, shared by `move_to_zone` and the merge-split
+/// component delivery (`merge::put_component_into_zone`). Tokens are not cards
+/// and do not count.
+pub(crate) fn record_descend_on_graveyard_arrival(
+    state: &mut GameState,
+    object_id: ObjectId,
+    owner: PlayerId,
+) {
+    let is_permanent_card = state.objects.get(&object_id).is_some_and(|obj| {
+        !obj.is_token
+            && obj
+                .card_types
+                .core_types
+                .iter()
+                .any(|ct| ct.is_permanent_type())
+    });
+    if is_permanent_card {
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
+            player.descended_this_turn = true;
+        }
+    }
+}
+
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
 pub fn move_to_zone(
     state: &mut GameState,
@@ -471,24 +514,9 @@ pub fn move_to_zone(
         obj_mut.reset_for_battlefield_entry(state.turn_number);
     }
 
-    // Track descended: a permanent card was put into its owner's graveyard.
+    // CR 700.11: a permanent card was put into its owner's graveyard.
     if to == Zone::Graveyard {
-        let is_permanent_card = obj_mut.card_types.core_types.iter().any(|ct| {
-            matches!(
-                ct,
-                CoreType::Creature
-                    | CoreType::Artifact
-                    | CoreType::Enchantment
-                    | CoreType::Planeswalker
-                    | CoreType::Land
-                    | CoreType::Battle
-            )
-        });
-        if is_permanent_card && !obj_mut.is_token {
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
-                player.descended_this_turn = true;
-            }
-        }
+        record_descend_on_graveyard_arrival(state, object_id, owner);
     }
 
     // Mark layers dirty when objects enter the battlefield, or the hand (so
@@ -1781,6 +1809,188 @@ mod tests {
                 .iter()
                 .all(|link| link.source_id != source),
             "TrackedBySource links should still be pruned immediately after LTB"
+        );
+    }
+
+    /// CR 712.8a + CR 400.7: An MDFC permanent that entered the battlefield as
+    /// its back face (modal_back_face = true) must revert to its front face when
+    /// it leaves the battlefield (battlefield is the only non-stack zone where
+    /// back face is permitted).
+    #[test]
+    fn mdfc_back_face_reverts_to_front_face_on_leaving_battlefield() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::printed_cards::apply_back_face_to_object;
+        use crate::types::card_type::{CardType, CoreType};
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+
+        // Create an MDFC in command zone, showing its front face (Valki-like).
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["God".to_string()],
+            };
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            // Store back face data (original MDFC back face).
+            obj.back_face = Some(BackFaceData {
+                name: "Back Face".to_string(),
+                power: Some(6),
+                toughness: Some(6),
+                loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
+                    subtypes: vec!["Devil".to_string()],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![Keyword::Trample],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+            });
+        }
+
+        // Simulate ChooseModalFace { back_face: true }: apply back face and set flag.
+        let front_snapshot =
+            crate::game::printed_cards::snapshot_object_face(state.objects.get(&id).unwrap());
+        let back_data = state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .back_face
+            .take()
+            .unwrap();
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            apply_back_face_to_object(obj, back_data);
+            obj.back_face = Some(front_snapshot);
+            obj.modal_back_face = true;
+        }
+
+        // Move to battlefield.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        {
+            let obj = &state.objects[&id];
+            assert!(obj.modal_back_face, "flag must still be set on battlefield");
+            assert_eq!(obj.name, "Back Face");
+        }
+
+        // Leave the battlefield (dies / commander SBA).
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        let obj = &state.objects[&id];
+        // CR 712.8a: must revert to front face.
+        assert!(
+            !obj.modal_back_face,
+            "modal_back_face must be cleared after leaving battlefield"
+        );
+        assert_eq!(obj.name, "Front Face", "must show front face in graveyard");
+        assert_eq!(obj.power, Some(1), "power must revert to front face");
+        assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+    }
+
+    /// CR 712.8a: A countered MDFC spell (stack → graveyard) must also revert to
+    /// front face — the graveyard is "a zone other than the battlefield or stack."
+    #[test]
+    fn mdfc_back_face_reverts_on_countered_spell_to_graveyard() {
+        use crate::game::game_object::BackFaceData;
+        use crate::game::printed_cards::apply_back_face_to_object;
+        use crate::types::card_type::{CardType, CoreType};
+
+        let mut state = setup();
+
+        let id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.back_face = Some(BackFaceData {
+                name: "Back Face".to_string(),
+                power: Some(6),
+                toughness: Some(6),
+                loyalty: None,
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
+                    subtypes: vec![],
+                },
+                mana_cost: crate::types::mana::ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+            });
+        }
+        // Apply back face (simulating ChooseModalFace on stack).
+        let front_snapshot =
+            crate::game::printed_cards::snapshot_object_face(state.objects.get(&id).unwrap());
+        let back_data = state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .back_face
+            .take()
+            .unwrap();
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            apply_back_face_to_object(obj, back_data);
+            obj.back_face = Some(front_snapshot);
+            obj.modal_back_face = true;
+        }
+
+        // Spell is countered: stack → graveyard.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        // CR 712.8a: graveyard is not battlefield/stack — must show front face.
+        let obj = &state.objects[&id];
+        assert!(
+            !obj.modal_back_face,
+            "flag must be cleared when spell goes to graveyard"
+        );
+        assert_eq!(
+            obj.name, "Front Face",
+            "must revert to front face in graveyard"
         );
     }
 }

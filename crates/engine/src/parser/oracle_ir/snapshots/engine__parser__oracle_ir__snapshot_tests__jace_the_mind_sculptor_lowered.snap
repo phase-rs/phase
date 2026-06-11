@@ -49,7 +49,6 @@ expression: "&lowered"
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": true,
@@ -59,7 +58,6 @@ expression: "&lowered"
       "duration": null,
       "description": "[+2]: Look at the top card of target player's library. You may put that card on the bottom of that player's library.",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"
@@ -116,7 +114,6 @@ expression: "&lowered"
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -125,7 +122,6 @@ expression: "&lowered"
       "duration": null,
       "description": "[0]: Draw three cards, then put two cards from your hand on top of your library in any order.",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"
@@ -158,7 +154,6 @@ expression: "&lowered"
       "duration": null,
       "description": "[−1]: Return target creature to its owner's hand.",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"
@@ -212,7 +207,6 @@ expression: "&lowered"
           "duration": null,
           "description": null,
           "target_prompt": null,
-          "sorcery_speed": false,
           "condition": null,
           "optional_targeting": false,
           "optional": false,
@@ -221,7 +215,6 @@ expression: "&lowered"
         "duration": null,
         "description": null,
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -230,7 +223,6 @@ expression: "&lowered"
       "duration": null,
       "description": "[−12]: Exile all cards from target player's library, then that player shuffles their hand into their library.",
       "target_prompt": null,
-      "sorcery_speed": true,
       "activation_restrictions": [
         {
           "type": "AsSorcery"

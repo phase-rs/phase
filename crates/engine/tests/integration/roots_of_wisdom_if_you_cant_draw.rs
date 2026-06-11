@@ -61,6 +61,8 @@ fn resolve_roots_of_wisdom<F>(
             object_id: roots_id,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Roots of Wisdom cast should be accepted");
 
@@ -158,6 +160,7 @@ use engine::types::ability::{
     AbilityCondition, BounceSelection, ControllerRef, Effect, FilterProp, QuantityExpr,
     ResolvedAbility, TargetFilter, TypedFilter,
 };
+use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::CardId;
 use engine::types::player::PlayerId;
 

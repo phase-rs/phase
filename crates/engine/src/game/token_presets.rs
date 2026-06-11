@@ -171,6 +171,38 @@ pub fn find_exact_token_ref(
     source_id: ObjectId,
     body: &TokenCharacteristics,
 ) -> Option<TokenImageRef> {
+    find_token_ref_with_mode(state, source_id, body, TokenRefMatchMode::Exact)
+}
+
+/// CR 111.10 + CR 702.175a: Resolve a card-linked token preset for a copy
+/// token when the copied body exactly matches a catalog entry. Unlike
+/// [`find_exact_token_ref`], never skips body matching for a sole
+/// `source_related_token_ids` link — Twinflame-style copies keep source P/T and
+/// must not route through an offspring 1/1 preset.
+pub fn find_card_linked_copy_token_ref(
+    state: &GameState,
+    source_id: ObjectId,
+    body: &TokenCharacteristics,
+) -> Option<TokenImageRef> {
+    find_token_ref_with_mode(state, source_id, body, TokenRefMatchMode::CardLinkedCopy)
+}
+
+#[derive(Clone, Copy)]
+enum TokenRefMatchMode {
+    /// `CreateToken` path: a unique `source_related_token_ids` link may resolve
+    /// without a body match when the card names exactly one preset.
+    Exact,
+    /// `CopyTokenOf` path: always require an exact body match so copies that
+    /// keep source P/T (Twinflame, Populate) do not inherit offspring presets.
+    CardLinkedCopy,
+}
+
+fn find_token_ref_with_mode(
+    state: &GameState,
+    source_id: ObjectId,
+    body: &TokenCharacteristics,
+    mode: TokenRefMatchMode,
+) -> Option<TokenImageRef> {
     let source = state.objects.get(&source_id);
     let related_ids = source
         .map(|obj| obj.source_related_token_ids.as_slice())
@@ -191,9 +223,11 @@ pub fn find_exact_token_ref(
             .iter()
             .filter(|preset| related_ids.iter().any(|id| id == &preset.id));
 
-        let first = matches.next()?;
-        if matches.next().is_none() {
-            return first.token_image_ref.clone();
+        if matches!(mode, TokenRefMatchMode::Exact) {
+            let first = matches.next()?;
+            if matches.next().is_none() {
+                return first.token_image_ref.clone();
+            }
         }
 
         let mut matches = known_token_presets().iter().filter(|preset| {

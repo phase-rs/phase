@@ -3,6 +3,7 @@
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -46,6 +47,8 @@ fn issue_1302_final_parting_partitions_hand_and_graveyard() {
             object_id: parting,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Final Parting cast should succeed");
     runner.advance_until_stack_empty();

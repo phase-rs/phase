@@ -32,7 +32,9 @@
 //! for those. CR 702.96a's clarification that the transformation applies
 //! only to the word "target" in the spell's text matches this behavior.
 
-use crate::types::ability::{AbilityDefinition, Effect};
+#[cfg(test)]
+use crate::types::ability::TapStateChange;
+use crate::types::ability::{AbilityDefinition, Effect, EffectScope};
 
 /// Transform an ability definition tree in place: rewrite every target-bearing
 /// effect into its all-matching counterpart and recurse into `sub_ability`,
@@ -88,7 +90,20 @@ fn transform_effect_in_place(effect: &mut Effect) {
             player_filter: None,
             damage_source: None,
         },
-        Effect::Tap { target } => Effect::TapAll { target },
+        // CR 702.96a + CR 701.26a/b: overload's text change (replace every
+        // "target" with "each") promotes single-target tap/untap to its mass
+        // scope, carrying the tap/untap polarity through. (Only the Tap polarity
+        // appears in the current overload corpus; Untap promotion is
+        // type-supported for parity.)
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state,
+        } => Effect::SetTapState {
+            target,
+            scope: EffectScope::All,
+            state,
+        },
         // CR 702.96b + CR 400.7 + CR 611.2c: Cyclonic Rift overload — promote
         // single-target Bounce to the canonical mass-bounce variant. Preserves
         // `destination` so top-of-library overloads (none in current corpus
@@ -202,11 +217,20 @@ mod tests {
 
     #[test]
     fn tap_becomes_tap_all() {
-        let mut def = leaf(Effect::Tap {
+        let mut def = leaf(Effect::SetTapState {
             target: creature_filter(),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         });
         transform_ability_def(&mut def);
-        assert!(matches!(*def.effect, Effect::TapAll { .. }));
+        assert!(matches!(
+            *def.effect,
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -315,13 +339,22 @@ mod tests {
         });
         let mut parent = AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: creature_filter(),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .sub_ability(sub);
         transform_ability_def(&mut parent);
-        assert!(matches!(*parent.effect, Effect::TapAll { .. }));
+        assert!(matches!(
+            *parent.effect,
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                state: TapStateChange::Tap,
+                ..
+            }
+        ));
         let sub_ref = parent.sub_ability.as_ref().expect("sub present");
         assert!(matches!(*sub_ref.effect, Effect::DestroyAll { .. }));
     }

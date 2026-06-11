@@ -25,6 +25,7 @@
 //! encode is an independent link.
 
 use super::triggers::{PendingTrigger, PendingTriggerContext};
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -130,19 +131,40 @@ pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller:
 /// card on that creature (exile + link); `None` — or a creature that is no
 /// longer a legal host — declines, routing the card to its owner's graveyard
 /// (CR 608.2n). The chosen creature is re-validated against the current board.
-pub fn handle_encode_choice(
+///
+/// Returns the [`ZoneMoveResult`] of the decline move so the caller knows
+/// whether a CR 616.1 replacement-ordering choice parked a prompt (the declined
+/// card hit a graveyard→exile redirect) — the encode-accept path never pauses
+/// (exile is not a `Moved` redirect destination) and reports `Done`.
+pub(crate) fn handle_encode_choice(
     state: &mut GameState,
     card_id: ObjectId,
     creature: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
-) {
+) -> ZoneMoveResult {
     let controller = state.objects.get(&card_id).map(|o| o.controller);
     let chosen = creature
         .filter(|id| controller.is_some_and(|c| legal_encode_creatures(state, c).contains(id)));
     match chosen {
-        Some(creature_id) => finish_encode(state, card_id, creature_id, events),
-        // CR 608.2n: a declined cipher card is put into its owner's graveyard.
-        None => super::zones::move_to_zone(state, card_id, Zone::Graveyard, events),
+        Some(creature_id) => {
+            finish_encode(state, card_id, creature_id, events);
+            ZoneMoveResult::Done
+        }
+        // CR 608.2n + CR 614.6: a declined cipher card is the resolving spell's
+        // card being put into its owner's graveyard — route it through the
+        // zone-change pipeline so a `Moved` graveyard→exile redirect (Rest in
+        // Peace / Leyline of the Void) fires on it. The raw `move_to_zone` never
+        // proposed the inner ZoneChange, silently dropping those redirects. The
+        // spell's card moves itself on resolution, so the cause is
+        // `SpellResolutionDefault` (no external source). A CR 616.1 ordering
+        // choice (two simultaneous redirects) is parked centrally by
+        // `move_object`; the caller surfaces the parked prompt instead of
+        // returning to priority.
+        None => zone_pipeline::move_object(
+            state,
+            ZoneMoveRequest::spell_resolution_default(card_id, Zone::Graveyard),
+            events,
+        ),
     }
 }
 

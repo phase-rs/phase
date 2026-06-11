@@ -21,6 +21,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 /// Cast Ponder, answer its `DigChoice`, and stop at the optional shuffle prompt.
 /// Returns the runner parked on `WaitingFor::OptionalEffectChoice`.
@@ -51,6 +52,8 @@ fn cast_ponder_to_shuffle_prompt(db: &'static CardDatabase) -> engine::game::sce
             object_id: ponder,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ponder cast should succeed");
     runner.advance_until_stack_empty();

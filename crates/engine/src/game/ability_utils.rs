@@ -1,6 +1,8 @@
+#[cfg(test)]
+use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, CardTypeSetSource, CastManaSpentMetric,
-    CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, FilterProp,
+    CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, EffectScope, FilterProp,
     GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     MultiTargetSpec, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
     RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
@@ -1734,8 +1736,11 @@ fn effect_references_target_player(effect: &Effect) -> bool {
         | Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::DamageAll { target, .. }
-        | Effect::TapAll { target, .. }
-        | Effect::UntapAll { target, .. }
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
@@ -1939,8 +1944,11 @@ fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
     match effect {
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
-        | Effect::TapAll { target, .. }
-        | Effect::UntapAll { target, .. }
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
@@ -2008,14 +2016,16 @@ fn effect_references_target_creature_quantity(effect: &Effect) -> bool {
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
-        | Effect::AddCounter { count: amount, .. }
         | Effect::Sacrifice { count: amount, .. } => {
             quantity_expr_references_target_creature(amount)
         }
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
-        | Effect::TapAll { target, .. }
-        | Effect::UntapAll { target, .. }
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
@@ -4859,8 +4869,10 @@ mod tests {
         };
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .unless_pay(modifier.clone());
@@ -6639,10 +6651,12 @@ mod tests {
             .tapped = true;
         let mut ability = per_opponent_gain_control_ability().sub_ability(
             ResolvedAbility::new(
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
                     },
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
                 vec![],
                 ObjectId(900),
@@ -7268,8 +7282,10 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
 
         let ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: creature_filter.clone(),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(900),
@@ -7608,8 +7624,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(10),
@@ -7650,8 +7668,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(10),
@@ -7684,8 +7704,10 @@ mod tests {
             .push(crate::types::card_type::CoreType::Creature);
 
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(10),
@@ -7727,8 +7749,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             ObjectId(10),
@@ -7773,8 +7797,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::land()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             vec![],
             ObjectId(10),
@@ -7813,8 +7839,10 @@ mod tests {
         }
 
         let mut ability = ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::land()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             vec![],
             ObjectId(10),
@@ -8313,8 +8341,10 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 cant_regenerate: false,
             }),
-            single_target_mode(Effect::Tap {
+            single_target_mode(Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }),
         ];
         let descriptions = vec![
@@ -8352,8 +8382,10 @@ mod tests {
             target: TargetFilter::Typed(TypedFilter::creature()),
             cant_regenerate: false,
         });
-        mode.sub_ability = Some(Box::new(single_target_mode(Effect::Tap {
+        mode.sub_ability = Some(Box::new(single_target_mode(Effect::SetTapState {
             target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         })));
         let abilities = vec![mode];
         let descriptions = vec!["Destroy then tap.".to_string()];
@@ -8387,8 +8419,10 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         spawn_creatures(&mut state, PlayerId(1), 1);
 
-        let mode = single_target_mode(Effect::Tap {
+        let mode = single_target_mode(Effect::SetTapState {
             target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         });
         let abilities = vec![mode];
         let descriptions = vec!["Tap a creature.".to_string()];
@@ -8421,8 +8455,10 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         spawn_creatures(&mut state, PlayerId(0), 1);
 
-        let abilities = vec![single_target_mode(Effect::Tap {
+        let abilities = vec![single_target_mode(Effect::SetTapState {
             target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         })];
 
         let (slots, labels) = build_target_slots_labelled(
@@ -8457,8 +8493,10 @@ mod tests {
         max: usize,
     ) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             source,

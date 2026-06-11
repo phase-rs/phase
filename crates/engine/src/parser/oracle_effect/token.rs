@@ -288,8 +288,11 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     // `ContinuationAst::EntersTappedAttacking`.
     let lower_trimmed = text.to_lowercase();
     // Single combinator for the whole clause: relative-pronoun variants
-    // factored into one `alt`, shared tail appears once, `eof` anchors the
-    // match at the string's end.
+    // factored into one `alt`, shared tail appears once.
+    // CR 107.3: the clause may also be followed by ", where X is …" (e.g. Anim
+    // Pakal, Thousandth Moon) — accept that as a valid terminator in addition
+    // to EOF so the attacking flag is captured even when a variable-X binding
+    // trails the clause.
     let attacking_clause = |i| -> OracleResult<'_, bool> {
         let (i, _) = alt((
             tag(" that's"),
@@ -303,12 +306,12 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
             value(false, tag(" attacking")),
         ))
         .parse(i)?;
-        let (i, _) = nom::combinator::eof(i)?;
+        let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
         Ok((i, tapped))
     };
     // Nom parses forward; scan byte positions (only those starting with the
     // leading space the clause requires) for the first place where the clause
-    // consumes the remainder to EOF. That byte offset is the body length.
+    // matches. That byte offset is the body length.
     let entry_clause = (0..lower_trimmed.len()).find_map(|pos| {
         (lower_trimmed.as_bytes().get(pos) == Some(&b' '))
             .then(|| {
@@ -318,6 +321,12 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
             })
             .flatten()
     });
+    // When the attacking clause is detected and text is truncated at `pos`, any
+    // trailing ", where X is …" that followed the clause is cut off from the
+    // token body.  Extract and save it now (from the pre-truncation text) so
+    // the X-binding step below can still resolve a variable count.
+    let saved_where_x_expr: Option<String> =
+        entry_clause.and_then(|(pos, _)| extract_token_where_x_expression(&text[pos..]));
     let (text, enters_attacking, enters_tapped_attacking) = match entry_clause {
         Some((len, tapped)) => (&text[..len], true, tapped),
         None => (text, false, false),
@@ -374,7 +383,11 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         name = name_override;
     }
 
-    if let Some(where_expression) = extract_token_where_x_expression(suffix) {
+    // CR 107.3: when the attacking clause was stripped and took the ", where X
+    // is …" tail with it, `saved_where_x_expr` carries the expression; fall
+    // back to it so the variable count is still resolved.
+    if let Some(where_expression) = extract_token_where_x_expression(suffix).or(saved_where_x_expr)
+    {
         // CR 107.3i + CR 117.1: The Token-effect `where X is …` rebind shares
         // the Join-Forces normalization path with non-Token effects via
         // `super::parse_where_x_quantity_expression`. This makes phrases like
@@ -1656,5 +1669,46 @@ mod tests {
         } else {
             panic!("Expected Token effect, got {:?}", effect);
         }
+    }
+
+    /// CR 508.4 + CR 107.3: "tokens that are tapped and attacking, where X is
+    /// the number of +1/+1 counters on ~" (Anim Pakal, Thousandth Moon).
+    /// The ", where X is …" clause used to defeat the eof-anchored scan and
+    /// leave `tapped`/`enters_attacking` both false.
+    #[test]
+    fn tapped_and_attacking_with_trailing_where_x_clause() {
+        use crate::types::ability::ObjectScope;
+        use crate::types::counter::CounterType;
+
+        let text = "create x 1/1 colorless gnome artifact creature tokens that are tapped and attacking, where x is the number of +1/+1 counters on ~";
+        let effect = try_parse_token(
+            text,
+            "Create X 1/1 colorless Gnome artifact creature tokens that are tapped and attacking, where X is the number of +1/+1 counters on ~",
+            &mut ParseContext::default(),
+        )
+        .expect("expected Token effect");
+        let Effect::Token {
+            tapped,
+            enters_attacking,
+            count,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert!(tapped, "tokens must enter tapped");
+        assert!(enters_attacking, "tokens must enter attacking");
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Plus1Plus1),
+                    }
+                }
+            ),
+            "X count must resolve to CountersOn(Source, P1P1), got {count:?}"
+        );
     }
 }

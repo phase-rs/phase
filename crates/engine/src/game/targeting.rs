@@ -1568,7 +1568,7 @@ pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
 }
 
 /// Extract all explicit zone restrictions from a target filter, recursing through combinators.
-fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
+pub(crate) fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
     match filter {
         TargetFilter::Typed(TypedFilter { properties, .. }) => {
             let mut explicit_zones = Vec::new();

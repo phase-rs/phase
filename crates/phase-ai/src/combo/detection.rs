@@ -13,6 +13,7 @@ use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 
 use crate::combo::line::{CardPredicate, ComboLine, ComboPiece, ComboReachability, ComboStep};
+use engine::types::game_state::CastPaymentMode;
 
 pub trait ComboDetector: Send + Sync {
     fn assess(&self, state: &GameState, line: &ComboLine, ai: PlayerId) -> ComboReachability;
@@ -149,6 +150,8 @@ fn resolve_action_sequence(
                         object_id,
                         card_id,
                         targets: Vec::new(),
+
+                        payment_mode: CastPaymentMode::Auto,
                     })
                 })?
             }

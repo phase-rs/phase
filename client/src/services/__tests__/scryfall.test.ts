@@ -1,4 +1,14 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const REPO_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../..",
+);
 
 function makeLocalDataMap(
   cards: Record<string, { name: string; mana_cost?: string; cmc?: number; type_line?: string }>,
@@ -190,6 +200,190 @@ describe("fetchCardImageUrl", () => {
     const url = await fetchCardImageUrl("Mountain <288>", 0, "art_crop");
 
     expect(url).toBe("https://img.example/Mountain-art.jpg");
+  });
+});
+
+describe("fetchCardImageAssetByOracleId — reversible cards (issue #2031)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("resolves front-face art keyed by face oracle_id", async () => {
+    const oracleId = "ea9709b6-4c37-4d5a-b04d-cd4c42e4f9dd";
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          [oracleId]: {
+            oracle_id: oracleId,
+            face_names: ["propaganda", "propaganda"],
+            faces: [
+              {
+                normal: "https://img.example/propaganda-front.jpg",
+                art_crop: "https://img.example/propaganda-front-art.jpg",
+              },
+              {
+                normal: "https://img.example/propaganda-back.jpg",
+                art_crop: "https://img.example/propaganda-back-art.jpg",
+              },
+            ],
+            layout: "reversible_card",
+            name: "Propaganda // Propaganda",
+            mana_cost: "{2}{U}",
+            cmc: 3,
+            type_line: "Enchantment",
+            colors: ["U"],
+            color_identity: ["U"],
+            keywords: [],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const { fetchCardImageAssetByOracleId } = await loadScryfallModule();
+    const asset = await fetchCardImageAssetByOracleId(oracleId, "Propaganda", "normal");
+
+    expect(asset.src).toBe("https://img.example/propaganda-front.jpg");
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Scryfall generation scripts — reversible cards (issue #2031)", () => {
+  const oracleId = "ea9709b6-4c37-4d5a-b04d-cd4c42e4f9dd";
+
+  function withTempDir(run: (dir: string) => void) {
+    const dir = mkdtempSync(path.join(tmpdir(), "scryfall-gen-"));
+    try {
+      run(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("keys image data by face oracle_id when reversible cards omit root oracle_id", () => {
+    withTempDir((dir) => {
+      const input = path.join(dir, "oracle-cards.json");
+      const output = path.join(dir, "scryfall-data.json");
+      writeFileSync(
+        input,
+        JSON.stringify([
+          {
+            layout: "reversible_card",
+            name: "Propaganda // Propaganda",
+            card_faces: [
+              {
+                oracle_id: oracleId,
+                name: "Propaganda",
+                mana_cost: "{2}{U}",
+                cmc: 3,
+                type_line: "Enchantment",
+                colors: ["U"],
+                color_identity: ["U"],
+                keywords: ["Ward"],
+                image_uris: {
+                  normal: "https://img.example/front.jpg",
+                  art_crop: "https://img.example/front-art.jpg",
+                },
+              },
+              {
+                oracle_id: oracleId,
+                name: "Propaganda",
+                image_uris: {
+                  normal: "https://img.example/back.jpg",
+                  art_crop: "https://img.example/back-art.jpg",
+                },
+              },
+            ],
+          },
+        ]),
+      );
+
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-images.sh")], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          SCRYFALL_ORACLE_FILE: input,
+          SCRYFALL_IMAGES_OUTPUT: output,
+        },
+        stdio: "pipe",
+      });
+
+      const generated = JSON.parse(readFileSync(output, "utf8"));
+      expect(generated[oracleId]).toMatchObject({
+        oracle_id: oracleId,
+        layout: "reversible_card",
+        color_identity: ["U"],
+        keywords: ["Ward"],
+      });
+      expect(generated[oracleId].faces[0].normal).toBe("https://img.example/front.jpg");
+    });
+  });
+
+  it("groups printings by face oracle_id when reversible cards omit root oracle_id", () => {
+    withTempDir((dir) => {
+      const input = path.join(dir, "default-cards.json");
+      const output = path.join(dir, "scryfall-printings.json");
+      writeFileSync(
+        input,
+        JSON.stringify([
+          {
+            id: "old-printing",
+            layout: "reversible_card",
+            name: "Propaganda // Propaganda",
+            set: "sld",
+            set_name: "Secret Lair Drop",
+            collector_number: "1",
+            released_at: "2024-01-01",
+            border_color: "borderless",
+            full_art: false,
+            card_faces: [
+              {
+                oracle_id: oracleId,
+                image_uris: {
+                  normal: "https://img.example/old-front.jpg",
+                  art_crop: "https://img.example/old-front-art.jpg",
+                },
+              },
+            ],
+          },
+          {
+            id: "new-printing",
+            layout: "reversible_card",
+            name: "Propaganda // Propaganda",
+            set: "sld",
+            set_name: "Secret Lair Drop",
+            collector_number: "2",
+            released_at: "2025-01-01",
+            border_color: "borderless",
+            full_art: true,
+            card_faces: [
+              {
+                oracle_id: oracleId,
+                image_uris: {
+                  normal: "https://img.example/new-front.jpg",
+                  art_crop: "https://img.example/new-front-art.jpg",
+                },
+              },
+            ],
+          },
+        ]),
+      );
+
+      execFileSync("bash", [path.join(REPO_ROOT, "scripts/gen-scryfall-printings.sh")], {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          SCRYFALL_DEFAULT_CARDS_FILE: input,
+          SCRYFALL_PRINTINGS_OUTPUT: output,
+        },
+        stdio: "pipe",
+      });
+
+      const generated = JSON.parse(readFileSync(output, "utf8"));
+      expect(generated[oracleId]).toHaveLength(2);
+      expect(generated[oracleId][0].id).toBe("new-printing");
+      expect(generated[oracleId][1].id).toBe("old-printing");
+    });
   });
 });
 

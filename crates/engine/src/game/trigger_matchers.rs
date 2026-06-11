@@ -2830,24 +2830,29 @@ pub(super) fn match_leaves_battlefield(
     state: &GameState,
 ) -> bool {
     if let GameEvent::ZoneChanged {
-        object_id,
-        from,
-        to,
-        ..
+        from, to, record, ..
     } = event
     {
-        if *from != Some(Zone::Battlefield) {
-            return false;
-        }
-        if let Some(destination) = trigger.destination {
-            if destination != *to {
-                return false;
-            }
-        }
-        if !destination_matches_constraint(*to, &trigger.destination_constraint) {
-            return false;
-        }
-        valid_card_matches(trigger, state, *object_id, source_id)
+        // CR 603.10a: LeavesBattlefield is a battlefield-origin zone change.
+        // Default `origin = None` to Battlefield, matching the legacy matcher.
+        let origin = if !trigger.origin_zones.is_empty() {
+            OriginConstraint::OneOf(trigger.origin_zones.clone())
+        } else if let Some(origin) = trigger.origin {
+            OriginConstraint::Equals(origin)
+        } else {
+            OriginConstraint::Equals(Zone::Battlefield)
+        };
+        zone_change_clause_matches(
+            &origin,
+            trigger.destination.as_ref(),
+            &trigger.destination_constraint,
+            trigger.valid_card.as_ref(),
+            from,
+            to,
+            record,
+            source_id,
+            state,
+        )
     } else {
         false
     }

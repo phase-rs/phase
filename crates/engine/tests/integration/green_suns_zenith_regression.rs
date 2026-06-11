@@ -16,6 +16,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+use engine::types::game_state::CastPaymentMode;
 
 fn add_mana(runner: &mut engine::game::scenario::GameRunner, ty: ManaType, count: usize) {
     for _ in 0..count {
@@ -49,6 +50,8 @@ fn green_suns_zenith_search_then_shuffle_self_into_library() {
             object_id: zenith,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Green Sun's Zenith cast should succeed");
 

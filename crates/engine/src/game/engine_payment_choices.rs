@@ -1,7 +1,8 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, Effect, EffectKind, EffectScope, ResolvedAbility,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -15,13 +16,13 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 use super::casting;
+use super::costs::{self, PaymentOutcome};
 use super::effects;
 use super::engine::{
     handle_tap_land_for_mana, handle_untap_land_for_mana, resume_pending_continuation_if_priority,
     EngineError,
 };
 use super::engine_priority;
-use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
 use super::zones;
 
@@ -115,8 +116,23 @@ pub(super) fn handle_opponent_may_choice(
             ability.context.accepting_player = Some(promptee);
 
             let target_selection = match &ability.effect {
-                Effect::Sacrifice { target, .. } | Effect::Tap { target } => {
-                    let require_untapped = matches!(ability.effect, Effect::Tap { .. });
+                // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
+                // sacrifice or single-target tap cost. Tap requires an untapped
+                // permanent (CR 701.26a); sacrifice has no such restriction.
+                Effect::Sacrifice { target, .. }
+                | Effect::SetTapState {
+                    target,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                } => {
+                    let require_untapped = matches!(
+                        ability.effect,
+                        Effect::SetTapState {
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                            ..
+                        }
+                    );
                     let legal: Vec<ObjectId> = state
                         .objects
                         .iter()
@@ -372,14 +388,23 @@ fn pay_top_library_exile_cost(
                 .collect::<Vec<_>>()
         })
         .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
-    let mut zone_changes = Vec::with_capacity(top_cards.len());
+    // Phase B (PLAN §6.2): stash the FULL post-replacement `ProposedEvent`s,
+    // not degraded `(object_id, to)` pairs. The pairs discarded the event's
+    // `applied: HashSet<ReplacementId>` (CR 616.1: the set of replacements
+    // already applied this pass) plus every other field the delivery tail
+    // reads; delivering through the raw mover then bypassed the tail entirely.
+    // Each event already cleared the replacement consult above, so it is sealed
+    // through the third mint path (`approve_post_replacement`) — a consult-
+    // skipping approved delivery. Re-proposing through `move_object` would
+    // double-apply the Moved definitions already applied here.
+    let mut approved_changes = Vec::with_capacity(top_cards.len());
 
     for card_id in top_cards {
         let proposed =
             ProposedEvent::zone_change(card_id, Zone::Library, Zone::Exile, Some(source_id));
         match replacement::replace_event(state, proposed, events) {
-            ReplacementResult::Execute(ProposedEvent::ZoneChange { object_id, to, .. }) => {
-                zone_changes.push((object_id, to));
+            ReplacementResult::Execute(event @ ProposedEvent::ZoneChange { .. }) => {
+                approved_changes.push(event);
             }
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
                 return Ok(false);
@@ -391,8 +416,45 @@ fn pay_top_library_exile_cost(
         }
     }
 
-    for (object_id, to) in zone_changes {
-        zones::move_to_zone(state, object_id, to, events);
+    for event in approved_changes {
+        // Attribute the move to the cost source (the event's `cause`),
+        // preserving the value the proposal carried (the proposal was built
+        // with `Some(source_id)`).
+        let source_id = match &event {
+            ProposedEvent::ZoneChange { cause, .. } => *cause,
+            _ => unreachable!("collected only ZoneChange events"),
+        };
+        let Ok(approved) =
+            crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(event)
+        else {
+            unreachable!("collected only ZoneChange events");
+        };
+        match crate::game::zone_pipeline::deliver(
+            state,
+            approved,
+            crate::game::zone_pipeline::DeliveryCtx {
+                source_id,
+                exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+                drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+            },
+            events,
+        ) {
+            crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
+            // The Library → Exile destination cannot surface a CR 614.1c
+            // counter-replacement pause (no battlefield entry); the arm is
+            // present for exhaustiveness. A redirect to the battlefield that
+            // paused would have no continuation home in this synchronous cost
+            // path, so fail the payment loudly — continuing would silently
+            // drop the parked tail and corrupt the cost state in release
+            // builds where a debug_assert is a no-op.
+            crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                return Err(EngineError::InvalidAction(
+                    "top-library exile cost delivery surfaced a replacement pause; \
+                     no continuation exists in this cost path"
+                        .to_string(),
+                ));
+            }
+        }
     }
 
     Ok(true)
@@ -426,9 +488,26 @@ pub(super) fn handle_unless_payment(
     let mut post_action_event_start = None;
     if pay {
         match cost {
-            // CR 118.12: Pay the static mana component of the unless cost.
-            AbilityCost::Mana { cost: mana_cost } => {
-                casting::pay_unless_cost(state, player, &mana_cost, events)?;
+            // CR 118.12: Pay the static mana component of the unless cost
+            // through the single payment authority (cost-payment unification,
+            // Phase 3). Resolution scope auto-taps via `pay_effect_mana_cost`
+            // — the same final mana path the old `pay_unless_cost` shim used —
+            // and maps an unpayable cost to the "unless" branch fall-through.
+            AbilityCost::Mana { .. } => {
+                match costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &cost,
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } => payment_failed = true,
+                    // CR 616.1: an atomic Mana cost cannot surface a
+                    // replacement pause; the authority never returns `Paused`
+                    // for it. Treat any pause defensively as not-paid.
+                    PaymentOutcome::Paused { .. } => payment_failed = true,
+                }
             }
             // CR 118.4 + CR 107.3c: A dynamic generic cost should have been
             // resolved into a fixed `Mana { cost }` upstream (in the
@@ -438,57 +517,63 @@ pub(super) fn handle_unless_payment(
             AbilityCost::ManaDynamic { .. } => {
                 unreachable!("ManaDynamic should be resolved before payment");
             }
-            // CR 118.12 + CR 118.3 + CR 119.4 + CR 119.8: Unless-pay life
-            // routes through the single-authority helper. An unpayable cost
-            // (insufficient life, or CantLoseLife lock) causes the "unless"
-            // branch to fall through to the effect still happening.
-            AbilityCost::PayLife { amount } => {
-                // CR 107.3c: Resolve the `QuantityExpr` against game state so
-                // dynamic life amounts (e.g., "pay X life where X is your
-                // opponents' life total") read the chosen X at payment time.
-                let life_amount = crate::game::quantity::resolve_quantity_with_targets(
+            // CR 118.12 + CR 118.3 + CR 119.4: Unless-pay life routes through
+            // the single payment authority (cost-payment unification, Phase 3),
+            // which routes it through `pay_life_as_cost`; an unpayable cost
+            // (insufficient life, or a CantLoseLife lock) makes the "unless"
+            // branch fall through to the effect still happening.
+            // Deviation from the authority's stated Resolution precondition:
+            // `pending_effect` is passed RAW — controller NOT swapped to the
+            // payer (unlike the `effects/pay.rs` payer-adjusted clone) — and
+            // the unless-payer goes in separately as `player`. This preserves
+            // the pre-Phase-3 inline behavior: unless-cost dynamic quantities
+            // can be controller-relative by card text, so a blanket controller
+            // swap is not obviously correct here. The PAYER's life is still
+            // what gets deducted (the authority pays `player`).
+            AbilityCost::PayLife { .. } => {
+                match costs::pay_ability_cost_for_resolution(
                     state,
-                    &amount,
+                    player,
+                    &cost,
                     pending_effect.as_ref(),
-                );
-                let life_amount = u32::try_from(life_amount.max(0)).unwrap_or(0);
-                match pay_life_as_cost(state, player, life_amount, events) {
-                    PayLifeCostResult::Paid { .. } => {}
-                    PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    // CR 616.1: the authority's Resolution PayLife arm has no
+                    // `Paused` return path today (`pay_life_as_cost` returns
+                    // only Paid/InsufficientLife/Prohibited); lumped with
+                    // `Failed` defensively. If a future authority change makes
+                    // a pause reachable here, this arm must hold the unless-
+                    // prompt instead of resolving the punishment effect over a
+                    // live replacement choice.
+                    PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
                         payment_failed = true;
                     }
                 }
             }
-            // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]"
-            // — the player chose to pay; deduct the cost and skip the effect.
-            // CR 107.14: Paying {E} removes one energy counter from the
-            // paying player per `{E}` symbol in the cost. Energy counters
-            // are tracked on `Player.energy` (no zone), so the deduction is
-            // a direct counter-state mutation.
-            AbilityCost::PayEnergy { amount } => {
-                // CR 107.3c: Resolve the `QuantityExpr` against game state
-                // before the mutable borrow below so dynamic amounts (e.g.
-                // "an amount of {E} equal to its mana value") read the parent
-                // target at payment time.
-                let energy_amount = crate::game::quantity::resolve_quantity_with_targets(
+            // CR 118.12 + CR 118.12a + CR 107.14: "[Effect] unless [player]
+            // pays [cost]" — paying {E} removes one energy counter per `{E}`
+            // symbol. Routed through the single payment authority (cost-payment
+            // unification, Phase 3), which resolves the dynamic `QuantityExpr`
+            // (CR 107.3c) and performs the energy deduction. Insufficient
+            // energy makes the "unless" branch fall through to the effect
+            // happening. Same precondition deviation as the PayLife arm above:
+            // `pending_effect` is passed RAW (no payer-adjusted clone); the
+            // PAYER's energy is what gets deducted.
+            AbilityCost::PayEnergy { .. } => {
+                match costs::pay_ability_cost_for_resolution(
                     state,
-                    &amount,
+                    player,
+                    &cost,
                     pending_effect.as_ref(),
-                );
-                let energy_amount = u32::try_from(energy_amount.max(0)).unwrap_or(0);
-                let Some(player_state) = state.players.iter_mut().find(|p| p.id == player) else {
-                    return Err(EngineError::InvalidAction(
-                        "Unless payment player not found".to_string(),
-                    ));
-                };
-                if player_state.energy < energy_amount {
-                    payment_failed = true;
-                } else {
-                    player_state.energy -= energy_amount;
-                    events.push(GameEvent::EnergyChanged {
-                        player,
-                        delta: -(energy_amount as i32),
-                    });
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    // CR 616.1: no `Paused` path exists for PayEnergy today;
+                    // lumped with `Failed` defensively (see PayLife arm note).
+                    PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
+                        payment_failed = true;
+                    }
                 }
             }
             // CR 118.12a + CR 701.9 + CR 702.24a: Unless-discard. Resolve the
@@ -1011,7 +1096,23 @@ pub(super) fn handle_ward_discard_choice(
         ));
     }
 
-    effects::discard::complete_discard_to_graveyard(state, chosen[0], player, events);
+    // CR 614.6: the discard's inner hand → graveyard move consults `Moved`
+    // redirects (RIP class) through the pipeline. A redirect that itself needs a
+    // CR 616.1 choice parks `state.waiting_for`; surface it and return.
+    if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
+        effects::discard::complete_discard_to_graveyard(
+            state,
+            chosen[0],
+            player,
+            Some(pending_effect.source_id),
+            std::collections::HashSet::new(),
+            events,
+        )
+    {
+        state.waiting_for =
+            crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
+        return Ok(state.waiting_for.clone());
+    }
 
     // CR 702.24a: more discards remain — re-derive hand eligibility (the
     // just-discarded card still keys `state.objects` in the graveyard, so
@@ -2095,6 +2196,61 @@ mod tests {
                 target: TargetFilter::Any,
                 count: 2,
             }
+        );
+    }
+
+    /// CR 614.1 + CR 614.6 regression test for the Phase-B seal+deliver
+    /// migration of the top-library exile cost (`pay_top_library_exile_cost`,
+    /// Thought Lash class). The loop now stashes the FULL post-replacement
+    /// `ProposedEvent`s and delivers each through
+    /// `ApprovedZoneChange::approve_post_replacement` + `zone_pipeline::deliver`
+    /// (a consult-skipping approved delivery that preserves the event's
+    /// `applied: HashSet<ReplacementId>`), rather than degrading survivors to
+    /// `(object_id, to)` pairs delivered via raw `zones::move_to_zone`.
+    ///
+    /// This is a structural fix (consult-once/deliver-once), not a behavior
+    /// change: a plain Library → Exile cost has no battlefield-entry mods to
+    /// apply, and the delivery tail's continuation drain early-returns for the
+    /// Exile destination (zone_pipeline.rs `apply_zone_delivery_tail`: `to ==
+    /// Exile` with a source attribution and no exile-link returns `Done` before
+    /// the `post_replacement_continuation` drain). The redirected destination
+    /// was already honored pre-migration (the `to` field was captured from the
+    /// Execute event), so this test pins the observable outcome — the top card
+    /// is exiled — against both the old raw delivery and the new sealed one.
+    #[test]
+    fn top_library_exile_cost_exiles_top_card_through_sealed_delivery() {
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(8000),
+            PlayerId(0),
+            "Cost Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // One card on top of P0's library to pay the exile cost with.
+        let top = create_object(
+            &mut state,
+            CardId(8001),
+            PlayerId(0),
+            "Top Card".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        let paid = pay_top_library_exile_cost(&mut state, PlayerId(0), 1, source, &mut events)
+            .expect("cost resolves");
+
+        assert!(paid, "the single top-library card pays the exile cost");
+        assert_eq!(
+            state.objects[&top].zone,
+            Zone::Exile,
+            "the top library card is exiled through the sealed delivery path"
+        );
+        assert!(
+            !state.players[0].library.contains(&top),
+            "the exiled card has left the library"
         );
     }
 }

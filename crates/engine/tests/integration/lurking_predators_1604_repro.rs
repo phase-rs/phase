@@ -16,6 +16,7 @@ use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{AbilityCondition, Effect};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -48,6 +49,8 @@ fn cast_creature_from_hand(runner: &mut engine::game::scenario::GameRunner, hand
             object_id: hand_card,
             card_id,
             targets: vec![],
+
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
 }

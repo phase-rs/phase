@@ -16,7 +16,7 @@ use crate::types::zones::Zone;
 use super::ability_utils::{flatten_targets_in_chain, validate_targets_in_chain};
 use super::effects;
 use super::targeting;
-use super::zones;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// CR 405.1: Add an object to the stack.
 pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
@@ -62,13 +62,23 @@ fn spell_in_zone(state: &GameState, id: ObjectId, zone: Zone) -> bool {
     state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
 }
 
+/// CR 608.3e + CR 614.6: A permanent spell whose ETB was fully prevented goes
+/// to its owner's graveyard (only if still on the stack — see `spell_still_on_stack`).
+/// Routed through the zone pipeline so board-wide `Moved` graveyard→exile
+/// redirects (Rest in Peace / Leyline of the Void) fire on the discarded
+/// permanent (PLAN §8 Risk #2). Returns the `ZoneMoveResult` so the caller can
+/// propagate a CR 616.1 ordering pause (two simultaneous redirects); the common
+/// single-redirect / no-redirect path returns `Done`.
 fn move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
     state: &mut GameState,
     id: ObjectId,
     events: &mut Vec<GameEvent>,
-) {
+) -> ZoneMoveResult {
     if spell_still_on_stack(state, id) {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
+        let req = ZoneMoveRequest::spell_resolution_default(id, Zone::Graveyard);
+        zone_pipeline::move_object(state, req, events)
+    } else {
+        ZoneMoveResult::Done
     }
 }
 
@@ -353,19 +363,38 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 if is_spell {
                     // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
                     // Aftermath, and Harmonize exile when leaving the stack
-                    // for any reason, including fizzle. Escape (CR 702.138)
-                    // has no such clause — escaped spells go to graveyard normally.
-                    let dest = if casting_variant.replaces_stack_to_graveyard_with_exile()
-                        || object_exiles_instead_of_graveyard(state, entry.id)
-                    {
+                    // for any reason, including fizzle. This is a STATIC
+                    // destination rule (the spell exiles instead of going to
+                    // any zone), not a replacement — it is selected here. Escape
+                    // (CR 702.138) has no such clause — escaped spells go to
+                    // graveyard normally. The Invoke Calamity free-cast rider is
+                    // NOT applied here: it is a self-scoped `Moved` replacement
+                    // on the spell, consulted by the pipeline below, so it never
+                    // double-applies with this static exile (its Graveyard-scoped
+                    // def does not match a stack→Exile move).
+                    let dest = if casting_variant.replaces_stack_to_graveyard_with_exile() {
                         Zone::Exile
                     } else {
                         Zone::Graveyard
                     };
-                    zones::move_to_zone(state, entry.id, dest, events);
                     if casting_variant.restores_front_face_after_stack_exit() {
                         restore_alternative_spell_normal_face(state, entry.id);
                     }
+                    // CR 608.2n + CR 614.6: route the stack → graveyard/exile
+                    // move through the pipeline so self-scoped `Moved` redirects
+                    // (the Invoke Calamity rider) and board-wide RIP/Leyline
+                    // redirects fire. On a CR 616.1 ordering pause (rider + RIP
+                    // = two simultaneous graveyard→exile candidates) the prompt
+                    // AND the move are parked by `move_object`; the spell has
+                    // left the stack either way, so fall through to the shared
+                    // fizzle epilogue below (StackResolved + trigger-context /
+                    // die-result clears) exactly as the delivered path does, and
+                    // let the replacement-choice resume path deliver the parked
+                    // move. A bare early return here leaked stale
+                    // cross-resolution context and never emitted StackResolved
+                    // (review fix).
+                    let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
+                    let _ = zone_pipeline::move_object(state, req, events);
                 }
                 events.push(GameEvent::StackResolved {
                     object_id: entry.id,
@@ -519,15 +548,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // instead of putting it anywhere else any time it would leave the stack.
             // Flashback only appears on instants/sorceries — unconditional exile is correct.
             Zone::Exile
-        } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
-            || object_exiles_instead_of_graveyard(state, entry.id))
+        } else if casting_variant.replaces_stack_to_graveyard_with_exile()
             && !is_permanent_spell(state, entry.id)
         {
             // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
             // spell cast this way would be put into your graveyard, exile it
-            // instead") and the per-object Invoke Calamity rider both replace the
-            // normal non-permanent resolution destination. Permanent spells still
-            // resolve to the battlefield.
+            // instead") are a STATIC destination rule selected here. Permanent
+            // spells still resolve to the battlefield. The Invoke Calamity
+            // free-cast rider is no longer read here — it is a self-scoped
+            // `Moved` replacement on the spell, consulted by the pipeline when
+            // the spell's stack → graveyard move is delivered below (CR 614.6).
             Zone::Exile
         } else if is_permanent_spell(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.
@@ -668,33 +698,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .get(&entry.id)
                 .map(|obj| obj.convoked_creatures.clone())
                 .unwrap_or_default();
-            // CR 702.33d + CR 400.7 + CR 400.7d: Capture the authoritative kicker
-            // payments BEFORE `move_to_zone` clears `kickers_paid` on the new
-            // battlefield object (CR 400.7 new-object rule, applied by
-            // `reset_for_battlefield_entry`). The resolving spell's `SpellContext`
-            // is authoritative when present; placeholder permanent spells (vanilla
-            // / ETB-only creatures with no on-resolve Spell ability) have
-            // `ability == None`, so fall back to the stack object's stamped value.
-            let kickers_paid: Vec<crate::types::ability::KickerVariant> = ability
-                .as_ref()
-                .map(|a| a.context.kickers_paid.clone())
-                .unwrap_or_else(|| {
-                    state
-                        .objects
-                        .get(&entry.id)
-                        .map(|o| o.kickers_paid.clone())
-                        .unwrap_or_default()
-                });
-            let additional_cost_payment_count = ability
-                .as_ref()
-                .map(|a| a.context.additional_cost_payment_count)
-                .unwrap_or_else(|| {
-                    state
-                        .objects
-                        .get(&entry.id)
-                        .map(|o| o.additional_cost_payment_count)
-                        .unwrap_or_default()
-                });
+            // CR 702.33d + CR 400.7d + CR 603.4: Normalize the authoritative
+            // cast-link provenance onto the stack object BEFORE `replace_event`,
+            // so the pipeline's `CastLinkSnapshot` (captured inside
+            // `deliver_replaced_zone_change` just before `reset_for_battlefield_entry`
+            // clears it per CR 400.7) sees the correct kicker / additional-cost /
+            // cast-from-zone values and restores them onto the resulting permanent.
+            // The resolving spell's `SpellContext` is authoritative when present;
+            // placeholder permanent spells (vanilla / ETB-only creatures with no
+            // on-resolve Spell ability) have `ability == None`, so the stack
+            // object's already-stamped value is left untouched.
+            if let Some(ability) = ability.as_ref() {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.kickers_paid = ability.context.kickers_paid.clone();
+                    obj.additional_cost_payment_count =
+                        ability.context.additional_cost_payment_count;
+                    if let Some(cast_from_zone) = ability.context.cast_from_zone {
+                        obj.cast_from_zone = Some(cast_from_zone);
+                    }
+                }
+            }
             let cast_timing_permission = state
                 .objects
                 .get(&entry.id)
@@ -705,13 +728,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         object_id,
                         to,
-                        enter_tapped,
-                        enter_with_counters,
-                        controller_override,
-                        enter_transformed,
                         ..
-                    } = event
+                    } = &event
                     {
+                        let object_id = *object_id;
+                        let to = *to;
                         // CR 608.3 + 608.2c: Stack-residency guard — see
                         // `spell_still_on_stack`. If `execute_effect` already
                         // moved the spell off the stack via a self-targeted
@@ -723,36 +744,52 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         // counter / transform state to a non-battlefield
                         // zone is meaningless and would corrupt the object.
                         if spell_still_on_stack(state, object_id) {
-                            zones::move_to_zone(state, object_id, to, events);
-                            if let Some(obj) = state.objects.get_mut(&object_id) {
-                                if enter_tapped.resolve(false) {
-                                    obj.tapped = true;
-                                }
-                                if let Some(new_controller) = controller_override {
-                                    obj.controller = new_controller;
-                                }
-                            }
-                            // CR 614.1c: Apply counters from replacement pipeline
-                            // (e.g., saga lore counters per CR 714.3a, planeswalker
-                            // intrinsic loyalty per CR 306.5b, battle intrinsic
-                            // defense per CR 310.4b).
-                            if !super::engine_replacement::apply_etb_counters(
+                            // CR 608.3 + CR 614.1c: The ETB replacement consult
+                            // already ran above (`replace_event`); seal the
+                            // post-replacement `ZoneChange` with the third mint
+                            // path so the shared `zone_pipeline::deliver` tail
+                            // applies the entry (move + enter-tapped /
+                            // controller-override / enter-with-counters /
+                            // enter-transformed / face-down / devour /
+                            // EntersWithAdditionalCounters statics / pending ETB
+                            // counters), restoring the CR 400.7d cast-link family
+                            // via `CastLinkSnapshot` from the values normalized
+                            // onto the stack object above. `CallerEpilogue` keeps
+                            // the CR 614.12a `post_replacement_continuation` drain
+                            // owned by the caller epilogue below (mirrors the
+                            // replacement-choice resume path), so the Siege /
+                            // Tribute prompt is not double-drained.
+                            let Ok(approved) =
+                                zone_pipeline::ApprovedZoneChange::approve_post_replacement(event)
+                            else {
+                                unreachable!("matched ProposedEvent::ZoneChange above");
+                            };
+                            match zone_pipeline::deliver(
                                 state,
-                                object_id,
-                                &enter_with_counters,
+                                approved,
+                                zone_pipeline::DeliveryCtx {
+                                    source_id: None,
+                                    exile_links: zone_pipeline::ExileLinkSpec::default(),
+                                    drain:
+                                        crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                                },
                                 events,
                             ) {
-                                return;
-                            }
-                            // CR 712.14a + CR 310.11b: Apply transformation if entering
-                            // transformed (propagated from ExileWithAltCost permission).
-                            if enter_transformed && to == Zone::Battlefield {
-                                if let Some(obj) = state.objects.get(&object_id) {
-                                    if obj.back_face.is_some() && !obj.transformed {
-                                        let _ = super::transform::transform_permanent(
-                                            state, object_id, events,
-                                        );
-                                    }
+                                zone_pipeline::ZoneDeliveryResult::Done => {}
+                                // CR 614.1c / CR 616.1: the delivery tail parked a
+                                // counter-replacement pause and stashed the
+                                // remaining tail; surface it without running the
+                                // caller epilogue (the parked tail carries
+                                // `CallerEpilogue` and the resume path owns it).
+                                zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                                    events.push(GameEvent::StackResolved {
+                                        object_id: entry.id,
+                                    });
+                                    state.current_trigger_event = None;
+                                    state.current_trigger_events.clear();
+                                    state.current_trigger_match_count = None;
+                                    state.die_result_this_resolution = None;
+                                    return;
                                 }
                             }
                             // CR 702.146b / CR 702.162a + CR 712.11a + CR
@@ -760,7 +797,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             // stack with its back face up. A resolving DFC
                             // spell becomes a permanent with the same face up;
                             // mark the battlefield object transformed without
-                            // swapping faces again.
+                            // swapping faces again. Casting-variant-specific, so
+                            // it stays caller-side (the pipeline tail only knows
+                            // the generic `enter_transformed` face-swap).
                             if matches!(
                                 casting_variant,
                                 CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
@@ -778,53 +817,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     events.push(GameEvent::Transformed { object_id });
                                 }
                             }
-                            // CR 614.1c: Apply pending ETB counters from delayed triggers
-                            // (e.g., "that creature enters with an additional +1/+1 counter").
-                            let pending: Vec<_> = state
-                                .pending_etb_counters
-                                .iter()
-                                .filter(|(oid, _, _)| *oid == object_id)
-                                .map(|(_, ct, n)| (ct.clone(), *n))
-                                .collect();
-                            if !pending.is_empty() {
-                                if !super::engine_replacement::apply_etb_counters(
-                                    state, object_id, &pending, events,
-                                ) {
-                                    return;
-                                }
-                                state
-                                    .pending_etb_counters
-                                    .retain(|(oid, _, _)| *oid != object_id);
-                            }
                         }
                     }
-                    // CR 603.4: Propagate cast_from_zone to the permanent so ETB triggers
-                    // can evaluate conditions like "if you cast it from your hand".
-                    // When ability is present, use its context; otherwise the object
-                    // already has cast_from_zone set during finalize_cast_to_stack.
+                    // CR 400.7d + CR 603.4: The cast-link family (cast_from_zone,
+                    // cast_timing_permission, convoked_creatures, kickers_paid,
+                    // additional_cost_payment_count) is now restored structurally
+                    // inside `zone_pipeline::deliver` via `CastLinkSnapshot`,
+                    // captured from the values normalized onto the stack object
+                    // before `replace_event`. Only the exile-link push and the
+                    // CR 709.5c room-door unlock remain caller-side here.
                     if spell_in_zone(state, entry.id, Zone::Battlefield) {
-                        if let Some(obj) = state.objects.get_mut(&entry.id) {
-                            if let Some(ref ability) = ability {
-                                obj.cast_from_zone = ability.context.cast_from_zone;
-                            }
-                            if let Some(permission) = cast_timing_permission {
-                                obj.cast_timing_permission = Some((permission, state.turn_number));
-                            }
-                            obj.convoked_creatures = convoked_creatures;
-                            // CR 702.33d + CR 400.7d: Restore kicker payments onto the
-                            // resulting permanent so post-resolution gates
-                            // (`ReplacementCondition::CastViaKicker` and ETB
-                            // `AbilityCondition::AdditionalCostPaid` on triggered
-                            // abilities) can evaluate. `move_to_zone` cleared
-                            // `kickers_paid` per CR 400.7 (new object on zone change);
-                            // CR 400.7d permits an ability of the permanent to
-                            // reference costs paid to cast the spell it became. This
-                            // restore is unconditional — mirroring `convoked_creatures`
-                            // — because placeholder permanent spells have
-                            // `ability == None` and would otherwise lose the data.
-                            obj.kickers_paid = kickers_paid;
-                            obj.additional_cost_payment_count = additional_cost_payment_count;
-                        }
                         if let Some(exiled_id) = ability
                             .as_ref()
                             .and_then(|ability| ability.cost_paid_object.as_ref())
@@ -882,9 +884,31 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // resolved), skip the prevented-ETB graveyard fallback so
                     // the self-chosen destination is honored (issue #323
                     // class).
-                    move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
+                    //
+                    // CR 614.6: the prevented permanent's graveyard fallback now
+                    // routes through the pipeline, so board-wide RIP/Leyline
+                    // graveyard→exile redirects fire. On a CR 616.1 ordering
+                    // pause (two simultaneous redirects), the move is parked;
+                    // bail with the standard pause epilogue so the
+                    // replacement-choice resume path delivers it. (The post-tail
+                    // below is all `spell_in_zone(Battlefield)`-gated, so it is a
+                    // no-op for a parked-on-stack spell regardless.)
+                    match move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
                         state, entry.id, events,
-                    );
+                    ) {
+                        ZoneMoveResult::Done => {}
+                        ZoneMoveResult::NeedsChoice(_)
+                        | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                            events.push(GameEvent::StackResolved {
+                                object_id: entry.id,
+                            });
+                            state.current_trigger_event = None;
+                            state.current_trigger_events.clear();
+                            state.current_trigger_match_count = None;
+                            state.die_result_this_resolution = None;
+                            return;
+                        }
+                    }
                 }
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
                     // A replacement needs player choice (e.g., Clone "enter as a copy").
@@ -959,7 +983,35 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // be skipped — otherwise the spell card travels exile→graveyard
             // and undoes its own self-exile clause (issue #323).
             if spell_still_on_stack(state, entry.id) {
-                zones::move_to_zone(state, entry.id, dest, events);
+                // CR 608.2n + CR 614.6: route the spell's stack → graveyard/exile
+                // default move through the pipeline so self-scoped `Moved`
+                // redirects (the Invoke Calamity rider) and board-wide
+                // RIP/Leyline redirects fire (PLAN §8 Risk #2 — confirmed bug on
+                // the old raw-move path). A redirect only matches a Graveyard
+                // destination, so flashback/adventure/omen spells (dest already
+                // Exile/Library) never engage it. On a CR 616.1 ordering choice
+                // (two simultaneous Graveyard→Exile redirects on the same spell),
+                // `move_object` parks the prompt; the spell is already off the
+                // stack and the dest is Graveyard, so every post-move bookkeeping
+                // step below is a no-op (front-face restore / Adventure / Omen /
+                // battlefield-entry tail all gate on non-graveyard zones). Mirror
+                // the permanent-spell NeedsChoice arm: emit StackResolved + clear
+                // trigger context, then bail so the replacement-choice resume
+                // path delivers the redirected move.
+                let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
+                match zone_pipeline::move_object(state, req, events) {
+                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                        events.push(GameEvent::StackResolved {
+                            object_id: entry.id,
+                        });
+                        state.current_trigger_event = None;
+                        state.current_trigger_events.clear();
+                        state.current_trigger_match_count = None;
+                        state.die_result_this_resolution = None;
+                        return;
+                    }
+                }
             }
         }
 
@@ -1972,16 +2024,6 @@ fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
 /// "spell that will enter the battlefield" from "non-permanent spell"
 /// (e.g., Sneak's CR 702.190b alongside-attacker placement, which applies
 /// only to permanent spells).
-/// CR 614.1a + CR 608.2n: True when a spell carries the per-object "exile
-/// instead of graveyard" rider (Invoke Calamity's free-cast spells). Read by the
-/// stack-resolution router to send the spell to exile when it leaves the stack.
-fn object_exiles_instead_of_graveyard(state: &GameState, object_id: ObjectId) -> bool {
-    state
-        .objects
-        .get(&object_id)
-        .is_some_and(|obj| obj.exile_from_stack_instead_of_graveyard)
-}
-
 pub(crate) fn is_permanent_spell(state: &GameState, object_id: ObjectId) -> bool {
     use crate::types::card_type::CoreType;
 
@@ -2067,7 +2109,7 @@ pub(crate) fn create_warp_delayed_trigger(
 mod tests {
     use super::*;
     use crate::game::game_object::BackFaceData;
-    use crate::game::zones::create_object;
+    use crate::game::zones::{self, create_object};
     use crate::types::ability::{
         CostPaidObjectSnapshot, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
         TypedFilter,
@@ -2272,6 +2314,79 @@ mod tests {
                 .get(&CounterType::Defense)
                 .copied(),
             Some(4)
+        );
+    }
+
+    /// CR 400.7d + CR 603.4 discriminating pin for the bucket-A migration of the
+    /// spell-resolution permanent entry onto `zone_pipeline::deliver`. A kicked
+    /// permanent spell with `ability == None` (placeholder permanent spell —
+    /// vanilla / ETB-only creature with no on-resolve Spell ability) resolves
+    /// the NON-paused Execute arm: the cast link normalized onto the stack
+    /// object before `replace_event` must survive `reset_for_battlefield_entry`
+    /// (CR 400.7) and land on the resulting permanent, because the migrated path
+    /// no longer has the bespoke post-move restore epilogue — it relies entirely
+    /// on `CastLinkSnapshot` inside `deliver`. The resume-path pin
+    /// (`zone_change_replacement_choice_preserves_cast_link_for_resolving_spell`,
+    /// engine_replacement.rs) covers the PAUSED path; this covers the direct
+    /// `resolve_top` Execute path the resume pin does not drive.
+    #[test]
+    fn resolving_permanent_spell_preserves_cast_link_without_ability() {
+        use crate::types::ability::{CastTimingPermission, KickerVariant};
+
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(623),
+            PlayerId(0),
+            "Kicked Vanilla Bear".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // `finalize_cast_to_stack` stamps the cast link onto the stack
+            // object; mirror that establishment for a placeholder permanent
+            // spell (no `SpellContext` ability), so the Execute arm's
+            // pre-`replace_event` normalization leaves the object value intact
+            // and the `CastLinkSnapshot` captures it.
+            obj.kickers_paid = vec![KickerVariant::First];
+            obj.additional_cost_payment_count = 1;
+            obj.convoked_creatures = vec![ObjectId(900)];
+            obj.cast_timing_permission =
+                Some((CastTimingPermission::AsThoughHadFlash, state.turn_number));
+        }
+
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(623),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        let obj = &state.objects[&spell_id];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(
+            obj.kickers_paid,
+            vec![KickerVariant::First],
+            "CR 400.7d: the resolved permanent must keep the kicker payments of \
+             the spell that became it — the entry reset cleared them and the \
+             migrated Execute arm restores them only via CastLinkSnapshot"
+        );
+        assert_eq!(obj.additional_cost_payment_count, 1);
+        assert_eq!(obj.convoked_creatures, vec![ObjectId(900)]);
+        assert_eq!(
+            obj.cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number)),
+            "CR 603.4: cast-timing permission is re-stamped with the resolution \
+             turn so same-turn trigger gates compare equal"
         );
     }
 
@@ -7046,5 +7161,156 @@ mod tests {
         assert!(obj.transformed);
         assert_eq!(obj.counters.get(&CounterType::Defense).copied(), Some(5));
         assert_eq!(obj.defense, Some(5));
+    }
+
+    // -----------------------------------------------------------------------
+    // C2: resolution-default moves route through the zone pipeline so Moved
+    // graveyard→exile redirects (Rest in Peace / Leyline of the Void class)
+    // fire on resolved/countered/prevented spells (PLAN §8 Risk #2).
+    // -----------------------------------------------------------------------
+
+    /// Install a board-wide Rest in Peace class redirect ("if a card would be
+    /// put into a graveyard from anywhere, exile it instead") on a battlefield
+    /// permanent. `valid_card: None` → matches any card's graveyard move;
+    /// `destination_zone: Graveyard` gates it to graveyard-bound moves only.
+    fn install_rest_in_peace(state: &mut GameState) -> ObjectId {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let rip = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(1),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        let redirect = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Graveyard)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            ));
+        state
+            .objects
+            .get_mut(&rip)
+            .unwrap()
+            .replacement_definitions
+            .push(redirect);
+        rip
+    }
+
+    fn push_plain_instant(state: &mut GameState) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let obj_id = create_object(state, card_id, PlayerId(0), "Bolt".to_string(), Zone::Stack);
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        obj_id
+    }
+
+    /// CR 608.2n + CR 614.6 (PLAN §8 Risk #2 bug-fix): a plain instant resolving
+    /// to its owner's graveyard is redirected to exile by a board-wide Rest in
+    /// Peace. FAILS on the pre-C2 raw `move_to_zone(state, id, Graveyard, ..)`
+    /// delivery, which never proposed the inner ZoneChange and so silently
+    /// dropped the redirect (the spell landed in the graveyard).
+    #[test]
+    fn rest_in_peace_exiles_resolved_instant() {
+        let mut state = setup();
+        install_rest_in_peace(&mut state);
+        let spell = push_plain_instant(&mut state);
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "Rest in Peace must redirect the resolved instant's graveyard move to exile"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&spell),
+            "the redirected spell must not also reach the graveyard"
+        );
+    }
+
+    /// CR 702.34a + CR 614.6 (PLAN §8 Risk #2 non-regression): a flashback spell
+    /// exiles via its STATIC destination rule (dest selected as Exile pre-
+    /// pipeline), so its proposed move is Stack→Exile. A board-wide Rest in
+    /// Peace is scoped to `destination_zone: Graveyard` and must NOT match the
+    /// stack→exile move — the flashback spell is exiled exactly once with no
+    /// double-apply / redirect re-entry.
+    #[test]
+    fn flashback_spell_exiles_once_with_rest_in_peace_present() {
+        let mut state = setup();
+        install_rest_in_peace(&mut state);
+        let spell = push_flashback_spell(
+            &mut state,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Exile,
+            "flashback spell still exiles via its static destination rule"
+        );
+        // CR 614.6: exactly one ZoneChange Stack→Exile; the RIP graveyard redirect
+        // never fires (its destination scope does not match a stack→exile move),
+        // so there is no second redirect move on the same object.
+        let exile_moves = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::ZoneChanged { object_id, to, .. }
+                        if *object_id == spell && *to == Zone::Exile
+                )
+            })
+            .count();
+        assert_eq!(
+            exile_moves, 1,
+            "flashback must be exiled exactly once — RIP must not double-apply on a stack→exile move"
+        );
     }
 }

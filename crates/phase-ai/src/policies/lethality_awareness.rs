@@ -8,6 +8,8 @@ use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, Tacti
 use super::strategy_helpers::{is_own_main_phase, opponent_lethal_damage};
 use crate::deck_profile::DeckArchetype;
 use crate::features::DeckFeatures;
+#[cfg(test)]
+use engine::types::game_state::CastPaymentMode;
 
 pub struct LethalityAwarenessPolicy;
 
@@ -189,6 +191,8 @@ mod tests {
                 object_id: spell,
                 card_id: CardId(20),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),
@@ -242,6 +246,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(20),
                 targets: Vec::new(),
+
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(PlayerId(0)),

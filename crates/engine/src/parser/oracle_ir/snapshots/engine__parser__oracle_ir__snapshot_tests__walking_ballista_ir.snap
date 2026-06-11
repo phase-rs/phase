@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 584
 expression: "&ir"
 ---
 {
@@ -31,7 +30,6 @@ expression: "&ir"
         "duration": null,
         "description": "{4}: Put a +1/+1 counter on ~.",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -65,7 +63,6 @@ expression: "&ir"
         "duration": null,
         "description": "Remove a +1/+1 counter from ~: It deals 1 damage to any target.",
         "target_prompt": null,
-        "sorcery_speed": false,
         "condition": null,
         "optional_targeting": false,
         "optional": false,
@@ -95,7 +92,6 @@ expression: "&ir"
           "duration": null,
           "description": null,
           "target_prompt": null,
-          "sorcery_speed": false,
           "condition": null,
           "optional_targeting": false,
           "optional": false,
@@ -108,7 +104,8 @@ expression: "&ir"
           "type": "SelfRef"
         },
         "description": "~ enters with X +1/+1 counters on it.",
-        "condition": null
+        "condition": null,
+        "destination_zone": "Battlefield"
       }
     }
   ],
