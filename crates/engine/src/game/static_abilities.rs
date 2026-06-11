@@ -167,6 +167,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
     registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
+    // CR 508.1c: CanOnlyAttackAlone — creature may only attack if it is the
+    // sole attacker. Runtime enforcement lives in combat.rs.
+    registry.insert(StaticMode::CanOnlyAttackAlone, handle_rule_mod);
     registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
     // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
     registry.insert(StaticMode::CantCrew, handle_rule_mod);

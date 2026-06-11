@@ -481,6 +481,23 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         }
     }
 
+    // CR 508.1c: A creature with "can only attack alone" may not be declared as
+    // an attacker if any other creature is also attacking. If any attacker in a
+    // multi-creature attack has this restriction, the entire declaration is illegal.
+    if attacker_ids.len() > 1 {
+        for &id in attacker_ids {
+            if let Some(obj) = state.objects.get(&id) {
+                if super::functioning_abilities::active_static_definitions(state, obj)
+                    .any(|sd| sd.mode == StaticMode::CanOnlyAttackAlone)
+                {
+                    return Err(format!(
+                        "{id:?} can only attack alone — may not attack alongside other creatures (CR 508.1c)"
+                    ));
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

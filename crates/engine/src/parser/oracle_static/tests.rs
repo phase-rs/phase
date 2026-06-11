@@ -1688,6 +1688,27 @@ fn static_cant_attack_or_block_alone_emits_both() {
     assert!(defs.iter().any(|d| d.mode == StaticMode::CantBlockAlone));
 }
 
+#[test]
+fn static_can_only_attack_alone_parses() {
+    // CR 508.1c: Master of Cruelties — "can only attack alone" means the
+    // creature may not be declared alongside other attackers.
+    let def =
+        parse_static_line("~ can only attack alone.").expect("can only attack alone should parse");
+    assert_eq!(def.mode, StaticMode::CanOnlyAttackAlone);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_can_only_attack_alone_not_swallowed_by_cant_attack_alone() {
+    // Guard: the positive ("can only attack alone") must not be confused
+    // with the negative ("can't attack alone") which means the opposite.
+    let def_only = parse_static_line("~ can only attack alone.").unwrap();
+    let def_cant = parse_static_line("~ can't attack alone.").unwrap();
+    assert_eq!(def_only.mode, StaticMode::CanOnlyAttackAlone);
+    assert_eq!(def_cant.mode, StaticMode::CantAttackAlone);
+    assert_ne!(def_only.mode, def_cant.mode);
+}
+
 /// CR 508.1: "~ can't attack if defending player controls [filter]" attaches
 /// the trailing "if" clause as a `DefendingPlayerControls` condition (Orgg,
 /// Mogg Jailer). Before 5a the condition was dropped.

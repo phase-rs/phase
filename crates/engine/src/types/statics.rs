@@ -1134,6 +1134,12 @@ pub enum StaticMode {
     /// player if able" requirement.
     Goaded,
     CantAttackAlone,
+    /// CR 508.1c: This creature can only attack if it is the sole attacker —
+    /// it cannot be declared as an attacker in a multi-creature attack, nor
+    /// can other creatures be declared alongside it. Enforced symmetrically:
+    /// if *any* declared attacker has this flag and the attack contains more
+    /// than one creature, the entire declaration is illegal.
+    CanOnlyAttackAlone,
     CantBlockAlone,
     /// CR 702.122c: This creature can't crew Vehicles.
     CantCrew,
@@ -1500,6 +1506,7 @@ impl StaticMode {
             | StaticMode::MustBeBlockedByAll
             | StaticMode::Goaded
             | StaticMode::CantAttackAlone
+            | StaticMode::CanOnlyAttackAlone
             | StaticMode::CantBlockAlone
             | StaticMode::CantCrew
             | StaticMode::CrewContribution { .. }
@@ -1737,6 +1744,7 @@ impl fmt::Display for StaticMode {
             StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
+            StaticMode::CanOnlyAttackAlone => write!(f, "CanOnlyAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
             StaticMode::CantCrew => write!(f, "CantCrew"),
             // Debug format, one-way (mirrors CantBeBlockedBy). No from_str reconstruction.
@@ -2082,6 +2090,7 @@ impl FromStr for StaticMode {
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
+            "CanOnlyAttackAlone" => StaticMode::CanOnlyAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,
             "CantCrew" => StaticMode::CantCrew,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
@@ -2565,6 +2574,7 @@ mod tests {
             StaticMode::CantUntap,
             StaticMode::MustBeBlocked,
             StaticMode::CantAttackAlone,
+            StaticMode::CanOnlyAttackAlone,
             StaticMode::CantBlockAlone,
             StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
