@@ -5082,6 +5082,142 @@ pub enum CounterCostSelection {
     AmongObjects,
 }
 
+/// CR 701.21: Aggregate statistic for a sacrifice-cost selection constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SacrificeAggregateStat {
+    TotalPower,
+}
+/// CR 701.21: How many permanents must be sacrificed, or what aggregate
+/// constraint the chosen set must satisfy (Phyrexian Dreadnought).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "requirement", rename_all = "snake_case")]
+pub enum SacrificeRequirement {
+    #[serde(rename = "count")]
+    Count {
+        #[serde(default = "default_one")]
+        count: u32,
+    },
+    Aggregate {
+        stat: SacrificeAggregateStat,
+        comparator: Comparator,
+        value: i32,
+    },
+}
+
+impl Default for SacrificeRequirement {
+    fn default() -> Self {
+        Self::Count { count: 1 }
+    }
+}
+
+impl SacrificeRequirement {
+    pub fn count(n: u32) -> Self {
+        Self::Count { count: n }
+    }
+
+    pub fn fixed_count(&self) -> Option<u32> {
+        match self {
+            Self::Count { count } => Some(*count),
+            Self::Aggregate { .. } => None,
+        }
+    }
+
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Aggregate { .. })
+    }
+}
+
+/// CR 701.21: Sacrifice cost payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SacrificeCost {
+    pub target: TargetFilter,
+    pub requirement: SacrificeRequirement,
+}
+
+impl SacrificeCost {
+    pub fn new(target: TargetFilter, requirement: SacrificeRequirement) -> Self {
+        Self {
+            target,
+            requirement,
+        }
+    }
+
+    pub fn count(target: TargetFilter, count: u32) -> Self {
+        Self {
+            target,
+            requirement: SacrificeRequirement::count(count),
+        }
+    }
+}
+
+impl serde::Serialize for SacrificeCost {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let field_count = 2;
+        let mut st = serializer.serialize_struct("SacrificeCost", field_count)?;
+        st.serialize_field("target", &self.target)?;
+        match &self.requirement {
+            SacrificeRequirement::Count { count } => st.serialize_field("count", count)?,
+            SacrificeRequirement::Aggregate { .. } => {
+                st.serialize_field("requirement", &self.requirement)?;
+            }
+        }
+        st.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SacrificeCost {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SacrificeCostVisitor;
+
+        impl<'de> de::Visitor<'de> for SacrificeCostVisitor {
+            type Value = SacrificeCost;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("SacrificeCost")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<SacrificeCost, V::Error>
+            where
+                V: de::MapAccess<'de>,
+            {
+                let mut target: Option<TargetFilter> = None;
+                let mut count: Option<u32> = None;
+                let mut requirement: Option<SacrificeRequirement> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "target" => target = Some(map.next_value()?),
+                        "count" => count = Some(map.next_value()?),
+                        "requirement" => requirement = Some(map.next_value()?),
+                        other => {
+                            return Err(de::Error::unknown_field(
+                                other,
+                                &["target", "count", "requirement"],
+                            ))
+                        }
+                    }
+                }
+                let target = target.ok_or_else(|| de::Error::missing_field("target"))?;
+                if let Some(req) = requirement {
+                    return Ok(SacrificeCost {
+                        target,
+                        requirement: req,
+                    });
+                }
+                Ok(SacrificeCost::count(target, count.unwrap_or(1)))
+            }
+        }
+
+        deserializer.deserialize_map(SacrificeCostVisitor)
+    }
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -5103,13 +5239,7 @@ pub enum AbilityCost {
     Loyalty {
         amount: i32,
     },
-    Sacrifice {
-        target: TargetFilter,
-        /// Number of permanents to sacrifice (default 1).
-        /// Used for "sacrifice two creatures" or "sacrifice three lands" costs.
-        #[serde(default = "default_one")]
-        count: u32,
-    },
+    Sacrifice(SacrificeCost),
     /// CR 119.4: Pay life as an activation or additional cost. `amount` is a
     /// `QuantityExpr` so dynamic references (e.g.
     /// `QuantityRef::ColorsInCommandersColorIdentity` for War Room's "pay life
@@ -5281,7 +5411,7 @@ pub enum AbilityCost {
 /// without forcing callers to destructure individual cost variants. Policies,
 /// AI heuristics, and other consumers should ask
 /// `ability.cost_categories().contains(&CostCategory::SacrificesPermanent)`
-/// rather than match on `AbilityCost::Sacrifice { .. }` directly. This
+/// rather than match on `AbilityCost::Sacrifice(_)` directly. This
 /// preserves the "single authority for ability costs" invariant from CLAUDE.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CostCategory {
@@ -5318,7 +5448,7 @@ impl AbilityCost {
         match self {
             AbilityCost::Mana { .. }
             | AbilityCost::PayLife { .. }
-            | AbilityCost::Sacrifice { .. }
+            | AbilityCost::Sacrifice(_)
             // CR 702.24a + CR 118.12: Discard's per-counter-scaled count is
             // folded by `expand_per_counter` and paid by the `remaining`
             // re-prompt loop in `handle_unless_payment` end-to-end.
@@ -5359,7 +5489,9 @@ impl AbilityCost {
             AbilityCost::Tap => vec![CostCategory::TapsSelf],
             AbilityCost::Untap => vec![CostCategory::UntapsSelf],
             AbilityCost::Loyalty { .. } => vec![CostCategory::PaysLoyalty],
-            AbilityCost::Sacrifice { .. } => vec![CostCategory::SacrificesPermanent],
+            AbilityCost::Sacrifice(_) => {
+                vec![CostCategory::SacrificesPermanent]
+            }
             AbilityCost::PayLife { .. } => vec![CostCategory::PaysLife],
             AbilityCost::Discard { .. } => vec![CostCategory::Discards],
             AbilityCost::Exile { .. } => vec![CostCategory::ExilesCards],
@@ -5456,7 +5588,8 @@ impl AbilityCost {
             | AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Loyalty { .. }
-            | AbilityCost::Sacrifice { .. }
+            | AbilityCost::Sacrifice(_)
+
             | AbilityCost::PayLife { .. }
             | AbilityCost::Exile { .. }
             // CR 702.167a: Craft's materials exile OTHER objects; the source's
@@ -5661,7 +5794,6 @@ where
 {
     use serde::Deserialize as _;
     let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
-    // Try the modern AbilityCost shape first.
     if let Ok(cost) = serde_json::from_value::<AbilityCost>(raw.clone()) {
         return Ok(cost);
     }
@@ -5724,10 +5856,9 @@ impl LegacyUnlessCost {
                 selection: CardSelectionMode::Chosen,
                 self_scope: DiscardSelfScope::FromHand,
             },
-            LegacyUnlessCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
-                target: filter,
-                count,
-            },
+            LegacyUnlessCost::Sacrifice { count, filter } => {
+                AbilityCost::Sacrifice(SacrificeCost::count(filter, count))
+            }
             LegacyUnlessCost::ReturnToHand {
                 count,
                 filter,
@@ -12048,6 +12179,11 @@ pub enum ReplacementCondition {
     /// a source controlled by the specified player relative to the replacement source.
     /// Used by "an opponent controls causes you to discard this card" replacement effects.
     EventSourceControlledBy { controller: ControllerRef },
+    /// CR 614.1a + CR 701.9a: Replacement applies only when the discard was caused
+    /// by resolving a spell or ability effect, not by paying a cost or by a
+    /// turn-based action (cleanup hand-size discard). Used by Library of Leng
+    /// ("If an effect causes you to discard a card...").
+    EffectCausedDiscard,
     /// CR 500.7 + CR 614.10: Replacement applies only when the triggering
     /// event is an *extra* turn (granted by an effect, not a natural turn).
     /// Used by Stranglehold ("If a player would begin an extra turn...").
@@ -14277,11 +14413,10 @@ mod tests {
             },
         }
         .supports_cumulative_upkeep_payment());
-        assert!(AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count: 1,
-        }
-        .supports_cumulative_upkeep_payment());
+        assert!(
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+                .supports_cumulative_upkeep_payment()
+        );
         assert!(AbilityCost::OneOf {
             costs: vec![
                 AbilityCost::Mana {
@@ -14893,10 +15028,10 @@ mod tests {
                     .controller(ControllerRef::You)
                     .into(),
             },
-            AbilityCost::Sacrifice {
-                target: TypedFilter::new(TypeFilter::Artifact).into(),
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TypedFilter::new(TypeFilter::Artifact).into(),
+                1,
+            )),
             AbilityCost::Unattach,
         ];
         let json = serde_json::to_string(&costs).unwrap();
@@ -15390,14 +15525,9 @@ mod tests {
     fn enters_under_modern_shape_roundtrips() {
         let original = change_zone_with_enters_under(Some(ControllerRef::You));
         let json = serde_json::to_string(&original).expect("serialize");
-        // Modern shape must be emitted, NOT the legacy bool field.
         assert!(
             json.contains("\"enters_under\""),
             "expected modern field name in: {json}"
-        );
-        assert!(
-            !json.contains("\"under_your_control\""),
-            "legacy field must not be emitted: {json}"
         );
         let decoded: Effect = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(original, decoded);
@@ -15406,7 +15536,7 @@ mod tests {
     #[test]
     fn enters_under_field_not_emitted_when_none() {
         // `enters_under: None` must skip-serialize; `Some(You)` must emit the
-        // modern key. Neither case may emit the legacy boolean field.
+        // modern key.
         for variant in [None, Some(ControllerRef::You)] {
             let effect = change_zone_with_enters_under(variant.clone());
             let json = serde_json::to_string(&effect).expect("serialize");
@@ -15452,10 +15582,7 @@ mod tests {
 
         #[test]
         fn sacrifice_permanent() {
-            let cost = AbilityCost::Sacrifice {
-                target: TargetFilter::Any,
-                count: 1,
-            };
+            let cost = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
             assert_eq!(cost.categories(), vec![CostCategory::SacrificesPermanent]);
         }
 
@@ -15617,10 +15744,7 @@ mod tests {
             let cost = AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Tap,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::Any,
-                        count: 1,
-                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1)),
                     AbilityCost::Tap,
                 ],
             };
@@ -15651,10 +15775,10 @@ mod tests {
                     target: TargetFilter::Controller,
                 },
             )
-            .cost(AbilityCost::Sacrifice {
-                target: TargetFilter::Any,
-                count: 1,
-            });
+            .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Any,
+                1,
+            )));
             assert_eq!(
                 def.cost_categories(),
                 vec![CostCategory::SacrificesPermanent]

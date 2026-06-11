@@ -328,11 +328,68 @@ fn parse_life_verb_remainder<'a>(
     .map(|(_, rest)| rest)
 }
 
+/// CR 119.3 + CR 115.1: "the amount of life [they|that player] [lost|gained]
+/// this turn" in a *targeted* life-change context ("Target opponent loses life
+/// equal to the amount of life they lost this turn" — Astarion, the Decadent's
+/// Feed/Friends modes). The third-person "they"/"that player" anaphor refers to
+/// the effect's player target, so it resolves through `PlayerScope::Target`
+/// (read from `ability.targets` by `resolve_quantity_with_targets`) — the same
+/// player the surrounding LoseLife/GainLife affects, so a target opponent loses
+/// life equal to *their own* life lost this turn.
+///
+/// Kept distinct from the shared `parse_life_lost_ref` "they lost" arms (which
+/// map to `Controller` for the per-iteration rebind of "each opponent" effects
+/// and to which Astarion's phrase never reaches because that combinator's
+/// `opt("the amount of ")` strip makes its "amount of …" tag unreachable). This
+/// recognizer requires the "amount of" gloss, so the article-only each-opponent
+/// phrasing ("the life they lost this turn", Archfiend of Despair) is untouched.
+fn parse_target_relative_life_change_this_turn(qty_text: &str) -> Option<QuantityExpr> {
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("the "))
+        .parse(qty_text)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("amount of life ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("they "), tag("that player ")))
+        .parse(rest)
+        .ok()?;
+    let (rest, gained) = alt((
+        value(false, tag::<_, _, OracleError<'_>>("lost")),
+        value(true, tag("gained")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // "this turn" is the canonical duration; tolerate its absence for callers
+    // that strip trailing durations before this point.
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn"))
+        .parse(rest)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let qty = if gained {
+        QuantityRef::LifeGainedThisTurn {
+            player: PlayerScope::Target,
+        }
+    } else {
+        QuantityRef::LifeLostThisTurn {
+            player: PlayerScope::Target,
+        }
+    };
+    Some(QuantityExpr::Ref { qty })
+}
+
 fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
     let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
         .parse(after_verb_lower)
         .ok()?;
     let qty_text = qty_text.trim_end_matches('.').trim();
+    // CR 115.1: target-relative "they/that player lost/gained this turn" → Target
+    // scope. Tried before the generic delegation, which would otherwise map the
+    // third-person anaphor to the controller (see helper doc).
+    if let Some(qty) = parse_target_relative_life_change_this_turn(qty_text) {
+        return Some(qty);
+    }
     if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
         return Some(qty);
     }
@@ -9368,6 +9425,37 @@ mod tests {
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1 + CR 119.3: Astarion (Feed mode) — "loses life equal to the
+    /// amount of life they lost this turn." The third-person "they" anaphor in a
+    /// targeted life-change refers to the effect's player target, so it maps to
+    /// `LifeLostThisTurn { Target }` (NOT `Controller` like the "you" form). The
+    /// maintainer's shared `parse_life_lost_ref` "amount of … they lost" tag is
+    /// unreachable behind its own prefix strip, so this targeted-context
+    /// recognizer is what resurrects the Feed mode.
+    #[test]
+    fn parse_lose_life_equal_to_life_they_lost_this_turn_is_target_scoped() {
+        for text in [
+            "loses life equal to the amount of life they lost this turn",
+            "loses life equal to the amount of life that player lost this turn",
+        ] {
+            let lower = text.to_lowercase();
+            let result = parse_numeric_imperative_ast(text, &lower)
+                .unwrap_or_else(|| panic!("should parse {text:?}"));
+            match result {
+                NumericImperativeAst::LoseLife { amount } => assert_eq!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLostThisTurn {
+                            player: PlayerScope::Target,
+                        },
+                    },
+                    "{text:?} must be Target-scoped",
+                ),
+                other => panic!("Expected LoseLife, got {other:?}"),
+            }
         }
     }
 

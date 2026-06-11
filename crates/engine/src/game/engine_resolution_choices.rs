@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityCost, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetRef,
+    AbilityCost, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, LibraryPosition,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -858,7 +858,9 @@ pub(super) fn handle_resolution_choice(
                         ));
                     }
                     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-                        effects::discard::discard_as_cost(state, card_id, player, events)
+                        effects::discard::discard_caused_by_effect_with_source(
+                            state, card_id, player, None, events,
+                        )
                     {
                         let draw = ResolvedAbility::new(
                             crate::types::ability::Effect::Draw {
@@ -2247,7 +2249,7 @@ pub(super) fn handle_resolution_choice(
             let events_before_effect = events.len();
             for &card_id in &chosen {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-                    effects::discard::discard_as_cost_with_source(
+                    effects::discard::discard_caused_by_effect_with_source(
                         state,
                         card_id,
                         player,
@@ -3309,11 +3311,12 @@ fn route_kept_card_or_defer(
         .get(&hit_card)
         .map(|obj| obj.controller)
         .unwrap_or(state.active_player);
-    match crate::game::zone_pipeline::move_object(
-        state,
-        crate::game::zone_pipeline::ZoneMoveRequest::effect(hit_card, destination, source_id),
-        events,
-    ) {
+    let mut req =
+        crate::game::zone_pipeline::ZoneMoveRequest::effect(hit_card, destination, source_id);
+    if destination == Zone::Library {
+        req = req.at_library_position(LibraryPosition::Bottom);
+    }
+    match crate::game::zone_pipeline::move_object(state, req, events) {
         crate::game::zone_pipeline::ZoneMoveResult::Done => None,
         crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -3420,13 +3423,35 @@ pub(crate) fn run_batch_completion(
         } => {
             // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
             // through `route_rest_partition` (ordered library bottom); the
-            // reveal-until path routes through `move_rest` (CR 701.20a — "on the
-            // bottom of your library in a random order" shuffles). Dispatch on the
+            // reveal-until path routes through `move_rest_then`, including
+            // Library-bottom placement and any CR 616.1 pause. Dispatch on the
             // dig-only payload so each site keeps its synchronous semantics.
             if publish_tracked_set.is_some() {
                 route_rest_partition(state, &rest_cards, rest_destination, events);
-            } else {
-                effects::reveal_until::move_rest(state, &rest_cards, rest_destination, events);
+            } else if !rest_cards.is_empty() {
+                // CR 701.20a + CR 616.1: Reveal-until rest piles are fully
+                // pipeline-owned, including Library-bottom placement. If a
+                // Library-destination `Moved` replacement pauses here, re-stash
+                // this completion as cleanup-only so reveal markers and
+                // continuation drain run after the pile actually lands.
+                let cleanup = BatchCompletion::RevealRestPile {
+                    player,
+                    rest_cards: Vec::new(),
+                    rest_destination,
+                    clear_markers,
+                    publish_tracked_set: None,
+                    emit_reveal_until_resolved,
+                };
+                match effects::reveal_until::move_rest_then(
+                    state,
+                    &rest_cards,
+                    rest_destination,
+                    Some(cleanup),
+                    events,
+                ) {
+                    crate::game::zone_pipeline::BatchMoveResult::Done
+                    | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => return,
+                }
             }
             for card_id in &clear_markers {
                 state.revealed_cards.remove(card_id);

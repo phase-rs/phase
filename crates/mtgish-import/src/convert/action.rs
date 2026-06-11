@@ -375,7 +375,7 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }
         // CR 702.167a/b: Craft materials carry no X-bound quantity.
         | AbilityCost::ExileMaterials { .. }

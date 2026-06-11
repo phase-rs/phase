@@ -1551,6 +1551,91 @@ mod tests {
     }
 
     #[test]
+    fn parses_opponent_controls_more_than_you_activation_restrictions() {
+        use crate::types::ability::{
+            Comparator, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef, TypeFilter,
+        };
+
+        // Issue #859 / #2908: Weathered Wayfarer — existential "more lands than you".
+        let parsed = parse_restriction_condition("an opponent controls more lands than you")
+            .expect("Weathered Wayfarer activation restriction must parse");
+        match parsed {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        comparator: Comparator::GT,
+                                        ..
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {}
+            other => panic!("expected existential opponent ControlsCount GT, got {other:?}"),
+        }
+
+        // Issue #2908: Isolated Watchtower — "at least two more lands than you".
+        let parsed =
+            parse_restriction_condition("an opponent controls at least two more lands than you")
+                .expect("Isolated Watchtower activation restriction must parse");
+        match parsed {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        comparator: Comparator::GE,
+                                        count,
+                                        ..
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => match count.as_ref() {
+                QuantityExpr::Offset { offset: 2, .. } => {}
+                other => panic!("expected Offset(+2) count threshold, got {other:?}"),
+            },
+            other => {
+                panic!("expected existential opponent ControlsCount GE (you+2), got {other:?}")
+            }
+        }
+
+        // Building-block proof: creatures variant shares the same combinator axis.
+        let parsed = parse_restriction_condition("an opponent controls more creatures than you")
+            .expect("creature comparison activation restriction must parse");
+        match parsed {
+            ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        filter: TargetFilter::Typed(tf),
+                                        comparator: Comparator::GT,
+                                        ..
+                                    },
+                            },
+                    },
+                ..
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected creature ControlsCount GT, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unrecognized_returns_none() {
         assert_eq!(
             parse_restriction_condition("something completely unknown"),

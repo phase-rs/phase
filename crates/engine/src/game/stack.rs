@@ -645,9 +645,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // face — read loyalty/defense from the back face directly so the
                 // replacement pipeline sees the correct counter count.
                 let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
-                    (true, Some(back)) => {
-                        super::printed_cards::intrinsic_face_counters(back.loyalty, back.defense)
-                    }
+                    (true, Some(back)) => super::printed_cards::intrinsic_entry_counters_for_face(
+                        back.loyalty,
+                        back.defense,
+                        &back.card_types,
+                    ),
                     _ => super::printed_cards::intrinsic_etb_counters(obj),
                 };
                 if !intrinsic.is_empty() {

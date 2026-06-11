@@ -90,8 +90,8 @@ mod tests {
         // CR 603.7b: keyed on the controller's next upkeep.
         match &trig.condition {
             DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player } => {
-                assert_eq!(*phase, Phase::Upkeep);
-                assert_eq!(*player, controller);
+                assert_eq!(phase, &Phase::Upkeep);
+                assert_eq!(player, &controller);
             }
             other => panic!("expected AtNextPhaseForPlayer Upkeep, got {other:?}"),
         }

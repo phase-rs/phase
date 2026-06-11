@@ -483,6 +483,8 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // then strip result, then clause-level propagation.
         if let Some(spec) = extract_exact_target_multi_target(&clause_ir.source_text) {
             def = def.multi_target(spec);
+        } else if let Some(spec) = extract_bounded_target_multi_target(&clause_ir.source_text) {
+            def = def.multi_target(spec);
         } else if let Some(ref spec) = clause_ir.multi_target {
             def = def.multi_target(spec.clone());
         } else if let Some(ref spec) = clause_ir.parsed.multi_target {
@@ -1451,9 +1453,21 @@ pub(super) fn strip_optional_effect_prefix(
     String,
 ) {
     let lower = text.to_lowercase();
+    // CR 608.2d + CR 115.7: "you may choose new targets for …" is a retarget
+    // effect, not a generic optional wrapper. Only that narrow class keeps the
+    // full surface form; other specialized `you may cast/play/…` clauses still
+    // peel here so `optional: true` is stamped (Beseech the Mirror, etc.).
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("you may ")).parse(input)
+    }) {
+        let rest_lower = rest.to_lowercase();
+        if crate::parser::clause_shell::is_specialized_you_may_retarget_phrase(&rest_lower) {
+            return (false, None, None, text.to_string());
+        }
+        return (true, None, None, rest.to_string());
+    }
     // CR 608.2d: "each opponent may" — per-opponent optional effect.
     // "any opponent may" — first-accept-wins opponent-choice optional effect.
-    // "you may" — standard optional effect prefix.
     if let Some(((scope, player_scope), rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(
@@ -1467,7 +1481,6 @@ pub(super) fn strip_optional_effect_prefix(
                 ),
                 tag("any opponent may "),
             ),
-            value((None, None), tag("you may ")),
             // CR 608.2c: "the first player may" — Oath of Mages and analogous
             // cross-clause patterns where the chooser of a prior sentence
             // (= TriggeringPlayer for upkeep/event triggers) is invited to
@@ -2655,6 +2668,35 @@ pub(crate) fn extract_exact_target_multi_target(text: &str) -> Option<MultiTarge
         };
         let (count, _) = strip_exact_target_prefix(after_verb)?;
         return Some(MultiTargetSpec::exact(count));
+    }
+    None
+}
+
+/// CR 115.1d: Recover bounded multi-target counts from imperative text where the
+/// verb precedes the count phrase — "return one or two target permanent cards
+/// from your graveyard" (Trystan's Command mode 2). The targeted-action parser
+/// strips the count via `parse_target` but does not attach `MultiTargetSpec`.
+pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
+    let lower = text.to_lowercase();
+    for verb in MULTI_TARGET_VERBS {
+        let Ok((after_verb, _)) =
+            terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" ")).parse(lower.as_str())
+        else {
+            continue;
+        };
+        for (prefix, min, max) in [
+            ("one or two ", 1usize, 2usize),
+            ("one, two, or three ", 1, 3),
+        ] {
+            if let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(after_verb) {
+                if tag::<_, _, OracleError<'_>>("target ")
+                    .parse(after_prefix)
+                    .is_ok()
+                {
+                    return Some(MultiTargetSpec::fixed(min, max));
+                }
+            }
+        }
     }
     None
 }
@@ -4830,7 +4872,7 @@ fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Opt
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
@@ -5763,5 +5805,37 @@ mod where_x_tests {
             constraint,
             TargetSelectionConstraint::DifferentObjectControllers
         );
+    }
+}
+
+#[cfg(test)]
+mod strip_optional_effect_prefix_tests {
+    use super::strip_optional_effect_prefix;
+
+    #[test]
+    fn choose_new_targets_is_not_generic_optional() {
+        let text = "you may choose new targets for target spell or ability";
+        let (is_optional, _, _, rest) = strip_optional_effect_prefix(text);
+        assert!(
+            !is_optional,
+            "retarget clauses must keep the full surface form"
+        );
+        assert_eq!(rest, text);
+    }
+
+    #[test]
+    fn generic_you_may_still_strips() {
+        let (is_optional, _, _, rest) = strip_optional_effect_prefix("you may draw a card");
+        assert!(is_optional);
+        assert_eq!(rest, "draw a card");
+    }
+
+    #[test]
+    fn beseech_style_you_may_cast_still_strips() {
+        let (is_optional, _, _, rest) = strip_optional_effect_prefix(
+            "you may cast the exiled card without paying its mana cost",
+        );
+        assert!(is_optional);
+        assert_eq!(rest, "cast the exiled card without paying its mana cost");
     }
 }

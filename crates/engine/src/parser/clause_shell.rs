@@ -268,7 +268,20 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
 /// require the full surface form. Generic `you may search your library for X`
 /// likewise peels cleanly; the from-among continuation is handled by the
 /// prior sub_ability path (sequence.rs), not parse_effect_clause.
-fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
+/// CR 115.7: Retarget clauses that must keep the full `you may choose new
+/// targets for …` surface in the chunk loop so `try_parse_change_targets`
+/// dispatches. Narrower than `is_specialized_you_may_phrase` — Beseech-style
+/// `you may cast …` still peels `you may` here to set `optional: true`.
+pub(crate) fn is_specialized_you_may_retarget_phrase(rest_lower: &str) -> bool {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("choose new targets ")),
+        value((), tag("choose new target ")),
+    ))
+    .parse(rest_lower)
+    .is_ok()
+}
+
+pub(crate) fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
     // Head-only blocklist: phrases whose dedicated body parsers need the full
     // `you may <verb>` surface present in their input to dispatch correctly.
     let head: nom::IResult<&str, (), OracleError<'_>> = alt((
@@ -535,6 +548,14 @@ mod tests {
         assert_eq!(peeled, "draw a card");
         assert!(ctx.optional);
         assert_eq!(ctx.duration(), Some(&Duration::UntilEndOfTurn));
+    }
+
+    #[test]
+    fn peel_does_not_strip_you_may_choose_new_targets() {
+        let text = "you may choose new targets for target spell or ability";
+        let (peeled, ctx) = peel_clause(text);
+        assert_eq!(peeled, text);
+        assert!(!ctx.optional);
     }
 
     #[test]

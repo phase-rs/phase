@@ -1742,17 +1742,29 @@ fn static_cant_block() {
 
 #[test]
 fn static_cant_attack_alone() {
-    // CR 506.5 + CR 508.1a: "can't attack alone" must NOT be swallowed by the
+    // CR 506.5 + CR 508.1c: "can't attack alone" must NOT be swallowed by the
     // generic "can't attack" arm (which would blanket-prohibit attacking).
     let def = parse_static_line("Bonded Construct can't attack alone.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantAttackAlone);
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
 #[test]
 fn static_cant_block_alone() {
     let def = parse_static_line("~ can't block alone.").unwrap();
-    assert_eq!(def.mode, StaticMode::CantBlockAlone);
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Block,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
@@ -1761,8 +1773,59 @@ fn static_cant_attack_or_block_alone_emits_both() {
     // CR 506.5: Mogg Flunkies — both restrictions from one clause.
     let defs = parse_static_line_multi("Mogg Flunkies can't attack or block alone.");
     assert_eq!(defs.len(), 2);
-    assert!(defs.iter().any(|d| d.mode == StaticMode::CantAttackAlone));
-    assert!(defs.iter().any(|d| d.mode == StaticMode::CantBlockAlone));
+    assert!(defs.iter().any(|d| {
+        d.mode
+            == (StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            })
+    }));
+    assert!(defs.iter().any(|d| {
+        d.mode
+            == (StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            })
+    }));
+}
+
+#[test]
+fn static_can_only_attack_alone_parses() {
+    // CR 508.1c: Master of Cruelties — "can only attack alone" means the
+    // creature may not be declared alongside other attackers.
+    let def =
+        parse_static_line("~ can only attack alone.").expect("can only attack alone should parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_can_only_attack_alone_not_swallowed_by_cant_attack_alone() {
+    // Guard: the positive ("can only attack alone") must not be confused
+    // with the negative ("can't attack alone") which means the opposite.
+    let def_only = parse_static_line("~ can only attack alone.").unwrap();
+    let def_cant = parse_static_line("~ can't attack alone.").unwrap();
+    assert_eq!(
+        def_only.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        }
+    );
+    assert_eq!(
+        def_cant.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    );
+    assert_ne!(def_only.mode, def_cant.mode);
 }
 
 /// CR 508.1: "~ can't attack if defending player controls [filter]" attaches
@@ -15052,4 +15115,125 @@ fn crew_contribution_power_and_toughness_modifiers_parse() {
         "anthem form must propagate via AddStaticMode, got {:?}",
         defs[0].modifications
     );
+}
+
+/// CR 611.3 + CR 613.1 + CR 205.4a: A multi-sentence static ability whose
+/// sentences are independent continuous effects (the dual-subject anthem class)
+/// must emit one `StaticDefinition` per sentence, each carrying its own affected
+/// filter and modifications. Regression for Flowering of the White Tree, whose
+/// first-sentence parse previously swallowed the period, mangled the ward cost,
+/// and dropped the entire second sentence.
+///
+/// Discriminating: the legendary half gets +2/+1 AND `ward {1}` (generic 1, NOT
+/// the empty `ward {0}` the swallowed-period bug produced); the nonlegendary
+/// half gets +1/+1 with NO keyword; both halves are restricted to `You`-
+/// controlled creatures so an opponent's legendary creature is unaffected.
+#[test]
+fn multi_sentence_dual_subject_anthem_emits_both_statics() {
+    use crate::types::keywords::WardCost;
+    use crate::types::mana::ManaCost;
+
+    let defs = parse_static_line_multi(
+        "Legendary creatures you control get +2/+1 and have ward {1}. \
+         Nonlegendary creatures you control get +1/+1.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "dual-subject anthem must emit both sentences as separate statics, got {defs:?}"
+    );
+
+    // Legendary half: +2/+1, ward {1}, controller=You, supertype=Legendary.
+    let legendary = defs
+        .iter()
+        .find(|d| {
+            matches!(
+                &d.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.properties.contains(&FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    })
+            )
+        })
+        .expect("must emit a Legendary-supertype static");
+    assert_eq!(legendary.mode, StaticMode::Continuous);
+    assert!(matches!(
+        &legendary.affected,
+        Some(TargetFilter::Typed(tf))
+            if tf.controller == Some(ControllerRef::You)
+                && tf.type_filters.contains(&TypeFilter::Creature)
+    ));
+    assert!(legendary
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 2 }));
+    assert!(legendary
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    // Ward cost must be {1} — the swallowed-period bug produced an empty {0}.
+    let ward = legendary
+        .modifications
+        .iter()
+        .find_map(|m| match m {
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Ward(WardCost::Mana(cost)),
+            } => Some(cost),
+            _ => None,
+        })
+        .expect("legendary half must grant a mana ward keyword");
+    assert_eq!(
+        ward.mana_value(),
+        1,
+        "ward cost must be {{1}}, got {ward:?}"
+    );
+    assert_ne!(*ward, ManaCost::zero(), "ward cost must not be empty {{0}}");
+
+    // Nonlegendary half: +1/+1, controller=You, NotSupertype(Legendary), no keyword.
+    let nonlegendary = defs
+        .iter()
+        .find(|d| {
+            matches!(
+                &d.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.properties.contains(&FilterProp::NotSupertype {
+                        value: Supertype::Legendary,
+                    })
+            )
+        })
+        .expect("must emit a NotSupertype(Legendary) static");
+    assert_eq!(nonlegendary.mode, StaticMode::Continuous);
+    assert!(matches!(
+        &nonlegendary.affected,
+        Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::You)
+    ));
+    assert!(nonlegendary
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(nonlegendary
+        .modifications
+        .contains(&ContinuousModification::AddToughness { value: 1 }));
+    assert!(
+        !nonlegendary
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })),
+        "nonlegendary half must NOT grant a keyword, got {:?}",
+        nonlegendary.modifications
+    );
+}
+
+/// Regression guard for the multi-sentence splitter: a single-sentence anthem
+/// must still emit exactly ONE static (the splitter only fires for 2+ sentences
+/// that each parse as statics), and trailing non-static prose must not cause a
+/// partial emit.
+#[test]
+fn single_sentence_anthem_unaffected_by_multi_sentence_split() {
+    let defs = parse_static_line_multi("Creatures you control get +1/+1.");
+    assert_eq!(
+        defs.len(),
+        1,
+        "single-sentence anthem must remain one static, got {defs:?}"
+    );
+    assert!(defs[0]
+        .modifications
+        .contains(&ContinuousModification::AddPower { value: 1 }));
 }

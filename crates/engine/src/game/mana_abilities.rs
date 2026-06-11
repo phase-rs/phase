@@ -1653,10 +1653,10 @@ where
         // CR 118.3 + CR 605.3b: Self-sacrifice mana ability costs are paid
         // atomically before mana production. This is the Treasure / Eldrazi
         // Spawn / Lotus Petal shape.
-        Some(AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            ..
-        }) => {
+        Some(AbilityCost::Sacrifice(cost))
+            if matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement == crate::types::ability::SacrificeRequirement::count(1) =>
+        {
             if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id) {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
@@ -1668,10 +1668,19 @@ where
         // as a mana ability cost (Phyrexian Altar class). The interactive flow
         // has already captured the chosen permanents; verify each is still
         // legal and route through the sacrifice replacement pipeline.
-        Some(AbilityCost::Sacrifice { target, count })
-            if !matches!(target, TargetFilter::SelfRef) =>
+        Some(AbilityCost::Sacrifice(cost))
+            if !matches!(cost.target, TargetFilter::SelfRef)
+                && matches!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count { .. }
+                ) =>
         {
-            for _ in 0..*count {
+            let crate::types::ability::SacrificeRequirement::Count { count } = cost.requirement
+            else {
+                unreachable!("guarded above");
+            };
+            let target = &cost.target;
+            for _ in 0..count {
                 let chosen_id = chosen_sacrificed_battlefield.next().ok_or_else(|| {
                     EngineError::InvalidAction(
                         "Missing sacrificed permanent selection for mana ability".to_string(),
@@ -1786,10 +1795,11 @@ where
                             }
                         }
                     }
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    } => {
+                    AbilityCost::Sacrifice(cost)
+                        if matches!(cost.target, TargetFilter::SelfRef)
+                            && cost.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1) =>
+                    {
                         if super::static_abilities::player_cant_sacrifice_as_cost(
                             state, player, source_id,
                         ) {
@@ -1799,8 +1809,17 @@ where
                         }
                         let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
                     }
-                    AbilityCost::Sacrifice { target, count } => {
-                        for _ in 0..*count {
+                    AbilityCost::Sacrifice(cost) => {
+                        let crate::types::ability::SacrificeRequirement::Count { count } =
+                            cost.requirement
+                        else {
+                            return Err(EngineError::InvalidAction(
+                                "Unsupported sacrifice cost requirement for mana ability"
+                                    .to_string(),
+                            ));
+                        };
+                        let target = &cost.target;
+                        for _ in 0..count {
                             let chosen_id =
                                 chosen_sacrificed_battlefield.next().ok_or_else(|| {
                                     EngineError::InvalidAction(
@@ -1980,10 +1999,12 @@ fn cost_resolves_without_choice(cost: &Option<AbilityCost>) -> bool {
 fn cost_component_choice_free(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap => true,
-        AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count,
-        } => *count == 1,
+        AbilityCost::Sacrifice(cost)
+            if matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement == crate::types::ability::SacrificeRequirement::count(1) =>
+        {
+            true
+        }
         AbilityCost::Composite { costs } => costs.iter().all(cost_component_choice_free),
         _ => false,
     }
@@ -2488,7 +2509,7 @@ fn prepare_deterministic_exile_cost_selection(
 }
 
 /// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible battlefield permanents
-/// for an `AbilityCost::Sacrifice { target: !SelfRef }` mana ability cost.
+/// for an `AbilityCost::Sacrifice(SacrificeCost::count(!SelfRef, 1))` mana ability cost.
 /// Delegates eligibility to the casting cost helper so mana and non-mana
 /// activation costs share the same battlefield/controller/filter semantics.
 fn sacrifice_cost_choice(
@@ -2677,8 +2698,8 @@ mod tests {
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
         ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, FilterProp,
         LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope,
-        PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        PlayerScope, QuantityExpr, QuantityRef, SacrificeCost, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -3560,10 +3581,7 @@ mod tests {
         .cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
 
@@ -3618,10 +3636,7 @@ mod tests {
         .cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def);
@@ -4000,10 +4015,7 @@ mod tests {
             AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Tap,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
-                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                 ],
             }
         )));
@@ -4012,17 +4024,14 @@ mod tests {
 
         // Phyrexian Altar: sacrifice a (non-self) creature → requires a choice.
         assert!(!cost_resolves_without_choice(&Some(
-            AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-                count: 1,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::creature()),
+                1
+            ))
         )));
         // Self-sacrifice of more than one is not the single-token shape.
         assert!(!cost_resolves_without_choice(&Some(
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 2,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 2))
         )));
         // Filter-land style mana sub-cost requires a payment choice.
         assert!(!cost_resolves_without_choice(&Some(
@@ -4164,10 +4173,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         Arc::make_mut(&mut state.objects.get_mut(&led).unwrap().abilities).push(ability.clone());
@@ -7065,10 +7071,10 @@ mod tests {
                 target: None,
             },
         )
-        .cost(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature()),
-            count: 1,
-        })
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature()),
+            1,
+        )))
     }
 
     fn make_titans_nest_ability() -> AbilityDefinition {

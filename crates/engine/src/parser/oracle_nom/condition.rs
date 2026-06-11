@@ -12,7 +12,7 @@ use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::error::{OracleError, OracleResult};
+use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
 };
@@ -148,10 +148,64 @@ fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticConditi
 
 fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_player_dealt_combat_damage_by_source_this_turn,
         parse_source_dealt_damage_to_opponent_this_turn,
         parse_source_was_dealt_damage_this_turn,
     ))
     .parse(input)
+}
+
+/// CR 603.4 + CR 120.2a + CR 608.2i: Parse the intervening-`if` predicate
+/// "a player/an opponent was dealt combat damage by a <source> this turn".
+///
+/// Lost Monarch of Ifnir: "At the beginning of your second main phase, if a
+/// player was dealt combat damage by a Zombie this turn, …". The predicate is
+/// satisfied when at least one recipient matching the subject was dealt combat
+/// damage this turn by a source matching the `by` filter.
+///
+/// Builds for the class — the source is parsed by `parse_type_phrase`, so any
+/// "by a <creature type / creature / permanent>" qualifier is covered, and the
+/// subject covers both "a player" and "an opponent" recipients. The resulting
+/// `QuantityRef::DamageDealtThisTurn` carries `damage_kind: CombatOnly`
+/// (CR 120.2a) and resolves against `state.damage_dealt_this_turn`, matching
+/// the source's CR 608.2i look-back type snapshot recorded at damage time, so a
+/// later type change or the source leaving the battlefield still answers the
+/// rules-correct question.
+fn parse_player_dealt_combat_damage_by_source_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    // Recipient subject: "a player" (any player) or "an opponent".
+    let (rest, recipient) = alt((
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("an opponent"),
+        ),
+        value(TargetFilter::Player, tag("a player")),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" was dealt combat damage by ").parse(rest)?;
+    // CR 608.2i: the `by` source qualifier — "a Zombie", "a creature", etc.
+    let (source, after_source) = parse_type_phrase(rest);
+    if matches!(source, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag(" this turn").parse(after_source)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(source),
+                target: Box::new(recipient),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::CombatOnly,
+            },
+            1,
+        ),
+    ))
 }
 
 fn parse_source_dealt_damage_to_opponent_this_turn(
@@ -5015,6 +5069,16 @@ fn parse_no_opponent_comparison_conditions(input: &str) -> OracleResult<'_, Stat
 fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("an opponent ").parse(input)?;
 
+    // CR 109.4 + CR 109.5: "an opponent controls at least N more [type] than you"
+    // — existential over opponents (at least one opponent's count is >= yours + N;
+    // "you" = the ability's controller). Isolated Watchtower ("at least two more
+    // lands"). Must precede the generic `controls` + `parse_ge_threshold` arm
+    // below, which would otherwise mis-read "at least two more lands" as
+    // "at least two" + type phrase "more lands than you".
+    if let Ok((rest2, condition)) = parse_opponent_controls_at_least_more_than_you(rest) {
+        return Ok((rest2, condition));
+    }
+
     // CR 109.3 + CR 603.4: "an opponent controls N or more [type]" /
     // "an opponent controls at least N [type]" → ObjectCount(filter w/
     // ControllerRef::Opponent) >= N. Shares `parse_ge_threshold` with the
@@ -5023,6 +5087,12 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     // card for this pattern.
     if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("controls ").parse(rest) {
         if let Ok((rest3, n)) = parse_ge_threshold(rest2) {
+            if tag::<_, _, OracleError<'_>>("more ")
+                .parse(rest3.trim_start())
+                .is_ok()
+            {
+                return Err(oracle_err(rest3));
+            }
             let type_text = rest3.trim_end_matches('.');
             let (filter, remainder) = parse_type_phrase(type_text);
             if !matches!(filter, TargetFilter::Any) {
@@ -5051,33 +5121,8 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     // existential over opponents (at least one opponent strictly exceeds your
     // count; "you" = the ability's controller), not an aggregate of all
     // opponent permanents. Weathered Wayfarer, Land Tax.
-    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("controls more ").parse(rest) {
-        if let Ok((rest3, type_text)) =
-            take_until::<_, _, OracleError<'_>>(" than you").parse(rest2)
-        {
-            let (rest3, _) = tag(" than you").parse(rest3)?;
-            let (type_filter, _) = parse_type_phrase(type_text.trim());
-            let you_filter = inject_controller_you(type_filter.clone());
-            return Ok((
-                rest3,
-                StaticCondition::QuantityComparison {
-                    lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::PlayerCount {
-                            filter: PlayerFilter::ControlsCount {
-                                relation: PlayerRelation::Opponent,
-                                filter: type_filter,
-                                comparator: Comparator::GT,
-                                count: Box::new(QuantityExpr::Ref {
-                                    qty: QuantityRef::ObjectCount { filter: you_filter },
-                                }),
-                            },
-                        },
-                    },
-                    comparator: Comparator::GE,
-                    rhs: QuantityExpr::Fixed { value: 1 },
-                },
-            ));
-        }
+    if let Ok((rest2, condition)) = parse_opponent_controls_more_than_you(rest) {
+        return Ok((rest2, condition));
     }
 
     // "an opponent has more life than you"
@@ -5214,6 +5259,80 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
         input,
         nom::error::ErrorKind::Fail,
     )))
+}
+
+fn parse_opponent_controls_at_least_more_than_you(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("controls at least ").parse(input)?;
+    let (rest, n) = parse_number(rest)?;
+    let (rest, _) = tag(" more ").parse(rest)?;
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" than you").parse(rest)?;
+    let (rest, _) = tag(" than you").parse(rest)?;
+    let (type_filter, you_filter) =
+        player_count_comparison_filters(type_text).ok_or_else(|| oracle_err(type_text))?;
+
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::ControlsCount {
+                        relation: PlayerRelation::Opponent,
+                        filter: type_filter,
+                        comparator: Comparator::GE,
+                        count: Box::new(QuantityExpr::Offset {
+                            inner: Box::new(QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { filter: you_filter },
+                            }),
+                            offset: n as i32,
+                        }),
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
+}
+
+fn parse_opponent_controls_more_than_you(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("controls more ").parse(input)?;
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" than you").parse(rest)?;
+    let (rest, _) = tag(" than you").parse(rest)?;
+    let (type_filter, you_filter) =
+        player_count_comparison_filters(type_text).ok_or_else(|| oracle_err(type_text))?;
+
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::ControlsCount {
+                        relation: PlayerRelation::Opponent,
+                        filter: type_filter,
+                        comparator: Comparator::GT,
+                        count: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter: you_filter },
+                        }),
+                    },
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        },
+    ))
+}
+
+fn player_count_comparison_filters(type_text: &str) -> Option<(TargetFilter, TargetFilter)> {
+    let (type_filter, remainder) = parse_type_phrase(type_text.trim());
+    if !remainder.trim().is_empty() || matches!(type_filter, TargetFilter::Any | TargetFilter::None)
+    {
+        return None;
+    }
+
+    let you_filter = inject_controller_you(type_filter.clone());
+    Some((type_filter, you_filter))
 }
 
 /// CR 118.12a: Parse "[player] pays {cost}" → UnlessPay { cost }.
@@ -8288,6 +8407,63 @@ mod tests {
         }
     }
 
+    /// Issue #2908 / Isolated Watchtower — "an opponent controls at least N more
+    /// [type] than you" uses GE with an Offset threshold, not bare GT.
+    #[test]
+    fn test_opponent_controls_at_least_n_more_lands_than_you() {
+        let (rest, c) =
+            parse_inner_condition("an opponent controls at least two more lands than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        filter: TargetFilter::Typed(tf),
+                                        comparator: Comparator::GE,
+                                        count,
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Land]);
+                match count.as_ref() {
+                    QuantityExpr::Offset { inner, offset: 2 } => match inner.as_ref() {
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        } => {
+                            assert!(matches!(
+                                filter,
+                                TargetFilter::Typed(TypedFilter {
+                                    controller: Some(ControllerRef::You),
+                                    ..
+                                })
+                            ));
+                        }
+                        other => panic!("expected ObjectCount inner, got {other:?}"),
+                    },
+                    other => panic!("expected Offset(+2) threshold, got {other:?}"),
+                }
+            }
+            other => panic!("expected existential opponent land count GE (you+2), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_opponent_controls_more_rejects_unknown_type_phrase() {
+        assert!(parse_inner_condition("an opponent controls more widgets than you").is_err());
+        assert!(
+            parse_inner_condition("an opponent controls at least two more widgets than you")
+                .is_err()
+        );
+    }
+
     /// CR 603.2b + CR 603.4: Keeper of the Accord — "that player" is the active
     /// player whose phase is beginning, not a generic opponent aggregate.
     #[test]
@@ -9732,6 +9908,73 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             } if source == Box::new(TargetFilter::Any)
                 && target == Box::new(TargetFilter::SelfRef)
+        ));
+    }
+
+    /// Issue #1347 — CR 603.4 + CR 120.2a + CR 608.2i: "a player was dealt
+    /// combat damage by a Zombie this turn" (Lost Monarch of Ifnir's
+    /// intervening-if) parses to a combat-only `DamageDealtThisTurn` keyed on a
+    /// Zombie source and any-player recipient.
+    #[test]
+    fn test_player_dealt_combat_damage_by_creature_type_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("a player was dealt combat damage by a Zombie this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            source,
+                            target,
+                            aggregate: AggregateFunction::Sum,
+                            group_by: None,
+                            damage_kind: DamageKindFilter::CombatOnly,
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = c
+        else {
+            panic!("expected combat-only DamageDealtThisTurn GE 1, got {c:?}");
+        };
+        // CR 120.1: any-player recipient (Lost Monarch reads "a player").
+        assert_eq!(*target, TargetFilter::Player);
+        // CR 608.2i: the source qualifier carries the Zombie subtype.
+        let TargetFilter::Typed(tf) = source.as_ref() else {
+            panic!("expected typed source filter, got {source:?}");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Zombie".to_string())),
+            "source must be keyed on the Zombie subtype, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// Issue #1347 — class coverage: the same predicate with an "an opponent"
+    /// recipient and a bare-creature source ("by a creature") still parses,
+    /// proving the combinator is parameterized over subject and source rather
+    /// than special-cased to "a player … Zombie".
+    #[test]
+    fn test_opponent_dealt_combat_damage_by_creature_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("an opponent was dealt combat damage by a creature this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn {
+                        damage_kind: DamageKindFilter::CombatOnly,
+                        ..
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
         ));
     }
 

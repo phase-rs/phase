@@ -38,8 +38,9 @@ use crate::types::ability::{
     AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
     DestinationConstraint, Effect, FilterProp, ObjectScope, OriginConstraint, PlayerFilter,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject, StaticCondition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, StaticCondition, TargetFilter,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     UnlessPayModifier, ZoneChangeClause,
 };
 #[cfg(test)]
@@ -2021,10 +2022,7 @@ fn parse_unless_they_sacrifice_filter(input: &str) -> Option<(AbilityCost, &str)
     // triggering-player, and scoped-player punishers alike.
     let filter = add_controller(filter, ControllerRef::You);
     Some((
-        AbilityCost::Sacrifice {
-            target: filter,
-            count: 1,
-        },
+        AbilityCost::Sacrifice(SacrificeCost::count(filter, 1)),
         after,
     ))
 }
@@ -2154,12 +2152,49 @@ fn unless_branch_boundary(input: &str) -> usize {
 /// Expects lowercased text. Accepts:
 /// - `a creature` / `an artifact` / `a [type] you control`
 /// - `two creatures` / `three lands`
+/// - `any number of creatures with total power 12 or greater`
 /// - terminal sentence punctuation
 fn parse_unless_sacrifice_filter(rest: &str) -> Option<AbilityCost> {
     // Trim trailing sentence punctuation so it doesn't leak into parse_target.
     let trimmed = rest.trim().trim_end_matches('.').trim();
     if trimmed.is_empty() {
         return None;
+    }
+
+    // CR 118.12: "any number of [filter] with total power N or greater"
+    if let Ok((power_tail, filter_text)) = preceded(
+        tag::<_, _, OracleError<'_>>("any number of "),
+        terminated(take_until(" with total power "), tag(" with total power ")),
+    )
+    .parse(trimmed)
+    {
+        if let Ok((_, threshold)) = alt((
+            terminated(
+                nom_primitives::parse_number,
+                tag::<_, _, OracleError<'_>>(" or greater"),
+            ),
+            terminated(
+                nom_primitives::parse_number,
+                tag::<_, _, OracleError<'_>>(" or more"),
+            ),
+        ))
+        .parse(power_tail.trim())
+        {
+            if !filter_text.is_empty() {
+                let target_phrase = format!("target {}", filter_text.trim());
+                let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+                if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
+                    return Some(AbilityCost::Sacrifice(SacrificeCost::new(
+                        filter,
+                        SacrificeRequirement::Aggregate {
+                            stat: SacrificeAggregateStat::TotalPower,
+                            comparator: Comparator::GE,
+                            value: threshold as i32,
+                        },
+                    )));
+                }
+            }
+        }
     }
 
     // Extract count: leading numeric word > 1 keeps as count, otherwise count=1.
@@ -2201,10 +2236,7 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<AbilityCost> {
         return None;
     }
 
-    Some(AbilityCost::Sacrifice {
-        target: filter,
-        count,
-    })
+    Some(AbilityCost::Sacrifice(SacrificeCost::count(filter, count)))
 }
 
 /// CR 118.12: Parse "you return [count] [filter] [you control] to its/their
@@ -18348,12 +18380,9 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         match &unless_pay.cost {
-            AbilityCost::Sacrifice {
-                count,
-                target: filter,
-            } => {
-                assert_eq!(*count, 1);
-                match filter {
+            AbilityCost::Sacrifice(cost) => {
+                assert_eq!(cost.requirement, SacrificeRequirement::count(1));
+                match &cost.target {
                     TargetFilter::Typed(typed) => {
                         assert!(
                             typed
@@ -18368,6 +18397,45 @@ mod tests {
                 }
             }
             other => panic!("cost should be Sacrifice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_sacrifice_power_threshold() {
+        let def = parse_trigger_line(
+            "When this creature enters, sacrifice it unless you sacrifice any number of creatures with total power 12 or greater.",
+            "Phyrexian Dreadnought",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        match &unless_pay.cost {
+            AbilityCost::Sacrifice(cost) => match &cost.requirement {
+                SacrificeRequirement::Aggregate {
+                    stat: SacrificeAggregateStat::TotalPower,
+                    comparator: Comparator::GE,
+                    value: 12,
+                } => match &cost.target {
+                    TargetFilter::Typed(typed) => {
+                        assert!(
+                            typed
+                                .type_filters
+                                .iter()
+                                .any(|t| matches!(t, TypeFilter::Creature)),
+                            "filter should include Creature, got {:?}",
+                            typed.type_filters,
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {:?}", other),
+                },
+                other => panic!("expected aggregate sacrifice requirement, got {:?}", other),
+            },
+            other => panic!("cost should be Sacrifice, got {:?}", other),
+        }
+        match def.execute.as_ref().expect("execute").effect.as_ref() {
+            Effect::Sacrifice { target, .. } => {
+                assert_eq!(*target, TargetFilter::SelfRef);
+            }
+            other => panic!("primary ETB effect should sacrifice self, got {:?}", other),
         }
     }
 
@@ -19106,15 +19174,19 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, AbilityCost::Sacrifice { count: 1, .. }),
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Sacrifice(cost)
+                    if cost.requirement == SacrificeRequirement::count(1)
+            ),
             "cost should be Sacrifice, got {:?}",
             unless_pay.cost
         );
-        let AbilityCost::Sacrifice { target, .. } = &unless_pay.cost else {
+        let AbilityCost::Sacrifice(cost) = &unless_pay.cost else {
             unreachable!("checked sacrifice cost above");
         };
-        let TargetFilter::Typed(tf) = target else {
-            panic!("sacrifice target should be typed, got {target:?}");
+        let TargetFilter::Typed(tf) = &cost.target else {
+            panic!("sacrifice target should be typed, got {:?}", cost.target);
         };
         assert_eq!(tf.controller, Some(ControllerRef::You));
     }
@@ -19132,7 +19204,11 @@ mod tests {
             "target-opponent punishers bind unless payer to the chosen player target (#2422)"
         );
         assert!(
-            matches!(unless_pay.cost, AbilityCost::Sacrifice { count: 1, .. }),
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Sacrifice(cost)
+                    if cost.requirement == SacrificeRequirement::count(1)
+            ),
             "cost should be Sacrifice, got {:?}",
             unless_pay.cost
         );
@@ -19194,15 +19270,15 @@ mod tests {
         };
         assert_eq!(costs.len(), 2, "OneOf should have two branches: {costs:?}");
         assert!(
-            matches!(costs[0], AbilityCost::Sacrifice { .. }),
+            matches!(costs[0], AbilityCost::Sacrifice(_)),
             "first branch should be Sacrifice, got {:?}",
             costs[0]
         );
-        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+        let AbilityCost::Sacrifice(cost) = &costs[0] else {
             unreachable!("checked sacrifice branch above");
         };
-        let TargetFilter::Typed(tf) = target else {
-            panic!("sacrifice target should be typed, got {target:?}");
+        let TargetFilter::Typed(tf) = &cost.target else {
+            panic!("sacrifice target should be typed, got {:?}", cost.target);
         };
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(
@@ -19222,15 +19298,19 @@ mod tests {
         // CR 608.2f: scoped opponent pays via per-iteration `scoped_player`.
         assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
         assert!(
-            matches!(unless_pay.cost, AbilityCost::Sacrifice { count: 1, .. }),
+            matches!(
+                &unless_pay.cost,
+                AbilityCost::Sacrifice(cost)
+                    if cost.requirement == SacrificeRequirement::count(1)
+            ),
             "cost should be Sacrifice, got {:?}",
             unless_pay.cost
         );
-        let AbilityCost::Sacrifice { target, .. } = &unless_pay.cost else {
+        let AbilityCost::Sacrifice(cost) = &unless_pay.cost else {
             unreachable!("checked sacrifice cost above");
         };
-        let TargetFilter::Typed(tf) = target else {
-            panic!("sacrifice target should be typed, got {target:?}");
+        let TargetFilter::Typed(tf) = &cost.target else {
+            panic!("sacrifice target should be typed, got {:?}", cost.target);
         };
         assert_eq!(tf.controller, Some(ControllerRef::You));
         let execute = def.execute.as_ref().expect("should have execute");
