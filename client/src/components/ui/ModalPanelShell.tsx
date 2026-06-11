@@ -13,6 +13,8 @@ interface ModalPanelShellProps {
   eyebrow?: string;
   maxWidthClassName?: string;
   bodyClassName?: string;
+  /** Override the outer overlay z-index/stacking (default `z-50`). */
+  overlayClassName?: string;
 }
 
 export function ModalPanelShell({
@@ -24,6 +26,7 @@ export function ModalPanelShell({
   eyebrow,
   maxWidthClassName = "max-w-4xl",
   bodyClassName = "",
+  overlayClassName = "z-50",
 }: ModalPanelShellProps) {
   const { t } = useTranslation();
   const titleId = useId();
@@ -33,7 +36,7 @@ export function ModalPanelShell({
       {open && (
         <motion.div
           key="modal-panel-shell"
-          className="fixed inset-0 z-[60] flex items-stretch px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6"
+          className={`fixed inset-0 flex items-stretch px-0 py-0 lg:items-center lg:justify-center lg:px-4 lg:py-6 ${overlayClassName}`}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
