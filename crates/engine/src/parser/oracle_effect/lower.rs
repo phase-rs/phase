@@ -1451,9 +1451,20 @@ pub(super) fn strip_optional_effect_prefix(
     String,
 ) {
     let lower = text.to_lowercase();
+    // CR 608.2d + CR 115.7: "you may choose new targets for …" is a retarget
+    // effect, not a generic optional wrapper. The chunk loop must leave the
+    // full surface form intact so `try_parse_change_targets` can dispatch it;
+    // mirroring `clause_shell::strip_optional_prefix` / `peel_clause`.
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        value((), tag::<_, _, OracleError<'_>>("you may ")).parse(input)
+    }) {
+        let rest_lower = rest.to_lowercase();
+        if !crate::parser::clause_shell::is_specialized_you_may_phrase(&rest_lower) {
+            return (true, None, None, rest.to_string());
+        }
+    }
     // CR 608.2d: "each opponent may" — per-opponent optional effect.
     // "any opponent may" — first-accept-wins opponent-choice optional effect.
-    // "you may" — standard optional effect prefix.
     if let Some(((scope, player_scope), rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(
@@ -1467,7 +1478,6 @@ pub(super) fn strip_optional_effect_prefix(
                 ),
                 tag("any opponent may "),
             ),
-            value((None, None), tag("you may ")),
             // CR 608.2c: "the first player may" — Oath of Mages and analogous
             // cross-clause patterns where the chooser of a prior sentence
             // (= TriggeringPlayer for upkeep/event triggers) is invited to
@@ -5763,5 +5773,28 @@ mod where_x_tests {
             constraint,
             TargetSelectionConstraint::DifferentObjectControllers
         );
+    }
+}
+
+#[cfg(test)]
+mod strip_optional_effect_prefix_tests {
+    use super::strip_optional_effect_prefix;
+
+    #[test]
+    fn choose_new_targets_is_not_generic_optional() {
+        let text = "you may choose new targets for target spell or ability";
+        let (is_optional, _, _, rest) = strip_optional_effect_prefix(text);
+        assert!(
+            !is_optional,
+            "retarget clauses must keep the full surface form"
+        );
+        assert_eq!(rest, text);
+    }
+
+    #[test]
+    fn generic_you_may_still_strips() {
+        let (is_optional, _, _, rest) = strip_optional_effect_prefix("you may draw a card");
+        assert!(is_optional);
+        assert_eq!(rest, "draw a card");
     }
 }

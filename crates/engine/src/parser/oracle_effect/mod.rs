@@ -17985,6 +17985,9 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         ),
         value(RetargetScope::Single, tag("change a target of ")),
         value(RetargetScope::All, tag("you may choose new targets for ")),
+        // Peeled form when `strip_optional_effect_prefix` correctly declined to
+        // strip a specialized "you may choose new targets" retarget clause.
+        value(RetargetScope::All, tag("choose new targets for ")),
     ))
     .parse(lower)
     .ok()?;
@@ -32024,6 +32027,33 @@ mod tests {
                     if properties.contains(&FilterProp::HasSingleTarget)
             )));
         }
+    }
+
+    #[test]
+    fn choose_new_targets_spell_or_ability_deflecting_swat() {
+        let e = parse_effect("you may choose new targets for target spell or ability");
+        let Effect::ChangeTargets {
+            target,
+            scope,
+            forced_to,
+        } = e
+        else {
+            panic!("Expected ChangeTargets, got {e:?}");
+        };
+        assert!(matches!(scope, RetargetScope::All));
+        assert!(forced_to.is_none());
+        let TargetFilter::Or { filters } = &target else {
+            panic!("Expected Or(StackSpell, StackAbility), got {target:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.contains(&TargetFilter::StackSpell));
+        assert!(matches!(
+            filters[1],
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None
+            }
+        ));
     }
 
     #[test]
