@@ -294,15 +294,55 @@ fn synthesize_granted_keyword_triggers<'a>(
     source_obj: &GameObject,
     keywords: impl IntoIterator<Item = &'a Keyword>,
 ) -> Vec<(KeywordKind, TriggerDefinition)> {
-    let base_keyword_kinds: Vec<_> = source_obj.base_keywords.iter().map(|k| k.kind()).collect();
+    let mut base_keywords = source_obj.base_keywords.clone();
     keywords
         .into_iter()
-        .filter(|kw| !base_keyword_kinds.contains(&kw.kind()))
+        .filter_map(|kw| {
+            if let Some(pos) = base_keywords.iter().position(|base| base == kw) {
+                base_keywords.remove(pos);
+                None
+            } else {
+                Some(kw)
+            }
+        })
         .flat_map(|kw| {
-            let kind = kw.kind();
             KeywordTriggerInstaller::triggers_for(kw)
                 .into_iter()
-                .map(move |trig| (kind, trig))
+                .map(move |trig| (kw.kind(), trig))
+        })
+        .collect()
+}
+
+fn keyword_kind_for_trigger(
+    keywords: &[Keyword],
+    trigger: &TriggerDefinition,
+) -> Option<KeywordKind> {
+    keywords
+        .iter()
+        .find(|keyword| KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, keyword))
+        .map(Keyword::kind)
+}
+
+fn runtime_granted_lki_keyword_triggers(
+    source_obj: &GameObject,
+    record: &crate::types::game_state::ZoneChangeRecord,
+) -> Vec<(KeywordKind, TriggerDefinition)> {
+    let mut base_triggers: Vec<TriggerDefinition> = source_obj
+        .base_trigger_definitions
+        .iter()
+        .cloned()
+        .collect();
+    record
+        .trigger_definitions
+        .iter()
+        .filter_map(|trigger| {
+            if let Some(pos) = base_triggers.iter().position(|base| base == trigger) {
+                base_triggers.remove(pos);
+                None
+            } else {
+                keyword_kind_for_trigger(&record.keywords, trigger)
+                    .map(|kind| (kind, trigger.clone()))
+            }
         })
         .collect()
 }
@@ -349,8 +389,7 @@ fn collect_matching_triggers(
         } = event
         {
             if *object_id == obj_id {
-                // allow-raw-authority: record.keywords is a characteristic snapshot (ZoneChangeRecord preserves LKI keyword set)
-                synthesize_granted_keyword_triggers(source_obj, record.keywords.iter())
+                runtime_granted_lki_keyword_triggers(source_obj, record)
             } else {
                 Vec::new()
             }

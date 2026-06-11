@@ -851,6 +851,7 @@ mod tests {
                 subtypes: Vec::new(),
                 supertypes: Vec::new(),
                 keywords: Vec::new(),
+                trigger_definitions: Vec::new(),
                 power: None,
                 toughness: None,
                 base_power: None,

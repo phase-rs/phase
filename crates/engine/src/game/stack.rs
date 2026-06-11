@@ -1680,6 +1680,7 @@ fn zone_change_record_from_spec(
         subtypes: ch.subtypes.clone(),
         supertypes: ch.supertypes.clone(),
         keywords: ch.keywords.clone(),
+        trigger_definitions: Vec::new(),
         power: ch.power,
         toughness: ch.toughness,
         base_power: ch.power,
