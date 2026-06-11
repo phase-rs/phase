@@ -519,12 +519,16 @@ pub fn resolved_targets(
     if !ability.targets.is_empty()
         && matches!(
             target_filter,
-            TargetFilter::ParentTarget
-                | TargetFilter::ParentTargetSlot { .. }
-                | TargetFilter::StackSpell
+            TargetFilter::ParentTarget | TargetFilter::StackSpell
         )
     {
         return ability.targets.clone();
+    }
+    // CR 608.2c: ParentTargetSlot needs the accumulated targets from the entire
+    // chain, not just the current ability's targets. Use flatten_targets_in_chain
+    // to collect all targets from previous TargetOnly effects (issue #2942).
+    if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
+        return super::ability_utils::flatten_targets_in_chain(ability);
     }
     // CR 601.2c + CR 608.2b: Pre-selected targets take precedence over
     // event-context resolution when the player chose targets at activation/
