@@ -3429,6 +3429,35 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
+    /// CR 115.7d: Redirect-style retarget effects encode the "you may choose
+    /// new targets" choice in `ChangeTargets { scope: All }`.
+    #[test]
+    fn optional_you_may_accepts_change_targets_all() {
+        let parsed = parse_named(
+            "You may choose new targets for target spell.",
+            "Redirect",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
+    /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
+    /// into `FlipCoin.win_effect`.
+    #[test]
+    fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
+        let parsed = parse_named(
+            "Whenever you cast an instant or sorcery spell, flip a coin. \
+             If you lose the flip, return that spell to its owner's hand. \
+             If you win the flip, copy that spell, and you may choose new targets for the copy.",
+            "Krark, the Thumbless",
+            &["Legendary", "Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
     /// Issue #2233: Condition_Unless — representative cards from the drilldown.
     #[test]
     fn condition_unless_accepts_representative_cards() {
