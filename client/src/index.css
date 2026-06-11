@@ -206,6 +206,18 @@ input[type="number"] {
   appearance: textfield;
 }
 
+/* Native select option tint — applied via SelectField's select-dark class so
+   browsers that honor option styling get the same dark surface as the app shell.
+   Long action menus (e.g. Load deck) use MenuSelect instead of native popups. */
+select.select-dark {
+  color-scheme: dark;
+}
+
+select.select-dark option {
+  background-color: #0a0f1b;
+  color: #e2e8f0;
+}
+
 @media (pointer: fine) {
   input[type="number"]::-webkit-inner-spin-button {
     -webkit-appearance: none;

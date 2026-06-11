@@ -584,6 +584,7 @@ fn check_lethal_damage(
                                 let ctx = DeliveryCtx {
                                     source_id: source,
                                     exile_links: ExileLinkSpec::default(),
+                                    drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
                                 };
                                 // CR 704.3: completing all SBAs may require a
                                 // replacement choice surfaced by the delivery tail

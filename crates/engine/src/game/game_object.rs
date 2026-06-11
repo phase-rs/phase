@@ -323,6 +323,13 @@ pub struct GameObject {
     pub face_down: bool,
     pub flipped: bool,
     pub transformed: bool,
+    /// CR 712.8a + CR 400.7: True when this object is showing its MDFC back face
+    /// (set via ChooseModalFace back_face=true). Reverted to front face on any
+    /// zone exit that is not to the battlefield (CR 712.8a: front face only in
+    /// zones other than battlefield/stack), unlike transform DFCs which use the
+    /// `transformed` flag.
+    #[serde(default)]
+    pub modal_back_face: bool,
 
     // Combat
     pub damage_marked: u32,
@@ -606,6 +613,17 @@ pub struct GameObject {
     /// ability union. `None` for non-merged objects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_layer_effect_id: Option<u64>,
+
+    /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
+    /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
+    /// the surviving object's id here, so that an effect which finds the object
+    /// the merged permanent became — a flicker/blink referencing "it" — returns
+    /// ALL of the components, not just the survivor (see
+    /// `merge::expand_returned_merge_components`). Set when the component is split
+    /// out on battlefield exit; cleared on any battlefield (re-)entry. `None` for
+    /// objects that were never split out of a merged permanent this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_from_merge_survivor: Option<ObjectId>,
 
     /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
     /// text-changing effect is live (the spell was cast for its cleave cost).
@@ -1019,6 +1037,7 @@ impl GameObject {
             face_down: false,
             flipped: false,
             transformed: false,
+            modal_back_face: false,
             damage_marked: 0,
             dealt_deathtouch_damage: false,
             attached_to: None,
@@ -1083,6 +1102,7 @@ impl GameObject {
             mutate_form: None,
             merged_components: Vec::new(),
             merge_layer_effect_id: None,
+            split_from_merge_survivor: None,
             cleave_form: None,
             cleave_variant: None,
             unimplemented_mechanics: Vec::new(),
@@ -1186,6 +1206,10 @@ impl GameObject {
         self.base_controller = Some(self.owner);
         self.controller = self.owner;
         self.entered_battlefield_turn = Some(turn_number);
+        // CR 730.3c + CR 400.7: a split-out merge component that (re-)enters the
+        // battlefield is a fresh permanent — drop the survivor back-link so it is
+        // not re-collected by a later continuity-reference return.
+        self.split_from_merge_survivor = None;
         // CR 302.6: A permanent that enters the battlefield has not been
         // continuously under its controller's control since that player's
         // most recent turn began. Cleared at controller's next turn start

@@ -13,13 +13,14 @@ use crate::types::ability::{
     AttackScope, AttackSubject, CardPlayMode, CastFromZoneDriver, CastManaObjectScope,
     CastManaSpentMetric, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, KickerVariant,
-    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-    NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PaymentCost,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    RenownSubject, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -4772,8 +4773,10 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
     }
     // CR 702.39a + CR 701.26b: the parent body untaps a creature the defending
     // player controls.
-    let Effect::Untap {
+    let Effect::SetTapState {
         target: TargetFilter::Typed(tf),
+        scope: EffectScope::Single,
+        state: TapStateChange::Untap,
     } = &*execute.effect
     else {
         return false;
@@ -4829,14 +4832,21 @@ fn build_enlist_trigger() -> TriggerDefinition {
 
     // CR 702.154a: "you may tap … when you do, [pump]." The optional parent taps
     // the eligible creature; the reflexive pump rides as its sub-ability.
-    let execute = AbilityDefinition::new(AbilityKind::Spell, Effect::Tap { target: tap_target })
-        .optional()
-        .sub_ability(pump)
-        .description(
-            "Enlist — you may tap an untapped creature you control; if you do, this \
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SetTapState {
+            target: tap_target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        },
+    )
+    .optional()
+    .sub_ability(pump)
+    .description(
+        "Enlist — you may tap an untapped creature you control; if you do, this \
              creature gets +X/+0 where X is that creature's power"
-                .to_string(),
-        );
+            .to_string(),
+    );
 
     TriggerDefinition::new(TriggerMode::Attacks)
         .valid_card(TargetFilter::SelfRef)
@@ -4886,7 +4896,14 @@ fn is_enlist_trigger(t: &TriggerDefinition) -> bool {
         return false;
     };
     execute.optional
-        && matches!(&*execute.effect, Effect::Tap { .. })
+        && matches!(
+            &*execute.effect,
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+                ..
+            }
+        )
         && execute
             .sub_ability
             .as_deref()
@@ -4936,8 +4953,10 @@ fn build_provoke_trigger() -> TriggerDefinition {
     // optional parent body untaps the chosen defender, then force-blocks it.
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Untap {
+        Effect::SetTapState {
             target: untap_target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         },
     )
     .optional()
@@ -12823,8 +12842,10 @@ mod provoke_synthesis_tests {
         );
 
         // CR 702.39a + CR 701.26b: parent body untaps the defending player's creature.
-        let Effect::Untap {
+        let Effect::SetTapState {
             target: TargetFilter::Typed(tf),
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         } = &*execute.effect
         else {
             panic!("execute body must be Effect::Untap over a TypedFilter");
@@ -12892,10 +12913,12 @@ mod provoke_synthesis_tests {
             .valid_card(TargetFilter::SelfRef)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::DefendingPlayer),
                     ),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             ));
         assert!(
@@ -12955,7 +12978,12 @@ mod provoke_synthesis_tests {
         );
 
         // Parent body taps an eligible Enlist creature.
-        let Effect::Tap { target } = &*execute.effect else {
+        let Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        } = &*execute.effect
+        else {
             panic!("execute body must be Effect::Tap");
         };
         let TargetFilter::And { filters } = target else {

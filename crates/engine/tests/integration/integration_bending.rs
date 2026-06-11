@@ -4,7 +4,9 @@
 use engine::ai_support::candidate_actions;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::create_object;
-use engine::types::ability::{AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, Effect, EffectScope, QuantityExpr, ResolvedAbility, TapStateChange, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -1790,8 +1792,10 @@ fn shock_land_replacement() -> engine::types::ability::ReplacementDefinition {
     );
     let tap_self = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     );
     ReplacementDefinition::new(ReplacementEvent::Moved)

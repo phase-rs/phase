@@ -30,10 +30,10 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
-    FilterProp, ManaModification, ManaReplacementScope, PlayerFilter, PreventionAmount,
-    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, ReplacementPlayerScope, StaticCondition, TargetFilter, TypeFilter,
-    TypedFilter,
+    EffectScope, FilterProp, ManaModification, ManaReplacementScope, PlayerFilter,
+    PreventionAmount, QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -154,6 +154,16 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "~ enters under the control of an opponent of your choice." ---
+    // CR 110.2a: A self-ETB controller-override replacement — the permanent
+    // enters the battlefield directly under an opponent's control (Xantcha,
+    // Sleeper Agent; Captive Audience; Pendant of Prosperity; Abby, Merciless
+    // Soldier). Checked before the generic enters-tapped guard so the "enters"
+    // verb isn't claimed by another arm.
+    if let Some(def) = parse_self_enters_under_opponent(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- "~ enters the battlefield tapped" (unconditional) ---
     // Guard: reject text with " unless " or "if you control" — all conditional
     // patterns must be handled above. Counter-bearing variants fall through to
@@ -168,8 +178,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))
                 .valid_card(TargetFilter::SelfRef)
@@ -947,8 +959,10 @@ fn parse_reveal_land_tail(
 fn unconditional_tap_self_ability() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     )
 }
@@ -963,8 +977,10 @@ fn tap_self_unless_controls_matching_ability(filter: &TargetFilter) -> AbilityDe
     let bound_filter = inject_controller(filter.clone(), ControllerRef::You);
     AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     )
     .condition(crate::types::ability::AbilityCondition::Not {
@@ -996,8 +1012,10 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 
     let tap_self = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     );
 
@@ -1100,8 +1118,10 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     let execute = if enters_tapped {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .sub_ability(choose)
@@ -1115,6 +1135,64 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             .valid_card(TargetFilter::SelfRef)
             // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
             .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 110.2a + CR 614.1c: "`<this permanent>` enters under the control of an
+/// opponent of your choice." — a self-ETB controller-override replacement.
+///
+/// The permanent enters the battlefield directly under an opponent's control;
+/// it never enters under its owner's control first (CR 110.2a). Cards: Xantcha,
+/// Sleeper Agent; Captive Audience; Pendant of Prosperity; Abby, Merciless
+/// Soldier. Emitted as a `Moved` self-replacement (`valid_card = SelfRef`,
+/// `destination_zone = Battlefield`) carrying `enters_under = Opponent`; the
+/// engine resolves the opponent and stamps the entering `ZoneChange`'s
+/// `controller_override` before ETB triggers fire (see
+/// `resolve_self_enters_under_controller`).
+///
+/// "Of your choice" is the controller's choice of opponent — deterministic in a
+/// two-player game (the sole opponent); a full multiplayer choice is a follow-up.
+fn parse_self_enters_under_opponent(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // The full, highly specific control clause (with or without "the battlefield").
+    let has_clause = nom_primitives::scan_contains(
+        norm_lower,
+        "enters under the control of an opponent of your choice",
+    ) || nom_primitives::scan_contains(
+        norm_lower,
+        "enters the battlefield under the control of an opponent of your choice",
+    );
+    if !has_clause {
+        return None;
+    }
+
+    // Self-subject gate: the subject of "enters" must be this permanent — the
+    // normalized self-name "~" (legendary short names included), or a "this
+    // <card-type>" / bare "this" demonstrative — never an external filter
+    // ("creatures you control enter ...").
+    let is_self_subject = nom_primitives::scan_contains(norm_lower, "~ enters")
+        || nom_primitives::scan_contains(norm_lower, "this artifact enters")
+        || nom_primitives::scan_contains(norm_lower, "this creature enters")
+        || nom_primitives::scan_contains(norm_lower, "this enchantment enters")
+        || nom_primitives::scan_contains(norm_lower, "this planeswalker enters")
+        || nom_primitives::scan_contains(norm_lower, "this land enters")
+        || nom_primitives::scan_contains(norm_lower, "this battle enters")
+        || nom_primitives::scan_contains(norm_lower, "this permanent enters")
+        || nom_primitives::scan_contains(norm_lower, "this enters");
+    if !is_self_subject {
+        return None;
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
+            // CR 110.2a: enters under an opponent's control (resolved at apply time).
+            .enters_under(ControllerRef::Opponent)
             .description(original_text.to_string()),
     )
 }
@@ -1223,8 +1301,10 @@ fn parse_clone_replacement(
     let execute_effect = if enter_tapped {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .sub_ability(copy_effect)
@@ -1510,8 +1590,10 @@ fn parse_enters_tapped_unless(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -1550,8 +1632,10 @@ fn parse_enters_tapped_if_controls(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -1909,8 +1993,10 @@ fn parse_enters_with_counters(
             let execute = if has_enters_tapped_phrase(work_text) {
                 AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 )
                 .sub_ability(choice)
@@ -2016,8 +2102,10 @@ fn parse_enters_with_counters(
     let execute = if has_enters_tapped_phrase(work_text) {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .sub_ability(put_counter)
@@ -2692,12 +2780,16 @@ fn build_external_entry_replacement(
     }
 
     let effect = if enters_tapped {
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         }
     } else {
-        Effect::Untap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         }
     };
 
@@ -6413,8 +6505,10 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
     }
@@ -6904,8 +6998,10 @@ mod tests {
             let decline = decline.as_ref().unwrap();
             assert!(matches!(
                 *decline.effect,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ));
         } else {
@@ -6961,8 +7057,10 @@ mod tests {
             ));
             assert!(matches!(
                 *decline.sub_ability.as_ref().unwrap().effect,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ));
         }
@@ -6993,8 +7091,10 @@ mod tests {
         let decline = on_decline.as_ref().unwrap();
         assert!(matches!(
             *decline.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
     }
@@ -7054,8 +7154,10 @@ mod tests {
         let decline = on_decline.as_ref().expect("on_decline must be present");
         assert!(matches!(
             *decline.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let cond = decline
@@ -7207,8 +7309,10 @@ mod tests {
         assert!(
             matches!(
                 *execute.effect,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ),
             "primary effect must be Tap {{ SelfRef }} (enter_tapped modifier), got {:?}",
@@ -7311,8 +7415,10 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Mandatory));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         match &def.condition {
@@ -7351,8 +7457,10 @@ mod tests {
         // execute must be Some(Tap) so the mandatory pipeline can apply it
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
     }
@@ -7370,8 +7478,10 @@ mod tests {
         let execute = def.execute.as_ref().expect("execute ability");
         assert!(matches!(
             *execute.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let sub = execute.sub_ability.as_ref().expect("counter sub_ability");
@@ -7406,8 +7516,10 @@ mod tests {
         // "it enters tapped" → Tap wrapper with the counter as its sub_ability.
         assert!(matches!(
             *execute.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let sub = execute.sub_ability.as_ref().expect("counter sub_ability");
@@ -8645,8 +8757,10 @@ mod tests {
         assert_eq!(def.destination_zone, Some(Zone::Battlefield));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         match &def.valid_card {
@@ -8730,8 +8844,10 @@ mod tests {
         assert_eq!(def.destination_zone, Some(Zone::Battlefield));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Untap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             }
         ));
         match &def.valid_card {
@@ -8758,8 +8874,10 @@ mod tests {
         );
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Untap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             }
         ));
         assert!(def.valid_card.is_some(), "expected other-permanents filter");
@@ -8780,8 +8898,10 @@ mod tests {
         );
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         assert!(def.valid_card.is_some(), "expected other-permanents filter");
@@ -8801,8 +8921,10 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Mandatory));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         match &def.condition {
@@ -9006,8 +9128,10 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Mandatory));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         match &def.condition {
@@ -9455,8 +9579,10 @@ mod tests {
         assert!(
             matches!(
                 &*execute.effect,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ),
             "top-level execute must be Tap {{ SelfRef }}, got {:?}",
@@ -9488,8 +9614,10 @@ mod tests {
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             &*execute.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let sub = execute.sub_ability.as_ref().unwrap();
@@ -9518,8 +9646,10 @@ mod tests {
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             &*execute.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let sub = execute.sub_ability.as_ref().unwrap();
@@ -11364,6 +11494,75 @@ mod snapshot_tests {
         assert!(
             super::parse_copy_count_replacement(&lower, text).is_none(),
             "copy-count replacement must not be gated by loose substring matching"
+        );
+    }
+
+    /// CR 110.2a: "<this permanent> enters under the control of an opponent of
+    /// your choice." parses to a self-ETB controller-override replacement —
+    /// `Moved` / `valid_card = SelfRef` / `destination_zone = Battlefield` /
+    /// `enters_under = Opponent`. Build-the-class across the four real corpus
+    /// phrasings (self-name "~", "this artifact", "this enchantment").
+    #[test]
+    fn self_enters_under_opponent_parses_controller_override_replacement() {
+        let cases = [
+            // Xantcha, Sleeper Agent / Abby, Merciless Soldier (legendary short name → "~").
+            (
+                "Xantcha enters under the control of an opponent of your choice.",
+                "Xantcha, Sleeper Agent",
+            ),
+            (
+                "Abby enters under the control of an opponent of your choice.",
+                "Abby, Merciless Soldier",
+            ),
+            // Pendant of Prosperity (card name absent; demonstrative subject).
+            (
+                "This artifact enters under the control of an opponent of your choice.",
+                "Pendant of Prosperity",
+            ),
+            // Captive Audience.
+            (
+                "This enchantment enters under the control of an opponent of your choice.",
+                "Captive Audience",
+            ),
+        ];
+
+        for (text, card_name) in cases {
+            let def = parse_replacement_line(text, card_name)
+                .unwrap_or_else(|| panic!("{card_name}: should parse as a replacement"));
+            assert_eq!(
+                def.event,
+                ReplacementEvent::Moved,
+                "{card_name}: self-ETB replacement is a Moved event"
+            );
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::SelfRef),
+                "{card_name}: applies only to the entering permanent itself"
+            );
+            assert_eq!(
+                def.destination_zone,
+                Some(Zone::Battlefield),
+                "{card_name}: battlefield-entry-scoped (CR 614.1c)"
+            );
+            assert_eq!(
+                def.enters_under,
+                Some(ControllerRef::Opponent),
+                "{card_name}: enters under an opponent's control (CR 110.2a)"
+            );
+        }
+    }
+
+    /// The control clause is NOT claimed when the subject is an external filter
+    /// rather than the permanent itself — the self-subject gate must reject it.
+    #[test]
+    fn external_enters_under_opponent_is_not_a_self_replacement() {
+        assert!(
+            super::parse_self_enters_under_opponent(
+                "creatures you control enter under the control of an opponent of your choice",
+                "Whatever",
+            )
+            .is_none(),
+            "external-subject entry must not match the self controller-override arm"
         );
     }
 }

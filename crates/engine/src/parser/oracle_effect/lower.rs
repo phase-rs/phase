@@ -24,10 +24,10 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttackScope, AttackSubject, Comparator,
-    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
-    MultiTargetSpec, ObjectScope, PaymentCost, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    FilterProp, MultiTargetSpec, ObjectScope, PaymentCost, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -832,9 +832,14 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
             return TargetChoiceTiming::Resolution;
         }
     }
+    // CR 701.26a/b: only single-target tap/untap (legacy `Tap`/`Untap`) takes
+    // the resolution-timing branch; the mass scope never declares multi-target.
     if matches!(
         clause_ir.parsed.effect,
-        Effect::Tap { .. } | Effect::Untap { .. }
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            ..
+        }
     ) && clause_ir.multi_target.is_some()
     {
         let lower = clause_ir.source_text.to_ascii_lowercase();
@@ -1253,8 +1258,12 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
+        // CR 701.26a/b: only single-target tap/untap carries a rewritable target.
+        | Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::Pump { target, .. }
         | Effect::ChangeZone { target, .. } => {
             if matches!(target, TargetFilter::ParentTarget) {
@@ -2513,6 +2522,18 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 player: crate::types::player::PlayerId(0),
             },
         ),
+        // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
+        // turn granted by the parent clause (the controller's next turn), so
+        // the controller's next end step. Suffix companion of the prefix arm
+        // in `strip_temporal_prefix`. Used by Final Fortune / Last Chance /
+        // Warrior's Oath / Chance for Glory.
+        (
+            " at the beginning of that turn's end step",
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End,
+                player: crate::types::player::PlayerId(0),
+            },
+        ),
         (
             " at the beginning of your next upkeep",
             DelayedTriggerCondition::AtNextPhaseForPlayer {
@@ -2562,6 +2583,22 @@ pub(super) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     player: crate::types::player::PlayerId(0),
                 },
                 tag("at the beginning of your next end step, "),
+            ),
+            // CR 603.7a + CR 104.3e: "at the beginning of that turn's end step"
+            // is the anaphoric form used by the extra-turn-with-a-cost cards
+            // (Final Fortune, Last Chance, Warrior's Oath, Chance for Glory):
+            // "Take an extra turn after this one. At the beginning of that
+            // turn's end step, you lose the game." "That turn" is the just-
+            // granted extra turn — the controller's next turn — so this is the
+            // controller's next end step, identical to the "your next end step"
+            // arm above. PlayerId(0) is rewritten to ability.controller at
+            // resolve time.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: crate::types::player::PlayerId(0),
+                },
+                tag("at the beginning of that turn's end step, "),
             ),
             // CR 505.1 + CR 603.7a: "your next main phase" → PreCombatMain.
             // PlayerId(0) rewritten to ability.controller at resolve time
@@ -5077,7 +5114,8 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 mod tests {
     use super::{
         nest_whenever_this_turn_token_cleanup_delayed_trigger, parse_where_x_quantity_expression,
-        strip_return_destination_ext_with_remainder, strip_trailing_where_x,
+        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+        strip_trailing_where_x,
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
@@ -5258,6 +5296,80 @@ mod tests {
             ),
             "sibling effects after the cleanup must remain on the outer ability"
         );
+    }
+
+    /// CR 603.7a + CR 104.3e: the anaphoric "at the beginning of that turn's end
+    /// step" (extra-turn-with-a-cost cards) is recognized by both temporal
+    /// recognizers, mapping to the controller's next end step — identical to the
+    /// existing "your next end step" arm.
+    #[test]
+    fn that_turns_end_step_temporal_resolves_to_controller_next_end_step() {
+        let expected = DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase: Phase::End,
+            player: crate::types::player::PlayerId(0),
+        };
+
+        let (rest, cond) =
+            strip_temporal_prefix("at the beginning of that turn's end step, you lose the game");
+        assert_eq!(rest, "you lose the game");
+        assert_eq!(cond, Some(expected.clone()));
+
+        let (rest, cond) =
+            strip_temporal_suffix("you lose the game at the beginning of that turn's end step");
+        assert_eq!(rest, "you lose the game");
+        assert_eq!(cond, Some(expected));
+    }
+
+    /// Build-the-class: the extra-turn-with-a-cost family parses to BOTH an
+    /// `ExtraTurn` effect AND a delayed `LoseTheGame` trigger fired at the extra
+    /// turn's end step (CR 603.7a). Previously the second sentence was dropped as
+    /// an `Effect:at` gap, so these cards became a downside-free extra turn.
+    #[test]
+    fn extra_turn_then_lose_parses_delayed_lose_the_game() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+
+        // Recursively collect every effect in the def + sub_ability chain,
+        // descending into CreateDelayedTrigger's inner effect.
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+                collect(effect, out);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect(sub, out);
+            }
+        }
+
+        for text in [
+            "Take an extra turn after this one. At the beginning of that turn's end step, you lose the game.",
+            "Creatures you control gain indestructible. Take an extra turn after this one. At the beginning of that turn's end step, you lose the game.",
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            let mut effects = Vec::new();
+            collect(&def, &mut effects);
+
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::ExtraTurn { .. })),
+                "expected an ExtraTurn effect in {text:?}, got {effects:?}"
+            );
+            let delayed_lose = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::CreateDelayedTrigger {
+                        condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                            phase: Phase::End,
+                            ..
+                        },
+                        effect,
+                        ..
+                    } if matches!(&*effect.effect, Effect::LoseTheGame { .. })
+                )
+            });
+            assert!(
+                delayed_lose,
+                "expected a delayed LoseTheGame at the extra turn's end step in {text:?}, got {effects:?}"
+            );
+        }
     }
 }
 

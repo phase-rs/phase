@@ -1338,6 +1338,11 @@ pub enum PendingCounterPostAction {
         source_id: Option<ObjectId>,
         duration: Option<Duration>,
         exile_tracking: ZoneDeliveryExileTracking,
+        /// Who drains `post_replacement_continuation` when this deferred tail
+        /// finally runs (CR 614.12a). `#[serde(default)]` = `DeliveryTail`,
+        /// matching every record minted before the field existed.
+        #[serde(default)]
+        drain: PostReplacementDrainOwner,
     },
     RecordStationed {
         spacecraft_id: ObjectId,
@@ -1357,6 +1362,30 @@ pub enum ZoneDeliveryExileTracking {
     #[default]
     None,
     TrackBySource,
+}
+
+/// CR 614.12a + CR 616.1: Which layer drains `post_replacement_continuation`
+/// after a post-replacement zone delivery (Phase-B divergence reconciliation,
+/// PLAN §7). The replacement-choice resume path historically drained the
+/// continuation in its own epilogue — WITH the spell-resolution ctx and with
+/// `post_replacement_source` cleared for zone changes — while the shared
+/// delivery tail drains it ctx-less without the clear. Parameterizing the tail
+/// (instead of keeping two divergent delivery copies) lets the resume path
+/// route through the shared `deliver` machinery while its epilogue keeps
+/// exclusive ownership of the drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PostReplacementDrainOwner {
+    /// The shared delivery tail (`apply_zone_delivery_tail`) drains the
+    /// continuation ctx-less — every direct pipeline delivery (effect moves,
+    /// stack resolution, land play, destroy/sacrifice lowering).
+    #[default]
+    DeliveryTail,
+    /// The caller's epilogue owns the drain; the tail skips it. Used by
+    /// `engine_replacement::handle_replacement_choice`, whose post-`Execute`
+    /// epilogue drains with the spell-resolution ctx and clears
+    /// `post_replacement_source` for zone changes (CR 614.12a ordering:
+    /// `apply_pending_spell_resolution` runs before the drain there).
+    CallerEpilogue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

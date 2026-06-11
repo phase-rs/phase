@@ -17,13 +17,14 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    CastTimingPermission, Duration, Effect, KickerVariant, LibraryPosition, ResolvedAbility,
+    StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BatchCompletion, ExileLink, ExileLinkKind, GameState, PendingBatchDeliveries,
-    PendingCounterPostAction, WaitingFor, ZoneDeliveryExileTracking,
+    PendingCounterPostAction, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -384,12 +385,43 @@ impl ApprovedZoneChange {
     }
 }
 
-/// Context threaded into `deliver`: the attributed source and exile-link spec.
-/// Consumed by the Phase B bucket-A `deliver(approved, ctx)` migrations.
-#[allow(dead_code)]
+/// Context threaded into `deliver`: the attributed source, exile-link spec,
+/// and the continuation-drain owner. Consumed by the bucket-A
+/// `deliver(approved, ctx)` migrations.
+///
+/// PLAN Open Question #3 (RESOLVED): play/cast provenance is NOT a ctx knob.
+/// `played_from_zone` (land-play provenance, CR 305.1) is established by the
+/// land-play action and cleared only on battlefield EXIT
+/// (`reset_for_battlefield_exit`) — nothing clears it during a battlefield
+/// ENTRY, so the former `ctx.played_from_zone` re-stamp preserved a value that
+/// was never destroyed (verified against `reset_for_battlefield_entry` and the
+/// field's writer set; the capture/restore was a defensive no-op since PR
+/// #1119 introduced it). The cast-link family that IS cleared on entry
+/// (CR 400.7d: kicker / additional-cost / convoke / cast-timing memory) is
+/// preserved structurally by the delivery itself — see [`CastLinkSnapshot`].
 pub(crate) struct DeliveryCtx {
     pub source_id: Option<ObjectId>,
     pub exile_links: ExileLinkSpec,
+    /// CR 614.12a: who drains `post_replacement_continuation` after this
+    /// delivery (see [`PostReplacementDrainOwner`]).
+    pub drain: PostReplacementDrainOwner,
+}
+
+/// CR 400.7d + CR 608.3: the cast-link family — information about the spell
+/// that became the permanent, which an ability of that permanent may
+/// reference ("if it was kicked", convoke history, cast-timing permission).
+/// `reset_for_battlefield_entry` (CR 400.7) clears these on entry; the
+/// delivery snapshots them from the pre-move STACK object and restores them
+/// right after the move, for `Stack → Battlefield` deliveries only.
+/// Establishment is exclusive to the cast pathway (`finalize_cast_to_stack`),
+/// so the gate makes effect-driven puts (Reanimate class) structurally unable
+/// to resurrect stale cast provenance.
+struct CastLinkSnapshot {
+    cast_from_zone: Option<Zone>,
+    cast_timing_permission: Option<CastTimingPermission>,
+    kickers_paid: Vec<KickerVariant>,
+    additional_cost_payment_count: u32,
+    convoked_creatures: Vec<ObjectId>,
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -555,6 +587,7 @@ pub(crate) fn move_object(
             DeliveryCtx {
                 source_id,
                 exile_links,
+                drain: PostReplacementDrainOwner::DeliveryTail,
             },
             events,
         ) {
@@ -851,10 +884,9 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
 }
 
 /// Deliver an event that already passed the replacement consult. Only callable
-/// with the `ApprovedZoneChange` proof token. This is the renamed
-/// `deliver_replaced_zone_change`; Phase A exposes it for the Phase B bucket-A
-/// migration (it is not yet called through the token by any production site).
-#[allow(dead_code)]
+/// with the `ApprovedZoneChange` proof token — the consult-once/deliver-once
+/// contract for every bucket-A post-replacement site (destroy/sacrifice/SBA
+/// lowering, the replacement-choice resume path, land play).
 pub(crate) fn deliver(
     state: &mut GameState,
     approved: ApprovedZoneChange,
@@ -871,6 +903,7 @@ pub(crate) fn deliver(
         ctx.source_id,
         ctx.exile_links.duration.as_ref(),
         track_exiled_by_source,
+        ctx.drain,
         events,
     )
 }
@@ -929,6 +962,7 @@ fn append_zone_delivery_tail_after_counter_pause(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     exile_tracking: ZoneDeliveryExileTracking,
+    drain: PostReplacementDrainOwner,
     clear_pending_etb_counters: Option<ObjectId>,
 ) -> ZoneDeliveryResult {
     let mut actions = Vec::new();
@@ -943,6 +977,7 @@ fn append_zone_delivery_tail_after_counter_pause(
         source_id,
         duration: duration.cloned(),
         exile_tracking,
+        drain,
     });
     crate::game::effects::counters::append_pending_counter_post_actions(state, actions);
     replacement_pause_delivery_result(state)
@@ -958,6 +993,7 @@ pub(crate) fn apply_zone_delivery_tail(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     exile_tracking: ZoneDeliveryExileTracking,
+    drain: PostReplacementDrainOwner,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     // CR 701.24a: To shuffle a library, randomize the cards within it so that
@@ -999,7 +1035,15 @@ pub(crate) fn apply_zone_delivery_tail(
     // `NeedsChoice` so the mass/single zone-change loop stashes the remaining
     // co-entering members and resumes after the choice (instead of dropping
     // them, issue #535 class).
-    if state.post_replacement_continuation.is_some() {
+    //
+    // `CallerEpilogue` (the replacement-choice resume path) skips this drain:
+    // its epilogue drains the continuation itself, WITH the spell-resolution
+    // ctx and with `post_replacement_source` cleared for zone changes, and
+    // only after `apply_pending_spell_resolution` (Phase-B divergence
+    // reconciliation — the tail is parameterized instead of copied).
+    if matches!(drain, PostReplacementDrainOwner::DeliveryTail)
+        && state.post_replacement_continuation.is_some()
+    {
         let waiting_for = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state,
             Some(object_id),
@@ -1110,6 +1154,7 @@ pub(crate) fn deliver_replaced_zone_change(
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
     track_exiled_by_source: bool,
+    drain: PostReplacementDrainOwner,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     if let ProposedEvent::ZoneChange {
@@ -1160,7 +1205,52 @@ pub(crate) fn deliver_replaced_zone_change(
             state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
         }
 
+        // CR 400.7d + CR 608.3: a permanent spell's resolution turns the spell
+        // into the permanent, and an ability of that permanent may reference
+        // information about the spell that became it — including what costs
+        // were paid (kicker, additional costs, convoke) and how it was cast.
+        // `reset_for_battlefield_entry` (CR 400.7) clears that cast-link family
+        // on entry, so snapshot it from the pre-move STACK object and restore
+        // it right after the move. Gated on `from == Stack`: establishment is
+        // exclusive to the cast pathway (`finalize_cast_to_stack` stamps the
+        // stack object), and an effect-driven put (Reanimate class) must NOT
+        // resurrect stale cast provenance — its entry is a new object with no
+        // cast linkage (CR 400.7, no exception applies).
+        let cast_link = (from == Zone::Stack && to == Zone::Battlefield)
+            .then(|| {
+                state.objects.get(&object_id).map(|obj| CastLinkSnapshot {
+                    cast_from_zone: obj.cast_from_zone,
+                    cast_timing_permission: obj.cast_timing_permission.map(|(p, _)| p),
+                    kickers_paid: obj.kickers_paid.clone(),
+                    additional_cost_payment_count: obj.additional_cost_payment_count,
+                    convoked_creatures: obj.convoked_creatures.clone(),
+                })
+            })
+            .flatten();
+
         zones::move_to_zone(state, object_id, to, events);
+        // CR 400.7d: restore the cast link immediately after the entry reset —
+        // BEFORE the face-down / counter blocks, so a counter-replacement pause
+        // (CR 616.1) cannot strand the resumed permanent without its kicker /
+        // convoke / cast-timing memory (the pre-pipeline stack.rs epilogue ran
+        // after the counter blocks and was skipped by their early returns).
+        if let Some(link) = cast_link {
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.cast_from_zone = link.cast_from_zone;
+                // CR 603.4: trigger conditions compare the stamp against the
+                // CURRENT turn (`triggers.rs` reads `(permission, turn)`), so
+                // re-stamp with the resolution turn — mirroring the
+                // `apply_pending_spell_resolution` restore. Cast turn and
+                // resolution turn are always equal (the stack empties before a
+                // turn ends), so this also preserves the captured value.
+                if let Some(permission) = link.cast_timing_permission {
+                    obj.cast_timing_permission = Some((permission, state.turn_number));
+                }
+                obj.kickers_paid = link.kickers_paid;
+                obj.additional_cost_payment_count = link.additional_cost_payment_count;
+                obj.convoked_creatures = link.convoked_creatures;
+            }
+        }
         if to == Zone::Battlefield || from == Zone::Battlefield {
             crate::game::layers::mark_layers_full(state);
         }
@@ -1283,6 +1373,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     source_id,
                     duration,
                     exile_tracking,
+                    drain,
                     pending_etb_cleanup,
                 );
             }
@@ -1313,6 +1404,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     source_id,
                     duration,
                     exile_tracking,
+                    drain,
                     None,
                 );
             }
@@ -1326,6 +1418,7 @@ pub(crate) fn deliver_replaced_zone_change(
             source_id,
             duration,
             exile_tracking,
+            drain,
             events,
         );
     }
@@ -1543,6 +1636,7 @@ pub(crate) fn execute_zone_move(
                     Some(source_id),
                     duration,
                     track_exiled_by_source,
+                    PostReplacementDrainOwner::DeliveryTail,
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {}
@@ -1573,6 +1667,7 @@ pub(crate) fn execute_zone_move(
                 Some(source_id),
                 duration,
                 track_exiled_by_source,
+                PostReplacementDrainOwner::DeliveryTail,
                 events,
             ) {
                 ZoneDeliveryResult::Done => {}

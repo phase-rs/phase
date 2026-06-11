@@ -313,12 +313,181 @@ pub fn split_merged_permanent_on_leave(
         if component_id == merged_id {
             continue;
         }
-        // CR 730.3 + S4: route each component to ITS OWN owner's destination zone.
-        crate::game::zones::move_to_zone(state, component_id, dest, events);
+        // CR 730.3 + S4: route each component to ITS OWN owner's destination zone
+        // as a NEW object that did not independently leave the battlefield.
+        put_component_into_zone(state, component_id, dest, events);
+        // CR 730.3c: record which surviving object this component split from, so an
+        // effect that later finds "the object the merged permanent became" (a
+        // flicker/blink return) brings this component back too, not just the
+        // survivor. See `expand_returned_merge_components`.
+        if let Some(obj) = state.objects.get_mut(&component_id) {
+            obj.split_from_merge_survivor = Some(merged_id);
+        }
     }
 
     // The surviving object's merge identity is cleared by its own
     // `reset_for_battlefield_exit` during the subsequent `move_to_zone`.
+}
+
+/// CR 730.3c: "If an effect can find the new object that a merged permanent
+/// becomes as it leaves the battlefield, it finds ALL of those objects. ... the
+/// same actions are taken upon each of them." When an effect references the
+/// object that just left the battlefield (a flicker/blink's "return it") and
+/// that object was a merged permanent's survivor, the absorbed component cards it
+/// split into (CR 730.3) must receive the same action too — otherwise a flicker
+/// returns only the survivor and strands the other components in exile.
+///
+/// Given the objects a *continuity* reference resolved to, append each survivor's
+/// co-departed sibling components that are still co-located in the same zone, in
+/// deterministic id order. The caller (the `ChangeZone` return loop) then applies
+/// its move to the whole pile; the components return as separate, non-merged
+/// objects (CR 730.3 — merging is not re-established) and their back-links clear
+/// on battlefield entry.
+///
+/// This is a no-op unless `target_filter` is a continuity reference AND a
+/// resolved object is a former merged survivor with co-located components. In
+/// particular it does NOT fire for a freshly chosen target (e.g. reanimating one
+/// specific card from a graveyard), which must not over-return.
+pub(crate) fn expand_returned_merge_components(
+    state: &GameState,
+    resolved: Vec<ObjectId>,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    if !references_object_that_left(target_filter) {
+        return resolved;
+    }
+    let mut expanded = resolved.clone();
+    for &survivor_id in &resolved {
+        let components = co_split_components(state, survivor_id, &expanded);
+        expanded.extend(components);
+    }
+    expanded
+}
+
+/// CR 730.3c: The component cards that the merged permanent identified by
+/// `survivor_id` split into when it left the battlefield (CR 730.3), and that are
+/// still co-located with the survivor in its current (off-battlefield) zone —
+/// returned in deterministic id order, omitting any id already in `exclude`.
+///
+/// Empty unless `survivor_id` is a former merged survivor with components still
+/// in its zone. Shared by both return paths that "find the object the merged
+/// permanent became": the `ChangeZone` continuity-reference return
+/// ([`expand_returned_merge_components`], flicker/blink) and the
+/// `UntilSourceLeaves` implicit return in `engine::check_exile_returns`
+/// (exile-until-this-leaves / "O-Ring" effects).
+pub(crate) fn co_split_components(
+    state: &GameState,
+    survivor_id: ObjectId,
+    exclude: &[ObjectId],
+) -> Vec<ObjectId> {
+    let Some(zone) = state.objects.get(&survivor_id).map(|o| o.zone) else {
+        return Vec::new();
+    };
+    // Split-out components are never independent members of the battlefield
+    // (CR 730.2) — only an off-battlefield survivor can have co-located ones.
+    if zone == Zone::Battlefield {
+        return Vec::new();
+    }
+    let mut components: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(id, obj)| {
+            obj.split_from_merge_survivor == Some(survivor_id)
+                && obj.zone == zone
+                && !exclude.contains(*id)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    components.sort_by_key(|id| id.0);
+    components
+}
+
+/// CR 730.3c: Target references that denote "the object that just left the
+/// battlefield" — i.e. continuity references that find the object a merged
+/// permanent became — as opposed to a freshly chosen target. Only these expand
+/// to a former merged permanent's component cards.
+fn references_object_that_left(target_filter: &TargetFilter) -> bool {
+    matches!(
+        target_filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::TriggeringSource
+    )
+}
+
+/// CR 730.3 + CR 712.21: Put a non-surviving merge component into `dest` as a
+/// NEW object that did NOT independently leave the battlefield.
+///
+/// A merged permanent is a single permanent (CR 730.2c); when it leaves, only
+/// the surviving object's move is a battlefield exit. Each absorbed component is
+/// "put into the appropriate zone" (CR 730.3) as a new object, emitting
+/// `ZoneChanged { from: None, .. }` — mirroring token creation (CR 111.1), where
+/// an object that appears directly in a zone has no origin zone.
+///
+/// This makes every battlefield-exit observer — "leaves the battlefield" / "dies"
+/// triggers (`from == Battlefield`) and the `CreatureDiedThisTurn` look-back
+/// (`from_zone == Some(Battlefield)`) — fire ONLY for the survivor, i.e. once for
+/// the whole pile, while origin-agnostic observers ("whenever a card is put into
+/// a graveyard from anywhere") still fire once per component card. This matches
+/// the CR 712.21 meld worked example: a melded creature dying triggers "a
+/// creature dies" once but "a card is put into a graveyard" once per card.
+///
+/// Composes `zones::apply_zone_exit_cleanup` (CR 400.7 new-object reset) and
+/// `zones::add_to_zone` rather than `zones::move_to_zone`, because the component
+/// is absorbed into the survivor (not present in any zone list) and its move must
+/// not be a battlefield exit.
+fn put_component_into_zone(
+    state: &mut GameState,
+    component_id: ObjectId,
+    dest: Zone,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 603.10a: snapshot the component's characteristics BEFORE the CR 400.7
+    // cleanup, so a transformed/animated component records its event-time face
+    // (mirrors `move_to_zone`, which snapshots before exit cleanup). Origin is
+    // `None`: the component enters `dest` as a new object, not as a departure
+    // from the battlefield.
+    let Some((owner, record)) = state.objects.get(&component_id).map(|obj| {
+        (
+            obj.owner,
+            obj.snapshot_for_zone_change(component_id, None, dest),
+        )
+    }) else {
+        return;
+    };
+
+    // CR 400.7: the component becomes a new object with no memory of its prior
+    // existence (clears revealed/activation history, captures last-known info).
+    // It was part of a battlefield permanent, so its prior context is the
+    // battlefield — but no battlefield-exit event is emitted for it.
+    crate::game::zones::apply_zone_exit_cleanup(state, component_id, Zone::Battlefield, dest);
+
+    // CR 730.2: the component is absorbed into the survivor and is not an
+    // independent member of the battlefield list; defensively ensure it is not
+    // left there (a no-op under the runtime invariant) before adding it to its
+    // OWN owner's destination zone.
+    crate::game::zones::remove_from_zone(state, component_id, Zone::Battlefield, owner);
+    crate::game::zones::add_to_zone(state, component_id, dest, owner);
+    if let Some(obj) = state.objects.get_mut(&component_id) {
+        obj.zone = dest;
+    }
+
+    // CR 700.11: a nontoken permanent card put into its owner's graveyard from
+    // anywhere counts as having descended this turn — shared single authority
+    // with `move_to_zone`.
+    if dest == Zone::Graveyard {
+        crate::game::zones::record_descend_on_graveyard_arrival(state, component_id, owner);
+    }
+
+    crate::game::restrictions::record_zone_change(state, record.clone());
+    events.push(GameEvent::ZoneChanged {
+        object_id: component_id,
+        from: None,
+        to: dest,
+        record: Box::new(record),
+    });
 }
 
 /// CR 702.140c + CR 730.2a: Resolve the controller's top/bottom choice for a

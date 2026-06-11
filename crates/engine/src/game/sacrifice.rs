@@ -183,6 +183,7 @@ fn deliver_sacrifice_zone_change(
     let ctx = DeliveryCtx {
         source_id: None,
         exile_links: ExileLinkSpec::default(),
+        drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
     };
     match zone_pipeline::deliver(state, approved, ctx, events) {
         ZoneDeliveryResult::Done => SacrificeApply::Complete,

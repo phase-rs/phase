@@ -3032,6 +3032,34 @@ pub enum TargetFilter {
     AllPlayers,
 }
 
+/// CR 701.26a / CR 701.26b: Selection scope for `Effect::SetTapState`. Picks
+/// whether the tap/untap targets a single chosen/source permanent (the legacy
+/// `Tap` / `Untap`) or every permanent matching the filter (the legacy
+/// `TapAll` / `UntapAll`). Parameterizes the structural "single vs mass"
+/// axis instead of proliferating sibling effect variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum EffectScope {
+    /// One permanent — `target` is a selectable target filter (legacy
+    /// `Effect::Tap` / `Effect::Untap`). `target_filter()` exposes it.
+    Single,
+    /// Every permanent matching the filter — `target` is a non-targeting
+    /// population filter (legacy `Effect::TapAll` / `Effect::UntapAll`).
+    All,
+}
+
+/// CR 701.26a (tap) / CR 701.26b (untap): Direction of an `Effect::SetTapState`.
+/// Parameterizes the tap/untap axis so a single effect variant covers both
+/// keyword actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TapStateChange {
+    /// CR 701.26a: Turn the permanent sideways (tap it).
+    Tap,
+    /// CR 701.26b: Rotate the permanent upright (untap it).
+    Untap,
+}
+
 /// CR 102 + CR 119 + CR 402: Player axis for player-scoped quantity references.
 ///
 /// Parameterizes the player whose hand size, life total, or other per-player
@@ -6114,23 +6142,27 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<TargetFilter>,
     },
-    Tap {
+    /// CR 701.26a (tap) / CR 701.26b (untap): Set the tap state of one or more
+    /// permanents. Collapses the legacy `Tap` / `Untap` / `TapAll` / `UntapAll`
+    /// variants into a single parameterized form:
+    ///
+    ///   - `Tap`     == `{ scope: Single, state: Tap }`   (target = chosen/source permanent)
+    ///   - `Untap`   == `{ scope: Single, state: Untap }`
+    ///   - `TapAll`  == `{ scope: All, state: Tap }`      (target = population filter)
+    ///   - `UntapAll`== `{ scope: All, state: Untap }`
+    ///
+    /// `scope` is load-bearing: `Single` resolves one selectable target while
+    /// `All` iterates every matching permanent (see `resolve_set_tap_state`).
+    SetTapState {
+        /// CR 115.1: For `Single`, the selectable target filter. For `All`,
+        /// the (non-targeting) population filter. Defaults to `Any` to preserve
+        /// the legacy `Tap`/`Untap` serde default; mass emitters always supply
+        /// an explicit filter.
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-    },
-    Untap {
-        #[serde(default = "default_target_filter_any")]
-        target: TargetFilter,
-    },
-    /// CR 701.26a: Tap all permanents matching the filter.
-    TapAll {
-        #[serde(default = "default_target_filter_none")]
-        target: TargetFilter,
-    },
-    /// CR 701.26b: Untap all permanents matching the filter.
-    UntapAll {
-        #[serde(default = "default_target_filter_none")]
-        target: TargetFilter,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
+        state: TapStateChange,
     },
     RemoveCounter {
         #[serde(default)]
@@ -8239,6 +8271,12 @@ fn default_target_filter_none() -> TargetFilter {
     TargetFilter::None
 }
 
+/// Serde default for `Effect::SetTapState::scope`: preserves the legacy
+/// `Tap`/`Untap` (single-target) reading when `scope` is omitted.
+fn default_effect_scope_single() -> EffectScope {
+    EffectScope::Single
+}
+
 fn default_target_filter_controller() -> TargetFilter {
     TargetFilter::Controller
 }
@@ -8684,8 +8722,6 @@ impl Effect {
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }
             | Effect::Counter { target, .. }
-            | Effect::Tap { target, .. }
-            | Effect::Untap { target, .. }
             | Effect::RemoveCounter { target, .. }
             | Effect::Sacrifice { target, .. }
             | Effect::DiscardCard { target, .. }
@@ -8843,6 +8879,19 @@ impl Effect {
             // every classic mana ability (Cabal Coffers, Reflecting Pool, etc.).
             Effect::Mana { target, .. } => target.as_ref(),
 
+            // CR 701.26a/b: `SetTapState` exposes its target only for the
+            // single-permanent scope (legacy `Tap`/`Untap`). The `All` scope
+            // (legacy `TapAll`/`UntapAll`) is a non-targeting population filter.
+            Effect::SetTapState {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
             // --- Effects with no player-selectable target field ---
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
@@ -8857,8 +8906,6 @@ impl Effect {
             | Effect::DamageAll { .. }
             | Effect::DamageEachPlayer { .. }
             | Effect::DestroyAll { .. }
-            | Effect::TapAll { .. }
-            | Effect::UntapAll { .. }
             | Effect::GoadAll { .. }
             | Effect::BounceAll { .. }
             | Effect::CounterAll { .. }
@@ -9052,10 +9099,8 @@ impl Effect {
             | Effect::Regenerate { .. }
             | Effect::Counter { .. }
             | Effect::CounterAll { .. }
-            | Effect::Tap { .. }
-            | Effect::Untap { .. }
-            | Effect::TapAll { .. }
-            | Effect::UntapAll { .. }
+            // CR 701.26a/b: tap/untap carry no QuantityExpr in any scope.
+            | Effect::SetTapState { .. }
             | Effect::RemoveCounter { .. }
             | Effect::DiscardCard { .. }
             | Effect::ChangeZone { .. }
@@ -9249,10 +9294,8 @@ impl Effect {
             | Effect::Regenerate { .. }
             | Effect::Counter { .. }
             | Effect::CounterAll { .. }
-            | Effect::Tap { .. }
-            | Effect::Untap { .. }
-            | Effect::TapAll { .. }
-            | Effect::UntapAll { .. }
+            // CR 701.26a/b: tap/untap carry no QuantityExpr in any scope.
+            | Effect::SetTapState { .. }
             | Effect::RemoveCounter { .. }
             | Effect::DiscardCard { .. }
             | Effect::ChangeZone { .. }
@@ -9399,10 +9442,14 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Token { .. } => "Token",
         Effect::GainLife { .. } => "GainLife",
         Effect::LoseLife { .. } => "LoseLife",
-        Effect::Tap { .. } => "Tap",
-        Effect::Untap { .. } => "Untap",
-        Effect::TapAll { .. } => "TapAll",
-        Effect::UntapAll { .. } => "UntapAll",
+        // CR 701.26a/b: preserve the four legacy variant labels so diagnostic
+        // and coverage tooling that keys on the name keeps reading the same set.
+        Effect::SetTapState { scope, state, .. } => match (scope, state) {
+            (EffectScope::Single, TapStateChange::Tap) => "Tap",
+            (EffectScope::Single, TapStateChange::Untap) => "Untap",
+            (EffectScope::All, TapStateChange::Tap) => "TapAll",
+            (EffectScope::All, TapStateChange::Untap) => "UntapAll",
+        },
         Effect::RemoveCounter { .. } => "RemoveCounter",
         Effect::Sacrifice { .. } => "Sacrifice",
         Effect::DiscardCard { .. } => "DiscardCard",
@@ -9792,10 +9839,14 @@ impl From<&Effect> for EffectKind {
             Effect::Token { .. } => EffectKind::Token,
             Effect::GainLife { .. } => EffectKind::GainLife,
             Effect::LoseLife { .. } => EffectKind::LoseLife,
-            Effect::Tap { .. } => EffectKind::Tap,
-            Effect::Untap { .. } => EffectKind::Untap,
-            Effect::TapAll { .. } => EffectKind::TapAll,
-            Effect::UntapAll { .. } => EffectKind::UntapAll,
+            // CR 701.26a/b: map the parameterized effect back to the four
+            // legacy `EffectKind` discriminants (EffectKind stays unchanged).
+            Effect::SetTapState { scope, state, .. } => match (scope, state) {
+                (EffectScope::Single, TapStateChange::Tap) => EffectKind::Tap,
+                (EffectScope::Single, TapStateChange::Untap) => EffectKind::Untap,
+                (EffectScope::All, TapStateChange::Tap) => EffectKind::TapAll,
+                (EffectScope::All, TapStateChange::Untap) => EffectKind::UntapAll,
+            },
             Effect::RemoveCounter { .. } => EffectKind::RemoveCounter,
             Effect::Sacrifice { .. } => EffectKind::Sacrifice,
             Effect::DiscardCard { .. } => EffectKind::DiscardCard,
@@ -12841,6 +12892,19 @@ pub struct ReplacementDefinition {
     /// counter-agnostic replacements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counter_match: Option<CounterMatch>,
+    /// CR 110.2a + CR 614.1c: Controller override applied to a self-ETB
+    /// (`event = Moved`, `valid_card = SelfRef`, `destination_zone = Battlefield`)
+    /// replacement, for permanents that "enter under the control of an opponent
+    /// of your choice" (Xantcha, Sleeper Agent; Captive Audience; Pendant of
+    /// Prosperity; Abby, Merciless Soldier). `Some(cref)` routes the entering
+    /// object to the player resolved from `cref` — set on the `ZoneChange`'s
+    /// `controller_override` *before* ETB triggers fire, so the permanent never
+    /// enters under its owner's control first. Mirrors the imperative
+    /// `Effect::ChangeZone.enters_under` slot (generalized for any `ControllerRef`
+    /// in #2817) on the self-replacement path. `None` = enters under owner's
+    /// control (the default for every existing replacement).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters_under: Option<ControllerRef>,
 }
 
 impl ReplacementDefinition {
@@ -12873,7 +12937,14 @@ impl ReplacementDefinition {
             additional_token_spec: None,
             ensure_token_specs: None,
             counter_match: None,
+            enters_under: None,
         }
+    }
+
+    /// CR 110.2a: Builder for the self-ETB controller override (see field docs).
+    pub fn enters_under(mut self, controller: ControllerRef) -> Self {
+        self.enters_under = Some(controller);
+        self
     }
 
     pub fn execute(mut self, ability: AbilityDefinition) -> Self {

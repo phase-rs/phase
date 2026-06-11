@@ -126,10 +126,15 @@ fn rod_exiles_both_players_spells_and_accumulates() {
         (p0_sorcery, "P0 sorcery"),
         (p1_instant, "P1 instant"),
     ] {
+        let obj = &runner.state().objects[&id];
         assert_eq!(
-            runner.state().objects[&id].zone,
+            obj.zone,
             Zone::Exile,
             "{label} must be exiled instead of going to the graveyard"
+        );
+        assert_eq!(
+            obj.exile_from_stack_linked_source, None,
+            "{label}'s stack-exile marker must be transient and cleared after the zone change"
         );
     }
 

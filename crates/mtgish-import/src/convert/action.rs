@@ -9,10 +9,10 @@
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, SharedQuality, StaticDefinition, TargetFilter, TriggerDefinition,
-    TypedFilter,
+    EffectScope, FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -669,13 +669,10 @@ fn rewrite_any_target_filter_in_effect(effect: &mut Effect, typed: &TargetFilter
         | Effect::Surveil { ref mut target, .. }
         | Effect::Suspect { ref mut target, .. }
         | Effect::SwitchPT { ref mut target, .. }
-        | Effect::Tap { ref mut target, .. }
-        | Effect::TapAll { ref mut target, .. }
+        | Effect::SetTapState { ref mut target, .. }
         | Effect::TargetOnly { ref mut target, .. }
         | Effect::Transform { ref mut target, .. }
         | Effect::UnattachAll { ref mut target, .. }
-        | Effect::Untap { ref mut target, .. }
-        | Effect::UntapAll { ref mut target, .. }
             if *target == TargetFilter::Any =>
         {
             *target = typed.clone();
@@ -2701,21 +2698,29 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             cant_regenerate: true,
         },
-        Action::TapPermanent(p) => Effect::Tap {
+        Action::TapPermanent(p) => Effect::SetTapState {
             target: convert_permanent(p)?,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
-        Action::UntapPermanent(p) => Effect::Untap {
+        Action::UntapPermanent(p) => Effect::SetTapState {
             target: convert_permanent(p)?,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         },
 
-        // CR 701.26: Mass tap — "Tap each <filter>" (Sleep, Cryptic Command-class).
-        // Mirrors `TapPermanent`; multi-match `TargetFilter` selects the set.
-        Action::TapEachPermanent(filter) => Effect::Tap {
+        // CR 701.26a: Mass tap — "Tap each <filter>" (Sleep, Cryptic Command-class).
+        // Preserves the legacy single-scope `Effect::Tap` with a multi-match filter.
+        Action::TapEachPermanent(filter) => Effect::SetTapState {
             target: convert_permanents(filter)?,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
-        // CR 701.26: Mass untap — "Untap each <filter>" (Wake the Dead, Awakening-class).
-        Action::UntapEachPermanent(filter) => Effect::Untap {
+        // CR 701.26b: Mass untap — "Untap each <filter>" (Wake the Dead, Awakening-class).
+        Action::UntapEachPermanent(filter) => Effect::SetTapState {
             target: convert_permanents(filter)?,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         },
         Action::DiscardACard => Effect::DiscardCard {
             count: 1,

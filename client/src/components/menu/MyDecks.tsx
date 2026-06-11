@@ -44,6 +44,7 @@ import {
 import { BASIC_LAND_NAMES } from "../../constants/game";
 import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
 import { SelectField } from "../ui/SelectField";
+import { MenuSelect } from "../ui/MenuSelect";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 const PRECON_PREFIX = "[Pre-built] ";
@@ -556,6 +557,16 @@ export function MyDecks({
   const [activeFilter, setActiveFilter] = useState<DeckFilter>(contextualFilter ?? "all");
   const selectedFormatForCompatibility = selectedFormat ?? (activeFilter === "all" ? null : activeFilter);
   const activeFilterOption = FORMAT_FILTERS.find((option) => option.key === activeFilter);
+  const formatMenuItems = useMemo(
+    () =>
+      FORMAT_FILTERS.map(({ key, label }) => ({
+        value: key,
+        label: key === "all" ? t("myDecks.filterAll") : label,
+      })),
+    [t],
+  );
+  const formatMenuLabel =
+    activeFilter === "all" ? t("myDecks.filterAll") : (activeFilterOption?.label ?? t("myDecks.filterAll"));
   const requiresCompatibilityFilter = activeFilter !== "all";
   const [activeSort, setActiveSort] = useState<DeckSort>(
     mode === "select" ? (selectedFormat ? "format" : "recent") : "alpha",
@@ -1126,32 +1137,27 @@ export function MyDecks({
           />
         </div>
 
-        {mode === "manage" && (<>
-        <div className="flex min-w-0 items-center gap-1 sm:w-[228px]">
-          <label htmlFor="my-decks-format-filter" className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+        {mode === "manage" && (
+        <div className="flex w-full min-w-0 flex-col gap-2 sm:contents">
+        <div className="flex min-w-0 w-full items-center gap-2 sm:w-[228px] sm:flex-none">
+          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
             {t("myDecks.formatLabel")}
-          </label>
-          <SelectField
-            id="my-decks-format-filter"
-            wrapperClassName="min-w-0 flex-1 sm:w-44"
-            chevronSize="sm"
-            iconWrapperClassName="text-slate-400"
-            value={activeFilter}
-            onChange={(e) => setActiveFilter(e.target.value as DeckFilter)}
-            className="min-h-[30px] w-full rounded bg-black/30 px-2 py-1 text-xs text-slate-300 outline-none ring-1 ring-white/10 focus:ring-white/20"
-          >
-            {FORMAT_FILTERS.map(({ key, label }) => (
-              <option key={key} value={key}>
-                {key === "all" ? t("myDecks.filterAll") : label}
-              </option>
-            ))}
-          </SelectField>
+          </span>
+          <MenuSelect
+            ariaLabel={t("myDecks.formatLabel")}
+            label={formatMenuLabel}
+            selectedValue={activeFilter}
+            items={formatMenuItems}
+            onSelect={(value) => setActiveFilter(value as DeckFilter)}
+            wrapperClassName="min-w-0 flex-1 sm:w-44 sm:flex-none"
+            className="min-h-[30px] rounded bg-black/30 px-2 py-1 text-xs text-slate-300 ring-1 ring-white/10 focus-visible:ring-white/20"
+          />
           {activeFilterOption?.aetherhubUrl && (
             <a
               href={activeFilterOption.aetherhubUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="rounded p-1 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-300"
+              className="shrink-0 rounded p-1 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-300"
               title={t("myDecks.browseAetherhub", { format: activeFilterOption.label })}
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
@@ -1163,12 +1169,12 @@ export function MyDecks({
         {contextualFilter && activeFilter === contextualFilter && (
           <button
             onClick={() => setActiveFilter("all")}
-            className="rounded border border-indigo-500/50 bg-indigo-500/10 px-2 py-1 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20"
+            className="hidden rounded border border-indigo-500/50 bg-indigo-500/10 px-2 py-1 text-xs font-medium text-indigo-200 hover:bg-indigo-500/20 sm:inline-flex"
           >
             {t("myDecks.showAllDecks")}
           </button>
         )}
-        <div className="flex items-center justify-end gap-1 sm:ml-auto">
+        <div className="flex w-full items-center justify-end gap-1 sm:ml-auto sm:w-auto">
           <SelectField
             chevronSize="sm"
             iconWrapperClassName="text-slate-400"
@@ -1199,7 +1205,8 @@ export function MyDecks({
             </svg>
           </button>
         </div>
-        </>)}
+        </div>
+        )}
       </div>
 
       {/* Format-filter banner: in select mode, when the caller pins a format
