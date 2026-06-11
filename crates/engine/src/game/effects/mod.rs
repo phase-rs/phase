@@ -8433,9 +8433,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Life {
+                cost: AbilityCost::PayLife {
                     amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -8503,9 +8504,10 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: 3 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -8562,9 +8564,10 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: 3 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -8637,9 +8640,10 @@ mod tests {
         // Sanity check: the same flag DOES gate a PayCost parent.
         let pay_cost_parent = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: 3 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -14928,18 +14932,17 @@ mod tests {
         .condition(AbilityCondition::effect_performed());
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::AbilityCost {
-                    cost: crate::types::ability::AbilityCost::Composite {
-                        costs: vec![
-                            crate::types::ability::AbilityCost::Mana {
-                                cost: ManaCost::generic(1),
-                            },
-                            crate::types::ability::AbilityCost::PayLife {
-                                amount: QuantityExpr::Fixed { value: 1 },
-                            },
-                        ],
-                    },
+                cost: crate::types::ability::AbilityCost::Composite {
+                    costs: vec![
+                        crate::types::ability::AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        crate::types::ability::AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -15017,9 +15020,10 @@ mod tests {
         .condition(AbilityCondition::effect_performed());
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: crate::types::ability::PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::generic(1),
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],

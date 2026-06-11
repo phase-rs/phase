@@ -5168,8 +5168,8 @@ pub mod tests {
         AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChosenAttribute,
         ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
         DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, FilterProp, KickerVariant,
-        MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
+        MultiTargetSpec, PlayerFilter, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
         SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
         TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
@@ -5767,18 +5767,17 @@ pub mod tests {
         let pay_then_draw = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PayCost {
-                cost: PaymentCost::AbilityCost {
-                    cost: AbilityCost::Composite {
-                        costs: vec![
-                            AbilityCost::Mana {
-                                cost: ManaCost::generic(1),
-                            },
-                            AbilityCost::PayLife {
-                                amount: QuantityExpr::Fixed { value: 1 },
-                            },
-                        ],
-                    },
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ],
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
         )
@@ -21446,7 +21445,7 @@ mod push_first_contract_tests {
     use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, Effect, PaymentCost,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
         QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
     };
     use crate::types::actions::GameAction;
@@ -21730,9 +21729,10 @@ mod push_first_contract_tests {
         // Parent: pay {E}{E}{E}. On success the reflexive `WhenYouDo` fires.
         let parent = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Fixed { value: 3 },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],

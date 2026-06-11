@@ -10,9 +10,9 @@ use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
     EffectScope, FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerDefinition, TypedFilter,
+    ModalSelectionConstraint, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+    QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -322,23 +322,29 @@ fn rewrite_bound_x_in_mana_production(
     }
 }
 
-fn rewrite_bound_x_in_payment_cost(cost: &mut PaymentCost, binding: &QuantityExpr) -> usize {
-    match cost {
-        PaymentCost::Life { amount }
-        | PaymentCost::Speed { amount }
-        | PaymentCost::Energy { amount } => rewrite_bound_x_in_quantity_expr(amount, binding),
-        PaymentCost::AbilityCost { cost } => rewrite_bound_x_in_ability_cost(cost, binding),
-        // CR 118.1: ScaledMana's `times` is a QuantityExpr that may carry a
-        // bound X — rewrite it like the other amount-bearing variants.
-        PaymentCost::ScaledMana { times, .. } => rewrite_bound_x_in_quantity_expr(times, binding),
-        PaymentCost::Mana { .. } => 0,
-    }
+/// CR 118.1: Rewrite a bound X inside an `Effect::PayCost`. The unified
+/// `AbilityCost` cost is rewritten via `rewrite_bound_x_in_ability_cost`; the
+/// resolution-only per-object `scale` (was `PaymentCost::ScaledMana::times`)
+/// carries a `QuantityExpr` that may also reference the bound X.
+fn rewrite_bound_x_in_payment_cost(
+    cost: &mut AbilityCost,
+    scale: &mut Option<QuantityExpr>,
+    binding: &QuantityExpr,
+) -> usize {
+    let cost_rewrites = rewrite_bound_x_in_ability_cost(cost, binding);
+    let scale_rewrites = scale
+        .as_mut()
+        .map_or(0, |times| rewrite_bound_x_in_quantity_expr(times, binding));
+    cost_rewrites + scale_rewrites
 }
 
 fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExpr) -> usize {
     match cost {
         AbilityCost::PayLife { amount }
         | AbilityCost::PaySpeed { amount }
+        // CR 107.14: `PayEnergy` carries its (possibly X-bound) amount as a
+        // `QuantityExpr` — rewrite it like the other amount-bearing variants.
+        | AbilityCost::PayEnergy { amount }
         | AbilityCost::Discard { count: amount, .. } => {
             rewrite_bound_x_in_quantity_expr(amount, binding)
         }
@@ -376,7 +382,6 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::PayEnergy { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Unattach
         | AbilityCost::Mill { .. }
@@ -536,7 +541,9 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
                 .sum();
             static_count + trigger_count
         }
-        Effect::PayCost { cost, .. } => rewrite_bound_x_in_payment_cost(cost, binding),
+        Effect::PayCost { cost, scale, .. } => {
+            rewrite_bound_x_in_payment_cost(cost, scale, binding)
+        }
         Effect::CastFromZone {
             alt_ability_cost: Some(_),
             ..
@@ -6750,13 +6757,11 @@ mod tests {
         };
         assert!(matches!(
             cost,
-            PaymentCost::AbilityCost {
-                cost: AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: None,
-                    selection: engine::types::ability::CardSelectionMode::Chosen,
-                    self_scope: engine::types::ability::DiscardSelfScope::FromHand,
-                },
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: engine::types::ability::CardSelectionMode::Chosen,
+                self_scope: engine::types::ability::DiscardSelfScope::FromHand,
             }
         ));
         let sub = ability.sub_ability.as_ref().expect("expected paid body");

@@ -1,10 +1,9 @@
 use crate::game::costs::{self, PaymentOutcome};
-use crate::game::life_costs::{can_pay_life_cost, pay_life_as_cost, PayLifeCostResult};
+use crate::game::life_costs::can_pay_life_cost;
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::speed::{effective_speed, set_speed};
 use crate::game::targeting::resolve_effect_player_ref;
 use crate::game::{casting, casting_costs};
-use crate::types::ability::{AbilityCost, Effect, PaymentCost, QuantityExpr, QuantityRef};
+use crate::types::ability::{AbilityCost, Effect, QuantityExpr, QuantityRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PayableResource, WaitingFor};
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -34,8 +33,8 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (cost, payer_filter) = match &ability.effect {
-        Effect::PayCost { cost, payer } => (cost, payer),
+    let (cost, scale, payer_filter) = match &ability.effect {
+        Effect::PayCost { cost, scale, payer } => (cost, scale, payer),
         _ => return Err(EffectError::MissingParam("PayCost".to_string())),
     };
     let Some(payer) = resolve_effect_player_ref(state, ability, payer_filter) else {
@@ -45,145 +44,101 @@ pub fn resolve(
     let mut payment_ability = ability.clone();
     payment_ability.controller = payer;
 
+    // CR 118.1 + CR 118.5: Per-object scaled mana cost (was
+    // `PaymentCost::ScaledMana`). `scale` is resolution-only metadata: the mana
+    // `cost` base (which may carry colored pips) is multiplied by `times`; when
+    // `times` resolves to 0 the scaled cost is `{0}` — paid trivially as a no-op
+    // SUCCESS (the empty selection IS the acknowledgment), never a payment
+    // failure. The concrete scaled `Mana` cost routes through the authority.
+    if let Some(times) = scale {
+        let AbilityCost::Mana { cost: base } = cost else {
+            return Err(EffectError::InvalidParam(
+                "PayCost.scale requires a Mana cost base".to_string(),
+            ));
+        };
+        let times = resolve_quantity_with_targets(state, times, &payment_ability).max(0);
+        let times = u32::try_from(times).unwrap_or(0);
+        let scaled = scale_mana_cost(base, times);
+        resolve_ability_cost_payment(
+            state,
+            &payment_ability,
+            payer,
+            &AbilityCost::Mana { cost: scaled },
+            events,
+        )?;
+        return Ok(());
+    }
+
     match cost {
-        PaymentCost::Mana { cost: mana_cost } => {
-            if payment_ability.chosen_x.is_none() && casting_costs::cost_has_x(mana_cost) {
-                let per_x = mana_x_shard_count(mana_cost);
-                let max = max_resolution_mana_x_value(state, payer, ability.source_id, mana_cost);
-                let max = trigger_event_amount(state).map_or(max, |amount| max.min(amount));
-                state.waiting_for = WaitingFor::PayAmountChoice {
-                    player: payer,
-                    resource: PayableResource::ManaGeneric { per_x },
-                    min: 0,
-                    max,
-                    accumulated: 0,
-                    source_id: ability.source_id,
-                    pending_mana_ability: None,
-                };
-                return Ok(());
-            }
-            if !casting::can_pay_effect_mana_cost_after_auto_tap(
-                state,
-                payer,
-                ability.source_id,
-                mana_cost,
-            ) {
-                state.cost_payment_failed_flag = true;
-                return Ok(());
-            }
-            if casting::pay_effect_mana_cost(state, payer, ability.source_id, mana_cost, events)
-                .is_err()
-            {
-                state.cost_payment_failed_flag = true;
-            }
+        // CR 107.3a + CR 601.2b: A resolution-time mana cost with an unannounced
+        // X (e.g. Well of Lost Dreams) prompts the payer for an amount before
+        // payment. This X-prompt stays adapter-side — the authority pays a
+        // concrete `Mana` cost only.
+        AbilityCost::Mana { cost: mana_cost }
+            if payment_ability.chosen_x.is_none() && casting_costs::cost_has_x(mana_cost) =>
+        {
+            let per_x = mana_x_shard_count(mana_cost);
+            let max = max_resolution_mana_x_value(state, payer, ability.source_id, mana_cost);
+            let max = trigger_event_amount(state).map_or(max, |amount| max.min(amount));
+            state.waiting_for = WaitingFor::PayAmountChoice {
+                player: payer,
+                resource: PayableResource::ManaGeneric { per_x },
+                min: 0,
+                max,
+                accumulated: 0,
+                source_id: ability.source_id,
+                pending_mana_ability: None,
+            };
         }
-        PaymentCost::Life { amount } => {
-            // CR 118.8 + CR 119.4 + CR 119.8: Paying life as an effect-embedded
-            // cost routes through the single-authority helper. Per CR 119.4 this
-            // IS a life-loss event, so the replacement pipeline fires and a
-            // CantLoseLife lock blocks the payment (cost unpayable). The amount
-            // is a `QuantityExpr` resolved here — dynamic refs like
-            // `Power { CostPaidObject }` resolve against the cost-paid /
-            // trigger-referenced object per CR 608.2k.
-            let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
-            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
-            match pay_life_as_cost(state, payer, amount, events) {
-                PayLifeCostResult::Paid { .. } => {}
-                PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
-                    state.cost_payment_failed_flag = true;
-                }
-            }
-        }
-        PaymentCost::Speed { amount } => {
-            let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
-            let amount = u8::try_from(amount.max(0)).unwrap_or(u8::MAX);
-            let current_speed = effective_speed(state, payer);
-            if amount <= current_speed {
-                set_speed(state, payer, Some(current_speed - amount), events);
-            } else {
-                state.cost_payment_failed_flag = true;
-            }
-        }
-        // CR 107.14: A player can pay {E} only if they have enough energy counters.
-        PaymentCost::Energy { amount } => {
-            // CR 107.1c + CR 107.14: "Pay any amount of {E}" — suspend the chain
-            // and surface a `PayAmountChoice` prompt. The sub-ability continuation
-            // machinery in `effects::mod` stashes the remainder of the chain;
-            // when the player submits the chosen amount (see
-            // `engine_resolution_choices::handle_resolution_choice`), the engine
-            // deducts energy, records the paid amount on `last_effect_count`
-            // (the fallback for `QuantityRef::EventContextAmount`), and drains
-            // the continuation so the subsequent "that much damage" effect
-            // reads the player's chosen value.
-            if is_pay_any_amount(amount) {
-                let max = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == payer)
-                    .map(|p| p.energy)
-                    .unwrap_or(0);
-                state.waiting_for = WaitingFor::PayAmountChoice {
-                    player: payer,
-                    resource: PayableResource::Energy,
-                    min: 0,
-                    max,
-                    accumulated: 0,
-                    source_id: ability.source_id,
-                    pending_mana_ability: None,
-                };
-                return Ok(());
-            }
-            let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
-            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
-            let can_pay = state
+        // CR 107.1c + CR 107.14: "Pay any amount of {E}" — suspend the chain and
+        // surface a `PayAmountChoice` prompt. The sub-ability continuation
+        // machinery in `effects::mod` stashes the remainder of the chain; when
+        // the player submits the chosen amount (see
+        // `engine_resolution_choices::handle_resolution_choice`), the engine
+        // deducts energy, records the paid amount on `last_effect_count` (the
+        // fallback for `QuantityRef::EventContextAmount`), and drains the
+        // continuation so the subsequent "that much damage" effect reads the
+        // player's chosen value. This X-prompt stays adapter-side; the authority
+        // pays a concrete `PayEnergy` amount only.
+        AbilityCost::PayEnergy { amount } if is_pay_any_amount(amount) => {
+            let max = state
                 .players
                 .iter()
                 .find(|p| p.id == payer)
-                .is_some_and(|p| p.energy >= amount);
-            if can_pay {
-                if let Some(p) = state.players.iter_mut().find(|p| p.id == payer) {
-                    p.energy -= amount;
-                    events.push(GameEvent::EnergyChanged {
-                        player: payer,
-                        delta: -(amount as i32),
-                    });
-                }
-                // CR 107.1c: Record the paid amount for downstream chain steps
-                // that reference `QuantityRef::EventContextAmount` (e.g.
-                // "that much damage"). Uses the same fallback slot populated
-                // for "pay any amount of X" so fixed and variable pays are
-                // observationally uniform downstream.
-                state.last_effect_count = Some(amount as i32);
-            } else {
-                state.cost_payment_failed_flag = true;
-            }
+                .map(|p| p.energy)
+                .unwrap_or(0);
+            state.waiting_for = WaitingFor::PayAmountChoice {
+                player: payer,
+                resource: PayableResource::Energy,
+                min: 0,
+                max,
+                accumulated: 0,
+                source_id: ability.source_id,
+                pending_mana_ability: None,
+            };
         }
-        PaymentCost::AbilityCost { cost } => {
+        // CR 107.1c + CR 107.14: A fixed-amount energy payment routes through the
+        // authority, then stamps `last_effect_count` so downstream chain steps
+        // that reference `QuantityRef::EventContextAmount` (e.g. "deals that much
+        // damage") read the paid value. The stamping is resolution-scope adapter
+        // behavior the authority's `PayEnergy` arm does not carry.
+        AbilityCost::PayEnergy { amount } => {
+            let resolved = u32::try_from(
+                resolve_quantity_with_targets(state, amount, &payment_ability).max(0),
+            )
+            .unwrap_or(0);
             resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+            if !state.cost_payment_failed_flag {
+                state.last_effect_count = Some(resolved as i32);
+            }
         }
-        // CR 118.1 + CR 118.5: Per-object scaled mana cost. The `base` cost
-        // (which may carry colored pips) is multiplied by `times`; when
-        // `times` resolves to 0 the scaled cost is `{0}` — paid trivially as a
-        // no-op SUCCESS (the empty selection IS the acknowledgment), never a
-        // payment failure.
-        PaymentCost::ScaledMana { base, times } => {
-            let times = resolve_quantity_with_targets(state, times, &payment_ability).max(0);
-            let times = u32::try_from(times).unwrap_or(0);
-            let scaled = scale_mana_cost(base, times);
-            if !casting::can_pay_effect_mana_cost_after_auto_tap(
-                state,
-                payer,
-                ability.source_id,
-                &scaled,
-            ) {
-                state.cost_payment_failed_flag = true;
-                return Ok(());
-            }
-            if casting::pay_effect_mana_cost(state, payer, ability.source_id, &scaled, events)
-                .is_err()
-            {
-                state.cost_payment_failed_flag = true;
-            }
+        // All other resolution-time cost shapes (Mana without X, PayLife,
+        // PaySpeed, Composite, Discard, …) route through the single payment
+        // authority. CR 119.4: paying life IS losing life (the replacement
+        // pipeline + CantLoseLife lock apply inside the authority's
+        // `pay_life_as_cost`).
+        _ => {
+            resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
         }
     }
     Ok(())
@@ -481,7 +436,8 @@ mod tests {
             generic: 2,
         };
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Mana { cost },
+            cost: AbilityCost::Mana { cost },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -499,7 +455,8 @@ mod tests {
             generic: 2,
         };
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Mana { cost },
+            cost: AbilityCost::Mana { cost },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -521,9 +478,10 @@ mod tests {
             expiry: None,
         });
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Mana {
+            cost: AbilityCost::Mana {
                 cost: ManaCost::generic(1),
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -546,9 +504,10 @@ mod tests {
         let unrestricted =
             create_colorless_source(&mut state, CardId(11), "Unrestricted Source", Vec::new());
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Mana {
+            cost: AbilityCost::Mana {
                 cost: ManaCost::generic(1),
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -571,12 +530,13 @@ mod tests {
             vec![ManaSpendRestriction::ActivateOnly],
         );
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Mana {
+            cost: AbilityCost::Mana {
                 cost: ManaCost::Cost {
                     shards: vec![ManaCostShard::X],
                     generic: 0,
                 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -595,9 +555,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].life = 20;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Life {
+            cost: AbilityCost::PayLife {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -617,9 +578,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].life = 2;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Life {
+            cost: AbilityCost::PayLife {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -639,11 +601,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].life = 20;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: 4 },
-                },
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 4 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -666,11 +627,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].life = 3;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: 4 },
-                },
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 4 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -693,21 +653,20 @@ mod tests {
             expiry: None,
         });
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::Composite {
-                    costs: vec![
-                        AbilityCost::Mana {
-                            cost: ManaCost::Cost {
-                                shards: vec![],
-                                generic: 1,
-                            },
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic: 1,
                         },
-                        AbilityCost::PayLife {
-                            amount: QuantityExpr::Fixed { value: 3 },
-                        },
-                    ],
-                },
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                    },
+                ],
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -731,11 +690,10 @@ mod tests {
             expiry: None,
         });
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::Mana {
-                    cost: ManaCost::generic(1),
-                },
+            cost: AbilityCost::Mana {
+                cost: ManaCost::generic(1),
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -761,11 +719,10 @@ mod tests {
             });
         }
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::ManaDynamic {
-                    quantity: QuantityExpr::Fixed { value: 2 },
-                },
+            cost: AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Fixed { value: 2 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -790,21 +747,20 @@ mod tests {
             expiry: None,
         });
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::Composite {
-                    costs: vec![
-                        AbilityCost::Mana {
-                            cost: ManaCost::Cost {
-                                shards: vec![],
-                                generic: 1,
-                            },
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic: 1,
                         },
-                        AbilityCost::PayLife {
-                            amount: QuantityExpr::Fixed { value: 3 },
-                        },
-                    ],
-                },
+                    },
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                    },
+                ],
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -825,18 +781,17 @@ mod tests {
         state.players[0].life = 5;
         state.players[0].energy = 3;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::Composite {
-                    costs: vec![
-                        AbilityCost::PayLife {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                        },
-                        AbilityCost::PayEnergy {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                        },
-                    ],
-                },
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                    AbilityCost::PayEnergy {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -855,18 +810,17 @@ mod tests {
         state.players[0].life = 5;
         state.players[0].energy = 0;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::Composite {
-                    costs: vec![
-                        AbilityCost::PayLife {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                        },
-                        AbilityCost::PayEnergy {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                        },
-                    ],
-                },
+            cost: AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                    AbilityCost::PayEnergy {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -886,11 +840,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].energy = 5;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::PayEnergy {
-                    amount: QuantityExpr::Fixed { value: 5 },
-                },
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 5 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -904,11 +857,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].energy = 4;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::AbilityCost {
-                cost: AbilityCost::PayEnergy {
-                    amount: QuantityExpr::Fixed { value: 5 },
-                },
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 5 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -923,9 +875,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].energy = 3;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Energy {
+            cost: AbilityCost::PayEnergy {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 2 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -945,9 +898,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].energy = 1;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Energy {
+            cost: AbilityCost::PayEnergy {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 2 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -968,14 +922,13 @@ mod tests {
         let second = create_object(&mut state, CardId(11), PlayerId(0), "B".into(), Zone::Hand);
         let ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::AbilityCost {
-                    cost: AbilityCost::Discard {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        filter: None,
-                        selection: crate::types::ability::CardSelectionMode::Chosen,
-                        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                    },
+                cost: AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -1021,14 +974,13 @@ mod tests {
         let second = create_object(&mut state, CardId(11), PlayerId(0), "B".into(), Zone::Hand);
         let ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::AbilityCost {
-                    cost: AbilityCost::Discard {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        filter: None,
-                        selection: crate::types::ability::CardSelectionMode::Random,
-                        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                    },
+                cost: AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Random,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -1078,14 +1030,13 @@ mod tests {
         );
         let mut pay_ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::AbilityCost {
-                    cost: AbilityCost::Discard {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        filter: None,
-                        selection: crate::types::ability::CardSelectionMode::Chosen,
-                        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-                    },
+                cost: AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -1128,9 +1079,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].energy = 5;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Energy {
+            cost: AbilityCost::PayEnergy {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -1146,13 +1098,14 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].energy = 3;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Energy {
+            cost: AbilityCost::PayEnergy {
                 amount: crate::types::ability::QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::Variable {
                         name: "X".to_string(),
                     },
                 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -1231,13 +1184,14 @@ mod tests {
         );
         let mut pay_ability = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Energy {
+                cost: AbilityCost::PayEnergy {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::Variable {
                             name: "X".to_string(),
                         },
                     },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![TargetRef::Object(target_id)],
@@ -1339,12 +1293,13 @@ mod tests {
         );
         let mut pay = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost {
                         shards: vec![ManaCostShard::X],
                         generic: 0,
                     },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -1464,12 +1419,13 @@ mod tests {
         // IfYouDo Draw attached as `sub_ability`.
         let mut pay = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost {
                         shards: vec![ManaCostShard::X],
                         generic: 0,
                     },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -1620,12 +1576,13 @@ mod tests {
 
         let mut pay = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost {
                         shards: vec![ManaCostShard::X],
                         generic: 0,
                     },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -1726,12 +1683,13 @@ mod tests {
 
         let mut pay = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost {
                         shards: vec![ManaCostShard::X],
                         generic: 0,
                     },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -1834,12 +1792,13 @@ mod tests {
 
         let mut pay = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost {
                         shards: vec![ManaCostShard::X],
                         generic: 0,
                     },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -1927,12 +1886,13 @@ mod tests {
         );
         let mut pay = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost {
                         shards: vec![ManaCostShard::X],
                         generic: 0,
                     },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],
@@ -2000,13 +1960,14 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.players[0].energy = 0;
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Energy {
+            cost: AbilityCost::PayEnergy {
                 amount: crate::types::ability::QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::Variable {
                         name: "X".to_string(),
                     },
                 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -2042,9 +2003,10 @@ mod tests {
         );
 
         let ability = make_ability(Effect::PayCost {
-            cost: PaymentCost::Life {
+            cost: AbilityCost::PayLife {
                 amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
             },
+            scale: None,
             payer: TargetFilter::Controller,
         });
         let mut events = Vec::new();
@@ -2095,12 +2057,13 @@ mod tests {
         );
         let mut pay = ResolvedAbility::new(
             Effect::PayCost {
-                cost: PaymentCost::Mana {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost {
                         shards: vec![ManaCostShard::X],
                         generic: 0,
                     },
                 },
+                scale: None,
                 payer: TargetFilter::Controller,
             },
             vec![],

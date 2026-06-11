@@ -13902,7 +13902,7 @@ mod tests {
     #[test]
     fn parse_ezio_damage_trigger_full_structure() {
         use crate::types::ability::{
-            AbilityCondition, Effect, PaymentCost, PlayerScope, QuantityExpr, QuantityRef,
+            AbilityCondition, AbilityCost, Effect, PlayerScope, QuantityExpr, QuantityRef,
         };
         use crate::types::mana::{ManaCost, ManaCostShard};
 
@@ -13955,9 +13955,9 @@ mod tests {
 
         // (d) Cost effect — PayCost { Mana { WUBRG }, payer: Controller }.
         match &*execute.effect {
-            Effect::PayCost { cost, payer } => {
+            Effect::PayCost { cost, payer, .. } => {
                 match cost {
-                    PaymentCost::Mana {
+                    AbilityCost::Mana {
                         cost: ManaCost::Cost { shards, generic },
                     } => {
                         assert_eq!(*generic, 0, "WUBRG cost has no generic component");
@@ -14037,7 +14037,7 @@ mod tests {
     #[test]
     fn parse_ezio_damage_trigger_verbatim_oracle_text() {
         use crate::types::ability::{
-            AbilityCondition, Effect, PaymentCost, PlayerScope, QuantityExpr, QuantityRef,
+            AbilityCondition, AbilityCost, Effect, PlayerScope, QuantityExpr, QuantityRef,
         };
         use crate::types::mana::{ManaCost, ManaCostShard};
 
@@ -14077,9 +14077,9 @@ mod tests {
         // (c) Cost effect — PayCost { Mana { WUBRG }, payer: Controller }.
         // The cost shape must be identical to the normalized form.
         match &*execute.effect {
-            Effect::PayCost { cost, payer } => {
+            Effect::PayCost { cost, payer, .. } => {
                 match cost {
-                    PaymentCost::Mana {
+                    AbilityCost::Mana {
                         cost: ManaCost::Cost { shards, generic },
                     } => {
                         assert_eq!(*generic, 0, "WUBRG cost has no generic component");
@@ -22394,7 +22394,7 @@ mod tests {
     /// and made Tymna draw all 12 of the player's permanents instead of 1).
     #[test]
     fn trigger_tymna_the_weaver_pays_and_draws_bound_x() {
-        use crate::types::ability::{Effect, PaymentCost, PlayerFilter, QuantityExpr, QuantityRef};
+        use crate::types::ability::{AbilityCost, Effect, PlayerFilter, QuantityExpr, QuantityRef};
 
         let def = parse_trigger_line(
             "At the beginning of each of your postcombat main phases, you may pay X life, \
@@ -22421,7 +22421,7 @@ mod tests {
         // CR 118.8 + CR 107.3i: pay-life cost amount carries the bound X.
         match execute.effect.as_ref() {
             Effect::PayCost {
-                cost: PaymentCost::Life { amount },
+                cost: AbilityCost::PayLife { amount },
                 ..
             } => assert_eq!(*amount, bound_qty, "pay-life cost amount must be bound X"),
             other => panic!("expected PayCost::Life, got {:?}", other),
@@ -25013,7 +25013,8 @@ mod tests {
         match &*execute.effect {
             Effect::PayCost {
                 payer,
-                cost: crate::types::ability::PaymentCost::Mana { cost },
+                cost: AbilityCost::Mana { cost },
+                ..
             } => {
                 assert_eq!(payer, &TargetFilter::TriggeringPlayer);
                 assert_eq!(cost, &crate::types::mana::ManaCost::generic(2));
@@ -25338,7 +25339,8 @@ mod tests {
         match &*execute.effect {
             Effect::PayCost {
                 payer,
-                cost: crate::types::ability::PaymentCost::Mana { cost },
+                cost: AbilityCost::Mana { cost },
+                ..
             } => {
                 assert_eq!(payer, &TargetFilter::Controller);
                 assert_eq!(cost, &crate::types::mana::ManaCost::generic(2));
@@ -25368,7 +25370,8 @@ mod tests {
         match &*execute.effect {
             Effect::PayCost {
                 payer,
-                cost: crate::types::ability::PaymentCost::Mana { cost },
+                cost: AbilityCost::Mana { cost },
+                ..
             } => {
                 assert_eq!(payer, &TargetFilter::Controller);
                 assert_eq!(cost, &crate::types::mana::ManaCost::generic(1));
