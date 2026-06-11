@@ -24,9 +24,9 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    Comparator, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    Comparator, ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition,
+    Duration, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
     TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
@@ -4783,7 +4783,41 @@ pub(super) fn apply_where_x_effect_expression(
                 if let Some(condition) = static_def.condition.as_mut() {
                     apply_where_x_static_condition(condition, where_x_expression);
                 }
+                // CR 107.3i + CR 611.2c: A continuous "gets +X/+X … where X is
+                // <expression>" grant lowers to dynamic P/T modifications whose
+                // `value` defaults to `CostXPaid` (X paid as the spell/ability was
+                // cast) when no binding clause has been applied yet. Substitute the
+                // surrounding where-X binding into each dynamic modification so a
+                // triggered/targeted pump (Xenagos, God of Revels: "where X is that
+                // creature's power") tracks the bound quantity instead of the
+                // cost-X fallback. Mirrors the `Pump`/`SearchLibrary` arms above.
+                for modification in static_def.modifications.iter_mut() {
+                    apply_where_x_continuous_modification(modification, where_x_expression);
+                }
             }
+        }
+        _ => {}
+    }
+}
+
+/// CR 107.3i + CR 611.2c: Substitute a "where X is <expression>" binding into a
+/// continuous modification's dynamic `QuantityExpr` value. Only the value-carrying
+/// dynamic P/T and dynamic-keyword variants hold an X-bearing `QuantityExpr`;
+/// every other `ContinuousModification` variant is a fixed/typed modification
+/// with no X to rebind (the `_` no-op arm).
+fn apply_where_x_continuous_modification(
+    modification: &mut ContinuousModification,
+    where_x_expression: Option<&str>,
+) {
+    match modification {
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. } => {
+            *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
         }
         _ => {}
     }
