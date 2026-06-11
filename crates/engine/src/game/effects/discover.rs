@@ -39,11 +39,17 @@ pub fn resolve(
         // CR 701.57a + CR 614.6: exile the card via the zone-change pipeline so a
         // board-wide `Moved` exile redirect is consulted (none target Exile today
         // — behavior-preserving, future-proof). No counters and no Exile-targeting
-        // Moved redirect means this cannot pause.
-        let _ = zone_pipeline::move_object(
+        // Moved redirect means this cannot pause. Assert `Done` rather than
+        // discarding the result so a future reachable pause trips tests instead of
+        // silently executing past a parked prompt.
+        let result = zone_pipeline::move_object(
             state,
             ZoneMoveRequest::effect(card_id, Zone::Exile, ability.source_id),
             events,
+        );
+        debug_assert!(
+            matches!(result, zone_pipeline::ZoneMoveResult::Done),
+            "discover exile-until-hit must not pause (no Exile-targeting redirect today)"
         );
 
         // Check if this is a nonland card with MV ≤ limit

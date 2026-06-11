@@ -93,11 +93,17 @@ pub fn resolve(
     // Route through the zone-change pipeline so a board-wide `Moved` exile
     // redirect is consulted (none target Exile today — behavior-preserving,
     // future-proof). Attributed to the card itself; no counters and no
-    // Exile-targeting Moved redirect means this cannot pause.
-    let _ = zone_pipeline::move_object(
+    // Exile-targeting Moved redirect means this cannot pause. Assert `Done` rather
+    // than discarding the result so a future reachable pause trips tests instead of
+    // silently executing past a parked prompt.
+    let result = zone_pipeline::move_object(
         state,
         ZoneMoveRequest::effect(card, Zone::Exile, card),
         events,
+    );
+    debug_assert!(
+        matches!(result, zone_pipeline::ZoneMoveResult::Done),
+        "haunt self-exile must not pause (no Exile-targeting redirect today)"
     );
     add_haunt_link(state, card, creature);
     Ok(())

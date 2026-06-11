@@ -94,6 +94,8 @@ fn deliver_destruction_zone_change(
         source_id: source,
         exile_links: ExileLinkSpec::default(),
         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+        // Destroy delivers to the graveyard — never a library placement.
+        library_placement: None,
     };
     !matches!(
         zone_pipeline::deliver(state, approved, ctx, events),

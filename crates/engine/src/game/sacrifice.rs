@@ -184,6 +184,8 @@ fn deliver_sacrifice_zone_change(
         source_id: None,
         exile_links: ExileLinkSpec::default(),
         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+        // Sacrifice delivers to the graveyard — never a library placement.
+        library_placement: None,
     };
     match zone_pipeline::deliver(state, approved, ctx, events) {
         ZoneDeliveryResult::Done => SacrificeApply::Complete,

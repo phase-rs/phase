@@ -436,6 +436,9 @@ fn pay_top_library_exile_cost(
                 source_id,
                 exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                 drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                // Cost-payment exile/sacrifice deliveries are never library
+                // placements.
+                library_placement: None,
             },
             events,
         ) {

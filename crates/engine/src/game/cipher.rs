@@ -107,11 +107,17 @@ pub fn finish_encode(
     // behavior-preserving today, future-proof per the single-entry principle).
     // The card moves itself, attributed to its own object id. Exile/hand
     // destinations carry no enters-with counters and no Exile-targeting Moved
-    // redirect exists, so this cannot pause — discard the always-`Done` result.
-    let _ = zone_pipeline::move_object(
+    // redirect exists, so this cannot pause. Assert `Done` rather than discarding
+    // the result so that a future reachable pause (a Moved redirect into a pausing
+    // zone) trips tests instead of silently executing past a parked prompt.
+    let result = zone_pipeline::move_object(
         state,
         ZoneMoveRequest::effect(card_id, Zone::Exile, card_id),
         events,
+    );
+    debug_assert!(
+        matches!(result, ZoneMoveResult::Done),
+        "cipher self-exile must not pause (no Exile-targeting redirect today)"
     );
     add_encode_link(state, card_id, creature_id);
 }

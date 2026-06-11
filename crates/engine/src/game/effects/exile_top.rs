@@ -59,18 +59,28 @@ pub fn resolve(
     for object_id in top_cards {
         // CR 614.6: exile the top card via the zone-change pipeline so a
         // board-wide `Moved` exile redirect is consulted (none target Exile today
-        // — behavior-preserving, future-proof). Exile-link tracking and the
-        // face-down mark stay in this caller's per-card epilogue below
-        // (`push_tracked_by_source` dedupes), so the move stays behavior-identical.
-        // No counters / no Exile-targeting Moved redirect means it cannot pause.
-        let _ = zone_pipeline::move_object(
-            state,
-            ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id),
-            events,
-        );
+        // — behavior-preserving, future-proof). Exile-link tracking rides the
+        // pipeline's `.track_exiled_by_source()` builder so the link is recorded by
+        // the delivery tail ONLY if the card actually lands in exile — a `Moved`
+        // redirect that sends it elsewhere correctly records no link (redirect-
+        // safe), and the tail's `push_with_kind` keeps the per-turn rolling list in
+        // lockstep exactly as the former caller-side `push_tracked_by_source` did.
+        // No counters / no Exile-targeting Moved redirect means it cannot pause;
+        // assert `Done` rather than discarding the result so a future reachable
+        // pause trips tests instead of silently executing past a parked prompt.
+        let mut request = ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id);
         if track_exiled_by_source {
-            crate::game::exile_links::push_tracked_by_source(state, object_id, ability.source_id);
+            request = request.track_exiled_by_source();
         }
+        let result = zone_pipeline::move_object(state, request, events);
+        debug_assert!(
+            matches!(result, zone_pipeline::ZoneMoveResult::Done),
+            "ExileTop must not pause (no Exile-targeting redirect today)"
+        );
+        // CR 406.3: The face-down mark stays in this caller's per-card epilogue —
+        // there is no pipeline knob for it (CR 708 face-down profiles are
+        // battlefield-only), so it is set directly after the move below.
+        //
         // CR 406.3: A card exiled face down can't be examined by any player
         // except when instructions allow it. Set the moved object's
         // face-down state immediately after the zone change (mirrors the
