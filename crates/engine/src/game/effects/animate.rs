@@ -136,6 +136,7 @@ fn resolve_animate_targets(ability: &ResolvedAbility) -> Vec<crate::types::ident
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -264,7 +265,6 @@ mod tests {
     /// tick (e.g. "becomes an X/X creature" where X = CostXPaid).
     #[test]
     fn animate_dynamic_pt_emits_set_power_dynamic() {
-        use crate::types::ability::{QuantityExpr, QuantityRef};
         let mut state = GameState::new_two_player(42);
         let obj_id = create_object(
             &mut state,

@@ -2020,7 +2020,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             ..
         } => {
-            use crate::types::ability::PtValue;
             let fmt_pt = |v: &PtValue| match v {
                 PtValue::Fixed(n) => n.to_string(),
                 PtValue::Variable(s) => s.clone(),
