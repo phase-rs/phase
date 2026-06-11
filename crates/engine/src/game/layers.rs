@@ -10186,6 +10186,140 @@ mod tests {
     }
 
     #[test]
+    fn granted_undying_with_complex_filter_installs_trigger() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Human".to_string(), "Bear".to_string()];
+
+        // Create a non-Human creature (Bear - not Human)
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let bear_obj = state.objects.get_mut(&bear).unwrap();
+        bear_obj.card_types.subtypes.push("Bear".to_string());
+        bear_obj.base_card_types.subtypes = bear_obj.card_types.subtypes.clone();
+
+        // Create Mikaeus-like source with complex filter: "Other non-Human creatures you control"
+        let mikaeus = make_creature(&mut state, "Mikaeus", 5, 5, PlayerId(0));
+        let mikaeus_obj = state.objects.get_mut(&mikaeus).unwrap();
+        mikaeus_obj.card_types.subtypes.push("Human".to_string());
+        mikaeus_obj.base_card_types.subtypes = mikaeus_obj.card_types.subtypes.clone();
+
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        "Human".to_string(),
+                    ))))
+                    .properties(vec![FilterProp::Another]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Undying,
+                },
+            ]);
+        mikaeus_obj.static_definitions.push(def);
+
+        evaluate_layers(&mut state);
+
+        // Verify Undying is granted to the non-Human creature
+        let bear = state.objects.get(&bear).unwrap();
+        assert!(
+            bear.keywords.contains(&Keyword::Undying),
+            "Bear should have Undying"
+        );
+        assert_eq!(bear.power, Some(3), "Bear should have +1/+1 from Mikaeus");
+        assert_eq!(
+            bear.toughness,
+            Some(3),
+            "Bear should have +1/+1 from Mikaeus"
+        );
+
+        // Verify the Undying trigger is installed
+        assert_eq!(
+            bear.trigger_definitions.len(),
+            1,
+            "Bear should have Undying trigger"
+        );
+        let trigger = bear.trigger_definitions.first().unwrap();
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+    }
+
+    #[test]
+    fn granted_undying_with_complex_filter_fires_on_death() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Human".to_string(), "Bear".to_string()];
+
+        // Create a non-Human creature (Bear - not Human)
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        {
+            let bear_obj = state.objects.get_mut(&bear).unwrap();
+            bear_obj.card_types.subtypes.push("Bear".to_string());
+            bear_obj.base_card_types.subtypes = bear_obj.card_types.subtypes.clone();
+        }
+
+        // Create Mikaeus-like source with complex filter: "Other non-Human creatures you control"
+        let mikaeus = make_creature(&mut state, "Mikaeus", 5, 5, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        "Human".to_string(),
+                    ))))
+                    .properties(vec![FilterProp::Another]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Undying,
+                },
+            ]);
+        {
+            let mikaeus_obj = state.objects.get_mut(&mikaeus).unwrap();
+            mikaeus_obj.card_types.subtypes.push("Human".to_string());
+            mikaeus_obj.base_card_types.subtypes = mikaeus_obj.card_types.subtypes.clone();
+            mikaeus_obj.static_definitions.push(def);
+        }
+
+        evaluate_layers(&mut state);
+
+        // Verify Undying is granted and trigger is installed
+        assert!(
+            state
+                .objects
+                .get(&bear)
+                .unwrap()
+                .keywords
+                .contains(&Keyword::Undying),
+            "Bear should have Undying"
+        );
+        assert_eq!(
+            state.objects.get(&bear).unwrap().trigger_definitions.len(),
+            1,
+            "Bear should have Undying trigger"
+        );
+
+        // Kill the bear by dealing lethal damage
+        let mut events = Vec::new();
+        state.objects.get_mut(&bear).unwrap().damage_marked = 3;
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+
+        // Process triggers from the death event
+        crate::game::triggers::process_triggers(&mut state, &events);
+
+        // Check if Undying trigger fired - it should be on the stack
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "Undying trigger should be on stack or pending"
+        );
+    }
+
+    #[test]
     fn add_keyword_annihilator_installs_parameterized_attack_trigger() {
         let mut state = setup();
         let attacker = make_creature(&mut state, "Battle-Mace Bearer", 2, 2, PlayerId(0));

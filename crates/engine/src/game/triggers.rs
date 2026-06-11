@@ -1342,11 +1342,71 @@ fn collect_pending_triggers(
             {
                 let matched_triggers = {
                     let obj = &state.objects[moved_id];
+
+                    // CR 603.10a + runtime-granted keyword triggers: Synthesize triggers
+                    // for keywords that were granted via continuous effects on the battlefield
+                    // but are no longer present in `obj.trigger_definitions` after the zone
+                    // change. The LKI snapshot in the ZoneChangeRecord preserves the keywords
+                    // the object had when it left the battlefield.
+                    let lki_keywords = if let GameEvent::ZoneChanged { record, .. } = event {
+                        record.keywords.clone()
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Synthesize triggers for LKI keywords that aren't in the current
+                    // trigger_definitions (runtime-granted triggers that were cleared
+                    // during the zone change). This fixes Undying/Persist granted by
+                    // static abilities like Mikaeus (issue #2944).
+                    let base_keyword_kinds: Vec<_> =
+                        obj.base_keywords.iter().map(|k| k.kind()).collect();
+                    let granted_lki_triggers: Vec<(
+                        crate::types::keywords::KeywordKind,
+                        TriggerDefinition,
+                    )> = lki_keywords
+                        .iter()
+                        .filter(|kw| !base_keyword_kinds.contains(&kw.kind()))
+                        .filter(|kw| {
+                            !obj.trigger_definitions.iter_all().any(|t| {
+                                // Check if this keyword's trigger is already present
+                                crate::database::synthesis::KeywordTriggerInstaller::triggers_for(
+                                    kw,
+                                )
+                                .iter()
+                                .any(|synth| {
+                                    // Simple structural check - same mode, origin, destination
+                                    synth.mode == t.mode
+                                        && synth.origin == t.origin
+                                        && synth.destination == t.destination
+                                })
+                            })
+                        })
+                        .flat_map(|kw| {
+                            let kind = kw.kind();
+                            crate::database::synthesis::KeywordTriggerInstaller::triggers_for(kw)
+                                .into_iter()
+                                .map(move |trig| (kind, trig))
+                        })
+                        .collect();
+
+                    // Temporarily add the synthesized triggers to the object for the scan
+                    // This is a bit of a hack but avoids duplicating the entire matching logic
+                    let _original_trigger_count = obj.trigger_definitions.len();
+                    let mut temp_triggers = obj.trigger_definitions.clone();
+                    for (_, trig) in granted_lki_triggers.iter() {
+                        temp_triggers.push(trig.clone());
+                    }
+
+                    // Create a temporary object with the synthesized triggers
+                    let mut temp_obj = obj.clone();
+                    temp_obj.trigger_definitions = temp_triggers;
+
+                    // Use the standard matching logic with the temporary object
                     collect_matching_triggers(
                         state,
                         event,
                         events,
-                        obj,
+                        &temp_obj,
                         obj.entered_battlefield_turn.unwrap_or(0),
                         Some(Zone::Battlefield),
                         &mut batched_this_pass,
