@@ -606,6 +606,42 @@ mod tests {
         assert_eq!(state.players[1].life, 17);
     }
 
+    /// CR 115.1 + CR 119.3: Astarion, the Decadent (Feed mode) — "Target
+    /// opponent loses life equal to the amount of life they lost this turn."
+    /// The third-person "they" anaphor is the effect's player target, so the
+    /// amount resolves through `PlayerScope::Target` (the target's *own*
+    /// `life_lost_this_turn`), NOT the controller's. The controller's count is
+    /// seeded high as a trap: a `Controller`-scoped resolution would drain the
+    /// target by 99 instead of 3.
+    #[test]
+    fn lose_life_amount_target_relative_life_lost_this_turn() {
+        use crate::types::ability::PlayerScope;
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life_lost_this_turn = 99; // controller — must be ignored
+        state.players[1].life_lost_this_turn = 3; // target opponent
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Target,
+                    },
+                },
+                target: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        // Target opponent (20 starting) loses 3 — their own life lost this turn.
+        assert_eq!(state.players[1].life, 17);
+        // Controller is untouched (it is the source, not a target/recipient).
+        assert_eq!(state.players[0].life, 20);
+    }
+
     #[test]
     fn lose_life_parent_target_controller_uses_attack_event_source() {
         let mut state = GameState::new_two_player(42);

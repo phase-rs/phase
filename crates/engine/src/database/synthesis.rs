@@ -17,9 +17,10 @@ use crate::types::ability::{
     KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
     ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
-    StaticCondition, StaticDefinition, TapStateChange, TargetChoiceTiming, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
+    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -1368,8 +1369,8 @@ pub fn synthesize_bargain(face: &mut CardFace) {
     }
 
     face.additional_cost = Some(AdditionalCost::Optional {
-        cost: AbilityCost::Sacrifice {
-            target: TargetFilter::Or {
+        cost: AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Or {
                 filters: vec![
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
@@ -1378,8 +1379,8 @@ pub fn synthesize_bargain(face: &mut CardFace) {
                     ),
                 ],
             },
-            count: 1,
-        },
+            1,
+        )),
         repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     });
 }
@@ -1895,10 +1896,7 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
             let composite_cost = AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Mana { cost: cost.clone() },
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
-                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                 ],
             };
             // CR 702.71a: "a creature card with the same mana value as this
@@ -2224,10 +2222,7 @@ pub fn synthesize_casualty(face: &mut CardFace) {
             },
         ]));
         face.additional_cost = Some(AdditionalCost::Optional {
-            cost: AbilityCost::Sacrifice {
-                target: sacrifice_filter,
-                count: 1,
-            },
+            cost: AbilityCost::Sacrifice(SacrificeCost::count(sacrifice_filter, 1)),
             repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
         });
     }
@@ -9867,10 +9862,7 @@ mod buyback_synthesis_tests {
     /// through the full AbilityCost pipeline as an optional additional cost.
     #[test]
     fn synthesize_buyback_non_mana_preserves_ability_cost() {
-        let sac_cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Any,
-            count: 1,
-        };
+        let sac_cost = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
         let mut face = CardFace {
             keywords: vec![Keyword::Buyback(BuybackCost::NonMana(sac_cost.clone()))],
             ..CardFace::default()
@@ -10010,12 +10002,18 @@ mod bargain_synthesis_tests {
 
         match face.additional_cost.expect("additional_cost set") {
             AdditionalCost::Optional {
-                cost: AbilityCost::Sacrifice { target, count },
+                cost: AbilityCost::Sacrifice(cost),
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             } => {
-                assert_eq!(count, 1);
-                let TargetFilter::Or { filters } = target else {
-                    panic!("expected artifact/enchantment/token disjunction, got {target:?}");
+                assert_eq!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::count(1)
+                );
+                let TargetFilter::Or { filters } = cost.target else {
+                    panic!(
+                        "expected artifact/enchantment/token disjunction, got {0:?}",
+                        cost.target
+                    );
                 };
                 assert!(
                     filters.contains(&TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)))
@@ -10233,13 +10231,15 @@ mod transfigure_synthesis_tests {
         match &ability.cost {
             Some(AbilityCost::Composite { costs }) => {
                 assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
-                assert!(costs.iter().any(|c| matches!(
-                    c,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
+                assert!(costs.iter().any(|c| {
+                    if let AbilityCost::Sacrifice(cost) = c {
+                        matches!(cost.target, TargetFilter::SelfRef)
+                            && cost.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1)
+                    } else {
+                        false
                     }
-                )));
+                }));
             }
             other => panic!("expected Composite cost, got {other:?}"),
         }
@@ -15561,10 +15561,10 @@ mod cumulative_upkeep_synthesis_tests {
             "PayLife base must install exactly one cumulative-upkeep trigger"
         );
 
-        let sacrifice_kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count: 1,
-        });
+        let sacrifice_kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::SelfRef,
+            1,
+        )));
         assert_eq!(
             KeywordTriggerInstaller::triggers_for(&sacrifice_kw).len(),
             1,

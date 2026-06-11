@@ -4861,8 +4861,9 @@ mod tests {
         Duration, Effect, EffectScope, FilterProp, ManaProduction, ManaSpendRestriction,
         ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter,
         PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind,
-        StaticCondition, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ReplacementCondition, RoundingMode, SacrificeCost, SacrificeRequirement, SharedQuality,
+        SharedQualityRelation, ShieldKind, StaticCondition, TapStateChange, TargetFilter,
+        TriggerCondition, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -5629,7 +5630,9 @@ mod tests {
             } => {
                 assert!(repeatability.is_once());
                 assert_eq!(costs.len(), 1);
-                assert!(matches!(&costs[0], AbilityCost::Sacrifice { count: 1, .. }));
+                assert!(
+                    matches!(&costs[0], AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(1))
+                );
             }
             other => panic!("expected non-mana Kicker, got {other:?}"),
         }
@@ -5645,12 +5648,9 @@ mod tests {
         let r = parse(oracle, "Rottenmouth Viper", &[], &["Creature"], &[]);
         match r.additional_cost {
             Some(AdditionalCost::Optional {
-                cost:
-                    AbilityCost::Sacrifice {
-                        count: u32::MAX, ..
-                    },
+                cost: AbilityCost::Sacrifice(ref sac),
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-            }) => {}
+            }) if sac.requirement.fixed_count() == Some(u32::MAX) => {}
             other => panic!("expected optional any-number sacrifice, got {other:?}"),
         }
         assert!(
@@ -5683,10 +5683,10 @@ mod tests {
         );
 
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) => {
-                assert_eq!(count, 1);
+            AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)) => {
+                assert_eq!(sac.requirement.fixed_count(), Some(1));
                 assert_eq!(
-                    target,
+                    sac.target,
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))
                 );
             }
@@ -5710,9 +5710,9 @@ mod tests {
             &[],
         );
         match r.additional_cost.expect("additional cost") {
-            AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) => {
-                assert_eq!(count, 1);
-                assert_eq!(target, TargetFilter::Typed(TypedFilter::creature()));
+            AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)) => {
+                assert_eq!(sac.requirement.fixed_count(), Some(1));
+                assert_eq!(sac.target, TargetFilter::Typed(TypedFilter::creature()));
             }
             other => panic!("expected required sacrifice-creature cost, got {other:?}"),
         }
@@ -5847,10 +5847,9 @@ mod tests {
 
         assert_eq!(
             r.additional_cost,
-            Some(AdditionalCost::Required(AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-                count: u32::MAX,
-            }))
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice(
+                SacrificeCost::count(TargetFilter::Typed(TypedFilter::creature()), u32::MAX)
+            )))
         );
         assert_eq!(r.abilities.len(), 1);
         let x = QuantityExpr::Ref {
@@ -5872,6 +5871,45 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
+    }
+
+    /// Issue #2938 — Deflecting Swat's resolution effect must lower to
+    /// `ChangeTargets`, not a no-op `TargetOnly` wrapper.
+    #[test]
+    fn deflecting_swat_choose_new_targets_for_spell_or_ability() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::game_state::RetargetScope;
+
+        let r = parse(
+            "If you control a commander, you may cast this spell without paying its mana cost.\n\
+             You may choose new targets for target spell or ability.",
+            "Deflecting Swat",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "abilities={:?}", r.abilities);
+        assert!(
+            matches!(
+                r.abilities[0].effect.as_ref(),
+                Effect::ChangeTargets {
+                    scope: RetargetScope::All,
+                    forced_to: None,
+                    ..
+                }
+            ),
+            "effect={:?} optional={} description={:?}",
+            r.abilities[0].effect,
+            r.abilities[0].optional,
+            r.abilities[0].description
+        );
+        let Effect::ChangeTargets { target, .. } = r.abilities[0].effect.as_ref() else {
+            unreachable!();
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected Or(StackSpell, StackAbility), got {target:?}");
+        };
+        assert!(filters.contains(&TargetFilter::StackSpell));
     }
 
     /// Issue #1990 — Spellskite must parse to forced-self `ChangeTargets` so the
@@ -6772,10 +6810,8 @@ mod tests {
                                 if matches!(*definition.effect, Effect::Mana { .. })
                                     && matches!(
                                         definition.cost,
-                                        Some(AbilityCost::Sacrifice {
-                                            target: TargetFilter::SelfRef,
-                                            count: 1
-                                        })
+                                        Some(AbilityCost::Sacrifice(ref sac))
+                                            if sac.requirement.fixed_count() == Some(1)
                                     )
                         )
                     })
@@ -6864,13 +6900,14 @@ mod tests {
                                 modification,
                                 ContinuousModification::GrantAbility { definition }
                                     if matches!(*definition.effect, Effect::Mana { .. })
-                                        && matches!(
-                                            definition.cost,
-                                            Some(AbilityCost::Sacrifice {
-                                                target: TargetFilter::SelfRef,
-                                                count: 1
-                                            })
-                                        )
+                                        && {
+                if let Some(AbilityCost::Sacrifice(sc)) = &definition.cost {
+                    matches!(sc.target, TargetFilter::SelfRef)
+                        && sc.requirement == SacrificeRequirement::count(1)
+                } else {
+                    false
+                }
+            }
                             )
                         })
                     }),
@@ -7553,6 +7590,46 @@ mod tests {
             r.statics[0].mode,
             crate::types::statics::StaticMode::NoMaximumHandSize
         );
+    }
+
+    #[test]
+    fn library_of_leng_parses_hand_size_static_and_discard_replacement() {
+        use crate::types::ability::{ControllerRef, Effect, ReplacementMode, TypedFilter};
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::statics::StaticMode;
+
+        let r = parse(
+            "You have no maximum hand size.\nIf an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard.",
+            "Library of Leng",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        assert!(r.abilities.is_empty());
+        assert_eq!(r.statics.len(), 1);
+        assert_eq!(r.statics[0].mode, StaticMode::NoMaximumHandSize);
+        assert_eq!(r.replacements.len(), 1);
+        let repl = &r.replacements[0];
+        assert_eq!(repl.event, ReplacementEvent::Discard);
+        assert!(matches!(
+            repl.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        assert_eq!(
+            repl.valid_card,
+            Some(crate::types::ability::TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
+        assert_eq!(
+            repl.condition,
+            Some(crate::types::ability::ReplacementCondition::EffectCausedDiscard)
+        );
+        let execute = repl.execute.as_ref().expect("replacement execute");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutAtLibraryPosition { .. }
+        ));
     }
 
     #[test]
@@ -10038,6 +10115,65 @@ mod tests {
     }
 
     #[test]
+    fn astarion_end_step_modal_target_relative_life_modes() {
+        // CR 603.1 + CR 700.2 + CR 115.1: Astarion, the Decadent — an end-step
+        // "choose one" modal trigger whose two named modes each reference a
+        // life-this-turn quantity. Previously the Feed mode dropped to
+        // `Unimplemented` (the third-person "the amount of life they lost this
+        // turn" anaphor never reached a recognizer), leaving the whole modal
+        // trigger inert. Both modes must now parse, and the Feed mode's amount
+        // must resolve through `PlayerScope::Target` (the target opponent's own
+        // life lost), not the controller's.
+        use crate::types::ability::{Effect, PlayerScope, QuantityExpr, QuantityRef};
+        let r = parse(
+            "Deathtouch, lifelink\nAt the beginning of your end step, choose one —\n• Feed — Target opponent loses life equal to the amount of life they lost this turn.\n• Friends — You gain life equal to the amount of life you gained this turn.",
+            "Astarion, the Decadent",
+            &[],
+            &["Creature"],
+            &["Vampire", "Noble"],
+        );
+        assert_eq!(r.triggers.len(), 1);
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("end-step trigger should have execute");
+        let modal = execute.modal.as_ref().expect("execute should be modal");
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(execute.mode_abilities.len(), 2);
+
+        // Feed: target opponent loses life equal to *their own* life lost this
+        // turn — the amount resolves through `PlayerScope::Target`, and a target
+        // filter is present (it is no longer an `Unimplemented` drop).
+        match execute.mode_abilities[0].effect.as_ref() {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLostThisTurn {
+                            player: PlayerScope::Target,
+                        },
+                    },
+                );
+                assert!(target.is_some(), "Feed mode targets the opponent");
+            }
+            other => panic!("Feed mode must be LoseLife, got {other:?}"),
+        }
+
+        // Friends: you gain life equal to the life you gained this turn.
+        match execute.mode_abilities[1].effect.as_ref() {
+            Effect::GainLife { amount, .. } => assert_eq!(
+                *amount,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            ),
+            other => panic!("Friends mode must be GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn non_modal_spell_has_no_modal_metadata() {
         let r = parse(
             "Deal 3 damage to any target.",
@@ -11470,7 +11606,7 @@ mod tests {
         let ability = &r.abilities[0];
         assert_eq!(ability.kind, AbilityKind::Activated);
         assert!(
-            matches!(ability.cost, Some(AbilityCost::Sacrifice { .. })),
+            matches!(ability.cost, Some(AbilityCost::Sacrifice(_))),
             "Boast cost should be Sacrifice, got {:?}",
             ability.cost
         );
@@ -11998,12 +12134,13 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(AbilityCost::Sacrifice { target, count }) => {
-                assert_eq!(*count, 1);
+            Keyword::CumulativeUpkeep(AbilityCost::Sacrifice(ref sac)) => {
+                assert_eq!(sac.requirement.fixed_count(), Some(1));
                 // Target should be a typed filter (Land subtype filter).
                 assert!(
-                    matches!(target, TargetFilter::Typed(_)),
-                    "expected Typed Land filter, got {target:?}"
+                    matches!(&sac.target, TargetFilter::Typed(_)),
+                    "expected Typed Land filter, got {:?}",
+                    sac.target
                 );
             }
             other => panic!("expected Sacrifice(Land, 1), got {other:?}"),

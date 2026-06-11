@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect,
-    ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, TargetFilter,
-    TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, SacrificeCost,
+    TargetFilter, TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -147,10 +148,9 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         },
-        WardCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
-            target: filter.clone(),
-            count: *count,
-        },
+        WardCost::Sacrifice { count, filter } => {
+            AbilityCost::Sacrifice(SacrificeCost::count(filter.clone(), *count))
+        }
         // CR 702.21a + CR 701.67: Waterbend ward cost maps to mana payment.
         // Full tap-to-help semantics deferred to waterbend cost integration.
         WardCost::Waterbend(mana_cost) => AbilityCost::Mana {
@@ -9870,7 +9870,9 @@ pub mod tests {
             filter: TargetFilter::Any,
         };
         let result = ward_cost_to_ability_cost(&sacrifice);
-        assert!(matches!(result, AbilityCost::Sacrifice { count: 1, .. }));
+        assert!(
+            matches!(result, AbilityCost::Sacrifice(ref c) if c.requirement.fixed_count() == Some(1))
+        );
 
         // Waterbend
         let waterbend = WardCost::Waterbend(ManaCost::generic(4));
@@ -14160,10 +14162,10 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Instant);
             obj.cast_from_zone = Some(Zone::Hand);
             obj.additional_cost = Some(AdditionalCost::Optional {
-                cost: AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    count: 1,
-                },
+                cost: AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    1,
+                )),
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             });
             obj.keywords.push(Keyword::Casualty(2));

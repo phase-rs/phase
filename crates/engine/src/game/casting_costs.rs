@@ -4,8 +4,8 @@ use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AdditionalCost, BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot,
     CounterCostSelection, Effect, KickerVariant, QuantityExpr, QuantityRef, ReplacementDefinition,
-    ResolvedAbility, SpellCastingOptionKind, StaticCondition, TargetFilter, TypedFilter,
-    EXILE_COST_X,
+    ResolvedAbility, SacrificeCost, SacrificeRequirement, SpellCastingOptionKind, StaticCondition,
+    TargetFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -2846,6 +2846,33 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     }
 
+    // CR 702.103a + CR 118.9 + CR 601.2h: Bestow twin of the Evoke branch above.
+    // A compound bestow cost ("Bestow—{R}, Collect evidence 6." on Detective's
+    // Phoenix) routes its residual non-mana sub-cost (Collect evidence) through
+    // `pay_additional_cost`; the mana sub-cost ({R}) was already substituted as
+    // the spell's mana cost in `prepare_spell_cast` and is paid through the
+    // normal mana-payment flow inside `pay_additional_cost`'s fall-through.
+    if casting_variant == CastingVariant::Bestow {
+        let bestow_split = super::casting::effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Bestow(bc) => {
+                    Some(super::casting::split_bestow_cost_components(bc))
+                }
+                _ => None,
+            });
+        if let Some((_mana, Some(non_mana_cost))) = bestow_split {
+            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+            pending.base_cost = base_cost.clone();
+            pending.casting_variant = casting_variant;
+            pending.cast_timing_permission = cast_timing_permission;
+            pending.distribute = distribute;
+            pending.origin_zone = origin_zone;
+            pending.payment_mode = payment_mode;
+            return pay_additional_cost(state, player, non_mana_cost, pending, events);
+        }
+    }
+
     // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
     // reduction on matching-color permanent spells.
     if let Some((life_cost, mana_reduction)) = find_defiler_reduction(state, player, object_id) {
@@ -3239,7 +3266,13 @@ fn pay_additional_cost_with_source(
                 events,
             );
         }
-        AbilityCost::Sacrifice { ref target, count } => {
+        AbilityCost::Sacrifice(cost) => {
+            let target = &cost.target;
+            let SacrificeRequirement::Count { count } = cost.requirement else {
+                return Err(EngineError::ActionNotAllowed(
+                    "Unsupported sacrifice cost requirement for spell payment".into(),
+                ));
+            };
             if matches!(target, crate::types::ability::TargetFilter::SelfRef) {
                 if super::static_abilities::player_cant_sacrifice_as_cost(
                     state,
@@ -3279,10 +3312,10 @@ fn pay_additional_cost_with_source(
                     min_count,
                     resume: CostResume::SpellCost {
                         spell: Box::new(pending),
-                        cost: Box::new(AbilityCost::Sacrifice {
-                            target: target.clone(),
+                        cost: Box::new(AbilityCost::Sacrifice(SacrificeCost::count(
+                            target.clone(),
                             count,
-                        }),
+                        ))),
                         source: cost_source,
                     },
                 });
@@ -3545,8 +3578,9 @@ fn is_offering_sacrifice_cost(
     };
     matches!(
         cost,
-        AbilityCost::Sacrifice { target, count: 1 }
-            if *target == offering_quality_filter(&quality)
+        AbilityCost::Sacrifice(cost)
+            if cost.requirement == SacrificeRequirement::count(1)
+                && cost.target == offering_quality_filter(&quality)
     )
 }
 
@@ -3557,7 +3591,9 @@ fn emerge_sacrifice_filter() -> TargetFilter {
 fn is_emerge_sacrifice_cost(cost: &AbilityCost) -> bool {
     matches!(
         cost,
-        AbilityCost::Sacrifice { target, count: 1 } if *target == emerge_sacrifice_filter()
+        AbilityCost::Sacrifice(cost)
+            if cost.requirement == SacrificeRequirement::count(1)
+                && cost.target == emerge_sacrifice_filter()
     )
 }
 
@@ -3566,10 +3602,7 @@ fn is_emerge_sacrifice_cost(cost: &AbilityCost) -> bool {
 /// reduction by `handle_sacrifice_for_cost` while the creature is still on the
 /// battlefield.
 pub(super) fn emerge_sacrifice_cost() -> AbilityCost {
-    AbilityCost::Sacrifice {
-        target: emerge_sacrifice_filter(),
-        count: 1,
-    }
+    AbilityCost::Sacrifice(SacrificeCost::count(emerge_sacrifice_filter(), 1))
 }
 
 /// CR 702.119a-c: Emerge can be paid only if a legal creature can be
@@ -3609,13 +3642,20 @@ fn additional_cost_x_max(
         AbilityCost::PayLife { amount } if amount.contains_x() => {
             Some(max_pay_life_x(state, player))
         }
-        AbilityCost::Sacrifice { target, count } if *count == u32::MAX => {
+        AbilityCost::Sacrifice(cost)
+            if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
+        {
             // CR 601.2b: X in an additional sacrifice cost is announced before later target choices.
             Some(
-                super::casting::find_eligible_sacrifice_targets(state, player, source_id, target)
-                    .len()
-                    .try_into()
-                    .unwrap_or(u32::MAX),
+                super::casting::find_eligible_sacrifice_targets(
+                    state,
+                    player,
+                    source_id,
+                    &cost.target,
+                )
+                .len()
+                .try_into()
+                .unwrap_or(u32::MAX),
             )
         }
         AbilityCost::Exile {
@@ -3758,8 +3798,8 @@ pub(super) fn effective_casualty_additional_cost(
             _ => None,
         })?;
     Some(AdditionalCost::Optional {
-        cost: AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+        cost: AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 crate::types::ability::FilterProp::PtComparison {
                     stat: crate::types::ability::PtStat::Power,
                     scope: crate::types::ability::PtValueScope::Current,
@@ -3769,8 +3809,8 @@ pub(super) fn effective_casualty_additional_cost(
                     },
                 },
             ])),
-            count: 1,
-        },
+            1,
+        )),
         repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
     })
 }
@@ -3839,10 +3879,7 @@ fn offering_quality_filter(quality: &str) -> TargetFilter {
 }
 
 pub(super) fn offering_sacrifice_cost(quality: &str) -> AbilityCost {
-    AbilityCost::Sacrifice {
-        target: offering_quality_filter(quality),
-        count: 1,
-    }
+    AbilityCost::Sacrifice(SacrificeCost::count(offering_quality_filter(quality), 1))
 }
 
 /// CR 702.48a: Returns `true` when the controller has at least one permanent
@@ -8140,11 +8177,11 @@ mod tests {
         match waiting {
             WaitingFor::OptionalCostChoice { cost, .. } => match cost {
                 AdditionalCost::Optional {
-                    cost: AbilityCost::Sacrifice { target, count },
+                    cost: AbilityCost::Sacrifice(cost),
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 } => {
-                    assert_eq!(count, 1);
-                    match target {
+                    assert_eq!(cost.requirement, SacrificeRequirement::count(1));
+                    match cost.target {
                         TargetFilter::Typed(tf) => {
                             assert!(tf.type_filters.contains(&TypeFilter::Creature));
                             assert!(tf.properties.contains(&FilterProp::PtComparison {
@@ -9732,10 +9769,7 @@ mod tests {
                 .cost(AbilityCost::Composite {
                     costs: vec![
                         AbilityCost::Tap,
-                        AbilityCost::Sacrifice {
-                            target: TargetFilter::SelfRef,
-                            count: 1,
-                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                     ],
                 }),
             );
@@ -9874,10 +9908,7 @@ mod tests {
                 .cost(AbilityCost::Composite {
                     costs: vec![
                         AbilityCost::Tap,
-                        AbilityCost::Sacrifice {
-                            target: TargetFilter::SelfRef,
-                            count: 1,
-                        },
+                        AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                     ],
                 }),
             );
@@ -11830,10 +11861,7 @@ mod tests {
             .cost(AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Tap,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
-                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                 ],
             });
             let obj = state.objects.get_mut(&treasure).unwrap();
@@ -11925,10 +11953,10 @@ mod tests {
                         target: None,
                     },
                 )
-                .cost(AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-                    count: 1,
-                }),
+                .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    1,
+                ))),
             );
         }
 
@@ -13435,9 +13463,9 @@ its replicate cost was paid.)\nDraw a card.";
                     matches!(
                         cost,
                         AdditionalCost::Optional {
-                            cost: AbilityCost::Sacrifice { count: 1, .. },
+                            cost: AbilityCost::Sacrifice(c),
                             repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-                        }
+                        } if c.requirement == SacrificeRequirement::count(1)
                     ),
                     "expected optional Spirit sacrifice, got {cost:?}"
                 );
@@ -13956,10 +13984,8 @@ its replicate cost was paid.)\nDraw a card.";
             &mut events,
         );
 
-        let non_offering_cost = AbilityCost::Sacrifice {
-            target: offering_quality_filter("Spirit"),
-            count: 1,
-        };
+        let non_offering_cost =
+            AbilityCost::Sacrifice(SacrificeCost::count(offering_quality_filter("Spirit"), 1));
         let waiting = handle_sacrifice_for_cost(
             &mut state,
             caster,

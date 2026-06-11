@@ -10,8 +10,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
     CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
     FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
-    ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetRef,
+    ResolvedAbility, SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -2498,6 +2498,19 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::Token { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+        // CR 707.10 + CR 608.2c: to copy a spell is to put a copy of it onto the
+        // stack, so a `CopySpell` "did anything" iff a copy was actually pushed.
+        // This drives the reflexive "if you don't copy a spell this way,
+        // <effect>" negation (Shiko and Narset, Unified): the rider fires only
+        // when NO copy was made. `copy_spell::resolve` emits `StackPushed` for
+        // the new copy on success, and returns early WITHOUT it when the source
+        // can't be copied — so the event's presence is the authoritative "a copy
+        // was made" signal. Without this arm CopySpell fell into the `_ => true`
+        // default, which claimed a copy always happened and wrongly suppressed
+        // the draw on the no-copy branch.
+        Effect::CopySpell { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackPushed { .. })),
         // CR 701.26a: a tap "did anything" iff some permanent became tapped.
         Effect::SetTapState {
             state: TapStateChange::Tap,
@@ -4583,6 +4596,23 @@ fn resolve_chain_body(
         ability
     };
 
+    // CR 608.2c + CR 613.1: A chained sub-ability is the next instruction in the
+    // same resolution (instructions are followed "in the order written"), so it
+    // resolves AFTER the parent's effect and must read the object's CURRENT
+    // characteristics, which the layer system (CR 613) determines. When the
+    // parent effect mutated layer-affecting state (a +1/+1 counter via
+    // `PutCounter`, a P/T-setting continuous effect, …) it only marked
+    // `layers_dirty`; the derived `power`/`toughness` fields are not recomputed
+    // until the next flush. Flush here, before the sub resolves its condition and
+    // effect-quantity reads, so a sub like "add {R} equal to this creature's
+    // power" (Molten-Core Maestro, issue #2384) sees the post-counter power
+    // rather than the stale pre-counter snapshot. `flush_layers` is the single
+    // authority and a no-op when nothing is dirty, so leaf chains and non-P/T
+    // parents pay nothing.
+    if ability.sub_ability.is_some() {
+        crate::game::layers::flush_layers(state);
+    }
+
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
     // This allows sub-abilities like "its controller gains life" to access the object
     // targeted by the parent (e.g. the exiled creature in Swords to Plowshares).
@@ -5736,10 +5766,18 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
         AbilityCost::PayLife { amount } => AbilityCost::PayLife {
             amount: amount.scaled_by(n),
         },
-        AbilityCost::Sacrifice { target, count } => AbilityCost::Sacrifice {
-            target: target.clone(),
-            count: count.saturating_mul(n),
-        },
+        AbilityCost::Sacrifice(cost) => {
+            let requirement = match &cost.requirement {
+                SacrificeRequirement::Count { count } => {
+                    SacrificeRequirement::count(count.saturating_mul(n))
+                }
+                req => req.clone(),
+            };
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: cost.target.clone(),
+                requirement,
+            })
+        }
         AbilityCost::OneOf { costs } => AbilityCost::Composite {
             costs: vec![
                 AbilityCost::OneOf {
@@ -6938,15 +6976,12 @@ mod tests {
 
     #[test]
     fn expand_per_counter_sacrifice_multiplies_count() {
-        let base = AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count: 1,
-        };
+        let base = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
         let expanded = expand_per_counter(&base, 3);
-        let AbilityCost::Sacrifice { count, .. } = expanded else {
+        let AbilityCost::Sacrifice(cost) = expanded else {
             panic!("expected Sacrifice");
         };
-        assert_eq!(count, 3);
+        assert_eq!(cost.requirement.fixed_count(), Some(3));
     }
 
     #[test]
@@ -16197,6 +16232,44 @@ mod tests {
         assert!(
             !cards.contains(&caster_library_relic),
             "search must not offer same-named card from the caster's library"
+        );
+    }
+
+    /// CR 707.10 + CR 608.2c (issue #1370): the reflexive "if you don't copy a
+    /// spell this way" gate keys on whether a copy was actually made. A
+    /// `CopySpell` parent counts as "performed" iff it pushed a copy onto the
+    /// stack (`StackPushed`); when the source can't be copied no such event
+    /// fires, so the negated rider (Shiko's draw) must run. This is
+    /// the building-block contract the full-pipeline `shiko_*` integration tests
+    /// exercise end to end — asserted here directly so the class is covered
+    /// independent of the parser/scenario wiring.
+    #[test]
+    fn copy_spell_performed_tracks_stack_pushed_event() {
+        let copy = Effect::CopySpell {
+            target: TargetFilter::Any,
+            retarget: crate::types::ability::CopyRetargetPermission::MayChooseNewTargets,
+            copier: None,
+        };
+
+        // A copy was put on the stack → the effect was performed → the negated
+        // "if you don't copy" rider must NOT fire.
+        let made = [GameEvent::StackPushed {
+            object_id: ObjectId(7),
+        }];
+        assert!(
+            mandatory_parent_effect_performed(&copy, &made),
+            "a CopySpell that pushed a copy onto the stack is 'performed'"
+        );
+
+        // No copy was made (e.g. the source can't be copied) → not performed →
+        // the negated rider fires.
+        let not_made = [GameEvent::EffectResolved {
+            kind: EffectKind::CopySpell,
+            source_id: ObjectId(7),
+        }];
+        assert!(
+            !mandatory_parent_effect_performed(&copy, &not_made),
+            "a CopySpell that made no copy is NOT 'performed' — the draw rider must run"
         );
     }
 }

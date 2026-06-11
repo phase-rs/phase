@@ -10,9 +10,9 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission,
     Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
     EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -1639,10 +1639,7 @@ fn treasure_ability() -> AbilityDefinition {
     .cost(AbilityCost::Composite {
         costs: vec![
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1669,10 +1666,10 @@ fn gold_ability() -> AbilityDefinition {
             target: None,
         },
     )
-    .cost(AbilityCost::Sacrifice {
-        target: TargetFilter::SelfRef,
-        count: 1,
-    })
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )))
 }
 
 /// CR 111.10b: Food — "{2}, {T}, Sacrifice this artifact: You gain 3 life."
@@ -1693,10 +1690,7 @@ fn food_ability() -> AbilityDefinition {
                 },
             },
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1718,10 +1712,7 @@ fn clue_ability() -> AbilityDefinition {
                     generic: 2,
                 },
             },
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1750,10 +1741,7 @@ fn blood_ability() -> AbilityDefinition {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             },
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1775,10 +1763,10 @@ fn spawn_ability() -> AbilityDefinition {
             target: None,
         },
     )
-    .cost(AbilityCost::Sacrifice {
-        target: TargetFilter::SelfRef,
-        count: 1,
-    })
+    .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+        TargetFilter::SelfRef,
+        1,
+    )))
 }
 
 /// CR 111.10h: Powerstone — "{T}: Add {C}. This mana can't be spent to cast a nonartifact spell."
@@ -1822,10 +1810,7 @@ fn map_ability() -> AbilityDefinition {
                 },
             },
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
     .activation_restrictions(vec![ActivationRestriction::AsSorcery])
@@ -1886,10 +1871,7 @@ fn lander_ability() -> AbilityDefinition {
                 },
             },
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -1915,10 +1897,7 @@ fn mutagen_ability() -> AbilityDefinition {
                 },
             },
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
     // CR 307.5: "Activate only as a sorcery" — controller has priority, during
@@ -1957,10 +1936,7 @@ fn junk_ability() -> AbilityDefinition {
     .cost(AbilityCost::Composite {
         costs: vec![
             AbilityCost::Tap,
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
     .activation_restrictions(vec![ActivationRestriction::AsSorcery])
@@ -2037,10 +2013,7 @@ fn shard_ability() -> AbilityDefinition {
                     generic: 2,
                 },
             },
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
         ],
     })
 }
@@ -3099,13 +3072,15 @@ mod tests {
                     }
                 )));
                 assert!(costs.iter().any(|c| matches!(c, AbilityCost::Tap)));
-                assert!(costs.iter().any(|c| matches!(
-                    c,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1
+                assert!(costs.iter().any(|c| {
+                    if let AbilityCost::Sacrifice(cost) = c {
+                        matches!(cost.target, TargetFilter::SelfRef)
+                            && cost.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1)
+                    } else {
+                        false
                     }
-                )));
+                }));
             }
             other => panic!("Lander cost must be Composite, got {other:?}"),
         }
@@ -3437,13 +3412,15 @@ mod tests {
                     }
                 )));
                 assert!(costs.iter().any(|cost| matches!(cost, AbilityCost::Tap)));
-                assert!(costs.iter().any(|cost| matches!(
-                    cost,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1
+                assert!(costs.iter().any(|cost| {
+                    if let AbilityCost::Sacrifice(sc) = cost {
+                        matches!(sc.target, TargetFilter::SelfRef)
+                            && sc.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1)
+                    } else {
+                        false
                     }
-                )));
+                }));
             }
             other => panic!("expected composite cost, got {other:?}"),
         }
@@ -3488,13 +3465,15 @@ mod tests {
                     }
                 )));
                 assert!(costs.iter().any(|cost| matches!(cost, AbilityCost::Tap)));
-                assert!(costs.iter().any(|cost| matches!(
-                    cost,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1
+                assert!(costs.iter().any(|cost| {
+                    if let AbilityCost::Sacrifice(sc) = cost {
+                        matches!(sc.target, TargetFilter::SelfRef)
+                            && sc.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1)
+                    } else {
+                        false
                     }
-                )));
+                }));
             }
             other => panic!("expected composite cost, got {other:?}"),
         }
@@ -3508,13 +3487,14 @@ mod tests {
         let abilities = predefined_token_abilities("Spawn");
         assert_eq!(abilities.len(), 1);
         assert!(matches!(*abilities[0].effect, Effect::Mana { .. }));
-        assert!(matches!(
-            abilities[0].cost,
-            Some(AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            })
-        ));
+        assert!({
+            if let Some(AbilityCost::Sacrifice(sc)) = &abilities[0].cost {
+                matches!(sc.target, TargetFilter::SelfRef)
+                    && sc.requirement == crate::types::ability::SacrificeRequirement::count(1)
+            } else {
+                false
+            }
+        });
     }
 
     #[test]

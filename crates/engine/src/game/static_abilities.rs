@@ -10,7 +10,8 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    CostPaymentProhibition, CrewAction, CrewContributionKind, ProhibitionScope, StaticMode,
+    CombatAloneAction, CombatAloneRequirement, CostPaymentProhibition, CrewAction,
+    CrewContributionKind, ProhibitionScope, StaticMode,
 };
 
 /// Handler function type for static ability modes.
@@ -166,8 +167,29 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
-    registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
-    registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
+    // CR 506.5 + CR 508.1c + CR 509.1b: CombatAlone — parameterized "alone"
+    // restriction. Runtime enforcement lives in combat.rs.
+    registry.insert(
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        },
+        handle_rule_mod,
+    );
+    registry.insert(
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Block,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        },
+        handle_rule_mod,
+    );
+    registry.insert(
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Attack,
+            requirement: CombatAloneRequirement::MustBeSole,
+        },
+        handle_rule_mod,
+    );
     // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
     registry.insert(StaticMode::CantCrew, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
