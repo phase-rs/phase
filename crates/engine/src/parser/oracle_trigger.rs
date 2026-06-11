@@ -3135,40 +3135,25 @@ fn try_extract_zone_change_object_filter_condition(
     ))
 }
 
-/// CR 603.4 + CR 102.1: Shared linking-verb prefix for source-referential
-/// intervening-if clauses ("if it('s| is| isn't| is not| was| wasn't| was not) …").
-/// Composes the contraction and explicit-negation axes rather than enumerating
-/// every surface phrase ("if it's not a token", "if it isn't a token", …).
-/// Returns `(remainder, negated)` where `negated` is true when the prefix
-/// carried an explicit negation ("isn't", "is not", "'s not", …).
-fn parse_if_it_intervening_prefix(input: &str) -> OracleResult<'_, bool> {
-    let (input, _) = tag("if it").parse(input)?;
-    let (input, negated) = alt((
-        value(true, tag(" isn't ")),
-        value(true, tag(" is not ")),
-        value(true, tag(" wasn't ")),
-        value(true, tag(" was not ")),
-        value(true, preceded(tag("'s "), tag("not "))),
-        value(false, tag("'s ")),
-        value(false, tag(" is ")),
-        value(false, tag(" was ")),
-        value(false, tag(" ")),
-    ))
-    .parse(input)?;
-    Ok((input, negated))
+/// CR 603.4 + CR 111.1: Token intervening-if with `'s not` contraction
+/// ("if it's not a token"). The legacy `if it ` + `isn't`/`is not` path
+/// already covers explicit negation; only the apostrophe contraction needs
+/// a dedicated arm so attachment lookbacks (`if it was enchanted`) keep their
+/// leading `was` for `parse_zone_change_object_filter_predicate`.
+fn parse_zone_change_object_token_contraction_intervening_if(
+    input: &str,
+) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if it's not a ").parse(input)?;
+    let (rest, _) = tag("token").parse(rest)?;
+    Ok((rest, zone_change_object_token_condition(true)))
 }
 
 fn parse_zone_change_object_filter_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
-    let (input, prefix_negated) = parse_if_it_intervening_prefix(input)?;
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a ").parse(input) {
-        let (rest, _) = tag("token").parse(rest)?;
-        return Ok((rest, zone_change_object_token_condition(prefix_negated)));
+    if let Ok((rest, condition)) = parse_zone_change_object_token_contraction_intervening_if(input)
+    {
+        return Ok((rest, condition));
     }
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("not a ").parse(input) {
-        let (rest, _) = tag("token").parse(rest)?;
-        return Ok((rest, zone_change_object_token_condition(true)));
-    }
-    parse_zone_change_object_filter_predicate(input)
+    preceded(tag("if it "), parse_zone_change_object_filter_predicate).parse(input)
 }
 
 fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
@@ -3221,18 +3206,6 @@ fn zone_change_object_token_condition(negated: bool) -> TriggerCondition {
 }
 
 fn parse_zone_change_object_token_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
-    // Bare forms after `parse_if_it_intervening_prefix` consumed the linking
-    // verb ("if it's not a token" → "'s " + "not a token"; "if it isn't a
-    // token" → " isn't " + "a token").
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("not a ").parse(input) {
-        let (rest, _) = tag("token").parse(rest)?;
-        return Ok((rest, zone_change_object_token_condition(true)));
-    }
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a ").parse(input) {
-        let (rest, _) = tag("token").parse(rest)?;
-        return Ok((rest, zone_change_object_token_condition(false)));
-    }
-
     let (rest, contracted_negation) = alt((
         value(true, alt((tag("isn't"), tag("wasn't")))),
         value(false, alt((tag("is"), tag("was")))),
@@ -12076,8 +12049,6 @@ mod tests {
             ("is not a token", FilterProp::NonToken),
             ("wasn't a token", FilterProp::NonToken),
             ("was not a token", FilterProp::NonToken),
-            ("not a token", FilterProp::NonToken),
-            ("a token", FilterProp::Token),
         ] {
             let (rest, condition) =
                 parse_zone_change_object_token_predicate(text).expect("token predicate parses");
@@ -12093,6 +12064,46 @@ mod tests {
                 ),
                 other => panic!("expected token filter condition for {text}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn trigger_dies_if_it_was_enchanted_attaches_attachment_lookback() {
+        let def = parse_trigger_line(
+            "When this creature dies, if it was enchanted, create a Junk token.",
+            "Gunner Conscript",
+        );
+        match def.condition {
+            Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                filter: TargetFilter::Typed(typed),
+                ..
+            }) => {
+                let has_aura = typed.properties.iter().any(|p| match p {
+                    FilterProp::HasAttachment { kind, .. } => *kind == AttachmentKind::Aura,
+                    FilterProp::HasAnyAttachmentOf { kinds, .. } => {
+                        kinds.contains(&AttachmentKind::Aura)
+                    }
+                    _ => false,
+                });
+                assert!(has_aura, "expected enchanted lookback, got {typed:?}");
+            }
+            other => panic!("expected attachment intervening-if, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zone_change_token_contraction_intervening_if_parses_its_not_a_token() {
+        let (rest, condition) = parse_zone_change_object_token_contraction_intervening_if(
+            "if it's not a token, create a token",
+        )
+        .expect("contraction intervening-if parses");
+        assert_eq!(rest, ", create a token");
+        match condition {
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                filter: TargetFilter::Typed(typed),
+                ..
+            } => assert!(typed.properties.contains(&FilterProp::NonToken)),
+            other => panic!("expected NonToken condition, got {other:?}"),
         }
     }
 
