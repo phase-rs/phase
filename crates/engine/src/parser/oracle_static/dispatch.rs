@@ -1219,11 +1219,9 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
-    // CR 508.1c: "~ can only attack alone" — the creature may attack only if it
-    // is the sole attacker that combat (Master of Cruelties). Distinct from and
-    // opposite to "can't attack alone": the creature CAN attack, but ONLY alone.
-    // Must precede the "can't attack" arm below, which would otherwise fail to
-    // match "can only attack alone" but could confuse surrounding context.
+    // CR 506.5 + CR 508.1c: "~ can only attack alone" — CombatAlone(Attack, MustBeSole).
+    // The creature may attack only if it is the sole attacker (Master of Cruelties).
+    // Must precede the generic "can't attack" arm to avoid mis-dispatch.
     if let Some((_, _, rest)) = nom_primitives::scan_preceded(tp.lower, |i: &str| {
         let (i, _) = tag::<_, _, OracleError<'_>>("can only attack alone").parse(i)?;
         let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i)?;
@@ -1231,9 +1229,12 @@ pub(crate) fn parse_static_line_inner(
     }) {
         if rest.trim().is_empty() {
             return Some(
-                StaticDefinition::new(StaticMode::CanOnlyAttackAlone)
-                    .affected(TargetFilter::SelfRef)
-                    .description(text.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action: CombatAloneAction::Attack,
+                    requirement: CombatAloneRequirement::MustBeSole,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
             );
         }
     }
@@ -1248,16 +1249,19 @@ pub(crate) fn parse_static_line_inner(
         nom_primitives::scan_preceded(tp.lower, parse_alone_combat_restriction)
     {
         if rest.trim().is_empty() {
-            let mode = match restriction {
+            let action = match restriction {
                 AloneCombatRestriction::Attack | AloneCombatRestriction::AttackOrBlock => {
-                    StaticMode::CantAttackAlone
+                    CombatAloneAction::Attack
                 }
-                AloneCombatRestriction::Block => StaticMode::CantBlockAlone,
+                AloneCombatRestriction::Block => CombatAloneAction::Block,
             };
             return Some(
-                StaticDefinition::new(mode)
-                    .affected(TargetFilter::SelfRef)
-                    .description(text.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(text.to_string()),
             );
         }
     }

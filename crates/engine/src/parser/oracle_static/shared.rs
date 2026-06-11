@@ -513,19 +513,26 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         ];
     }
 
-    // CR 506.5 + CR 508.1a + CR 509.1b: "can't attack or block alone" (Mogg
-    // Flunkies) imposes both the attack-alone and block-alone restrictions.
+    // CR 506.5 + CR 508.1c + CR 509.1b: "can't attack or block alone" (Mogg
+    // Flunkies) imposes both CombatAlone(Attack,NeedsCompanion) and
+    // CombatAlone(Block,NeedsCompanion).
     if let Some((_, AloneCombatRestriction::AttackOrBlock, rest)) =
         nom_primitives::scan_preceded(&lower, parse_alone_combat_restriction)
     {
         if rest.trim().is_empty() {
             return vec![
-                StaticDefinition::new(StaticMode::CantAttackAlone)
-                    .affected(TargetFilter::SelfRef)
-                    .description(stripped.to_string()),
-                StaticDefinition::new(StaticMode::CantBlockAlone)
-                    .affected(TargetFilter::SelfRef)
-                    .description(stripped.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action: CombatAloneAction::Attack,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action: CombatAloneAction::Block,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
             ];
         }
     }
