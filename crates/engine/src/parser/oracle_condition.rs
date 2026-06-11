@@ -121,14 +121,6 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
         return Some(condition);
     }
 
-    // Cross-player quantity comparisons ("an opponent controls more lands than
-    // you", "an opponent controls at least two more lands than you", etc.).
-    // Tried before event-based "an opponent [verb]" arms so existential control
-    // comparisons are not misclassified as turn-history event predicates.
-    if let Some(condition) = parse_quantity_restriction_condition(text) {
-        return Some(condition);
-    }
-
     // Event-based conditions: structured nom matching for event phrases.
     if let Some(condition) = parse_event_condition(text) {
         return Some(condition);
@@ -190,6 +182,9 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
         return Some(ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast {
             count: count as u32,
         });
+    }
+    if let Some(condition) = parse_quantity_restriction_condition(text) {
+        return Some(condition);
     }
     None
 }
