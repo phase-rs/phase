@@ -148,10 +148,64 @@ fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticConditi
 
 fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_player_dealt_combat_damage_by_source_this_turn,
         parse_source_dealt_damage_to_opponent_this_turn,
         parse_source_was_dealt_damage_this_turn,
     ))
     .parse(input)
+}
+
+/// CR 603.4 + CR 120.2a + CR 608.2i: Parse the intervening-`if` predicate
+/// "a player/an opponent was dealt combat damage by a <source> this turn".
+///
+/// Lost Monarch of Ifnir: "At the beginning of your second main phase, if a
+/// player was dealt combat damage by a Zombie this turn, …". The predicate is
+/// satisfied when at least one recipient matching the subject was dealt combat
+/// damage this turn by a source matching the `by` filter.
+///
+/// Builds for the class — the source is parsed by `parse_type_phrase`, so any
+/// "by a <creature type / creature / permanent>" qualifier is covered, and the
+/// subject covers both "a player" and "an opponent" recipients. The resulting
+/// `QuantityRef::DamageDealtThisTurn` carries `damage_kind: CombatOnly`
+/// (CR 120.2a) and resolves against `state.damage_dealt_this_turn`, matching
+/// the source's CR 608.2i look-back type snapshot recorded at damage time, so a
+/// later type change or the source leaving the battlefield still answers the
+/// rules-correct question.
+fn parse_player_dealt_combat_damage_by_source_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    // Recipient subject: "a player" (any player) or "an opponent".
+    let (rest, recipient) = alt((
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("an opponent"),
+        ),
+        value(TargetFilter::Player, tag("a player")),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" was dealt combat damage by ").parse(rest)?;
+    // CR 608.2i: the `by` source qualifier — "a Zombie", "a creature", etc.
+    let (source, after_source) = parse_type_phrase(rest);
+    if matches!(source, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag(" this turn").parse(after_source)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(source),
+                target: Box::new(recipient),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+                damage_kind: DamageKindFilter::CombatOnly,
+            },
+            1,
+        ),
+    ))
 }
 
 fn parse_source_dealt_damage_to_opponent_this_turn(
@@ -9732,6 +9786,73 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             } if source == Box::new(TargetFilter::Any)
                 && target == Box::new(TargetFilter::SelfRef)
+        ));
+    }
+
+    /// Issue #1347 — CR 603.4 + CR 120.2a + CR 608.2i: "a player was dealt
+    /// combat damage by a Zombie this turn" (Lost Monarch of Ifnir's
+    /// intervening-if) parses to a combat-only `DamageDealtThisTurn` keyed on a
+    /// Zombie source and any-player recipient.
+    #[test]
+    fn test_player_dealt_combat_damage_by_creature_type_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("a player was dealt combat damage by a Zombie this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DamageDealtThisTurn {
+                            source,
+                            target,
+                            aggregate: AggregateFunction::Sum,
+                            group_by: None,
+                            damage_kind: DamageKindFilter::CombatOnly,
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = c
+        else {
+            panic!("expected combat-only DamageDealtThisTurn GE 1, got {c:?}");
+        };
+        // CR 120.1: any-player recipient (Lost Monarch reads "a player").
+        assert_eq!(*target, TargetFilter::Player);
+        // CR 608.2i: the source qualifier carries the Zombie subtype.
+        let TargetFilter::Typed(tf) = source.as_ref() else {
+            panic!("expected typed source filter, got {source:?}");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Zombie".to_string())),
+            "source must be keyed on the Zombie subtype, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// Issue #1347 — class coverage: the same predicate with an "an opponent"
+    /// recipient and a bare-creature source ("by a creature") still parses,
+    /// proving the combinator is parameterized over subject and source rather
+    /// than special-cased to "a player … Zombie".
+    #[test]
+    fn test_opponent_dealt_combat_damage_by_creature_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("an opponent was dealt combat damage by a creature this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn {
+                        damage_kind: DamageKindFilter::CombatOnly,
+                        ..
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
         ));
     }
 
