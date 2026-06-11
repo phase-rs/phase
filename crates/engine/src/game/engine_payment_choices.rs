@@ -16,13 +16,13 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
 use super::casting;
+use super::costs::{self, PaymentOutcome};
 use super::effects;
 use super::engine::{
     handle_tap_land_for_mana, handle_untap_land_for_mana, resume_pending_continuation_if_priority,
     EngineError,
 };
 use super::engine_priority;
-use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
 use super::zones;
 
@@ -488,9 +488,26 @@ pub(super) fn handle_unless_payment(
     let mut post_action_event_start = None;
     if pay {
         match cost {
-            // CR 118.12: Pay the static mana component of the unless cost.
-            AbilityCost::Mana { cost: mana_cost } => {
-                casting::pay_unless_cost(state, player, &mana_cost, events)?;
+            // CR 118.12: Pay the static mana component of the unless cost
+            // through the single payment authority (cost-payment unification,
+            // Phase 3). Resolution scope auto-taps via `pay_effect_mana_cost`
+            // — the same final mana path the old `pay_unless_cost` shim used —
+            // and maps an unpayable cost to the "unless" branch fall-through.
+            AbilityCost::Mana { .. } => {
+                match costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &cost,
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } => payment_failed = true,
+                    // CR 616.1: an atomic Mana cost cannot surface a
+                    // replacement pause; the authority never returns `Paused`
+                    // for it. Treat any pause defensively as not-paid.
+                    PaymentOutcome::Paused { .. } => payment_failed = true,
+                }
             }
             // CR 118.4 + CR 107.3c: A dynamic generic cost should have been
             // resolved into a fixed `Mana { cost }` upstream (in the
@@ -500,57 +517,47 @@ pub(super) fn handle_unless_payment(
             AbilityCost::ManaDynamic { .. } => {
                 unreachable!("ManaDynamic should be resolved before payment");
             }
-            // CR 118.12 + CR 118.3 + CR 119.4 + CR 119.8: Unless-pay life
-            // routes through the single-authority helper. An unpayable cost
-            // (insufficient life, or CantLoseLife lock) causes the "unless"
-            // branch to fall through to the effect still happening.
-            AbilityCost::PayLife { amount } => {
-                // CR 107.3c: Resolve the `QuantityExpr` against game state so
-                // dynamic life amounts (e.g., "pay X life where X is your
-                // opponents' life total") read the chosen X at payment time.
-                let life_amount = crate::game::quantity::resolve_quantity_with_targets(
+            // CR 118.12 + CR 118.3 + CR 119.4: Unless-pay life routes through
+            // the single payment authority (cost-payment unification, Phase 3).
+            // The authority resolves the `QuantityExpr` against the payer-
+            // adjusted ability (dynamic life amounts read the chosen X /
+            // event-context object at payment time, CR 608.2k) and routes
+            // through `pay_life_as_cost`; an unpayable cost (insufficient life,
+            // or a CantLoseLife lock) makes the "unless" branch fall through to
+            // the effect still happening.
+            AbilityCost::PayLife { .. } => {
+                match costs::pay_ability_cost_for_resolution(
                     state,
-                    &amount,
+                    player,
+                    &cost,
                     pending_effect.as_ref(),
-                );
-                let life_amount = u32::try_from(life_amount.max(0)).unwrap_or(0);
-                match pay_life_as_cost(state, player, life_amount, events) {
-                    PayLifeCostResult::Paid { .. } => {}
-                    PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
                         payment_failed = true;
                     }
                 }
             }
-            // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]"
-            // — the player chose to pay; deduct the cost and skip the effect.
-            // CR 107.14: Paying {E} removes one energy counter from the
-            // paying player per `{E}` symbol in the cost. Energy counters
-            // are tracked on `Player.energy` (no zone), so the deduction is
-            // a direct counter-state mutation.
-            AbilityCost::PayEnergy { amount } => {
-                // CR 107.3c: Resolve the `QuantityExpr` against game state
-                // before the mutable borrow below so dynamic amounts (e.g.
-                // "an amount of {E} equal to its mana value") read the parent
-                // target at payment time.
-                let energy_amount = crate::game::quantity::resolve_quantity_with_targets(
+            // CR 118.12 + CR 118.12a + CR 107.14: "[Effect] unless [player]
+            // pays [cost]" — paying {E} removes one energy counter per `{E}`
+            // symbol. Routed through the single payment authority (cost-payment
+            // unification, Phase 3); the authority resolves the dynamic
+            // `QuantityExpr` against the payer-adjusted ability (CR 107.3c) and
+            // performs the energy deduction. Insufficient energy makes the
+            // "unless" branch fall through to the effect happening.
+            AbilityCost::PayEnergy { .. } => {
+                match costs::pay_ability_cost_for_resolution(
                     state,
-                    &amount,
+                    player,
+                    &cost,
                     pending_effect.as_ref(),
-                );
-                let energy_amount = u32::try_from(energy_amount.max(0)).unwrap_or(0);
-                let Some(player_state) = state.players.iter_mut().find(|p| p.id == player) else {
-                    return Err(EngineError::InvalidAction(
-                        "Unless payment player not found".to_string(),
-                    ));
-                };
-                if player_state.energy < energy_amount {
-                    payment_failed = true;
-                } else {
-                    player_state.energy -= energy_amount;
-                    events.push(GameEvent::EnergyChanged {
-                        player,
-                        delta: -(energy_amount as i32),
-                    });
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } | PaymentOutcome::Paused { .. } => {
+                        payment_failed = true;
+                    }
                 }
             }
             // CR 118.12a + CR 701.9 + CR 702.24a: Unless-discard. Resolve the
