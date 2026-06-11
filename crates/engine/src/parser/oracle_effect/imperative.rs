@@ -1715,6 +1715,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 granted_to: None,
                 resolution_cleanup: None,
                 duration: None,
+                exile_instead_of_graveyard_on_resolve: false,
             },
             target,
             grantee: Default::default(),
@@ -5683,6 +5684,42 @@ pub(super) fn parse_imperative_family_ast(
         "exile" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
         "counter" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
 
+        // CR 406.3 + CR 701.20a: "turn the exiled card(s) face up" — the Imprint "flip" cards
+        // (Clone Shell, Summoner's Egg, Compleated Clone Shell, The Creation of
+        // Avacyn). Distinct from the morph/disguise special action ("you may
+        // turn this face up"), which is an activated ability parsed elsewhere.
+        "turn" | "turns" if nom_primitives::scan_contains(lower, "face up") => {
+            // Match ONLY the complete "turn the exiled card(s) face up" clause
+            // (anchored, all-consuming). A trailing follow-up sentence — e.g.
+            // "... face up. If it's a creature card, put it onto the
+            // battlefield under your control." — must be left for the chain's
+            // sentence splitter, not swallowed: returning `None` on the
+            // combined text lets the splitter break it into separate clauses.
+            let matched = all_consuming(terminated(
+                preceded(
+                    alt((
+                        tag::<_, _, OracleError<'_>>("turn the exiled cards"),
+                        tag("turn the exiled card"),
+                        tag("turn that card"),
+                        tag("turns the exiled cards"),
+                        tag("turns the exiled card"),
+                        tag("turns that card"),
+                    )),
+                    tag(" face up"),
+                ),
+                opt(tag(".")),
+            ))
+            .parse(lower.trim())
+            .is_ok();
+            if matched {
+                Some(ImperativeFamilyAst::TurnFaceUp {
+                    target: TargetFilter::ExiledBySource,
+                })
+            } else {
+                None
+            }
+        }
+
         // Numeric verbs (CR 121)
         "draw" if nom_primitives::scan_contains(lower, "that many") => {
             // "draw that many cards" / "draw that many cards minus one" →
@@ -7129,6 +7166,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
         ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
+        // CR 406.3: Turn the exiled card(s) face up (Imprint flip cards).
+        ImperativeFamilyAst::TurnFaceUp { target } => Effect::TurnFaceUp { target },
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {

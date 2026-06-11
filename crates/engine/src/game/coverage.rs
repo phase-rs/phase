@@ -1739,6 +1739,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
         Effect::EpicCopy { .. } => {}
         Effect::Intensify { .. } => {}
+        Effect::TurnFaceUp { .. } => {}
         Effect::DestroyAll { target, .. }
         // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) reports a
         // population `filter`, like the other mass effects.

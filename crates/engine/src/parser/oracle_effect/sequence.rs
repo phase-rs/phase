@@ -3340,6 +3340,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
+        // CR 406.3: turning the exiled card face up is its own resolving effect,
+        // not a Dig-lookback-transparent clause.
+        Effect::TurnFaceUp { .. } => false,
         Effect::StartYourEngines { .. }
         | Effect::EpicCopy { .. }
         | Effect::ChangeSpeed { .. }
