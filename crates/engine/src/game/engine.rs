@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use thiserror::Error;
 
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
@@ -1737,7 +1739,10 @@ fn apply_action(
                     let front_snapshot = super::printed_cards::snapshot_object_face(obj);
                     super::printed_cards::apply_back_face_to_object(obj, back);
                     obj.back_face = Some(front_snapshot);
+                    // CR 712.8a: Mark MDFC back-face so apply_zone_exit_cleanup
+                    // reverts to front face on any zone exit to a non-battlefield zone.
                     // Do NOT set obj.transformed — MDFC face choice ≠ transform
+                    obj.modal_back_face = true;
                 } else {
                     // Front face chosen — clear layout_kind so the MDFC intercept
                     // won't re-fire on re-entry into handle_play_land / handle_cast_spell.
@@ -5193,8 +5198,10 @@ fn handle_play_land(
             let front_snapshot = super::printed_cards::snapshot_object_face(obj);
             super::printed_cards::apply_back_face_to_object(obj, back);
             obj.back_face = Some(front_snapshot);
-            // Do NOT set obj.transformed — MDFC face selection is not transformation.
-            // zones.rs:38-46 reverts transformed permanents on zone exit; MDFCs must not trigger this.
+            // CR 712.8a: Mark back-face so apply_zone_exit_cleanup reverts to front face
+            // when this land leaves the battlefield. Do NOT set obj.transformed — MDFC
+            // face selection is not transformation.
+            obj.modal_back_face = true;
         }
     }
 
@@ -5236,52 +5243,58 @@ fn handle_play_land(
 
     match super::replacement::replace_event(state, proposed, events) {
         super::replacement::ReplacementResult::Execute(event) => {
-            if let crate::types::proposed_event::ProposedEvent::ZoneChange {
-                object_id,
-                to,
-                enter_tapped,
-                enter_with_counters,
-                controller_override,
-                ..
-            } = event
+            if let crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } = event
             {
-                zones::move_to_zone(state, object_id, to, events);
-                mark_land_played_from_zone(state, object_id, origin_zone);
-                // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
-                // defaults. Override only when the replacement pipeline changed them.
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    if enter_tapped.resolve(false) {
-                        obj.tapped = true;
-                    }
-                    if let Some(new_controller) = controller_override {
-                        obj.controller = new_controller;
-                    }
-                }
-                // CR 614.1c: Apply counters from replacement pipeline.
-                if !engine_replacement::apply_etb_counters(
+                // Phase B (PLAN §6.2 / §7): the divergent partial copy of
+                // `deliver_replaced_zone_change` that used to live here is
+                // dissolved — the post-`replace_event` event is a
+                // `ReplacementResult::Execute` payload, sealed through the third
+                // mint path (`approve_post_replacement`) and delivered by the
+                // shared `zone_pipeline::deliver`. The land entry now gets the
+                // FULL delivery tail the copy skipped (CR 614.1c
+                // `EntersWithAdditionalCounters` statics snapshot, the CR 303.4f
+                // `attach_to` host, `entered_via_ability_source` provenance, the
+                // CR 701.24a library-shuffle arm). `drain = CallerEpilogue`: the
+                // land-play epilogue below owns the `post_replacement_continuation`
+                // drain (it clears `post_replacement_source` and runs the
+                // land-specific accounting), so the tail must not also drain it.
+                let Ok(approved) =
+                    crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(event)
+                else {
+                    unreachable!("`if let ZoneChange` guarantees a ZoneChange payload");
+                };
+                match crate::game::zone_pipeline::deliver(
                     state,
-                    object_id,
-                    &enter_with_counters,
+                    approved,
+                    crate::game::zone_pipeline::DeliveryCtx {
+                        source_id: None,
+                        exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
+                        drain: crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                    },
                     events,
                 ) {
-                    return Ok(state.waiting_for.clone());
-                }
-                // CR 614.1c: Apply pending ETB counters from delayed triggers
-                // (e.g., "that creature enters with an additional +1/+1 counter").
-                let pending: Vec<_> = state
-                    .pending_etb_counters
-                    .iter()
-                    .filter(|(oid, _, _)| *oid == object_id)
-                    .map(|(_, ct, n)| (ct.clone(), *n))
-                    .collect();
-                if !pending.is_empty() {
-                    if !engine_replacement::apply_etb_counters(state, object_id, &pending, events) {
+                    crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
+                    // CR 614.1c / CR 614.12a: the delivery tail parked a
+                    // counter-replacement prompt and stashed the remaining tail
+                    // (carrying `CallerEpilogue`). The land has already entered
+                    // the battlefield (the move precedes the counter pause in the
+                    // tail), so stamp the play origin now — matching the pre-token
+                    // arm, which stamped before the `apply_etb_counters`
+                    // early-return — then surface the parked prompt; the land
+                    // epilogue must not run yet.
+                    crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                        // CR 305.1 + CR 400.7i: stamp land-play provenance so
+                        // effects can find the permanent the played land became.
+                        mark_land_played_from_zone(state, object_id, origin_zone);
                         return Ok(state.waiting_for.clone());
                     }
-                    state
-                        .pending_etb_counters
-                        .retain(|(oid, _, _)| *oid != object_id);
                 }
+                // CR 305.1 + CR 400.7i: stamp land-play provenance ("where it
+                // was played from") so effects can find the permanent the
+                // played land became. Stamped fresh AFTER delivery (this site
+                // records a brand-new origin); the stamp then survives until
+                // battlefield EXIT (`reset_for_battlefield_exit`).
+                mark_land_played_from_zone(state, object_id, origin_zone);
             }
 
             // CR 614.12a: Drain post-replacement side effects (e.g., "As this land
@@ -6527,10 +6540,24 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         else {
             continue;
         };
-        match groups.iter_mut().find(|(zone, _)| *zone == *return_zone) {
-            Some((_, ids)) => ids.push(link.exiled_id),
-            None => groups.push((*return_zone, vec![link.exiled_id])),
+        let return_zone = *return_zone;
+        let gi = match groups.iter().position(|(zone, _)| *zone == return_zone) {
+            Some(i) => i,
+            None => {
+                groups.push((return_zone, Vec::new()));
+                groups.len() - 1
+            }
+        };
+        if !groups[gi].1.contains(&link.exiled_id) {
+            groups[gi].1.push(link.exiled_id);
         }
+        // CR 730.3c: if the source exiled a MERGED permanent, it split into
+        // multiple objects (CR 730.3). The implicit "return when the source
+        // leaves" must bring back ALL of them, not just the tracked survivor —
+        // the components are co-located in exile with the survivor and return to
+        // the same zone. (A no-op when the exiled card was not a merged permanent.)
+        let components = super::merge::co_split_components(state, link.exiled_id, &groups[gi].1);
+        groups[gi].1.extend(components);
     }
 
     // Links for cards that already left exile (not returned by us) are still spent
@@ -8059,6 +8086,85 @@ mod tests {
             "result.waiting_for={:?}, stack={:?}",
             result.waiting_for,
             state.stack
+        );
+    }
+
+    /// CR 614.1c discriminating test (fail-first): a land played through the
+    /// real `PlayLand` action must receive the `EntersWithAdditionalCounters`
+    /// static snapshot ("permanents you control enter with an additional +1/+1
+    /// counter" class) that an active permanent contributes. Before Phase B,
+    /// the land-play `Execute` arm was a divergent partial copy of
+    /// `deliver_replaced_zone_change`: it applied only the event's own
+    /// `enter_with_counters` and SKIPPED the statics snapshot, so a played land
+    /// silently missed the static's counter while every other battlefield entry
+    /// (creatures via the shared tail) received it. Routing the land entry
+    /// through `zone_pipeline::deliver` runs the full tail.
+    #[test]
+    fn played_land_receives_enters_with_additional_counters_static() {
+        use std::sync::Arc;
+
+        use crate::types::ability::{ControllerRef, FilterProp, StaticDefinition, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+
+        // CR 614.1c: a P0 permanent granting "other permanents you control enter
+        // with an additional +1/+1 counter" — must be functioning BEFORE the
+        // land enters.
+        let source = create_object(
+            &mut state,
+            CardId(7000),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            let def = StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ));
+            obj.static_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+
+        let land = create_object(
+            &mut state,
+            CardId(7001),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land,
+                card_id: CardId(7001),
+            },
+        )
+        .unwrap();
+
+        let obj = &state.objects[&land];
+        assert_eq!(obj.zone, Zone::Battlefield, "land entered the battlefield");
+        assert_eq!(
+            *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0),
+            1,
+            "played land must receive the EntersWithAdditionalCounters static \
+             (CR 614.1c) — the divergent land-play Execute arm dropped the \
+             statics snapshot the shared delivery tail applies"
         );
     }
 
@@ -12476,8 +12582,10 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))
                 .valid_card(TargetFilter::SelfRef)
@@ -14521,6 +14629,103 @@ mod exile_return_tests {
         );
     }
 
+    /// CR 730.3c: An "exile until this leaves" effect (Banisher Priest, Banishing
+    /// Light, Oblivion Ring) that exiles a MERGED Mutate permanent must, when it
+    /// leaves and its `UntilSourceLeaves` return fires, bring back ALL of the
+    /// component cards the merged permanent split into — not just the tracked
+    /// survivor. Regression test for the implicit-return path (companion to the
+    /// flicker/`ChangeZone` path covered in `merge_tests`).
+    #[test]
+    fn until_source_leaves_return_brings_back_all_merge_components() {
+        use crate::game::merge::{merge_object_onto, MergeSide};
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // The "O-Ring" source on P0's battlefield.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        // A merged Mutate permanent: host (survivor) + rider (absorbed component).
+        let host = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Host".to_string(),
+            Zone::Battlefield,
+        );
+        let rider = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Rider".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events: Vec<GameEvent> = Vec::new();
+        merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+        // Runtime invariant: the mutating spell resolved off the stack, so the
+        // absorbed component is not an independent member of the battlefield list.
+        state.battlefield.retain(|&id| id != rider);
+
+        // The source exiles the merged permanent; the survivor is the tracked,
+        // exile-linked object (the component is split out alongside it).
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+        assert_eq!(state.objects.get(&host).unwrap().zone, Zone::Exile);
+        assert_eq!(state.objects.get(&rider).unwrap().zone, Zone::Exile);
+        state.exile_links.push(ExileLink {
+            exiled_id: host,
+            source_id,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
+        });
+
+        // The source leaves the battlefield → the implicit return fires.
+        events.clear();
+        crate::game::zones::move_to_zone(&mut state, source_id, Zone::Graveyard, &mut events);
+        let default_wf = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        crate::game::engine_priority::run_post_action_pipeline(
+            &mut state,
+            &mut events,
+            &default_wf,
+            true,
+        )
+        .unwrap();
+
+        // CR 730.3c: BOTH the survivor and the component card return — as separate,
+        // non-merged objects — not just the survivor.
+        for id in [host, rider] {
+            assert!(
+                state.battlefield.contains(&id),
+                "component {id:?} must return to the battlefield (CR 730.3c); battlefield={:?}, exile={:?}",
+                state.battlefield,
+                state.exile,
+            );
+            let o = state.objects.get(&id).unwrap();
+            assert!(
+                o.merged_components.is_empty(),
+                "returns un-merged (CR 730.3)"
+            );
+            assert_eq!(
+                o.split_from_merge_survivor, None,
+                "the survivor back-link clears on battlefield entry"
+            );
+        }
+        assert!(!state.exile.contains(&host) && !state.exile.contains(&rider));
+    }
+
     /// CR 400.7 + CR 610.3a: End-to-end through full apply path — cast a
     /// Destroy spell targeting the source, resolve it, verify the exiled
     /// card returns. Regression test for the White Auracite user report.
@@ -15051,9 +15256,10 @@ mod phase_trigger_regression_tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
-        FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
-        ReplacementMode, ResolvedAbility, TargetFilter, TargetRef, TriggerConstraint,
-        TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+        EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange, TargetFilter,
+        TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::card::CardFace;
     use crate::types::card_type::CoreType;
@@ -17289,8 +17495,10 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
         );
 
         let mut pending_ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![],
             source_id,

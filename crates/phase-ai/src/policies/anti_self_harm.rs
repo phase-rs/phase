@@ -5,7 +5,8 @@ use engine::game::quantity::resolve_quantity;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 use engine::types::ability::{
-    AbilityCost, Effect, QuantityExpr, ReplacementMode, TargetFilter, TargetRef,
+    AbilityCost, Effect, EffectScope, QuantityExpr, ReplacementMode, TapStateChange, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -474,7 +475,16 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
 
     if beneficial
         && effects.iter().any(|effect| {
-            matches!(effect, Effect::Untap { .. }) && effect_targets_object(ctx, effect, object_id)
+            // CR 701.26b: only single-target untap (legacy `Effect::Untap`)
+            // factors here; the mass scope was never matched.
+            matches!(
+                effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            ) && effect_targets_object(ctx, effect, object_id)
         })
     {
         if object.tapped {
@@ -2254,8 +2264,10 @@ mod tests {
             PlayerId(0),
         );
         rewind.sub_ability = Some(Box::new(ResolvedAbility::new(
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
             Vec::new(),
             rewind_id,

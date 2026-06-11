@@ -230,10 +230,12 @@ describe("MyDecks", () => {
 
     expect(await screen.findByText("PDH Ready")).toBeInTheDocument();
     expect(screen.getByText("Not PDH")).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Format" }));
     expect(screen.getByRole("option", { name: "Pauper Commander" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "BO3" })).not.toBeInTheDocument();
-
-    await userEvent.selectOptions(screen.getByLabelText("Format"), "PauperCommander");
+    await user.click(screen.getByRole("option", { name: "Pauper Commander" }));
 
     expect(await screen.findByText("Not PDH")).toBeInTheDocument();
     expect(screen.getByText("PDH Ready")).toBeInTheDocument();
@@ -272,7 +274,9 @@ describe("MyDecks", () => {
       />,
     );
 
-    await userEvent.selectOptions(screen.getByLabelText("Format"), "Standard");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Format" }));
+    await user.click(screen.getByRole("option", { name: "Standard" }));
 
     expect(await screen.findByText("Known Standard")).toBeInTheDocument();
     expect(screen.getByText("Unknown User Deck")).toBeInTheDocument();

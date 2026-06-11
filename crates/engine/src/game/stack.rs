@@ -17,7 +17,6 @@ use super::ability_utils::{flatten_targets_in_chain, validate_targets_in_chain};
 use super::effects;
 use super::targeting;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
-use super::zones;
 
 /// CR 405.1: Add an object to the stack.
 pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
@@ -699,33 +698,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .get(&entry.id)
                 .map(|obj| obj.convoked_creatures.clone())
                 .unwrap_or_default();
-            // CR 702.33d + CR 400.7 + CR 400.7d: Capture the authoritative kicker
-            // payments BEFORE `move_to_zone` clears `kickers_paid` on the new
-            // battlefield object (CR 400.7 new-object rule, applied by
-            // `reset_for_battlefield_entry`). The resolving spell's `SpellContext`
-            // is authoritative when present; placeholder permanent spells (vanilla
-            // / ETB-only creatures with no on-resolve Spell ability) have
-            // `ability == None`, so fall back to the stack object's stamped value.
-            let kickers_paid: Vec<crate::types::ability::KickerVariant> = ability
-                .as_ref()
-                .map(|a| a.context.kickers_paid.clone())
-                .unwrap_or_else(|| {
-                    state
-                        .objects
-                        .get(&entry.id)
-                        .map(|o| o.kickers_paid.clone())
-                        .unwrap_or_default()
-                });
-            let additional_cost_payment_count = ability
-                .as_ref()
-                .map(|a| a.context.additional_cost_payment_count)
-                .unwrap_or_else(|| {
-                    state
-                        .objects
-                        .get(&entry.id)
-                        .map(|o| o.additional_cost_payment_count)
-                        .unwrap_or_default()
-                });
+            // CR 702.33d + CR 400.7d + CR 603.4: Normalize the authoritative
+            // cast-link provenance onto the stack object BEFORE `replace_event`,
+            // so the pipeline's `CastLinkSnapshot` (captured inside
+            // `deliver_replaced_zone_change` just before `reset_for_battlefield_entry`
+            // clears it per CR 400.7) sees the correct kicker / additional-cost /
+            // cast-from-zone values and restores them onto the resulting permanent.
+            // The resolving spell's `SpellContext` is authoritative when present;
+            // placeholder permanent spells (vanilla / ETB-only creatures with no
+            // on-resolve Spell ability) have `ability == None`, so the stack
+            // object's already-stamped value is left untouched.
+            if let Some(ability) = ability.as_ref() {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.kickers_paid = ability.context.kickers_paid.clone();
+                    obj.additional_cost_payment_count =
+                        ability.context.additional_cost_payment_count;
+                    if let Some(cast_from_zone) = ability.context.cast_from_zone {
+                        obj.cast_from_zone = Some(cast_from_zone);
+                    }
+                }
+            }
             let cast_timing_permission = state
                 .objects
                 .get(&entry.id)
@@ -736,13 +728,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         object_id,
                         to,
-                        enter_tapped,
-                        enter_with_counters,
-                        controller_override,
-                        enter_transformed,
                         ..
-                    } = event
+                    } = &event
                     {
+                        let object_id = *object_id;
+                        let to = *to;
                         // CR 608.3 + 608.2c: Stack-residency guard — see
                         // `spell_still_on_stack`. If `execute_effect` already
                         // moved the spell off the stack via a self-targeted
@@ -754,36 +744,52 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         // counter / transform state to a non-battlefield
                         // zone is meaningless and would corrupt the object.
                         if spell_still_on_stack(state, object_id) {
-                            zones::move_to_zone(state, object_id, to, events);
-                            if let Some(obj) = state.objects.get_mut(&object_id) {
-                                if enter_tapped.resolve(false) {
-                                    obj.tapped = true;
-                                }
-                                if let Some(new_controller) = controller_override {
-                                    obj.controller = new_controller;
-                                }
-                            }
-                            // CR 614.1c: Apply counters from replacement pipeline
-                            // (e.g., saga lore counters per CR 714.3a, planeswalker
-                            // intrinsic loyalty per CR 306.5b, battle intrinsic
-                            // defense per CR 310.4b).
-                            if !super::engine_replacement::apply_etb_counters(
+                            // CR 608.3 + CR 614.1c: The ETB replacement consult
+                            // already ran above (`replace_event`); seal the
+                            // post-replacement `ZoneChange` with the third mint
+                            // path so the shared `zone_pipeline::deliver` tail
+                            // applies the entry (move + enter-tapped /
+                            // controller-override / enter-with-counters /
+                            // enter-transformed / face-down / devour /
+                            // EntersWithAdditionalCounters statics / pending ETB
+                            // counters), restoring the CR 400.7d cast-link family
+                            // via `CastLinkSnapshot` from the values normalized
+                            // onto the stack object above. `CallerEpilogue` keeps
+                            // the CR 614.12a `post_replacement_continuation` drain
+                            // owned by the caller epilogue below (mirrors the
+                            // replacement-choice resume path), so the Siege /
+                            // Tribute prompt is not double-drained.
+                            let Ok(approved) =
+                                zone_pipeline::ApprovedZoneChange::approve_post_replacement(event)
+                            else {
+                                unreachable!("matched ProposedEvent::ZoneChange above");
+                            };
+                            match zone_pipeline::deliver(
                                 state,
-                                object_id,
-                                &enter_with_counters,
+                                approved,
+                                zone_pipeline::DeliveryCtx {
+                                    source_id: None,
+                                    exile_links: zone_pipeline::ExileLinkSpec::default(),
+                                    drain:
+                                        crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                                },
                                 events,
                             ) {
-                                return;
-                            }
-                            // CR 712.14a + CR 310.11b: Apply transformation if entering
-                            // transformed (propagated from ExileWithAltCost permission).
-                            if enter_transformed && to == Zone::Battlefield {
-                                if let Some(obj) = state.objects.get(&object_id) {
-                                    if obj.back_face.is_some() && !obj.transformed {
-                                        let _ = super::transform::transform_permanent(
-                                            state, object_id, events,
-                                        );
-                                    }
+                                zone_pipeline::ZoneDeliveryResult::Done => {}
+                                // CR 614.1c / CR 616.1: the delivery tail parked a
+                                // counter-replacement pause and stashed the
+                                // remaining tail; surface it without running the
+                                // caller epilogue (the parked tail carries
+                                // `CallerEpilogue` and the resume path owns it).
+                                zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                                    events.push(GameEvent::StackResolved {
+                                        object_id: entry.id,
+                                    });
+                                    state.current_trigger_event = None;
+                                    state.current_trigger_events.clear();
+                                    state.current_trigger_match_count = None;
+                                    state.die_result_this_resolution = None;
+                                    return;
                                 }
                             }
                             // CR 702.146b / CR 702.162a + CR 712.11a + CR
@@ -791,7 +797,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             // stack with its back face up. A resolving DFC
                             // spell becomes a permanent with the same face up;
                             // mark the battlefield object transformed without
-                            // swapping faces again.
+                            // swapping faces again. Casting-variant-specific, so
+                            // it stays caller-side (the pipeline tail only knows
+                            // the generic `enter_transformed` face-swap).
                             if matches!(
                                 casting_variant,
                                 CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
@@ -809,53 +817,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     events.push(GameEvent::Transformed { object_id });
                                 }
                             }
-                            // CR 614.1c: Apply pending ETB counters from delayed triggers
-                            // (e.g., "that creature enters with an additional +1/+1 counter").
-                            let pending: Vec<_> = state
-                                .pending_etb_counters
-                                .iter()
-                                .filter(|(oid, _, _)| *oid == object_id)
-                                .map(|(_, ct, n)| (ct.clone(), *n))
-                                .collect();
-                            if !pending.is_empty() {
-                                if !super::engine_replacement::apply_etb_counters(
-                                    state, object_id, &pending, events,
-                                ) {
-                                    return;
-                                }
-                                state
-                                    .pending_etb_counters
-                                    .retain(|(oid, _, _)| *oid != object_id);
-                            }
                         }
                     }
-                    // CR 603.4: Propagate cast_from_zone to the permanent so ETB triggers
-                    // can evaluate conditions like "if you cast it from your hand".
-                    // When ability is present, use its context; otherwise the object
-                    // already has cast_from_zone set during finalize_cast_to_stack.
+                    // CR 400.7d + CR 603.4: The cast-link family (cast_from_zone,
+                    // cast_timing_permission, convoked_creatures, kickers_paid,
+                    // additional_cost_payment_count) is now restored structurally
+                    // inside `zone_pipeline::deliver` via `CastLinkSnapshot`,
+                    // captured from the values normalized onto the stack object
+                    // before `replace_event`. Only the exile-link push and the
+                    // CR 709.5c room-door unlock remain caller-side here.
                     if spell_in_zone(state, entry.id, Zone::Battlefield) {
-                        if let Some(obj) = state.objects.get_mut(&entry.id) {
-                            if let Some(ref ability) = ability {
-                                obj.cast_from_zone = ability.context.cast_from_zone;
-                            }
-                            if let Some(permission) = cast_timing_permission {
-                                obj.cast_timing_permission = Some((permission, state.turn_number));
-                            }
-                            obj.convoked_creatures = convoked_creatures;
-                            // CR 702.33d + CR 400.7d: Restore kicker payments onto the
-                            // resulting permanent so post-resolution gates
-                            // (`ReplacementCondition::CastViaKicker` and ETB
-                            // `AbilityCondition::AdditionalCostPaid` on triggered
-                            // abilities) can evaluate. `move_to_zone` cleared
-                            // `kickers_paid` per CR 400.7 (new object on zone change);
-                            // CR 400.7d permits an ability of the permanent to
-                            // reference costs paid to cast the spell it became. This
-                            // restore is unconditional — mirroring `convoked_creatures`
-                            // — because placeholder permanent spells have
-                            // `ability == None` and would otherwise lose the data.
-                            obj.kickers_paid = kickers_paid;
-                            obj.additional_cost_payment_count = additional_cost_payment_count;
-                        }
                         if let Some(exiled_id) = ability
                             .as_ref()
                             .and_then(|ability| ability.cost_paid_object.as_ref())
@@ -2138,7 +2109,7 @@ pub(crate) fn create_warp_delayed_trigger(
 mod tests {
     use super::*;
     use crate::game::game_object::BackFaceData;
-    use crate::game::zones::create_object;
+    use crate::game::zones::{self, create_object};
     use crate::types::ability::{
         CostPaidObjectSnapshot, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
         TypedFilter,
@@ -2343,6 +2314,79 @@ mod tests {
                 .get(&CounterType::Defense)
                 .copied(),
             Some(4)
+        );
+    }
+
+    /// CR 400.7d + CR 603.4 discriminating pin for the bucket-A migration of the
+    /// spell-resolution permanent entry onto `zone_pipeline::deliver`. A kicked
+    /// permanent spell with `ability == None` (placeholder permanent spell —
+    /// vanilla / ETB-only creature with no on-resolve Spell ability) resolves
+    /// the NON-paused Execute arm: the cast link normalized onto the stack
+    /// object before `replace_event` must survive `reset_for_battlefield_entry`
+    /// (CR 400.7) and land on the resulting permanent, because the migrated path
+    /// no longer has the bespoke post-move restore epilogue — it relies entirely
+    /// on `CastLinkSnapshot` inside `deliver`. The resume-path pin
+    /// (`zone_change_replacement_choice_preserves_cast_link_for_resolving_spell`,
+    /// engine_replacement.rs) covers the PAUSED path; this covers the direct
+    /// `resolve_top` Execute path the resume pin does not drive.
+    #[test]
+    fn resolving_permanent_spell_preserves_cast_link_without_ability() {
+        use crate::types::ability::{CastTimingPermission, KickerVariant};
+
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(623),
+            PlayerId(0),
+            "Kicked Vanilla Bear".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // `finalize_cast_to_stack` stamps the cast link onto the stack
+            // object; mirror that establishment for a placeholder permanent
+            // spell (no `SpellContext` ability), so the Execute arm's
+            // pre-`replace_event` normalization leaves the object value intact
+            // and the `CastLinkSnapshot` captures it.
+            obj.kickers_paid = vec![KickerVariant::First];
+            obj.additional_cost_payment_count = 1;
+            obj.convoked_creatures = vec![ObjectId(900)];
+            obj.cast_timing_permission =
+                Some((CastTimingPermission::AsThoughHadFlash, state.turn_number));
+        }
+
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(623),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        let obj = &state.objects[&spell_id];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(
+            obj.kickers_paid,
+            vec![KickerVariant::First],
+            "CR 400.7d: the resolved permanent must keep the kicker payments of \
+             the spell that became it — the entry reset cleared them and the \
+             migrated Execute arm restores them only via CastLinkSnapshot"
+        );
+        assert_eq!(obj.additional_cost_payment_count, 1);
+        assert_eq!(obj.convoked_creatures, vec![ObjectId(900)]);
+        assert_eq!(
+            obj.cast_timing_permission,
+            Some((CastTimingPermission::AsThoughHadFlash, state.turn_number)),
+            "CR 603.4: cast-timing permission is re-stamped with the resolution \
+             turn so same-turn trigger gates compare equal"
         );
     }
 

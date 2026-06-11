@@ -1,6 +1,6 @@
 use crate::cast_facts::collect_definition_effects;
 use crate::features::DeckFeatures;
-use engine::types::ability::{Effect, PtValue};
+use engine::types::ability::{Effect, EffectScope, PtValue, TapStateChange};
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -127,7 +127,16 @@ fn score_effect(effect: &Effect, opponent_creature_value: f64) -> f64 {
         Effect::Draw { .. } => 0.18,
         Effect::Token { .. } => 0.16,
         Effect::SearchLibrary { .. } => 0.12,
-        Effect::Tap { .. } | Effect::Goad { .. } | Effect::Suspect { .. } => {
+        // CR 701.26a: tapping a single permanent (legacy `Effect::Tap`) is the
+        // only tap-family ETB worth a value here — untap and the mass scopes
+        // fall through to `0.0`, matching their legacy absence from this match.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+            ..
+        }
+        | Effect::Goad { .. }
+        | Effect::Suspect { .. } => {
             if opponent_creature_value > 0.0 {
                 0.12
             } else {

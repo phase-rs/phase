@@ -1914,7 +1914,7 @@ pub(super) fn push_activated_ability_to_stack(
             &mut resolved,
             cost,
         );
-        if let super::casting::AbilityCostPaymentOutcome::Paused { remaining_cost } =
+        if let super::casting::PaymentOutcome::Paused { remaining_cost } =
             super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
         {
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);

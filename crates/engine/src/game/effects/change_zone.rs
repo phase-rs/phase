@@ -5,6 +5,8 @@ use crate::types::ability::{
     ControllerRef, Duration, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
     TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypedFilter,
 };
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterPostAction, WaitingFor};
@@ -240,6 +242,16 @@ pub fn resolve(
     let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
     let targeted_objects =
         crate::game::effects::effect_object_targets(target_filter, &effective_targets);
+    // CR 730.3c: when this effect references the object that just left the
+    // battlefield (a flicker/blink's "return it") and that object was a merged
+    // permanent's survivor, act on the component cards it split into as well, so
+    // the whole pile is moved — not just the survivor. A no-op for ordinary
+    // (freshly chosen) targets.
+    let targeted_objects = crate::game::merge::expand_returned_merge_components(
+        state,
+        targeted_objects,
+        target_filter,
+    );
 
     if targeted_objects.is_empty() {
         // CR 115.6: "Up to one target" — if the player chose zero targets during
@@ -4169,8 +4181,10 @@ mod tests {
         trigger.condition = Some(TriggerCondition::ZoneChangeObjectIsTapped);
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::TriggeringSource,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
         )));
         trigger
@@ -4408,8 +4422,10 @@ mod tests {
             });
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Untap {
+                Effect::SetTapState {
                     target: TargetFilter::TriggeringSource,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
                 },
             )));
             let obj = state.objects.get_mut(&conqueror).unwrap();
@@ -5571,8 +5587,10 @@ mod tests {
                     },
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
-                        Effect::Tap {
+                        Effect::SetTapState {
                             target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
                         },
                     ))),
                 })
@@ -5765,8 +5783,10 @@ mod tests {
                 },
                 decline: Some(Box::new(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))),
             })
@@ -5940,8 +5960,10 @@ mod tests {
                     },
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
-                        Effect::Tap {
+                        Effect::SetTapState {
                             target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
                         },
                     ))),
                 })
@@ -5972,8 +5994,10 @@ mod tests {
                     },
                     decline: Some(Box::new(AbilityDefinition::new(
                         AbilityKind::Spell,
-                        Effect::Tap {
+                        Effect::SetTapState {
                             target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
                         },
                     ))),
                 })
@@ -6329,6 +6353,77 @@ mod tests {
             obj.loyalty,
             Some(3),
             "layer-derived loyalty must equal the seeded loyalty counters"
+        );
+    }
+
+    /// CR 110.2a: A permanent whose own self-replacement says it "enters under
+    /// the control of an opponent of your choice" enters the battlefield under
+    /// the opponent's control — not its owner's. Drives the real ChangeZone
+    /// pipeline: the entering object carries the `Moved` / `enters_under =
+    /// Opponent` replacement that `oracle_replacement` emits for Xantcha,
+    /// Sleeper Agent et al., and the replacement step stamps the ZoneChange's
+    /// controller_override before the entry completes (before ETB triggers).
+    #[test]
+    fn self_enters_under_opponent_replacement_routes_control_to_opponent() {
+        use crate::types::ability::{ControllerRef, ReplacementDefinition};
+        use crate::types::card_type::CoreType;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(7);
+
+        // Xantcha-style creature in player 0's hand, carrying the self-ETB
+        // controller-override replacement on itself.
+        let obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Xantcha, Sleeper Agent".to_string(),
+            Zone::Hand,
+        );
+        {
+            let o = state.objects.get_mut(&obj).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .enters_under(ControllerRef::Opponent),
+            );
+        }
+
+        // Enter the battlefield with NO imperative controller override (default
+        // would be the owner's control, player 0). The self-replacement must
+        // flip control to the opponent, player 1.
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(obj)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&obj].zone,
+            Zone::Battlefield,
+            "permanent entered the battlefield"
+        );
+        assert_eq!(
+            state.objects[&obj].controller,
+            PlayerId(1),
+            "CR 110.2a: enters under the opponent's control, not its owner's"
         );
     }
 }

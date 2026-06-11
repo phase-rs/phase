@@ -413,6 +413,18 @@ pub(crate) fn parse_quantity_ref_with_context(
                 });
             }
         }
+        // CR 608.2c + CR 400.7: "the number of [filter] destroyed/sacrificed
+        // this way" — count from the tracked set populated by the preceding
+        // destroy/sacrifice in the sub_ability chain. Must run BEFORE
+        // `parse_type_phrase`, which would consume "creatures you controlled"
+        // and leave an unresolved "that were destroyed this way" tail.
+        // Class: Kaya's Wrath (issue #2943), Ceaseless Conflict, and any
+        // "equal to the number of … destroyed this way" lifegain phrasing.
+        if let Some(qty) =
+            parse_destroyed_or_sacrificed_this_way_quantity(&rest.to_ascii_lowercase())
+        {
+            return Some(qty);
+        }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
         // including the empty-shaped form (no `type_filters`, no `controller`, no
@@ -1743,7 +1755,7 @@ fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFi
 ///
 /// Uses `terminated(take_until(suffix), tag(suffix))` to split at each
 /// recognized suffix, then delegates the prefix to `parse_type_phrase`.
-fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
+fn parse_destroyed_or_sacrificed_this_way_filter(lower: &str) -> Option<Option<TargetFilter>> {
     // Each suffix is tried in order; the first complete match wins.
     // Longer/more-specific suffixes must come before shorter ones so
     // "that was destroyed this way" is preferred over "destroyed this way".
@@ -1751,9 +1763,11 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
         " that was destroyed this way",
         " that were destroyed this way",
         " destroyed this way",
+        "destroyed this way",
         " that was sacrificed this way",
         " that were sacrificed this way",
         " sacrificed this way",
+        "sacrificed this way",
     ];
     for &suffix in suffixes {
         // terminated(take_until(suffix), tag(suffix)) parses the noun-phrase
@@ -1763,17 +1777,37 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
         if let Ok(("", filter_phrase)) = result {
             let (filter, remainder) =
                 crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
-            if remainder.trim().is_empty() && filter_is_nontrivial_for_tracked_set(&filter) {
-                return Some(QuantityRef::FilteredTrackedSetSize {
-                    filter: Box::new(filter),
-                });
+            if remainder.trim().is_empty() {
+                return Some(Some(filter));
             }
             // A suffix matched but the filter is trivial or the phrase
             // didn't fully consume — fall through to TrackedSetSize.
-            return None;
+            return Some(None);
         }
     }
     None
+}
+
+fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
+    match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
+        Some(filter) if filter_is_nontrivial_for_tracked_set(&filter) => {
+            Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(filter),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_destroyed_or_sacrificed_this_way_quantity(lower: &str) -> Option<QuantityRef> {
+    match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
+        Some(filter) if filter_is_nontrivial_for_tracked_set(&filter) => {
+            Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(filter),
+            })
+        }
+        _ => Some(QuantityRef::TrackedSetSize),
+    }
 }
 
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
@@ -5347,6 +5381,55 @@ mod tests {
             },
         };
         assert_eq!(qty, expected);
+    }
+
+    /// CR 608.2c + CR 400.7: "the number of creatures you controlled that were
+    /// destroyed this way" (Kaya's Wrath, issue #2943) must lower to
+    /// `FilteredTrackedSetSize`, not `Effect::Unimplemented`. The for-each
+    /// path already handled this shape; the `parse_quantity_ref` "the number
+    /// of …" path must mirror it before `parse_type_phrase` strips the tail.
+    #[test]
+    fn parse_quantity_ref_creatures_you_controlled_destroyed_this_way() {
+        let qty = parse_quantity_ref(
+            "the number of creatures you controlled that were destroyed this way",
+        )
+        .expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => match *filter {
+                TargetFilter::Typed(ref tf) => {
+                    assert!(
+                        tf.type_filters.contains(&TypeFilter::Creature),
+                        "filter must require Creature"
+                    );
+                    assert!(
+                        tf.controller
+                            .as_ref()
+                            .is_some_and(|c| matches!(c, ControllerRef::You)),
+                        "filter must require controller=You"
+                    );
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// Type-qualified "the number of … destroyed this way" via
+    /// `parse_quantity_ref` emits `FilteredTrackedSetSize` when the type
+    /// phrase restricts the tracked set.
+    #[test]
+    fn parse_quantity_ref_permanents_destroyed_this_way_uses_filtered_tracked_set() {
+        let qty =
+            parse_quantity_ref("the number of permanents destroyed this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => {
+                assert!(
+                    matches!(filter.as_ref(), TargetFilter::Typed(_)),
+                    "expected typed permanent filter, got {filter:?}"
+                );
+            }
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
     }
 
     /// Same composite shape with "you controlled" — verifies the controller

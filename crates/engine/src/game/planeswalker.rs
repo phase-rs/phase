@@ -318,8 +318,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, QuantityExpr,
-        TargetFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, EffectScope,
+        QuantityExpr, TapStateChange, TargetFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::CastingVariant;
@@ -641,8 +641,10 @@ mod tests {
             4,
             vec![make_loyalty_ability(
                 -2,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::Typed(TypedFilter::creature()),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             )],
         );

@@ -1,11 +1,10 @@
+use crate::game::costs::{self, PaymentOutcome};
 use crate::game::life_costs::{can_pay_life_cost, pay_life_as_cost, PayLifeCostResult};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{effective_speed, set_speed};
 use crate::game::targeting::resolve_effect_player_ref;
 use crate::game::{casting, casting_costs};
-use crate::types::ability::{
-    AbilityCost, Effect, EffectKind, PaymentCost, QuantityExpr, QuantityRef,
-};
+use crate::types::ability::{AbilityCost, Effect, PaymentCost, QuantityExpr, QuantityRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PayableResource, WaitingFor};
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -210,6 +209,13 @@ fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
     }
 }
 
+/// CR 118.12: Pay a resolution-time `AbilityCost` via the single payment
+/// authority (`game::costs`). This adapter pre-gates affordability (CR 601.2h:
+/// "partial payments are not allowed") and maps the authority's outcome to the
+/// resolution-scope failure channel (`cost_payment_failed_flag`). The duplicate
+/// Mana/ManaDynamic/PayLife/PayEnergy/Composite/Discard payment arms that used
+/// to live here were folded into `costs::pay_ability_cost_for_resolution`
+/// (cost-payment unification, Phase 2).
 fn resolve_ability_cost_payment(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -217,143 +223,28 @@ fn resolve_ability_cost_payment(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    match cost {
-        AbilityCost::Mana { cost: mana_cost } => {
-            if !casting::can_pay_effect_mana_cost_after_auto_tap(
-                state,
-                payer,
-                ability.source_id,
-                mana_cost,
-            ) {
-                state.cost_payment_failed_flag = true;
-                return Ok(());
-            }
-            if casting::pay_effect_mana_cost(state, payer, ability.source_id, mana_cost, events)
-                .is_err()
-            {
-                state.cost_payment_failed_flag = true;
-            }
+    // CR 601.2h: pre-gate the whole cost so a `Composite` never commits a
+    // sub-cost before discovering a later sub-cost is unpayable. The
+    // authority's `Failed` is the secondary guard for any drift between
+    // affordability and payment.
+    if !can_pay_resolution_ability_cost(state, ability, payer, cost) {
+        state.cost_payment_failed_flag = true;
+        return Ok(());
+    }
+    match costs::pay_ability_cost_for_resolution(state, payer, cost, ability, events) {
+        Ok(PaymentOutcome::Paid) => {}
+        // CR 616.1: a replacement-effect choice — or an interactive
+        // `DiscardChoice` — interrupted payment. `state.waiting_for` is already
+        // set by the authority; the resolution chain resumes from there.
+        Ok(PaymentOutcome::Paused { .. }) => {}
+        Ok(PaymentOutcome::Failed { .. }) => {
+            state.cost_payment_failed_flag = true;
         }
-        AbilityCost::ManaDynamic { quantity } => {
-            let amount = resolve_quantity_with_targets(state, quantity, ability);
-            let mana_cost = ManaCost::generic(amount.max(0) as u32);
-            if !casting::can_pay_effect_mana_cost_after_auto_tap(
-                state,
-                payer,
-                ability.source_id,
-                &mana_cost,
-            ) {
-                state.cost_payment_failed_flag = true;
-                return Ok(());
-            }
-            if casting::pay_effect_mana_cost(state, payer, ability.source_id, &mana_cost, events)
-                .is_err()
-            {
-                state.cost_payment_failed_flag = true;
-            }
-        }
-        AbilityCost::PayLife { amount } => {
-            let amount = resolve_quantity_with_targets(state, amount, ability);
-            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
-            match pay_life_as_cost(state, payer, amount, events) {
-                PayLifeCostResult::Paid { .. } => {}
-                PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
-                    state.cost_payment_failed_flag = true;
-                }
-            }
-        }
-        // CR 107.14: Remove the indicated number of energy counters from `payer`.
-        // Mirrors the pattern in `PaymentCost::Energy` above.
-        AbilityCost::PayEnergy { amount } => {
-            // CR 107.3c: Resolve the `QuantityExpr` before any mutable borrow of
-            // `state` (the `iter_mut()` below). Dynamic amounts (e.g. "an amount
-            // of {E} equal to its mana value") read the parent target here.
-            let amount =
-                u32::try_from(resolve_quantity_with_targets(state, amount, ability).max(0))
-                    .unwrap_or(0);
-            let can_pay = state
-                .players
-                .iter()
-                .find(|p| p.id == payer)
-                .is_some_and(|p| p.energy >= amount);
-            if can_pay {
-                if let Some(p) = state.players.iter_mut().find(|p| p.id == payer) {
-                    p.energy -= amount;
-                    events.push(GameEvent::EnergyChanged {
-                        player: payer,
-                        delta: -(amount as i32),
-                    });
-                }
-            } else {
-                state.cost_payment_failed_flag = true;
-            }
-        }
-        AbilityCost::Composite { costs } => {
-            if !costs
-                .iter()
-                .all(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost))
-            {
-                state.cost_payment_failed_flag = true;
-                return Ok(());
-            }
-            for cost in costs {
-                let prior_waiting_for = state.waiting_for.clone();
-                resolve_ability_cost_payment(state, ability, payer, cost, events)?;
-                if state.cost_payment_failed_flag || state.waiting_for != prior_waiting_for {
-                    break;
-                }
-            }
-        }
-        AbilityCost::Discard {
-            count,
-            filter,
-            selection: crate::types::ability::CardSelectionMode::Chosen,
-            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-        } => {
-            let count = resolve_quantity_with_targets(state, count, ability).max(0) as usize;
-            let eligible = casting::find_eligible_discard_targets(
-                state,
-                payer,
-                ability.source_id,
-                filter.as_ref(),
-            );
-            if eligible.len() < count {
-                state.cost_payment_failed_flag = true;
-                return Ok(());
-            }
-            if count == 0 {
-                state.last_effect_count = Some(0);
-                return Ok(());
-            }
-            if eligible.len() == count {
-                for card_id in eligible {
-                    if let super::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-                        super::discard::discard_as_cost(state, card_id, payer, events)
-                    {
-                        state.waiting_for =
-                            crate::game::replacement::replacement_choice_waiting_for(
-                                choice_player,
-                                state,
-                            );
-                        return Ok(());
-                    }
-                }
-                state.last_effect_count = Some(count as i32);
-            } else {
-                state.waiting_for = WaitingFor::DiscardChoice {
-                    player: payer,
-                    count,
-                    cards: eligible,
-                    source_id: ability.source_id,
-                    effect_kind: EffectKind::PayCost,
-                    up_to: false,
-                    unless_filter: None,
-                };
-            }
-        }
-        unsupported => {
+        // An engine invariant violation (e.g. missing source object) surfaces
+        // as an effect error rather than a silent payment failure.
+        Err(e) => {
             return Err(EffectError::InvalidParam(format!(
-                "unsupported resolution-time AbilityCost payment: {unsupported:?}"
+                "resolution-time cost payment failed: {e:?}"
             )));
         }
     }
@@ -443,9 +334,11 @@ fn can_pay_resolution_ability_cost(
             .iter()
             .any(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost)),
         // Variants below are not yet supported as resolution-time costs.
-        // The matching arms in `resolve_ability_cost_payment` return
-        // `EffectError::InvalidParam`; refusing here is the conservative
-        // affordability answer (treat as "can't pay" → effect proceeds).
+        // Refusing here is the conservative affordability answer (treat as
+        // "can't pay" → `cost_payment_failed_flag` → the effect's didn't-pay
+        // branch, per CR 118.12). The authority's Resolution-scope guard on
+        // its interactive pass-through arm backs this up: a shape that slips
+        // past this pre-gate returns `Failed`, never a silent `Paid`.
         //
         // CR 702.24a: `PerCounter` is expanded into a concrete cost at the
         // unless-payment entry point (Task 6 wires resolution); the resolved
@@ -734,6 +627,56 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.cost_payment_failed_flag);
         assert_eq!(state.players[0].life, 2); // No change
+    }
+
+    /// CR 118.12: A resolution-time `PayCost { AbilityCost::PayLife }` routes
+    /// through `costs::pay_ability_cost_for_resolution` (the unified authority,
+    /// Phase 2) rather than the deleted in-arm duplicate. The visible behavior
+    /// — life deducted, `LifeChanged` event, no failure flag — must be
+    /// identical to the pre-Phase-2 implementation.
+    #[test]
+    fn resolution_ability_pay_life_routes_through_authority() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].life, 16);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::LifeChanged { player_id, amount }
+                if *player_id == PlayerId(0) && *amount == -4
+        )));
+    }
+
+    /// CR 118.3 + CR 601.2h: An unaffordable resolution-time
+    /// `PayCost { AbilityCost::PayLife }` reports failure via
+    /// `cost_payment_failed_flag` and commits no partial payment — the
+    /// authority's `Failed` outcome maps to the resolution failure channel.
+    #[test]
+    fn resolution_ability_pay_life_failure_maps_to_flag() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 3;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].life, 3);
     }
 
     #[test]
@@ -1059,6 +1002,53 @@ mod tests {
             }
             other => panic!("expected DiscardChoice, got {other:?}"),
         }
+    }
+
+    /// CR 118.3 + CR 601.2h: a resolution-time cost shape the authority cannot
+    /// execute (random discard is not auto-payable) must fail the payment —
+    /// never silently report `Paid` while discarding nothing. Discriminates the
+    /// Resolution-scope guard on the authority's interactive pass-through arm:
+    /// without it, this shape falls through to `Paid` with the hand untouched
+    /// and the flag unset.
+    #[test]
+    fn ability_cost_random_discard_fails_instead_of_silent_paid() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(&mut state, CardId(10), PlayerId(0), "A".into(), Zone::Hand);
+        let second = create_object(&mut state, CardId(11), PlayerId(0), "B".into(), Zone::Hand);
+        let ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: crate::types::ability::CardSelectionMode::Random,
+                        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.cost_payment_failed_flag,
+            "unexecutable resolution cost shape must set the failed flag, not fake Paid"
+        );
+        assert_eq!(
+            state.objects[&first].zone,
+            Zone::Hand,
+            "no card may be discarded by a failed payment"
+        );
+        assert_eq!(state.objects[&second].zone, Zone::Hand);
     }
 
     #[test]

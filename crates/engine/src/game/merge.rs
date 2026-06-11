@@ -316,10 +316,105 @@ pub fn split_merged_permanent_on_leave(
         // CR 730.3 + S4: route each component to ITS OWN owner's destination zone
         // as a NEW object that did not independently leave the battlefield.
         put_component_into_zone(state, component_id, dest, events);
+        // CR 730.3c: record which surviving object this component split from, so an
+        // effect that later finds "the object the merged permanent became" (a
+        // flicker/blink return) brings this component back too, not just the
+        // survivor. See `expand_returned_merge_components`.
+        if let Some(obj) = state.objects.get_mut(&component_id) {
+            obj.split_from_merge_survivor = Some(merged_id);
+        }
     }
 
     // The surviving object's merge identity is cleared by its own
     // `reset_for_battlefield_exit` during the subsequent `move_to_zone`.
+}
+
+/// CR 730.3c: "If an effect can find the new object that a merged permanent
+/// becomes as it leaves the battlefield, it finds ALL of those objects. ... the
+/// same actions are taken upon each of them." When an effect references the
+/// object that just left the battlefield (a flicker/blink's "return it") and
+/// that object was a merged permanent's survivor, the absorbed component cards it
+/// split into (CR 730.3) must receive the same action too — otherwise a flicker
+/// returns only the survivor and strands the other components in exile.
+///
+/// Given the objects a *continuity* reference resolved to, append each survivor's
+/// co-departed sibling components that are still co-located in the same zone, in
+/// deterministic id order. The caller (the `ChangeZone` return loop) then applies
+/// its move to the whole pile; the components return as separate, non-merged
+/// objects (CR 730.3 — merging is not re-established) and their back-links clear
+/// on battlefield entry.
+///
+/// This is a no-op unless `target_filter` is a continuity reference AND a
+/// resolved object is a former merged survivor with co-located components. In
+/// particular it does NOT fire for a freshly chosen target (e.g. reanimating one
+/// specific card from a graveyard), which must not over-return.
+pub(crate) fn expand_returned_merge_components(
+    state: &GameState,
+    resolved: Vec<ObjectId>,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    if !references_object_that_left(target_filter) {
+        return resolved;
+    }
+    let mut expanded = resolved.clone();
+    for &survivor_id in &resolved {
+        let components = co_split_components(state, survivor_id, &expanded);
+        expanded.extend(components);
+    }
+    expanded
+}
+
+/// CR 730.3c: The component cards that the merged permanent identified by
+/// `survivor_id` split into when it left the battlefield (CR 730.3), and that are
+/// still co-located with the survivor in its current (off-battlefield) zone —
+/// returned in deterministic id order, omitting any id already in `exclude`.
+///
+/// Empty unless `survivor_id` is a former merged survivor with components still
+/// in its zone. Shared by both return paths that "find the object the merged
+/// permanent became": the `ChangeZone` continuity-reference return
+/// ([`expand_returned_merge_components`], flicker/blink) and the
+/// `UntilSourceLeaves` implicit return in `engine::check_exile_returns`
+/// (exile-until-this-leaves / "O-Ring" effects).
+pub(crate) fn co_split_components(
+    state: &GameState,
+    survivor_id: ObjectId,
+    exclude: &[ObjectId],
+) -> Vec<ObjectId> {
+    let Some(zone) = state.objects.get(&survivor_id).map(|o| o.zone) else {
+        return Vec::new();
+    };
+    // Split-out components are never independent members of the battlefield
+    // (CR 730.2) — only an off-battlefield survivor can have co-located ones.
+    if zone == Zone::Battlefield {
+        return Vec::new();
+    }
+    let mut components: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(id, obj)| {
+            obj.split_from_merge_survivor == Some(survivor_id)
+                && obj.zone == zone
+                && !exclude.contains(*id)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    components.sort_by_key(|id| id.0);
+    components
+}
+
+/// CR 730.3c: Target references that denote "the object that just left the
+/// battlefield" — i.e. continuity references that find the object a merged
+/// permanent became — as opposed to a freshly chosen target. Only these expand
+/// to a former merged permanent's component cards.
+fn references_object_that_left(target_filter: &TargetFilter) -> bool {
+    matches!(
+        target_filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::TriggeringSource
+    )
 }
 
 /// CR 730.3 + CR 712.21: Put a non-surviving merge component into `dest` as a

@@ -6,6 +6,8 @@ use crate::types::ability::{
     ModalChoice, PlayerFilter, QuantityExpr, RenownSubject, ResolvedAbility, TargetFilter,
     TargetRef, TributeOutcome, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -13893,6 +13895,65 @@ pub mod tests {
     }
 
     #[test]
+    fn first_sliver_granted_cascade_triggers_for_sliver_spell() {
+        let mut state = setup();
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "The First Sliver".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Cascade,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Subtype("Sliver".into())).controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Cheap Sliver".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Sliver".into());
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(2),
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if matches!(ability.effect, Effect::Cascade)
+                )
+            }),
+            "Sliver spells cast with The First Sliver on the battlefield should trigger cascade"
+        );
+    }
+
+    #[test]
     fn granted_casualty_triggers_copy_when_paid() {
         let mut state = setup();
         let caster = PlayerId(0);
@@ -17074,10 +17135,12 @@ pub mod tests {
             ))
             .execute(AbilityDefinition::new(
                 AbilityKind::Database,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::Typed(
                         TypedFilter::default().with_type(TypeFilter::Creature),
                     ),
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ));
         {
@@ -18078,7 +18141,13 @@ pub mod tests {
         match crate::game::replacement::replace_event(state, proposed, events) {
             crate::game::replacement::ReplacementResult::Execute(event) => {
                 crate::game::effects::change_zone::deliver_replaced_zone_change(
-                    state, event, None, None, false, events,
+                    state,
+                    event,
+                    None,
+                    None,
+                    false,
+                    crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                    events,
                 );
             }
             crate::game::replacement::ReplacementResult::Prevented => {}
@@ -20835,8 +20904,10 @@ mod dedup_regression_tests {
         };
 
         let ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::TriggeringSource,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             Vec::new(),
             ObjectId(0),

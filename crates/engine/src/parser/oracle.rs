@@ -4804,13 +4804,65 @@ fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition) {
 mod tests {
     use super::*;
     use crate::parser::oracle_effect::parse_effect_chain;
+
+    /// CR 601.2c (#2344): a single "target opponent" governs the whole verb list
+    /// ("sacrifices …, discards …, and loses 3 life") — the player is chosen once
+    /// and every conjugated continuation shares that target via `ParentTarget`,
+    /// not a fresh `Opponent` slot (which would prompt the player again).
+    #[test]
+    fn compound_target_player_continuations_share_one_target() {
+        use crate::types::ability::{AbilityDefinition, Effect, TargetFilter};
+        let p = parse_oracle_text(
+            "Flying\nWhenever this creature enters or attacks, target opponent sacrifices a creature or planeswalker of their choice, discards a card, and loses 3 life. You draw a card and gain 3 life.",
+            "Archon of Cruelty",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        let exec = p.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger has an execute ability");
+
+        // Collect the discard + lose-life continuation targets from the chain.
+        fn walk(
+            def: &AbilityDefinition,
+            discard: &mut Vec<TargetFilter>,
+            lose: &mut Vec<TargetFilter>,
+        ) {
+            match &*def.effect {
+                Effect::Discard { target, .. } => discard.push(target.clone()),
+                Effect::LoseLife {
+                    target: Some(t), ..
+                } => lose.push(t.clone()),
+                _ => {}
+            }
+            if let Some(sub) = &def.sub_ability {
+                walk(sub, discard, lose);
+            }
+        }
+        let (mut discard, mut lose) = (Vec::new(), Vec::new());
+        walk(exec, &mut discard, &mut lose);
+
+        assert_eq!(
+            discard,
+            vec![TargetFilter::ParentTarget],
+            "the 'discards a card' continuation must inherit the announced target"
+        );
+        assert_eq!(
+            lose,
+            vec![TargetFilter::ParentTarget],
+            "the 'loses 3 life' continuation must inherit the announced target"
+        );
+    }
+
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-        Duration, Effect, FilterProp, ManaProduction, ManaSpendRestriction,
+        Duration, Effect, EffectScope, FilterProp, ManaProduction, ManaSpendRestriction,
         ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter,
         PlayerScope, PreventionAmount, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind,
-        StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        StaticCondition, TapStateChange, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -7684,7 +7736,7 @@ mod tests {
                 matches!(
                     modification,
                     ContinuousModification::GrantAbility { definition }
-                        if matches!(&*definition.effect, Effect::Untap { .. })
+                        if matches!(&*definition.effect, Effect::SetTapState { state: TapStateChange::Untap, .. })
                 )
             })
         }));
@@ -8456,7 +8508,13 @@ mod tests {
         assert_eq!(r.abilities.len(), 1);
         let ability = &r.abilities[0];
         assert_eq!(ability.kind, AbilityKind::Activated);
-        assert!(matches!(*ability.effect, Effect::Untap { .. }));
+        assert!(matches!(
+            *ability.effect,
+            Effect::SetTapState {
+                state: TapStateChange::Untap,
+                ..
+            }
+        ));
         assert!(ability
             .activation_restrictions
             .iter()
@@ -14044,7 +14102,11 @@ mod tests {
             while let Some(def) = cursor {
                 match def.effect.as_ref() {
                     Effect::PutCounter { .. } => saw_counter = true,
-                    Effect::Tap { .. } => saw_tap = true,
+                    Effect::SetTapState {
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                        ..
+                    } => saw_tap = true,
                     Effect::GenericEffect {
                         static_abilities,
                         duration,

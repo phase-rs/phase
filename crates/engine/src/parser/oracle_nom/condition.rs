@@ -25,8 +25,9 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AbilityCondition, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
     CommanderOwnership, Comparator, ControllerRef, CountScope, DamageGroupKey, DamageKindFilter,
-    FilterProp, ObjectProperty, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, SharedQuality,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
+    QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -5017,35 +5018,34 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
         }
     }
 
-    // "an opponent controls more [type] than you"
+    // CR 109.4 + CR 109.5: "an opponent controls more [type] than you" —
+    // existential over opponents (at least one opponent strictly exceeds your
+    // count; "you" = the ability's controller), not an aggregate of all
+    // opponent permanents. Weathered Wayfarer, Land Tax.
     if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("controls more ").parse(rest) {
         if let Ok((rest3, type_text)) =
             take_until::<_, _, OracleError<'_>>(" than you").parse(rest2)
         {
             let (rest3, _) = tag(" than you").parse(rest3)?;
-            let (filter, _) = parse_type_phrase(type_text.trim());
-            let opp_filter = match filter {
-                TargetFilter::Typed(tf) => {
-                    TargetFilter::Typed(tf.controller(ControllerRef::Opponent))
-                }
-                other => other,
-            };
-            let you_filter = match parse_type_phrase(type_text.trim()) {
-                (TargetFilter::Typed(tf), _) => {
-                    TargetFilter::Typed(tf.controller(ControllerRef::You))
-                }
-                (other, _) => other,
-            };
+            let (type_filter, _) = parse_type_phrase(type_text.trim());
+            let you_filter = inject_controller_you(type_filter.clone());
             return Ok((
                 rest3,
                 StaticCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount { filter: opp_filter },
+                        qty: QuantityRef::PlayerCount {
+                            filter: PlayerFilter::ControlsCount {
+                                relation: PlayerRelation::Opponent,
+                                filter: type_filter,
+                                comparator: Comparator::GT,
+                                count: Box::new(QuantityExpr::Ref {
+                                    qty: QuantityRef::ObjectCount { filter: you_filter },
+                                }),
+                            },
+                        },
                     },
-                    comparator: Comparator::GT,
-                    rhs: QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount { filter: you_filter },
-                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
                 },
             ));
         }
@@ -8212,15 +8212,50 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount { .. },
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        comparator: Comparator::GT,
+                                        ..
+                                    },
+                            },
                     },
-                comparator: Comparator::GT,
-                rhs:
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount { .. },
-                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             } => {}
-            other => panic!("expected ObjectCount GT ObjectCount, got {other:?}"),
+            other => panic!("expected existential opponent ControlsCount GE 1, got {other:?}"),
+        }
+    }
+
+    /// Issue #859: Weathered Wayfarer — "Activate only if an opponent controls
+    /// more lands than you."
+    #[test]
+    fn test_opponent_controls_more_lands_than_you() {
+        let (rest, c) = parse_inner_condition("an opponent controls more lands than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter:
+                                    PlayerFilter::ControlsCount {
+                                        relation: PlayerRelation::Opponent,
+                                        filter: TargetFilter::Typed(tf),
+                                        comparator: Comparator::GT,
+                                        ..
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Land]);
+            }
+            other => panic!("expected existential opponent land count GE 1, got {other:?}"),
         }
     }
 

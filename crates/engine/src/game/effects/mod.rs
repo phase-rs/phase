@@ -8,9 +8,10 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, FilterProp,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
+    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectScope,
+    FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
+    ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -1877,10 +1878,9 @@ pub fn resolve_effect(
         Effect::Token { .. } => token::resolve(state, ability, events),
         Effect::GainLife { .. } => life::resolve_gain(state, ability, events),
         Effect::LoseLife { .. } => life::resolve_lose(state, ability, events),
-        Effect::Tap { .. } => tap_untap::resolve_tap(state, ability, events),
-        Effect::Untap { .. } => tap_untap::resolve_untap(state, ability, events),
-        Effect::TapAll { .. } => tap_untap::resolve_tap_all(state, ability, events),
-        Effect::UntapAll { .. } => tap_untap::resolve_untap_all(state, ability, events),
+        // CR 701.26a/b: scope (Single vs All) and state (Tap vs Untap) are
+        // dispatched inside `resolve_set_tap_state`.
+        Effect::SetTapState { .. } => tap_untap::resolve_set_tap_state(state, ability, events),
         Effect::RemoveCounter { .. } => counters::resolve_remove(state, ability, events),
         Effect::Sacrifice { .. } => sacrifice::resolve(state, ability, events),
         Effect::DiscardCard { .. } => discard::resolve(state, ability, events),
@@ -2328,9 +2328,14 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
-        // CR 701.26a + CR 608.2c: Tap publishes the tapped set for downstream
-        // "each of those <type>" continuations (Urge to Feed class).
-        Effect::Tap { .. } | Effect::Untap { .. } => {
+        // CR 701.26a + CR 608.2c: single-target tap/untap publishes the tapped
+        // set for downstream "each of those <type>" continuations (Urge to Feed
+        // class). The mass (`All`) scope is not a target source — it falls
+        // through to the default arm, matching the legacy `TapAll`/`UntapAll`.
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            ..
+        } => {
             let from_events: Vec<ObjectId> = events
                 .iter()
                 .filter_map(|event| match event {
@@ -2351,6 +2356,18 @@ fn affected_objects_from_events(
                     .collect()
             }
         }
+        // CR 701.20b + CR 608.2c: Reveal instructions do not move cards, so they
+        // emit `CardsRevealed` rather than `ZoneChanged`. Publish the revealed
+        // card ids for downstream "from among the revealed cards"
+        // `ChooseFromZone` continuations (Atraxa, Grand Unifier class).
+        Effect::RevealTop { .. } | Effect::RevealHand { .. } | Effect::Clash => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.as_slice()),
+                _ => None,
+            })
+            .flat_map(|ids| ids.iter().copied())
+            .collect(),
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
@@ -2442,10 +2459,18 @@ fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> b
         Effect::Token { .. } => events
             .iter()
             .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
-        Effect::Tap { .. } | Effect::TapAll { .. } => events
+        // CR 701.26a: a tap "did anything" iff some permanent became tapped.
+        Effect::SetTapState {
+            state: TapStateChange::Tap,
+            ..
+        } => events
             .iter()
             .any(|event| matches!(event, GameEvent::PermanentTapped { .. })),
-        Effect::Untap { .. } | Effect::UntapAll { .. } => events
+        // CR 701.26b: an untap "did anything" iff some permanent became untapped.
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            ..
+        } => events
             .iter()
             .any(|event| matches!(event, GameEvent::PermanentUntapped { .. })),
         Effect::GainLife { .. } => events
@@ -3058,8 +3083,6 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::PairWith { target }
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::GainControl { target, .. }
         | Effect::Counter { target, .. }
@@ -3115,6 +3138,16 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::GiveControl { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
+        // CR 701.26a/b + CR 603.7c: only the single-permanent tap/untap exposes
+        // an event-context target. The mass (`All`) scope's `target` is a
+        // population filter, not a per-event target ref — it must not be
+        // auto-resolved here (matching the legacy `TapAll`/`UntapAll`, which had
+        // no event-context target at all).
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => target,
         // CR 603.7c + CR 608.2c: `GenericEffect` carries an optional `target` that may
         // be an event-context ref (e.g., `TriggeringSource` for "that land doesn't untap
         // during its controller's next untap step" on a TapsForMana trigger). Routing it
@@ -7106,8 +7139,10 @@ mod tests {
             Zone::Battlefield,
         );
         let mut ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![TargetRef::Object(target)],
             source,
@@ -8883,6 +8918,43 @@ mod tests {
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
     }
 
+    /// CR 701.20b + CR 608.2c: `RevealTop` publishes `CardsRevealed`, not
+    /// `ZoneChanged`. Without a dedicated arm in `affected_objects_from_events`,
+    /// the tracked-set publish is empty and `ChooseFromZone` falls back to a
+    /// stale graveyard set from an earlier resolution (issue #1374).
+    #[test]
+    fn reveal_top_publishes_cards_revealed_for_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top Card".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second Card".to_string(),
+            Zone::Library,
+        );
+        let events = vec![GameEvent::CardsRevealed {
+            player: PlayerId(0),
+            card_ids: vec![top, second],
+            card_names: vec!["Top Card".to_string(), "Second Card".to_string()],
+        }];
+        let effect = Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 2,
+        };
+
+        assert_eq!(
+            affected_objects_from_events(&effect, &events, &[]),
+            vec![top, second]
+        );
+    }
+
     /// CR 701.20a + CR 608.2f: an Indomitable Creativity-style
     /// `RevealUntil(kept_destination=Exile)` publishes only the kept card as
     /// the chain tracked set. Without the `RevealUntil` destination filter in
@@ -9251,8 +9323,10 @@ mod tests {
             PlayerId(0),
         );
         let ability = ResolvedAbility::new(
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::Typed(TypedFilter::creature().subtype("Vampire".to_string())),
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
             vec![TargetRef::Object(vampire)],
             source,

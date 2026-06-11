@@ -60,7 +60,8 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords::{has_flash, has_keyword};
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
-    ContinuousModification, Duration, Effect, QuantityExpr, StaticDefinition, TargetFilter,
+    ContinuousModification, Duration, Effect, EffectScope, QuantityExpr, StaticDefinition,
+    TapStateChange, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -271,8 +272,19 @@ fn redundancy_delta(
     origin: EffectOrigin,
 ) -> Option<(f64, i64, i64)> {
     match effect {
-        Effect::Tap { target } => tap_redundancy(state, source_id, target),
-        Effect::Untap { target } => untap_redundancy(state, source_id, target),
+        // CR 701.26a/b: single-target tap/untap have redundancy checks; the
+        // mass (`All`) scope has none (see the no-op list below), matching the
+        // legacy `Tap`/`Untap` vs `TapAll`/`UntapAll` split.
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        } => tap_redundancy(state, source_id, target),
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
+        } => untap_redundancy(state, source_id, target),
         Effect::Pump {
             power,
             toughness,
@@ -352,8 +364,12 @@ fn redundancy_delta(
         | Effect::Counter { .. }
         | Effect::Token { .. }
         | Effect::LoseLife { .. }
-        | Effect::TapAll { .. }
-        | Effect::UntapAll { .. }
+        // CR 701.26a/b: mass tap/untap (legacy `TapAll`/`UntapAll`) has no
+        // shipped redundancy check.
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            ..
+        }
         | Effect::RemoveCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -1100,8 +1116,10 @@ mod tests {
         let obj_id = make_creature_with_ability(
             &mut state,
             "Tapper",
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         );
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
@@ -1124,8 +1142,10 @@ mod tests {
         let obj_id = make_creature_with_ability(
             &mut state,
             "Tapper",
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         );
         // default tapped = false
@@ -1148,8 +1168,10 @@ mod tests {
         let obj_id = make_creature_with_ability(
             &mut state,
             "Untapper",
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
         );
         // default tapped = false -- so untap is a no-op on this target set
@@ -1172,8 +1194,10 @@ mod tests {
         let obj_id = make_creature_with_ability(
             &mut state,
             "Untapper",
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
         );
         state.objects.get_mut(&obj_id).unwrap().tapped = true;
@@ -1884,8 +1908,10 @@ mod tests {
         let _other = make_creature_with_ability(
             &mut state,
             "Other Creature",
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         );
 

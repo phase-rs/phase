@@ -15,8 +15,8 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, FilterProp, QuantityExpr,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, EffectScope, FilterProp,
+    QuantityExpr, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
@@ -1416,7 +1416,13 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 fn normalize_escalate_cost(cost: AbilityCost) -> AbilityCost {
     match cost {
         AbilityCost::EffectCost { effect } => match *effect {
-            Effect::Tap { target } => AbilityCost::TapCreatures {
+            // CR 701.26a: a single-target tap effect-cost becomes a typed
+            // tap-creatures cost. Untap / mass scopes keep the effect-cost form.
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            } => AbilityCost::TapCreatures {
                 count: 1,
                 filter: target,
             },
