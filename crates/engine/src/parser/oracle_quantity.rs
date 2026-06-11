@@ -420,14 +420,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         // and leave an unresolved "that were destroyed this way" tail.
         // Class: Kaya's Wrath (issue #2943), Ceaseless Conflict, and any
         // "equal to the number of … destroyed this way" lifegain phrasing.
+        if let Some(qty) =
+            parse_destroyed_or_sacrificed_this_way_quantity(&rest.to_ascii_lowercase())
         {
-            let lower = rest.to_ascii_lowercase();
-            if lower.contains("destroyed this way") || lower.contains("sacrificed this way") {
-                if let Some(qty) = parse_filtered_destroyed_this_way(&lower) {
-                    return Some(qty);
-                }
-                return Some(QuantityRef::TrackedSetSize);
-            }
+            return Some(qty);
         }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
@@ -1759,7 +1755,7 @@ fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFi
 ///
 /// Uses `terminated(take_until(suffix), tag(suffix))` to split at each
 /// recognized suffix, then delegates the prefix to `parse_type_phrase`.
-fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
+fn parse_destroyed_or_sacrificed_this_way_filter(lower: &str) -> Option<Option<TargetFilter>> {
     // Each suffix is tried in order; the first complete match wins.
     // Longer/more-specific suffixes must come before shorter ones so
     // "that was destroyed this way" is preferred over "destroyed this way".
@@ -1767,9 +1763,11 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
         " that was destroyed this way",
         " that were destroyed this way",
         " destroyed this way",
+        "destroyed this way",
         " that was sacrificed this way",
         " that were sacrificed this way",
         " sacrificed this way",
+        "sacrificed this way",
     ];
     for &suffix in suffixes {
         // terminated(take_until(suffix), tag(suffix)) parses the noun-phrase
@@ -1779,17 +1777,37 @@ fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
         if let Ok(("", filter_phrase)) = result {
             let (filter, remainder) =
                 crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
-            if remainder.trim().is_empty() && filter_is_nontrivial_for_tracked_set(&filter) {
-                return Some(QuantityRef::FilteredTrackedSetSize {
-                    filter: Box::new(filter),
-                });
+            if remainder.trim().is_empty() {
+                return Some(Some(filter));
             }
             // A suffix matched but the filter is trivial or the phrase
             // didn't fully consume — fall through to TrackedSetSize.
-            return None;
+            return Some(None);
         }
     }
     None
+}
+
+fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
+    match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
+        Some(filter) if filter_is_nontrivial_for_tracked_set(&filter) => {
+            Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(filter),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_destroyed_or_sacrificed_this_way_quantity(lower: &str) -> Option<QuantityRef> {
+    match parse_destroyed_or_sacrificed_this_way_filter(lower)? {
+        Some(filter) if filter_is_nontrivial_for_tracked_set(&filter) => {
+            Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(filter),
+            })
+        }
+        _ => Some(QuantityRef::TrackedSetSize),
+    }
 }
 
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
