@@ -1452,16 +1452,17 @@ pub(super) fn strip_optional_effect_prefix(
 ) {
     let lower = text.to_lowercase();
     // CR 608.2d + CR 115.7: "you may choose new targets for …" is a retarget
-    // effect, not a generic optional wrapper. The chunk loop must leave the
-    // full surface form intact so `try_parse_change_targets` can dispatch it;
-    // mirroring `clause_shell::strip_optional_prefix` / `peel_clause`.
+    // effect, not a generic optional wrapper. Only that narrow class keeps the
+    // full surface form; other specialized `you may cast/play/…` clauses still
+    // peel here so `optional: true` is stamped (Beseech the Mirror, etc.).
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
         value((), tag::<_, _, OracleError<'_>>("you may ")).parse(input)
     }) {
         let rest_lower = rest.to_lowercase();
-        if !crate::parser::clause_shell::is_specialized_you_may_phrase(&rest_lower) {
-            return (true, None, None, rest.to_string());
+        if crate::parser::clause_shell::is_specialized_you_may_retarget_phrase(&rest_lower) {
+            return (false, None, None, text.to_string());
         }
+        return (true, None, None, rest.to_string());
     }
     // CR 608.2d: "each opponent may" — per-opponent optional effect.
     // "any opponent may" — first-accept-wins opponent-choice optional effect.
@@ -5796,5 +5797,14 @@ mod strip_optional_effect_prefix_tests {
         let (is_optional, _, _, rest) = strip_optional_effect_prefix("you may draw a card");
         assert!(is_optional);
         assert_eq!(rest, "draw a card");
+    }
+
+    #[test]
+    fn beseech_style_you_may_cast_still_strips() {
+        let (is_optional, _, _, rest) = strip_optional_effect_prefix(
+            "you may cast the exiled card without paying its mana cost",
+        );
+        assert!(is_optional);
+        assert_eq!(rest, "cast the exiled card without paying its mana cost");
     }
 }
