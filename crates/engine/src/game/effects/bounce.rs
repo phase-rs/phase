@@ -152,6 +152,7 @@ pub fn resolve(
     // case (Skullwinder-class "that player returns a card"): targets are empty
     // because no choice has been made *yet*, so it must reach the zone-scan.
     if targets.is_empty()
+        && !non_targeting
         && ability.targeting_is_optional()
         && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
     {
@@ -1493,6 +1494,78 @@ mod tests {
             "no card returned when zero targets were chosen"
         );
         assert!(!state.players[0].hand.contains(&land));
+    }
+
+    /// CR 115.1 + CR 608.2c: the zero-target short-circuit is only for
+    /// targeted "up to N target ..." bounce. Non-targeted at-resolution bounce
+    /// must still enumerate legal permanents even if it happens to carry
+    /// optional multi-target metadata.
+    #[test]
+    fn non_targeted_optional_bounce_still_prompts_at_resolution() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr, TypeFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let own_bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let own_dragon = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own_bear, own_dragon] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+                ),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                effect_kind: EffectKind::ChangeZone,
+                zone: Zone::Battlefield,
+                destination: Some(Zone::Hand),
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert_eq!(*min_count, 1);
+                assert!(cards.contains(&own_bear));
+                assert!(cards.contains(&own_dragon));
+            }
+            other => panic!("expected EffectZoneChoice for non-targeted bounce, got {other:?}"),
+        }
     }
 
     /// CR 115.1 + Whitemane Lion ruling (issue #563): When no eligible
