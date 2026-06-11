@@ -116,6 +116,11 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     }
 
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
+        // CR 400.7 + CR 614.1a: Rod of Absorption's stack-exile rider is a
+        // transient marker on the spell object. The stack resolver snapshots it
+        // before moving the spell, so all zone exits can clear the field here.
+        obj_mut.exile_from_stack_linked_source = None;
+
         // CR 712.14 + CR 400.7: Transformed permanents revert to front face on zone change.
         if obj_mut.transformed {
             if let Some(back_face) = obj_mut.back_face.clone() {

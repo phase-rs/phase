@@ -7324,12 +7324,12 @@ pub enum Effect {
     /// `WhenAPlayerCasts` trigger to the *triggering spell* (Rod of Absorption).
     ///
     /// At resolution this effect does NOT move the spell (it is still on the
-    /// stack); it stamps the per-object `exile_from_stack_instead_of_graveyard`
-    /// rider so the stack-resolution router sends the spell to exile (CR 614.1a
-    /// replaces the normal CR 608.2n graveyard destination) when it finishes
-    /// resolving. When the spell reaches exile, it is recorded as "exiled with"
-    /// the trigger source so a linked ability (CR 607.2b — "cards exiled with
-    /// this artifact") can later refer to the accumulating set.
+    /// stack); it stamps the per-object linked-source marker so the
+    /// stack-resolution router sends the spell to exile (CR 614.1a replaces the
+    /// normal CR 608.2n graveyard destination) when it finishes resolving. When
+    /// the spell reaches exile, it is recorded as "exiled with" the trigger
+    /// source so a linked ability (CR 607.2b — "cards exiled with this artifact")
+    /// can later refer to the accumulating set.
     ///
     /// Distinct from `ChangeZone { destination: Exile }` (which moves a card that
     /// is already in a zone) and from `FreeCastFromZones { exile_instead… }`

@@ -824,24 +824,12 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
-    /// CR 614.1a + CR 608.2n: When true, this spell is exiled instead of being
-    /// put into its owner's graveyard any time it would leave the stack
-    /// ("if those spells would be put into your graveyard, exile them instead").
+    /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
+    /// is exiled instead of being put into its owner's graveyard as it resolves,
+    /// and the resulting exile is recorded as "exiled with" the stored source.
     /// Set by `Effect::ExileResolvingSpellInsteadOfGraveyard` (Rod of
     /// Absorption's "exile it instead of putting it into a graveyard as it
-    /// resolves" rider); read by the stack-resolution router. Unlike the
-    /// keyword-driven `CastingVariant` exile riders, this is a per-object marker
-    /// so it survives the during-resolution cast finalize regardless of the
-    /// spell's origin zone or casting variant.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub exile_from_stack_instead_of_graveyard: bool,
-
-    /// CR 607.2b + CR 406.6: When `exile_from_stack_instead_of_graveyard` sends
-    /// this spell to exile as it resolves, record it as "exiled with" this
-    /// source so a linked ability on the source ("cards exiled with this
-    /// permanent" — Rod of Absorption) can refer to the accumulating set.
-    /// Set by `Effect::ExileResolvingSpellInsteadOfGraveyard`; consumed by the
-    /// stack-resolution router when the spell moves to exile.
+    /// resolves" rider); consumed by the stack-resolution router.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_from_stack_linked_source: Option<ObjectId>,
 
@@ -1135,7 +1123,6 @@ impl GameObject {
             room_unlocks: None,
             class_level: None,
             cast_from_zone: None,
-            exile_from_stack_instead_of_graveyard: false,
             exile_from_stack_linked_source: None,
             played_from_zone: None,
             mana_spent_to_cast: false,

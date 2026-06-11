@@ -21,9 +21,9 @@ use crate::types::zones::Zone;
 ///
 /// The triggering spell is still on the stack when this effect resolves (the
 /// trigger resolves above it), so this does NOT move the card — it sets the
-/// marker the stack-resolution router reads when the spell finishes resolving
-/// (`object_exiles_instead_of_graveyard`). The link source is stashed on the
-/// spell and turned into a real `TrackedBySource` `ExileLink` only when the
+/// marker the stack-resolution router reads when the spell finishes resolving.
+/// The link source is stashed on the spell and turned into a real
+/// `TrackedBySource` `ExileLink` only when the
 /// spell actually reaches exile, so the linked set never lists a spell that was
 /// countered or otherwise removed before it would have hit the graveyard.
 pub fn resolve(
@@ -42,15 +42,11 @@ pub fn resolve(
         // CR 614.1a: only a spell still on the stack can be redirected as it
         // resolves; if it already left the stack (countered, fizzled) there is
         // nothing to replace.
-        let on_stack = state
-            .objects
-            .get(&spell_id)
-            .is_some_and(|obj| obj.zone == Zone::Stack);
-        if on_stack {
-            if let Some(obj) = state.objects.get_mut(&spell_id) {
-                obj.exile_from_stack_instead_of_graveyard = true;
+        if let Some(obj) = state.objects.get_mut(&spell_id) {
+            if obj.zone == Zone::Stack {
                 // CR 607.2b: record the linking source so the eventual exile is
-                // tracked as "exiled with [this source]".
+                // tracked as "exiled with [this source]". Presence of this
+                // typed source is also the CR 614.1a exile-instead marker.
                 obj.exile_from_stack_linked_source = Some(ability.source_id);
             }
         }
