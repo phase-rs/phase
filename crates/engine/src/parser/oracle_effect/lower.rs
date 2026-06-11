@@ -4763,15 +4763,7 @@ pub(super) fn apply_where_x_effect_expression(
             if let Some(times) = scale {
                 *times = apply_where_x_quantity_expression(times.clone(), where_x_expression);
             }
-            match cost {
-                AbilityCost::PayLife { amount }
-                | AbilityCost::PaySpeed { amount }
-                | AbilityCost::PayEnergy { amount }
-                | AbilityCost::ManaDynamic { quantity: amount } => {
-                    *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
-                }
-                _ => {}
-            }
+            apply_where_x_to_ability_cost(cost, where_x_expression);
         }
         Effect::GenericEffect {
             static_abilities, ..
@@ -4783,6 +4775,66 @@ pub(super) fn apply_where_x_effect_expression(
             }
         }
         _ => {}
+    }
+}
+
+/// CR 107.3i + CR 118.1: Propagate a "where X is <expression>" binding into the
+/// `QuantityExpr` amounts of a resolution-time `AbilityCost`. Exhaustive over
+/// `AbilityCost` (no wildcard) so a future variant carrying an X-amount — e.g. a
+/// `Composite { …PayLife(X)… }` producer — forces a deliberate decision here
+/// instead of silently skipping the rewrite. Recurses into the compositional
+/// (`Composite`/`OneOf`) and wrapping (`PerCounter`) variants. The no-X variants
+/// are enumerated as explicit no-ops: their amounts are either fixed integers
+/// (`Loyalty`, `Mill`, `Blight`, counts on Sacrifice/Exile/TapCreatures/…) or a
+/// static `ManaCost`/object filter that the where-X mana-value clause does not
+/// bind (X-in-mana-cost is concretized at announcement, not by this rewrite).
+fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Option<&str>) {
+    match cost {
+        AbilityCost::PayLife { amount }
+        | AbilityCost::PaySpeed { amount }
+        | AbilityCost::PayEnergy { amount }
+        | AbilityCost::ManaDynamic { quantity: amount } => {
+            *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+        }
+        // CR 701.9: "discard X cards, where X is …" — the discard count is a
+        // `QuantityExpr` and must track the same where-X binding.
+        AbilityCost::Discard { count, .. } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
+        }
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            for sub in costs.iter_mut() {
+                apply_where_x_to_ability_cost(sub, where_x_expression);
+            }
+        }
+        AbilityCost::PerCounter { base, .. } => {
+            apply_where_x_to_ability_cost(base, where_x_expression);
+        }
+        // No X-bearing `QuantityExpr` amount to bind: fixed integer counts
+        // (`Loyalty`, `Mill`, `Blight`, counts on Sacrifice/Exile/…) or a static
+        // `ManaCost`/object filter that this where-X mana-value clause does not
+        // bind (X-in-mana-cost is concretized at announcement, not by this
+        // rewrite).
+        AbilityCost::Mana { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::Unimplemented { .. } => {}
     }
 }
 
