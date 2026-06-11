@@ -85,15 +85,14 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 700.2 + CR 603.7: Resolve the candidate card pool for a tracked-set pick.
+/// CR 608.2c + CR 608.2d + CR 603.7: Resolve the candidate card pool for a
+/// tracked-set pick.
 ///
 /// Priority order:
 /// 1. The current resolution chain's tracked set (if non-empty).
-/// 2. `last_revealed_ids` from a preceding reveal in this resolution — must
-///    beat stale global tracked sets from earlier resolutions (issue #1374).
-/// 3. The latest non-empty tracked set from any prior publish in this game.
-/// 4. Explicit `TargetRef::Object` targets on the ability.
-/// 5. Direct zone scan (`zone` + `additional_zones`).
+/// 2. The latest non-empty tracked set from any prior publish in this game.
+/// 3. Explicit `TargetRef::Object` targets on the ability.
+/// 4. Direct zone scan (`zone` + `additional_zones`).
 fn resolve_candidate_cards(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -104,22 +103,6 @@ fn resolve_candidate_cards(
 ) -> Result<Vec<ObjectId>, EffectError> {
     if let Some(cards) = chain_tracked_set_cards(state) {
         return Ok(cards);
-    }
-
-    if !state.last_revealed_ids.is_empty() {
-        // CR 701.20b: RevealTop/Dig reveal-only parents write here but do not
-        // emit ZoneChanged, so the tracked-set publish depends on
-        // `affected_objects_from_events` reading `CardsRevealed`.
-        let filter_ctx = FilterContext::from_ability(ability);
-        let cards: Vec<_> = state
-            .last_revealed_ids
-            .iter()
-            .copied()
-            .filter(|id| filter.is_none_or(|f| matches_target_filter(state, *id, f, &filter_ctx)))
-            .collect();
-        if !cards.is_empty() {
-            return Ok(cards);
-        }
     }
 
     let cards = crate::game::targeting::latest_tracked_set_id(state)
@@ -798,93 +781,6 @@ mod tests {
                 categories: vec![CoreType::Artifact, CoreType::Creature],
             }),
         ));
-    }
-
-    /// CR 701.20b + CR 700.2: Issue #1374 — when RevealTop did not publish a
-    /// tracked set, `ChooseFromZone` must bind to `last_revealed_ids`, not a
-    /// stale graveyard set from an earlier resolution.
-    #[test]
-    fn resolve_prefers_last_revealed_ids_over_stale_tracked_set() {
-        let mut state = GameState::new_two_player(42);
-        let revealed_creature = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Revealed Creature".to_string(),
-            Zone::Library,
-        );
-        state
-            .objects
-            .get_mut(&revealed_creature)
-            .unwrap()
-            .card_types
-            .core_types = vec![CoreType::Creature];
-        let revealed_instant = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Revealed Instant".to_string(),
-            Zone::Library,
-        );
-        state
-            .objects
-            .get_mut(&revealed_instant)
-            .unwrap()
-            .card_types
-            .core_types = vec![CoreType::Instant];
-        let stale_graveyard_card = create_object(
-            &mut state,
-            CardId(3),
-            PlayerId(0),
-            "Stale Graveyard Card".to_string(),
-            Zone::Graveyard,
-        );
-        state
-            .tracked_object_sets
-            .insert(TrackedSetId(9), vec![stale_graveyard_card]);
-        state.next_tracked_set_id = 10;
-        state.last_revealed_ids = vec![revealed_creature, revealed_instant];
-
-        let categories = vec![
-            CoreType::Artifact,
-            CoreType::Battle,
-            CoreType::Creature,
-            CoreType::Enchantment,
-            CoreType::Instant,
-            CoreType::Land,
-            CoreType::Planeswalker,
-            CoreType::Sorcery,
-        ];
-        let ability = ResolvedAbility::new(
-            Effect::ChooseFromZone {
-                count: categories.len() as u32,
-                zone: Zone::Library,
-                additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::Controller,
-                filter: None,
-                chooser: Chooser::Controller,
-                up_to: true,
-                constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
-            },
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        );
-        let mut events = Vec::new();
-
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        match &state.waiting_for {
-            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
-                assert!(cards.contains(&revealed_creature));
-                assert!(cards.contains(&revealed_instant));
-                assert!(
-                    !cards.contains(&stale_graveyard_card),
-                    "stale graveyard tracked set must not shadow revealed library cards"
-                );
-            }
-            other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
-        }
     }
 
     /// End-to-end regression for Atraxa, Grand Unifier's ETB chain:

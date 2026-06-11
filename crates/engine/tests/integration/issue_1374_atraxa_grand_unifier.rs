@@ -14,7 +14,7 @@
 //! graveyard/mill set from an earlier resolution — offering only graveyard cards.
 //!
 //! CR 701.20b: Revealing does not move cards; the choice pool is the revealed set.
-//! CR 700.2: "From among" restricts the pick to that set.
+//! CR 608.2d: "From among" restricts the resolution-time choice to that set.
 
 use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::P0;
