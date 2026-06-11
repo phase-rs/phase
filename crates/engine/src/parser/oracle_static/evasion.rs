@@ -830,11 +830,11 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
     Some(defs)
 }
 
-/// CR 508.1d: Decompose `"<grant or restriction>[,] and can't attack you [or
-/// planeswalkers you control]"` (the Vow cycle — Vow of Lightning, Duty,
-/// Flight, Torment, Wildness) into the first conjunct's static(s) plus a
-/// companion `CantAttack` static scoped to the Aura controller's side of
-/// the board, sharing the same `affected` set.
+/// CR 508.1b + CR 508.1c: Decompose `"<grant or restriction>[,] and can't
+/// attack you [or planeswalkers you control]"` (the Vow cycle — Vow of
+/// Lightning, Duty, Flight, Torment, Wildness) into the first conjunct's
+/// static(s) plus a companion `CantAttack` static scoped to the Aura
+/// controller's side of the board, sharing the same `affected` set.
 ///
 /// Without this split the trailing attack restriction was silently dropped:
 /// Vow of Lightning ("Enchanted creature gets +2/+2, has first strike, and
@@ -852,7 +852,6 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
 /// - `"and can't attack you or planeswalkers you control"` → `CantAttack`
 ///   with `defended = PlayerOrPlaneswalker`
 pub(crate) fn try_split_and_cant_attack_scoped(text: &str) -> Option<Vec<StaticDefinition>> {
-    use crate::types::triggers::AttackTargetFilter;
     type VE<'a> = OracleError<'a>;
     let lower = text.to_ascii_lowercase();
 
@@ -862,16 +861,13 @@ pub(crate) fn try_split_and_cant_attack_scoped(text: &str) -> Option<Vec<StaticD
             tag::<_, _, VE>("and can\u{2019}t attack"),
         ))
         .parse(i)?;
-        // Match the scoped suffix — "you or planeswalkers you control" must be
-        // tried before bare "you" so the longer form wins.
-        let (i, defended) = alt((
-            value(
-                AttackTargetFilter::PlayerOrPlaneswalker,
-                tag::<_, _, VE>(" you or planeswalkers you control"),
-            ),
-            value(AttackTargetFilter::Player, tag::<_, _, VE>(" you")),
-        ))
-        .parse(i)?;
+        let (i, defended) = parse_cant_attack_defended_scope_nom(i)?;
+        let Some(defended) = defended else {
+            return Err(nom::Err::Error(OracleError::new(
+                i,
+                nom::error::ErrorKind::Tag,
+            )));
+        };
         // Optional trailing duration phrase.
         let (i, _) = opt(alt((
             tag::<_, _, VE>(" each combat"),

@@ -2307,7 +2307,8 @@ pub(crate) fn parse_rule_static_predicate_nom(
     Ok((rest, predicate))
 }
 
-/// Combat-rule predicate plus optional CR 508.1d defended scope (`CantAttack` only).
+/// Combat-rule predicate plus optional CR 508.1b + CR 508.1c defended scope
+/// (`CantAttack` only).
 pub(crate) fn parse_combat_rule_static_predicate_with_defended_nom(
     input: &str,
 ) -> OracleResult<
@@ -2405,7 +2406,7 @@ pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleSt
     }
 }
 
-/// Optional attack-target scope after "can't attack" (CR 508.1d).
+/// Optional attack-target scope after "can't attack" (CR 508.1b + CR 508.1c).
 pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
