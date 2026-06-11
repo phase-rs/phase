@@ -669,6 +669,36 @@ fn parse_evoke_cost(cost_text: &str) -> Option<crate::types::keywords::EvokeCost
     }
 }
 
+/// CR 702.103a + CR 118.9: Parse a bestow cost following the em-dash separator.
+/// Classic Theros bestow ("Bestow {3}{G}{G}") is a pure mana cost delivered via
+/// MTGJSON's keywords array (the `FromStr` path). The em-dash form carries a
+/// compound cost — "Bestow—{R}, Collect evidence 6." on Detective's Phoenix —
+/// where the mana sub-cost is paid normally and the residual non-mana sub-cost
+/// (Collect evidence) is paid via `pay_additional_cost`. Mirrors
+/// `parse_flashback_cost` / `parse_evoke_cost`: delegates to `parse_oracle_cost`
+/// so comma-separated parts compose into `AbilityCost::Composite`, and wraps the
+/// result in `BestowCost::Mana` when it's a pure mana cost or `BestowCost::NonMana`
+/// otherwise (the runtime split via `split_bestow_cost_components` extracts the
+/// mana sub-cost from a Composite for normal payment).
+fn parse_bestow_cost(cost_text: &str) -> Option<crate::types::keywords::BestowCost> {
+    use crate::types::keywords::BestowCost;
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(BestowCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(BestowCost::NonMana(other)),
+    }
+}
+
 /// CR 702.30a: Parse an echo cost following the em-dash separator
 /// (e.g., "echo—discard a card" on Rakdos Headliner / Deepcavern Imp).
 /// Mirrors `parse_evoke_cost`: delegates to `parse_oracle_cost` so
@@ -1149,6 +1179,20 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("flashback\u{2014}").parse(text) {
         if let Some(fb_cost) = parse_flashback_cost(rest) {
             return Some(Keyword::Flashback(fb_cost));
+        }
+    }
+
+    // CR 702.103a + CR 118.9: Bestow with em-dash cost — covers compound costs
+    // such as Detective's Phoenix "Bestow—{R}, Collect evidence 6." Pure-mana
+    // bestow ("Bestow {3}{G}{G}") arrives via MTGJSON's keywords array (FromStr
+    // path). `parse_bestow_cost` delegates to `parse_oracle_cost`, which composes
+    // comma-separated parts into `AbilityCost::Composite` so the runtime split
+    // (`split_bestow_cost_components` in casting.rs) can route the mana sub-cost
+    // through the mana-payment flow and the residual (Collect evidence) through
+    // `pay_additional_cost`.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("bestow\u{2014}").parse(text) {
+        if let Some(bestow_cost) = parse_bestow_cost(rest) {
+            return Some(Keyword::Bestow(bestow_cost));
         }
     }
 
