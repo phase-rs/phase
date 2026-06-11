@@ -92,9 +92,9 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, DamageModification, DamageSource,
     DelayedTriggerCondition, DoubleTarget, Duration, Effect, EffectScope, FilterProp,
     GameRestriction, IntensityScope, IterationKindBinding, ManaProduction, ManaSpendPermission,
-    MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
-    QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
+    MultiTargetSpec, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
     StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
     TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
     TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
@@ -3422,12 +3422,10 @@ fn try_parse_choose_and_pay_per_object(
     let pay_ability = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PayCost {
-            cost: PaymentCost::ScaledMana {
-                base,
-                times: QuantityExpr::Ref {
-                    qty: QuantityRef::TrackedSetSize,
-                },
-            },
+            cost: AbilityCost::Mana { cost: base },
+            scale: Some(QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            }),
             payer: chooser.clone(),
         },
     );
@@ -18107,11 +18105,11 @@ mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
     use crate::types::ability::{
-        AbilityCondition, AggregateFunction, BounceSelection, CardTypeSetSource, CastVariantPaid,
-        ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject, Comparator,
-        ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode,
-        Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation,
+        AbilityCondition, AbilityCost, AggregateFunction, BounceSelection, CardTypeSetSource,
+        CastVariantPaid, ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject,
+        Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope,
+        DoublePTMode, Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution,
+        ManaProduction, ObjectProperty, ObjectScope, PermissionGrantee, PlayerRelation,
         PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
         SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter,
         ZoneRef,
@@ -18412,19 +18410,19 @@ mod tests {
         );
         // sub_ability: PayCost { ScaledMana { base: {4}, times: TrackedSetSize } }.
         let pay = clause.sub_ability.as_ref().expect("PayCost sub_ability");
-        let Effect::PayCost { cost, payer } = pay.effect.as_ref() else {
+        let Effect::PayCost { cost, scale, payer } = pay.effect.as_ref() else {
             panic!("expected PayCost, got {:?}", pay.effect);
         };
         assert_eq!(*payer, TargetFilter::TriggeringPlayer);
-        let PaymentCost::ScaledMana { base, times } = cost else {
-            panic!("expected ScaledMana, got {cost:?}");
+        let AbilityCost::Mana { cost: base } = cost else {
+            panic!("expected Mana base, got {cost:?}");
         };
         assert_eq!(*base, crate::types::mana::ManaCost::generic(4));
         assert_eq!(
-            *times,
-            QuantityExpr::Ref {
+            *scale,
+            Some(QuantityExpr::Ref {
                 qty: QuantityRef::TrackedSetSize
-            }
+            })
         );
     }
 
@@ -18440,11 +18438,12 @@ mod tests {
             .expect("Thelon's Curse main clause must parse");
         let pay = clause.sub_ability.as_ref().expect("PayCost sub_ability");
         let Effect::PayCost {
-            cost: PaymentCost::ScaledMana { base, .. },
+            cost: AbilityCost::Mana { cost: base },
+            scale: Some(_),
             ..
         } = pay.effect.as_ref()
         else {
-            panic!("expected PayCost {{ ScaledMana }}, got {:?}", pay.effect);
+            panic!("expected PayCost {{ Mana, scale }}, got {:?}", pay.effect);
         };
         assert_eq!(
             *base,
@@ -26942,7 +26941,7 @@ mod tests {
         assert!(matches!(
             e,
             Effect::PayCost {
-                cost: PaymentCost::Life {
+                cost: AbilityCost::PayLife {
                     amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
                 },
                 ..
@@ -26955,10 +26954,7 @@ mod tests {
         let e = parse_effect("pay {1} and 3 life");
         match e {
             Effect::PayCost {
-                cost:
-                    PaymentCost::AbilityCost {
-                        cost: crate::types::ability::AbilityCost::Composite { costs },
-                    },
+                cost: crate::types::ability::AbilityCost::Composite { costs },
                 ..
             } => {
                 assert_eq!(costs.len(), 2);
@@ -26993,7 +26989,7 @@ mod tests {
             matches!(
                 &e,
                 Effect::PayCost {
-                    cost: PaymentCost::Life {
+                    cost: AbilityCost::PayLife {
                         amount: crate::types::ability::QuantityExpr::Ref {
                             qty: crate::types::ability::QuantityRef::Power {
                                 scope: crate::types::ability::ObjectScope::Anaphoric,
@@ -27014,7 +27010,7 @@ mod tests {
         match &e {
             Effect::PayCost {
                 cost:
-                    PaymentCost::Life {
+                    AbilityCost::PayLife {
                         amount:
                             crate::types::ability::QuantityExpr::Ref {
                                 qty: crate::types::ability::QuantityRef::Variable { name },
@@ -37684,7 +37680,7 @@ mod tests {
             matches!(
                 e,
                 Effect::PayCost {
-                    cost: PaymentCost::Energy {
+                    cost: AbilityCost::PayEnergy {
                         amount: QuantityExpr::Fixed { value: 2 },
                     },
                     ..
@@ -37701,7 +37697,7 @@ mod tests {
             matches!(
                 e,
                 Effect::PayCost {
-                    cost: PaymentCost::Energy {
+                    cost: AbilityCost::PayEnergy {
                         amount: QuantityExpr::Fixed { value: 3 },
                     },
                     ..
@@ -43709,8 +43705,9 @@ mod tests {
             matches!(
                 &*def.effect,
                 Effect::PayCost {
-                    cost: PaymentCost::Mana { .. },
+                    cost: AbilityCost::Mana { .. },
                     payer: TargetFilter::Controller,
+                    ..
                 }
             ),
             "Outer effect must be PayCost {{ Mana, Controller }}, got {:?}",
@@ -43850,8 +43847,9 @@ mod tests {
             matches!(
                 &*def.effect,
                 Effect::PayCost {
-                    cost: PaymentCost::Mana { .. },
+                    cost: AbilityCost::Mana { .. },
                     payer: TargetFilter::Controller,
+                    ..
                 }
             ),
             "Outer effect must be PayCost {{ Mana, Controller }}, got {:?}",
@@ -43904,8 +43902,9 @@ mod tests {
         assert!(matches!(
             &*def.effect,
             Effect::PayCost {
-                cost: PaymentCost::Mana { .. },
+                cost: AbilityCost::Mana { .. },
                 payer: TargetFilter::Controller,
+                ..
             }
         ));
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
@@ -43937,8 +43936,9 @@ mod tests {
         assert!(matches!(
             &*def.effect,
             Effect::PayCost {
-                cost: PaymentCost::Mana { .. },
+                cost: AbilityCost::Mana { .. },
                 payer: TargetFilter::Controller,
+                ..
             }
         ));
         assert_eq!(def.player_scope, Some(PlayerFilter::All));

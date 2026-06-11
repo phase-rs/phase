@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, PaymentCost, QuantityExpr,
+    AbilityCost, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, QuantityExpr,
     QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
@@ -3327,11 +3327,12 @@ fn route_kept_card_or_defer(
 fn starts_with_pay_amount_prompt(ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PayCost {
-            cost: PaymentCost::Mana { cost },
+            cost: AbilityCost::Mana { cost },
+            scale: None,
             ..
         } => casting_costs::cost_has_x(cost),
         Effect::PayCost {
-            cost: PaymentCost::Energy { amount },
+            cost: AbilityCost::PayEnergy { amount },
             ..
         } => matches!(
             amount,

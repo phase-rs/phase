@@ -73,6 +73,15 @@ pub(super) fn handle_replacement_choice(
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::MoveCounter { .. }));
+    // CR 701.24a: capture the parked library placement (W3) BEFORE
+    // `continue_replacement` consumes (`.take()`s) the pending record, so the
+    // ZoneChange resume arm below can thread it into the delivery `DeliveryCtx`
+    // instead of hardcoding `None` (which would let the tail auto-shuffle the
+    // requested position away). `None` for every non-library parked event.
+    let parked_library_placement = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.library_placement.clone());
     match super::replacement::continue_replacement(state, index, events) {
         super::replacement::ReplacementResult::Execute(event) => {
             let mut zone_change_object_id = None;
@@ -134,6 +143,11 @@ pub(super) fn handle_replacement_choice(
                             exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
+                            // CR 701.24a: thread the parked W3 library placement so
+                            // a resumed Library-targeting redirect lands at the
+                            // requested index instead of the tail auto-shuffling it
+                            // away. `None` for every non-library parked event.
+                            library_placement: parked_library_placement.clone(),
                         },
                         events,
                     ) {
@@ -562,9 +576,23 @@ pub(super) fn handle_replacement_choice(
 
             Ok(waiting_for)
         }
-        super::replacement::ReplacementResult::NeedsChoice(player) => Ok(
-            super::replacement::replacement_choice_waiting_for(player, state),
-        ),
+        super::replacement::ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1 + CR 701.24a: a SECOND ordering choice on the same
+            // library-placement event re-parked a fresh `PendingReplacement`
+            // inside `pipeline_loop` with `library_placement: None`. Reapply the
+            // placement captured before `continue_replacement` consumed the prior
+            // record so the eventual delivery still honors the requested index
+            // instead of the tail auto-shuffling it away. `None` for every
+            // non-library parked event (no-op).
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                if pending.library_placement.is_none() {
+                    pending.library_placement = parked_library_placement.clone();
+                }
+            }
+            Ok(super::replacement::replacement_choice_waiting_for(
+                player, state,
+            ))
+        }
         super::replacement::ReplacementResult::Prevented => {
             if state.pending_counter_additions.is_some() {
                 state.waiting_for = WaitingFor::Priority {
@@ -1547,6 +1575,7 @@ mod tests {
             }],
             depth: 0,
             is_optional: false,
+            library_placement: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);

@@ -585,6 +585,9 @@ fn check_lethal_damage(
                                     source_id: source,
                                     exile_links: ExileLinkSpec::default(),
                                     drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                                    // SBA destroy/sacrifice deliveries target the
+                                    // graveyard — never a library placement.
+                                    library_placement: None,
                                 };
                                 // CR 704.3: completing all SBAs may require a
                                 // replacement choice surfaced by the delivery tail

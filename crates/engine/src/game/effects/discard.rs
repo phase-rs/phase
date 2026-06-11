@@ -70,6 +70,8 @@ pub(crate) fn complete_discard_to_graveyard(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                // Discard delivers to the graveyard — no library placement.
+                None,
                 events,
             );
         }
@@ -229,6 +231,7 @@ pub fn resolve(
                                 None,
                                 false,
                                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                                None,
                                 events,
                             );
                             // CR 702.35: The card was still discarded — record and emit event
@@ -399,6 +402,7 @@ pub(crate) fn discard_as_cost_with_source(
                     None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                    None,
                     events,
                 );
                 crate::game::restrictions::record_discard(state, player);
