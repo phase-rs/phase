@@ -429,6 +429,29 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             });
         }
 
+        // CR 106.1: "{fixed} or one mana of the chosen color" after a count
+        // prefix must retain the fixed-color alternative. Scan `rest` before
+        // the bare chosen-color arm so a leading count token does not drop the
+        // `{B}`/`{G}` branch (Gate lands with a count-qualified tail).
+        if let Some(produced) = scan_mana_production_type(&rest_lower, count.clone(), contribution)
+        {
+            if matches!(
+                produced,
+                ManaProduction::ChosenColor {
+                    fixed_alternative: Some(_),
+                    ..
+                }
+            ) {
+                return Some(Effect::Mana {
+                    produced,
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: where_x_target,
+                });
+            }
+        }
+
         if let Some((_, after_color)) = nom_on_lower(rest, &rest_lower, |i| {
             alt((
                 value((), tag("mana of the chosen color")),
@@ -2499,5 +2522,26 @@ mod tests {
             ),
             other => panic!("expected colorless Mana, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_black_dragon_gate_mana_ability() {
+        // Issue #2933: "Add {B} or one mana of the chosen color" must retain
+        // the fixed Black alternative through `try_parse_add_mana_effect`.
+        let effect = try_parse_add_mana_effect("Add {B} or one mana of the chosen color.")
+            .expect("Black Dragon Gate mana line must parse");
+        assert!(
+            matches!(
+                effect,
+                Effect::Mana {
+                    produced: ManaProduction::ChosenColor {
+                        fixed_alternative: Some(ManaColor::Black),
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected ChosenColor with fixed_alternative Black, got {effect:?}"
+        );
     }
 }
