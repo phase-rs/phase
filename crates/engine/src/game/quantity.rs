@@ -6959,6 +6959,67 @@ mod tests {
         );
     }
 
+    /// Issue #2908: "an opponent controls at least N more [type] than you" —
+    /// existential GE with an Offset threshold. P0: 1 land, P1: 2 lands (only +1,
+    /// fails), P2: 3 lands (+2, qualifies) → PlayerCount == 1.
+    #[test]
+    fn resolve_player_count_controls_at_least_n_more_lands_than_you() {
+        use crate::types::ability::{
+            Comparator, ControllerRef, PlayerRelation, TypeFilter, TypedFilter,
+        };
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+
+        let add_land = |state: &mut GameState, owner: PlayerId, id: u64| {
+            let land = create_object(
+                state,
+                CardId(id),
+                owner,
+                format!("Land {id}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&land)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        };
+        add_land(&mut state, PlayerId(0), 910);
+        add_land(&mut state, PlayerId(1), 911);
+        add_land(&mut state, PlayerId(1), 912);
+        add_land(&mut state, PlayerId(2), 913);
+        add_land(&mut state, PlayerId(2), 914);
+        add_land(&mut state, PlayerId(2), 915);
+
+        let land_filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Land));
+        let you_land =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Land).controller(ControllerRef::You));
+
+        let at_least_two_more = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Opponent,
+                    filter: land_filter,
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter: you_land },
+                        }),
+                        offset: 2,
+                    }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &at_least_two_more, PlayerId(0), ObjectId(1)),
+            1,
+            "only P2 (3 lands >= 1+2) qualifies; P1 (2 lands) does not"
+        );
+    }
+
     /// CR 122.1f: discriminating coverage for Glissa's Retriever — "the number
     /// of opponents who have three or more poison counters". The per-candidate
     /// poison total must be read off each candidate player, NOT the controller.
