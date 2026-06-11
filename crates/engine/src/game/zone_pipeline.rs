@@ -490,39 +490,68 @@ pub(crate) fn move_object(
         }
     }
 
-    // Library-placement arm. A `Some(placement)` request delivers directly to the
-    // requested library index via the `move_to_library_at_index` primitive,
-    // skipping the replacement consult. Phase D wires the exempt pregame/debug
-    // library-bottom and debug top/Nth callers through here; the mulligan and
-    // debug call sites pass a placement and rely on this direct delivery.
+    // Library-placement arm (W3). A `Some(placement)` request lands the object at
+    // a specific library index instead of shuffling it in (CR 701.24g: a placement
+    // is not a shuffle).
     //
-    // DEFERRED (W3 / PLAN §3.5): running the consult on a library placement —
-    // "the consult should still run for future-proofing per the single-entry
-    // principle". It is a guaranteed no-op today: no `Moved` replacement in the
-    // card pool targets `destination_zone(Library)` (verified: 25 Battlefield /
-    // 17 Graveyard / 2 Exile destinations, zero Library; reproduce with
+    // For EXEMPT causes (pregame opening-hand bottoming, debug top/Nth) the
+    // consult is skipped — exactly as the raw `move_to_library_at_index` callers
+    // did before migration — and the object is placed directly. The unconditional
+    // CR 111.8 token / CR 400.7 cleanup guards live inside the primitive itself.
+    //
+    // For NON-EXEMPT causes the consult RUNS (W3 completion): a board-wide `Moved`
+    // "would be put into a library → ... instead" redirect (none exist in the
+    // current pool — behavior-preserving today; re-verify with
     //   rg -o 'destination_zone\(Zone::\w+\)' crates/engine/src | sort | uniq -c
-    // — re-run before lifting this deferral). Completing it correctly
-    // also requires gating the CR 701.24a delivery-tail auto-shuffle on
-    // placement-absence across the shared `deliver` / `deliver_replaced_zone_change`
-    // signatures (a library *placement* must NOT shuffle, but a plain
-    // library-destination ZoneChange MUST) — a cross-cutting change with a
-    // silent-randomization landmine for zero current correctness gain. The raw
-    // `move_to_library_position` / `_at_index` sibling production callers
-    // (put_on_top, cascade, discover, reveal_until, drawn_this_turn_choice,
-    // engine_resolution_choices) stay on the raw movers until that completion;
-    // they are library repositions with no Moved-redirect class to consult.
-    if let Some(position) = &req.placement {
+    // ) is honored. The delivered destination decides placement: if the redirect
+    // sent the object elsewhere, `deliver_replaced_zone_change` ignores the
+    // placement; if it still lands in the library, the object is placed at the
+    // requested index and the CR 701.24a auto-shuffle is suppressed.
+    if let Some(position) = req.placement.clone() {
         if req.to == Zone::Library {
-            let index = match position {
-                LibraryPosition::Top => Some(0),
-                LibraryPosition::Bottom => None,
-                // CR: `NthFromTop { n }` is 1-based ("second from the top" => n=2,
-                // index 1); `move_to_library_at_index` is 0-based.
-                LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+            if req.cause.is_exempt() {
+                let index = match position {
+                    LibraryPosition::Top => Some(0),
+                    LibraryPosition::Bottom => None,
+                    // CR: `NthFromTop { n }` is 1-based ("second from the top" =>
+                    // n=2, index 1); `move_to_library_at_index` is 0-based.
+                    LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                };
+                zones::move_to_library_at_index(state, req.object_id, index, events);
+                return ZoneMoveResult::Done;
+            }
+            let source_id = req.source();
+            let proposed =
+                ProposedEvent::zone_change(req.object_id, from_zone, Zone::Library, source_id);
+            return match replacement::replace_event(state, proposed, events) {
+                ReplacementResult::Execute(event) => {
+                    match deliver_replaced_zone_change(
+                        state,
+                        event,
+                        source_id,
+                        req.exile_links.duration.as_ref(),
+                        matches!(
+                            req.exile_links.tracking,
+                            ZoneDeliveryExileTracking::TrackBySource
+                        ),
+                        PostReplacementDrainOwner::DeliveryTail,
+                        Some(position),
+                        events,
+                    ) {
+                        ZoneDeliveryResult::Done => ZoneMoveResult::Done,
+                        ZoneDeliveryResult::NeedsChoice(player) => {
+                            ZoneMoveResult::NeedsChoice(player)
+                        }
+                    }
+                }
+                ReplacementResult::Prevented => ZoneMoveResult::Done,
+                ReplacementResult::NeedsChoice(player) => {
+                    // CR 616.1: park at the single unparked origin (mirrors
+                    // `execute_zone_move`'s NeedsChoice arm) so the prompt surfaces.
+                    replacement::park_waiting_for(state, player);
+                    ZoneMoveResult::NeedsChoice(player)
+                }
             };
-            zones::move_to_library_at_index(state, req.object_id, index, events);
-            return ZoneMoveResult::Done;
         }
     }
 
@@ -904,6 +933,9 @@ pub(crate) fn deliver(
         ctx.exile_links.duration.as_ref(),
         track_exiled_by_source,
         ctx.drain,
+        // Bucket-A deliveries (destroy / sacrifice / SBA / land play) carry no
+        // library placement — those are graveyard / battlefield destinations.
+        None,
         events,
     )
 }
@@ -994,11 +1026,21 @@ pub(crate) fn apply_zone_delivery_tail(
     duration: Option<&Duration>,
     exile_tracking: ZoneDeliveryExileTracking,
     drain: PostReplacementDrainOwner,
+    // CR 701.24g: when a specific library position was requested, the object was
+    // placed at that index by the caller and the library is NOT shuffled — a
+    // placement is not a shuffle. `None` = plain library-destination ZoneChange,
+    // which DOES auto-shuffle per CR 701.24a. The counter-pause continuation
+    // (`ContinueZoneDeliveryTail`) never carries a placement: library placements
+    // bear no enters-with counters and never enter the battlefield, so they
+    // never reach the counter-replacement pause that re-enters this tail.
+    library_placement: Option<&LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     // CR 701.24a: To shuffle a library, randomize the cards within it so that
-    // no player knows their order.
-    if to == Zone::Library {
+    // no player knows their order. CR 701.24g: a request that places the object
+    // at a specific position is NOT a shuffle, so suppress the auto-shuffle when
+    // a `library_placement` was honored by the move above.
+    if to == Zone::Library && library_placement.is_none() {
         let owner = state.objects.get(&object_id).map(|o| o.owner);
         if let Some(owner) = owner {
             shuffle_library(state, owner, events);
@@ -1148,6 +1190,15 @@ pub(crate) fn apply_face_down_entry_profile(
 }
 
 /// Deliver a zone-change event that has already passed through replacement.
+///
+/// `library_placement` (CR 701.24g): when the event's delivered destination is
+/// the library AND a specific position was requested, the object is placed at
+/// that index and the library is NOT shuffled (a placement is not a shuffle).
+/// `None` = the zone-default placement, which auto-shuffles per CR 701.24a. A
+/// `Moved` replacement may have redirected the event to a non-library zone; the
+/// placement then has no effect (the index/shuffle gates both key on
+/// `to == Zone::Library`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn deliver_replaced_zone_change(
     state: &mut GameState,
     event: ProposedEvent,
@@ -1155,6 +1206,7 @@ pub(crate) fn deliver_replaced_zone_change(
     duration: Option<&Duration>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
+    library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     if let ProposedEvent::ZoneChange {
@@ -1228,7 +1280,27 @@ pub(crate) fn deliver_replaced_zone_change(
             })
             .flatten();
 
-        zones::move_to_zone(state, object_id, to, events);
+        // CR 701.24g: deliver to a specific library index when the event's
+        // destination is the library and a position was requested; otherwise the
+        // zone-default `move_to_zone` (which the tail then auto-shuffles per
+        // CR 701.24a). `move_to_library_at_index` performs the same full
+        // cross-zone cleanup (LKI, transform revert, layer pruning) as
+        // `move_to_zone` — it differs only in placing at an index instead of
+        // shuffling. A `Moved` redirect may have changed `to` away from Library,
+        // in which case the placement is inert and the default mover runs.
+        match (to, library_placement.as_ref()) {
+            (Zone::Library, Some(position)) => {
+                let index = match position {
+                    LibraryPosition::Top => Some(0),
+                    LibraryPosition::Bottom => None,
+                    // CR: `NthFromTop { n }` is 1-based ("second from the top"
+                    // => n=2, index 1); `move_to_library_at_index` is 0-based.
+                    LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                };
+                zones::move_to_library_at_index(state, object_id, index, events);
+            }
+            _ => zones::move_to_zone(state, object_id, to, events),
+        }
         // CR 400.7d: restore the cast link immediately after the entry reset —
         // BEFORE the face-down / counter blocks, so a counter-replacement pause
         // (CR 616.1) cannot strand the resumed permanent without its kicker /
@@ -1419,6 +1491,7 @@ pub(crate) fn deliver_replaced_zone_change(
             duration,
             exile_tracking,
             drain,
+            library_placement.as_ref(),
             events,
         );
     }
@@ -1637,6 +1710,10 @@ pub(crate) fn execute_zone_move(
                     duration,
                     track_exiled_by_source,
                     PostReplacementDrainOwner::DeliveryTail,
+                    // `execute_zone_move` carries no library placement (its
+                    // callers are battlefield/graveyard/exile moves); placements
+                    // route through `move_object`'s library arm directly.
+                    None,
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {}
@@ -1668,6 +1745,7 @@ pub(crate) fn execute_zone_move(
                 duration,
                 track_exiled_by_source,
                 PostReplacementDrainOwner::DeliveryTail,
+                None,
                 events,
             ) {
                 ZoneDeliveryResult::Done => {}
@@ -1699,5 +1777,147 @@ pub(crate) fn execute_zone_move(
             replacement::park_waiting_for(state, player);
             ZoneMoveResult::NeedsChoice(player)
         }
+    }
+}
+
+#[cfg(test)]
+mod w3_library_placement_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ReplacementDefinition, TargetFilter,
+    };
+    use crate::types::identifiers::CardId;
+    use crate::types::replacements::ReplacementEvent;
+
+    /// Install a board-wide `Moved` replacement: "any object that would be put
+    /// into a library is exiled instead" (synthetic — no such card exists in the
+    /// pool today, which is why a non-exempt library placement was a guaranteed
+    /// no-op before W3). The redirect's destination is the match condition; the
+    /// `.execute(ChangeZone { destination: Exile })` is the lowered effect.
+    fn install_library_to_exile_redirect(state: &mut GameState) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(90001),
+            PlayerId(0),
+            "Library Exile Redirect".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Exile,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        face_down_profile: None,
+                    },
+                ))
+                .destination_zone(Zone::Library),
+        );
+        source
+    }
+
+    /// W3 (CR 614.6): a NON-EXEMPT library placement now runs the replacement
+    /// consult. Before W3 the placement arm skipped `replace_event` and delivered
+    /// straight to the library index, so the redirect below was silently dropped
+    /// and the card landed in the library. With the consult running, the
+    /// board-wide "put into library → exile instead" redirect fires and the card
+    /// lands in EXILE — the discriminating behavior change.
+    #[test]
+    fn library_placement_consults_moved_redirect() {
+        let mut state = GameState::new_two_player(42);
+        let redirect_source = install_library_to_exile_redirect(&mut state);
+        let card = create_object(
+            &mut state,
+            CardId(90002),
+            PlayerId(0),
+            "Redirected Card".to_string(),
+            Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card, Zone::Library, redirect_source)
+                .at_library_position(LibraryPosition::Top),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        // The redirect sent the card to exile instead of the library.
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
+        assert!(!state.players[0].library.contains(&card));
+    }
+
+    /// W3 (CR 701.24g): a NON-EXEMPT library placement with no redirect places the
+    /// object at the requested index and does NOT shuffle the library — a
+    /// placement is not a shuffle. Seeds a deterministic three-card library and
+    /// asserts the placed card lands on top with the existing order preserved.
+    #[test]
+    fn library_placement_does_not_shuffle() {
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Library,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Library,
+        );
+        let c = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "C".to_string(),
+            Zone::Library,
+        );
+        // Deterministic order: [A, B, C] (index 0 = top).
+        state.players[0].library = crate::im::vector![a, b, c];
+
+        let placed = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Placed".to_string(),
+            Zone::Graveyard,
+        );
+        let mover = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Mover".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(placed, Zone::Library, mover)
+                .at_library_position(LibraryPosition::Top),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        // Placed on top; the existing order is untouched (no shuffle).
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![placed, a, b, c]
+        );
     }
 }

@@ -571,6 +571,11 @@ fn apply_pending_counter_post_action(
                 duration.as_ref(),
                 exile_tracking,
                 drain,
+                // CR 701.24g: the counter-pause continuation never carries a
+                // library placement — library placements bear no enters-with
+                // counters and never enter the battlefield, so they never reach
+                // the counter-replacement pause that re-enters this tail.
+                None,
                 events,
             ) {
                 super::change_zone::ZoneDeliveryResult::Done => true,
