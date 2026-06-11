@@ -419,6 +419,11 @@ fn redundancy_delta(
         // target creature) is a triggered death/resolution effect, not a
         // "redundant if already controlled" one.
         | Effect::ExileHaunting { .. }
+        // CR 614.1a + CR 607.2b: Rod of Absorption's trigger stamps a resolving
+        // spell with an exile-instead/linked-source rider. Its value is realized
+        // by the stack resolution replacement path, so this policy has no static
+        // redundancy signal to score.
+        | Effect::ExileResolvingSpellInsteadOfGraveyard
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::ChooseCard { .. }
