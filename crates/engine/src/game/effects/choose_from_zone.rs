@@ -45,38 +45,14 @@ pub fn resolve(
             _ => return Err(EffectError::MissingParam("ChooseFromZone".to_string())),
         };
 
-    // Read available cards from the most recent tracked set (same pattern as delayed_trigger.rs).
-    // The tracked set was recorded by the preceding ChangeZone effect via next_sub_needs_tracked_set.
-    let cards: Vec<ObjectId> = crate::game::targeting::latest_tracked_set_id(state)
-        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
-        .unwrap_or_default();
-
-    // Fallback: if tracked set is empty, try ability targets filtered to objects.
-    let cards = if cards.is_empty() {
-        ability
-            .targets
-            .iter()
-            .filter_map(|t| match t {
-                TargetRef::Object(id) => Some(*id),
-                _ => None,
-            })
-            .collect()
-    } else {
-        cards
-    };
-
-    let cards = if cards.is_empty() {
-        collect_direct_zone_cards(
-            state,
-            ability,
-            zone,
-            &additional_zones,
-            zone_owner,
-            filter.as_ref(),
-        )?
-    } else {
-        cards
-    };
+    let cards = resolve_candidate_cards(
+        state,
+        ability,
+        zone,
+        &additional_zones,
+        zone_owner,
+        filter.as_ref(),
+    )?;
 
     // CR 700.2: If there are no objects to choose from, skip the choice.
     if cards.is_empty() || count == 0 {
@@ -107,6 +83,71 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 700.2 + CR 603.7: Resolve the candidate card pool for a tracked-set pick.
+///
+/// Priority order:
+/// 1. The current resolution chain's tracked set (if non-empty).
+/// 2. `last_revealed_ids` from a preceding reveal in this resolution — must
+///    beat stale global tracked sets from earlier resolutions (issue #1374).
+/// 3. The latest non-empty tracked set from any prior publish in this game.
+/// 4. Explicit `TargetRef::Object` targets on the ability.
+/// 5. Direct zone scan (`zone` + `additional_zones`).
+fn resolve_candidate_cards(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    zone: Zone,
+    additional_zones: &[Zone],
+    zone_owner: ZoneOwner,
+    filter: Option<&TargetFilter>,
+) -> Result<Vec<ObjectId>, EffectError> {
+    if let Some(cards) = chain_tracked_set_cards(state) {
+        return Ok(cards);
+    }
+
+    if !state.last_revealed_ids.is_empty() {
+        // CR 701.20b: RevealTop/Dig reveal-only parents write here but do not
+        // emit ZoneChanged, so the tracked-set publish depends on
+        // `affected_objects_from_events` reading `CardsRevealed`.
+        let filter_ctx = FilterContext::from_ability(ability);
+        let cards: Vec<_> = state
+            .last_revealed_ids
+            .iter()
+            .copied()
+            .filter(|id| filter.is_none_or(|f| matches_target_filter(state, *id, f, &filter_ctx)))
+            .collect();
+        if !cards.is_empty() {
+            return Ok(cards);
+        }
+    }
+
+    let cards = crate::game::targeting::latest_tracked_set_id(state)
+        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+        .unwrap_or_else(|| {
+            ability
+                .targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .collect()
+        });
+
+    let cards = if cards.is_empty() {
+        collect_direct_zone_cards(state, ability, zone, additional_zones, zone_owner, filter)?
+    } else {
+        cards
+    };
+
+    Ok(cards)
+}
+
+fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
+    let chain_id = state.chain_tracked_set_id?;
+    let cards = state.tracked_object_sets.get(&chain_id)?;
+    (!cards.is_empty()).then(|| cards.clone())
 }
 
 fn collect_direct_zone_cards(
@@ -757,5 +798,231 @@ mod tests {
                 categories: vec![CoreType::Artifact, CoreType::Creature],
             }),
         ));
+    }
+
+    /// CR 701.20b + CR 700.2: Issue #1374 — when RevealTop did not publish a
+    /// tracked set, `ChooseFromZone` must bind to `last_revealed_ids`, not a
+    /// stale graveyard set from an earlier resolution.
+    #[test]
+    fn resolve_prefers_last_revealed_ids_over_stale_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+        let revealed_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Creature".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&revealed_creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let revealed_instant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Revealed Instant".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&revealed_instant)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Instant];
+        let stale_graveyard_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Stale Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(9), vec![stale_graveyard_card]);
+        state.next_tracked_set_id = 10;
+        state.last_revealed_ids = vec![revealed_creature, revealed_instant];
+
+        let categories = vec![
+            CoreType::Artifact,
+            CoreType::Battle,
+            CoreType::Creature,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Land,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
+        ];
+        let ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: categories.len() as u32,
+                zone: Zone::Library,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: true,
+                constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert!(cards.contains(&revealed_creature));
+                assert!(cards.contains(&revealed_instant));
+                assert!(
+                    !cards.contains(&stale_graveyard_card),
+                    "stale graveyard tracked set must not shadow revealed library cards"
+                );
+            }
+            other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
+        }
+    }
+
+    /// End-to-end regression for Atraxa, Grand Unifier's ETB chain:
+    /// RevealTop(10) → ChooseFromZone(DistinctCardTypes) must offer only the
+    /// revealed library cards.
+    #[test]
+    fn atraxa_style_reveal_top_chain_offers_revealed_library_cards() {
+        use super::super::resolve_ability_chain;
+        use crate::types::ability::TargetFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Atraxa, Grand Unifier".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut library_top = Vec::new();
+        for i in 0..10 {
+            let core_type = if i % 2 == 0 {
+                CoreType::Creature
+            } else {
+                CoreType::Instant
+            };
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![core_type];
+            library_top.push(id);
+        }
+        let _library_padding = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Library Padding".to_string(),
+            Zone::Library,
+        );
+
+        let stale_graveyard_card = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Stale Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(5), vec![stale_graveyard_card]);
+        state.next_tracked_set_id = 6;
+
+        let categories = vec![
+            CoreType::Artifact,
+            CoreType::Battle,
+            CoreType::Creature,
+            CoreType::Enchantment,
+            CoreType::Instant,
+            CoreType::Land,
+            CoreType::Planeswalker,
+            CoreType::Sorcery,
+        ];
+        let change_zone = Box::new(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ));
+        let choose = ResolvedAbility {
+            sub_ability: Some(change_zone),
+            ..ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: categories.len() as u32,
+                    zone: Zone::Library,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::Controller,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: true,
+                    constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+        let reveal = ResolvedAbility {
+            sub_ability: Some(Box::new(choose)),
+            ..ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 10,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+        };
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reveal, &mut events, 0).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, up_to, .. } => {
+                assert!(up_to);
+                assert_eq!(cards.len(), 10, "must offer exactly the ten revealed cards");
+                for id in &library_top {
+                    assert!(cards.contains(id), "missing revealed library card {id:?}");
+                }
+                assert!(
+                    !cards.contains(&stale_graveyard_card),
+                    "graveyard cards must never appear in the reveal-and-choose pool"
+                );
+                assert!(
+                    !cards.contains(&_library_padding),
+                    "cards below the reveal window must not be offered"
+                );
+            }
+            other => panic!(
+                "Expected ChooseFromZoneChoice after RevealTop, got {:?}",
+                other
+            ),
+        }
     }
 }

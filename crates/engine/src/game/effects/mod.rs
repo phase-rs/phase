@@ -2351,6 +2351,18 @@ fn affected_objects_from_events(
                     .collect()
             }
         }
+        // CR 701.20b + CR 608.2c: Reveal instructions do not move cards, so they
+        // emit `CardsRevealed` rather than `ZoneChanged`. Publish the revealed
+        // card ids for downstream "from among the revealed cards"
+        // `ChooseFromZone` continuations (Atraxa, Grand Unifier class).
+        Effect::RevealTop { .. } | Effect::RevealHand { .. } | Effect::Clash => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.as_slice()),
+                _ => None,
+            })
+            .flat_map(|ids| ids.iter().copied())
+            .collect(),
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
@@ -8881,6 +8893,43 @@ mod tests {
             .filter(|o| o.name == "Treasure")
             .count();
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
+    }
+
+    /// CR 701.20b + CR 608.2c: `RevealTop` publishes `CardsRevealed`, not
+    /// `ZoneChanged`. Without a dedicated arm in `affected_objects_from_events`,
+    /// the tracked-set publish is empty and `ChooseFromZone` falls back to a
+    /// stale graveyard set from an earlier resolution (issue #1374).
+    #[test]
+    fn reveal_top_publishes_cards_revealed_for_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top Card".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second Card".to_string(),
+            Zone::Library,
+        );
+        let events = vec![GameEvent::CardsRevealed {
+            player: PlayerId(0),
+            card_ids: vec![top, second],
+            card_names: vec!["Top Card".to_string(), "Second Card".to_string()],
+        }];
+        let effect = Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 2,
+        };
+
+        assert_eq!(
+            affected_objects_from_events(&effect, &events, &[]),
+            vec![top, second]
+        );
     }
 
     /// CR 701.20a + CR 608.2f: an Indomitable Creativity-style
