@@ -4783,7 +4783,8 @@ pub(super) fn apply_where_x_effect_expression(
 /// `AbilityCost` (no wildcard) so a future variant carrying an X-amount — e.g. a
 /// `Composite { …PayLife(X)… }` producer — forces a deliberate decision here
 /// instead of silently skipping the rewrite. Recurses into the compositional
-/// (`Composite`/`OneOf`) and wrapping (`PerCounter`) variants. The no-X variants
+/// (`Composite`/`OneOf`), wrapping (`PerCounter`), and effect-nesting
+/// (`EffectCost`) variants. The no-X variants
 /// are enumerated as explicit no-ops: their amounts are either fixed integers
 /// (`Loyalty`, `Mill`, `Blight`, counts on Sacrifice/Exile/TapCreatures/…) or a
 /// static `ManaCost`/object filter that the where-X mana-value clause does not
@@ -4809,6 +4810,15 @@ fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Opt
         AbilityCost::PerCounter { base, .. } => {
             apply_where_x_to_ability_cost(base, where_x_expression);
         }
+        // CR 107.3i + CR 118.1: An effect performed as a cost nests an `Effect`
+        // (e.g. `PutCounter { count: QuantityExpr }`), whose own quantity can
+        // carry the surrounding where-X binding. Recurse through the shared
+        // `apply_where_x_effect_expression` rewriter so a "where X is …" clause
+        // flows into the nested effect's count exactly as it does for the
+        // sub-ability's effects — never re-implement the per-effect quantity walk.
+        AbilityCost::EffectCost { effect } => {
+            apply_where_x_effect_expression(effect, where_x_expression);
+        }
         // No X-bearing `QuantityExpr` amount to bind: fixed integer counts
         // (`Loyalty`, `Mill`, `Blight`, counts on Sacrifice/Exile/…) or a static
         // `ManaCost`/object filter that this where-X mana-value clause does not
@@ -4833,7 +4843,6 @@ fn apply_where_x_to_ability_cost(cost: &mut AbilityCost, where_x_expression: Opt
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
-        | AbilityCost::EffectCost { .. }
         | AbilityCost::Unimplemented { .. } => {}
     }
 }

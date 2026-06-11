@@ -10616,8 +10616,9 @@ pub(super) fn find_eligible_sacrifice_targets(
 ///
 /// The bespoke non-self-Sacrifice / PayLife / TapCreatures pre-checks that used
 /// to live here were deleted in Phase 5 — each duplicated logic already in
-/// `is_payable` (proven by discriminating tests); the Waterbend check is now the
-/// `PaymentClass::InteractiveMana` routing rule inside `can_pay`/`is_payable`.
+/// `is_payable` (proven by discriminating tests); a bare Waterbend cost is
+/// answered by `is_payable`'s auto-tap check and skips the `can_pay` dry run
+/// (gated on the bare `AbilityCost::Waterbend` shape).
 fn can_pay_ability_cost_now(
     state: &GameState,
     player: PlayerId,

@@ -15,16 +15,15 @@
 //! Phase 2 introduced [`PaymentScope`] and routed the resolution-time
 //! `Effect::PayCost` arms (`effects/pay.rs`) through this authority, deleting
 //! their duplicate Mana/ManaDynamic/PayLife/PayEnergy/Composite/Discard
-//! implementations. Phase 5 added the [`payment_class`] structural classifier
-//! and [`can_pay`] — the single affordability authority that composes
-//! `AbilityCost::is_payable` (the CR 118.3 resource/choice-eligibility gate)
-//! with a scope-appropriate check: the relocated A2 clone-and-simulate for
-//! activation, the relocated A3 resource match for resolution. The activation
+//! implementations. Phase 5 added [`can_pay`] — the single affordability
+//! authority that composes `AbilityCost::is_payable` (the CR 118.3
+//! resource/choice-eligibility gate) with a scope-appropriate check: the
+//! relocated A2 clone-and-simulate for activation, the relocated A3 resource
+//! match for resolution (`supported_at_resolution` is the shared membership
+//! authority for which shapes have a resolution payment arm). The activation
 //! flow, the `WaitingFor::PayCost` emission/resume handlers, the cost finder
 //! helpers, and the mana planner all remain in `casting.rs`;
-//! `casting::can_pay_ability_cost_now` now delegates to [`can_pay`], and
-//! `casting.rs` re-exports the moved symbols via `pub(crate) use` shims so
-//! existing call sites compile unchanged.
+//! `casting::can_pay_ability_cost_now` now delegates to [`can_pay`].
 //!
 //! L1-primitives-only rule (TARGET invariant): code here pays costs through
 //! L1 resource primitives (`life_costs`, `effects::counters`, `sacrifice`,
@@ -83,9 +82,18 @@ pub(crate) enum PaymentScope<'a> {
     Activation {
         excluded_sources: &'a HashSet<ObjectId>,
     },
-    /// `ability` is the PAYER-ADJUSTED `ResolvedAbility` clone (controller
-    /// swapped to the resolved payer, per `effects/pay.rs`). All
+    /// `ability` is normally the PAYER-ADJUSTED `ResolvedAbility` clone
+    /// (controller swapped to the resolved payer, per `effects/pay.rs`). All
     /// quantity-resolving arms read it via `resolve_quantity_with_targets`.
+    ///
+    /// Caveat: the unless-payment adapter (`engine_payment_choices.rs`,
+    /// PayLife / PayEnergy arms) intentionally passes the `pending_effect` RAW —
+    /// the controller is NOT swapped to the unless-payer — because unless-cost
+    /// dynamic quantities can be controller-relative by card text, so a blanket
+    /// swap is not obviously correct there. The payer is still threaded
+    /// separately (`player`), so the right player's resources are deducted; only
+    /// the `QuantityExpr` resolution reads the un-swapped controller. See the
+    /// per-arm comments at those call sites.
     Resolution { ability: &'a ResolvedAbility },
 }
 
@@ -235,6 +243,18 @@ fn pay_ability_cost_inner(
     events: &mut Vec<GameEvent>,
     scope: &PaymentScope,
 ) -> Result<PaymentOutcome, EngineError> {
+    // CR 118.3 / CR 601.2h: at resolution there is no interactive interceptor or
+    // activation-window mana detour, so any shape outside the resolution-payable
+    // set has no real payment arm here. One structural guard (shared with
+    // `can_pay_resolution` via `supported_at_resolution`) refuses them as
+    // `Failed` up front — never a silent `Paid` no-op, never an unintended
+    // execution — so a shape that slips past the pre-gate fails loudly into the
+    // effect's `cost_payment_failed_flag` branch (CR 118.12).
+    if matches!(scope, PaymentScope::Resolution { .. }) && !supported_at_resolution(cost) {
+        return Ok(payment_failed(
+            "unsupported resolution-time AbilityCost payment shape",
+        ));
+    }
     match cost {
         AbilityCost::Tap => {
             let obj = state
@@ -751,15 +771,11 @@ fn pay_ability_cost_inner(
         | AbilityCost::NinjutsuFamily { .. } => {
             // At Activation these shapes are intercepted by the interactive
             // WaitingFor detours before payment is invoked, so passing through
-            // is sound. At Resolution there is no interceptor: falling through
-            // to `Paid` would report a cost as paid that was never paid
-            // (CR 118.3 / CR 601.2h). Fail loudly so the adapter's
-            // `cost_payment_failed_flag` branch fires instead.
-            if matches!(scope, PaymentScope::Resolution { .. }) {
-                return Ok(payment_failed(
-                    "unsupported resolution-time AbilityCost payment shape",
-                ));
-            }
+            // to `Paid` is sound. At Resolution there is no interceptor — but
+            // none of these shapes is in `supported_at_resolution`, so the
+            // structural guard at the top of this function has already refused
+            // them with `Failed` (CR 118.3 / CR 601.2h) and this arm is only
+            // ever reached at Activation scope.
         }
         // CR 118.12a: `OneOf` (disjunctive unless-cost) is intercepted at
         // `surface_unless_payment` and never reaches an auto-payment site.
@@ -783,108 +799,6 @@ fn pay_ability_cost_inner(
     Ok(PaymentOutcome::Paid)
 }
 
-/// CR 118: Static structural classification of an [`AbilityCost`] variant.
-///
-/// This is a *taxonomy of the variant shape*, never a runtime-state check
-/// (unification plan §3, review M4): it answers "how is this kind of cost paid"
-/// so [`can_pay`] can route affordability without re-deriving it from bespoke
-/// cost-tree walks (the deleted A2 `find_*` pre-checks). Forced-choice fast
-/// paths and "is there a legal object" eligibility remain runtime checks inside
-/// `AbilityCost::is_payable` / `pay_ability_cost_inner`, not classifier facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PaymentClass {
-    /// CR 601.2h: The cost is fully resolved by `pay_ability_cost_inner` against
-    /// the current state — cloning the state and dry-running payment is a sound
-    /// affordability oracle (the relocated A2 simulation guarantee).
-    Deterministic,
-    /// CR 605.3a / Waterbend: a mana cost paid through an interactive auto-tap
-    /// window. `is_payable` excludes mana affordability by design, and the
-    /// `pay_ability_cost_inner` arm is a no-op (the mana is paid by the
-    /// `ManaPayment` detour before payment runs), so affordability must route
-    /// through `can_pay_cost_after_auto_tap` — captured by `is_payable`'s
-    /// Waterbend arm — rather than a dry run.
-    InteractiveMana,
-    /// CR 601.2b: the cost requires a player to choose objects (sacrifice a
-    /// creature, discard a card, tap N creatures, …). It is paid via a
-    /// `WaitingFor` detour before `pay_ability_cost_inner` runs; the arm there
-    /// is a deliberate no-op. Affordability is the choice-eligibility gate in
-    /// `is_payable`. Dry-running would falsely report `Paid` for the no-op arm,
-    /// so the simulation is consulted only for the deterministic siblings of a
-    /// `Composite` (see [`can_pay`]).
-    Interactive,
-    /// CR 118.12a: the cost is only valid inside an unless-payment / per-counter
-    /// expansion context (or is `Unimplemented`); it has no standalone payment.
-    UnlessOnly,
-}
-
-/// CR 118: Classify a cost's payment shape. `Composite`/`OneOf` fold their
-/// children — an aggregate is `InteractiveMana` if any child is (its mana leg
-/// needs the auto-tap check), else `Interactive` if any child is (a no-op leg
-/// must not be dry-run-trusted), else `Deterministic`. `UnlessOnly` children do
-/// not change the aggregate class — a `Composite` mixing a payable leaf with an
-/// `Unimplemented` leaf is still gated by `is_payable`/simulation.
-pub(crate) fn payment_class(cost: &AbilityCost) -> PaymentClass {
-    use crate::types::ability::DiscardSelfScope;
-    match cost {
-        AbilityCost::Waterbend { .. } => PaymentClass::InteractiveMana,
-        AbilityCost::Mana { .. }
-        | AbilityCost::ManaDynamic { .. }
-        | AbilityCost::Tap
-        | AbilityCost::Untap
-        | AbilityCost::Loyalty { .. }
-        | AbilityCost::PayLife { .. }
-        | AbilityCost::PayEnergy { .. }
-        | AbilityCost::PaySpeed { .. }
-        | AbilityCost::Unattach
-        | AbilityCost::Mill { .. }
-        | AbilityCost::Exert
-        | AbilityCost::EffectCost { .. } => PaymentClass::Deterministic,
-        // Self-referential sacrifice/exile/remove-counter and source-card
-        // discard are paid directly by `pay_ability_cost_inner` (no object
-        // choice) — deterministic. Their non-self / targeted / hand-choice
-        // forms below are interactive.
-        AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            ..
-        } => PaymentClass::Deterministic,
-        AbilityCost::Exile {
-            filter: Some(TargetFilter::SelfRef),
-            ..
-        } => PaymentClass::Deterministic,
-        AbilityCost::RemoveCounter { target: None, .. } => PaymentClass::Deterministic,
-        AbilityCost::Discard {
-            self_scope: DiscardSelfScope::SourceCard,
-            ..
-        } => PaymentClass::Deterministic,
-        AbilityCost::Sacrifice { .. }
-        | AbilityCost::Exile { .. }
-        | AbilityCost::ExileMaterials { .. }
-        | AbilityCost::CollectEvidence { .. }
-        | AbilityCost::TapCreatures { .. }
-        | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::NinjutsuFamily { .. }
-        | AbilityCost::Discard { .. } => PaymentClass::Interactive,
-        AbilityCost::OneOf { .. }
-        | AbilityCost::PerCounter { .. }
-        | AbilityCost::Unimplemented { .. } => PaymentClass::UnlessOnly,
-        AbilityCost::Composite { costs } => {
-            let mut class = PaymentClass::Deterministic;
-            for sub in costs {
-                match payment_class(sub) {
-                    PaymentClass::InteractiveMana => return PaymentClass::InteractiveMana,
-                    PaymentClass::Interactive => class = PaymentClass::Interactive,
-                    PaymentClass::Deterministic | PaymentClass::UnlessOnly => {}
-                }
-            }
-            class
-        }
-    }
-}
-
 /// CR 118.3 + CR 601.2h: The single affordability authority. Returns whether
 /// `payer` could pay `cost` right now in the active [`PaymentScope`].
 ///
@@ -893,12 +807,15 @@ pub(crate) fn payment_class(cost: &AbilityCost) -> PaymentClass {
 /// choice-eligibility/resource gate plus a clone-and-dry-run of
 /// `pay_ability_cost_inner`, which is the affordability oracle for every
 /// deterministic component (including the source's tapped state for `{T}`, and
-/// the activation-window mana payment). `InteractiveMana` costs skip the dry run
-/// — `is_payable`'s Waterbend arm already routes through
-/// `can_pay_cost_after_auto_tap`, and the dry run no-ops the Waterbend arm — but
-/// a `Composite` carrying both a Waterbend leg and deterministic legs is dry-run
-/// for those legs (the InteractiveMana fold only suppresses the dry run for a
-/// *bare* Waterbend, where it would be pure waste).
+/// the activation-window mana payment). A *bare* `Waterbend` cost skips the dry
+/// run — `is_payable`'s Waterbend arm already routes through
+/// `can_pay_cost_after_auto_tap`, and the dry run no-ops the Waterbend arm, so
+/// it would be pure waste — but a `Composite` carrying both a Waterbend leg and
+/// deterministic legs (e.g. Waterbend's own `{T}` companion cost) is dry-run for
+/// those legs. The skip is gated on the bare `Waterbend` *shape*, never on the
+/// folded `InteractiveMana` class: the fold returns `InteractiveMana` for any
+/// Composite containing a Waterbend leg, so gating on the class would wrongly
+/// suppress the dry run that checks the `{T}` leg's tapped-source state.
 ///
 /// Resolution scope answers CR 118.12 affordability: a resource/eligibility
 /// match per `AbilityCost` (relocated from the deleted
@@ -916,12 +833,16 @@ pub(crate) fn can_pay(
             if !cost.is_payable(state, payer, source_id) {
                 return false;
             }
-            // CR 605.3a: A bare interactive-mana cost (Waterbend) has no
-            // deterministic component to dry-run — its affordability is fully
-            // answered by `is_payable`'s auto-tap check above. Every other class
-            // (including a Composite whose Waterbend leg is no-op'd) relies on
-            // the relocated A2 simulation guarantee.
-            if payment_class(cost) == PaymentClass::InteractiveMana {
+            // CR 701.67a: A bare Waterbend cost has no deterministic component
+            // to dry-run — its affordability is fully answered by `is_payable`'s
+            // auto-tap check above. Gate on the bare `Waterbend` *shape*, not the
+            // folded `InteractiveMana` class: the fold reports `InteractiveMana`
+            // for any Composite that merely *contains* a Waterbend leg (e.g.
+            // "Waterbend {3}, {T}"), and skipping the dry run there would leak
+            // the `{T}` leg's tapped-source state — `is_payable`'s Tap arm is
+            // unconditionally true. Every other shape (including such a
+            // Composite) relies on the relocated A2 simulation guarantee.
+            if matches!(cost, AbilityCost::Waterbend { .. }) {
                 return true;
             }
             let mut simulated = state.clone();
@@ -944,6 +865,65 @@ pub(crate) fn can_pay(
     }
 }
 
+/// CR 118.12: The single source of truth for which `AbilityCost` shapes
+/// `pay_ability_cost_inner` can actually pay at `PaymentScope::Resolution`. Both
+/// the resolution affordability oracle (`can_pay_resolution`) and the
+/// resolution-scope structural guard inside `pay_ability_cost_inner` derive from
+/// this one predicate, so the two can never disagree and a future variant forces
+/// a deliberate decision in exactly one place.
+///
+/// A shape outside this set has no resolution-time payment arm: at resolution
+/// there is no interactive `WaitingFor` interceptor and no activation-window
+/// mana detour, so executing such an arm would either silently report a no-op
+/// cost as `Paid` (`Waterbend`, `ExileMaterials`, non-self `Sacrifice`, targeted
+/// `RemoveCounter`) or perform an effect that was never meant to fire at
+/// resolution (singleton `Tap`, self-ref `Sacrifice`/`Exile`, `Loyalty`,
+/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, `EffectCost`,
+/// source-card `Discard`). Both outcomes violate CR 118.3 / CR 601.2h, so the
+/// guard refuses them with `Failed`.
+fn supported_at_resolution(cost: &AbilityCost) -> bool {
+    use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+    match cost {
+        AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::OneOf { .. } => true,
+        // Only the chosen-from-hand discard has a resolution arm (the
+        // `WaitingFor::DiscardChoice` / forced-choice fast path). The source-card
+        // discard arm is an activation-cost shape with no resolution payment.
+        AbilityCost::Discard {
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+            ..
+        } => true,
+        AbilityCost::Discard { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::Unimplemented { .. } => false,
+    }
+}
+
 /// CR 118.3 + CR 118.12: Resolution-time affordability (relocated A3). A player
 /// can't pay a cost without the resources to pay it fully; used as the
 /// `Composite` pre-flight so the resolver never commits a sub-cost before
@@ -954,6 +934,7 @@ fn can_pay_resolution(
     cost: &AbilityCost,
     ability: &ResolvedAbility,
 ) -> bool {
+    use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
     match cost {
         AbilityCost::Mana { cost: mana_cost } => {
             can_pay_effect_mana_cost_after_auto_tap(state, payer, ability.source_id, mana_cost)
@@ -991,16 +972,17 @@ fn can_pay_resolution(
             let amount = u8::try_from(amount.max(0)).unwrap_or(u8::MAX);
             effective_speed(state, payer) >= amount
         }
-        // CR 701.9: Discard requires `count` eligible cards in the payer's hand
-        // (matching `filter` if present). `random` and `self_ref` do not affect
-        // affordability — random discard still needs the card count, and a
-        // self-ref discard requires the source to be in hand. Defer those
-        // shape-specific checks until commitment time.
+        // CR 701.9: A chosen-from-hand discard requires `count` eligible cards
+        // in the payer's hand (matching `filter` if present). This is the only
+        // discard shape with a resolution payment arm (`supported_at_resolution`);
+        // the source-card discard is an activation-cost shape and falls to the
+        // unsupported list below. `random` does not affect affordability — random
+        // discard still needs the card count — so it is not constrained here.
         AbilityCost::Discard {
             count,
             filter,
-            selection: _,
-            self_scope: _,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
         } => {
             let count = u32::try_from(resolve_quantity_with_targets(state, count, ability).max(0))
                 .unwrap_or(0) as usize;
@@ -1018,18 +1000,24 @@ fn can_pay_resolution(
         AbilityCost::OneOf { costs } => costs
             .iter()
             .any(|cost| can_pay_resolution(state, payer, cost, ability)),
-        // Variants below are not yet supported as resolution-time costs.
+        // Variants below have no resolution-time payment arm
+        // (`supported_at_resolution` is the shared membership authority).
         // Refusing here is the conservative affordability answer (treat as
         // "can't pay" → `cost_payment_failed_flag` → the effect's didn't-pay
-        // branch, per CR 118.12). The authority's Resolution-scope guard on its
-        // interactive pass-through arm backs this up: a shape that slips past
-        // this pre-gate returns `Failed`, never a silent `Paid`.
+        // branch, per CR 118.12). The structural guard at the top of
+        // `pay_ability_cost_inner` backs this up: a shape that slips past this
+        // pre-gate returns `Failed`, never a silent `Paid` and never an
+        // unintended execution.
+        //
+        // The source-card / non-chosen `Discard` shapes land here (only the
+        // chosen-from-hand discard above has a resolution arm).
         //
         // CR 702.24a: `PerCounter` is expanded into a concrete cost at the
         // unless-payment entry point; the resolved base is what gets
         // payability-checked. The wrapper itself is not a direct resolution-time
         // cost, so refusing here keeps the effect proceeding pre-expansion.
-        AbilityCost::Tap
+        AbilityCost::Discard { .. }
+        | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Unattach
         | AbilityCost::Loyalty { .. }
@@ -1069,8 +1057,9 @@ mod tests {
     /// Build one representative value for EVERY `AbilityCost` variant via an
     /// exhaustive `match` over a tag enum. The `match` has no wildcard, so a new
     /// `AbilityCost` variant forces a compile error here — the lockstep gate
-    /// (plan §5 / risk R5): a new payable resource must be classified by
-    /// `payment_class` and payable through `pay_cost` before this test compiles.
+    /// (plan §5 / risk R5): a new payable resource must be given a
+    /// `supported_at_resolution` answer and payable through `pay_cost` before
+    /// this test compiles.
     fn sample_for(tag: &AbilityCost) -> AbilityCost {
         let life = QuantityExpr::Fixed { value: 1 };
         match tag {
@@ -1272,15 +1261,18 @@ mod tests {
         tags.iter().map(sample_for).collect()
     }
 
-    /// Plan §5 lockstep: every `AbilityCost` variant is classified by
-    /// `payment_class` (the exhaustive `match` makes a missing arm a compile
-    /// error), and the classification is total — no variant is left unclassified.
+    /// Plan §5 lockstep: every `AbilityCost` variant has a resolution-support
+    /// answer from `supported_at_resolution` (the exhaustive `match` makes a
+    /// missing arm a compile error), so a new variant is forced through a
+    /// deliberate "is this payable at resolution?" decision — the single
+    /// authority shared by `can_pay_resolution` and the `pay_ability_cost_inner`
+    /// structural guard.
     #[test]
-    fn every_ability_cost_variant_is_classified() {
+    fn every_ability_cost_variant_has_resolution_support_answer() {
         for cost in all_variants() {
-            // `payment_class` is exhaustive; calling it on every variant proves
-            // the taxonomy is total. The returned class is documented per arm.
-            let _class = payment_class(&cost);
+            // `supported_at_resolution` is exhaustive; calling it on every
+            // variant proves the membership predicate is total.
+            let _supported = supported_at_resolution(&cost);
         }
     }
 
@@ -1343,19 +1335,6 @@ mod tests {
                 "can_pay==true but pay_cost returned Failed for {cost:?}"
             );
         }
-    }
-
-    /// CR 605.3a: a bare Waterbend cost is classified `InteractiveMana` and
-    /// `can_pay` answers via the mana auto-tap check inside `is_payable` (no dry
-    /// run of the no-op payment arm).
-    #[test]
-    fn waterbend_is_interactive_mana() {
-        assert_eq!(
-            payment_class(&AbilityCost::Waterbend {
-                cost: ManaCost::generic(1)
-            }),
-            PaymentClass::InteractiveMana
-        );
     }
 
     /// Activation-scope `can_pay` against `state` for `source`.
@@ -1441,6 +1420,106 @@ mod tests {
         assert!(
             can_pay_activation(&scenario.state, src, &cost),
             "2 untapped creatures → payable"
+        );
+    }
+
+    /// HIGH-1 regression (CR 701.67a + CR 118.3): a `Composite[Waterbend, {T}]`
+    /// (Avatar TLA "Waterbend [cost], {T}: …") must NOT skip the dry run just
+    /// because the `payment_class` fold reports `InteractiveMana` for the
+    /// Waterbend leg. The `{T}` leg's tapped-source state is only checked by the
+    /// dry run (`is_payable`'s Tap arm is unconditionally true), so a TAPPED
+    /// source must be `can_pay == false` and an UNTAPPED source `true`. Before
+    /// the bare-shape gate fix this asserted `true` for the tapped source
+    /// (leaking an unactivatable ability into legal actions).
+    #[test]
+    fn composite_waterbend_tap_respects_tapped_source() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Waterbender", 1, 1).id();
+        // NoCost Waterbend leg isolates the {T} leg as the only differentiator
+        // (the mana auto-tap check is trivially satisfied).
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Waterbend {
+                    cost: ManaCost::NoCost,
+                },
+                AbilityCost::Tap,
+            ],
+        };
+        // Untapped source: the {T} leg can be paid → payable.
+        assert!(
+            can_pay_activation(&scenario.state, src, &cost),
+            "untapped source → Composite[Waterbend, {{T}}] payable"
+        );
+        // Tap the source: the {T} leg can no longer be paid → unpayable.
+        scenario.state.objects.get_mut(&src).unwrap().tapped = true;
+        assert!(
+            !can_pay_activation(&scenario.state, src, &cost),
+            "tapped source → Composite[Waterbend, {{T}}] must be unpayable"
+        );
+    }
+
+    /// MED-2 regression (CR 118.3 / CR 601.2h): at `PaymentScope::Resolution` a
+    /// shape with no resolution payment arm must yield `Failed` via the single
+    /// structural guard — never a silent fake-`Paid` no-op, never an unintended
+    /// execution. A bare `Waterbend` (whose `pay_ability_cost_inner` arm is a
+    /// no-op that previously returned `Paid`) and a singleton `Tap` (which
+    /// previously executed, tapping the source) are the two discriminating
+    /// shapes. Before the guard the Waterbend arm returned `Paid` and the Tap
+    /// arm tapped the source.
+    #[test]
+    fn unsupported_shapes_fail_at_resolution_without_mutation() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Source", 1, 1).id();
+        // The effect body is irrelevant — the structural guard fires before any
+        // arm reads the ability; use a trivial self-counter effect as the stub.
+        let ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            src,
+            P0,
+        );
+        let scope = PaymentScope::Resolution { ability: &ability };
+
+        // (i) Waterbend at Resolution → Failed (was a silent no-op `Paid`).
+        let waterbend = AbilityCost::Waterbend {
+            cost: ManaCost::generic(1),
+        };
+        let outcome = pay_ability_cost_inner(
+            &mut scenario.state,
+            P0,
+            src,
+            &waterbend,
+            &mut Vec::new(),
+            &scope,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, PaymentOutcome::Failed { .. }),
+            "Waterbend at Resolution must Failed, got {outcome:?}"
+        );
+
+        // (ii) Singleton Tap at Resolution → Failed, and the source stays
+        // untapped (was: executed, tapping the source).
+        let outcome = pay_ability_cost_inner(
+            &mut scenario.state,
+            P0,
+            src,
+            &AbilityCost::Tap,
+            &mut Vec::new(),
+            &scope,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, PaymentOutcome::Failed { .. }),
+            "singleton Tap at Resolution must Failed, got {outcome:?}"
+        );
+        assert!(
+            !scenario.state.objects.get(&src).unwrap().tapped,
+            "Tap at Resolution must not tap the source"
         );
     }
 }
